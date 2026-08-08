@@ -7,5 +7,7 @@ pub mod v1 {
     include!(concat!(env!("OUT_DIR"), "/kaname.v1.rs"));
 }
 
+pub mod journal;
+
 pub const SCHEMA_MAJOR: u32 = 1;
 pub const MAXIMUM_ENVELOPE_BYTES: usize = 64 * 1024;
