@@ -7,12 +7,8 @@ import KanameFixtures
 public struct IPhoneControlSurface: View {
     @State private var selectedTab: IPhoneTab = .home
     @State private var workProjection: IPhoneWorkProjection = .inbox
-    @State private var isMacReachable = false
-    @State private var queuedCommands = PhoneQueuedCommand.fixtureItems
-    @State private var notificationRoute: PhoneNotificationRoute?
-    @State private var newDraftRoute: IPhoneNewDraftRoute?
+    @State private var fixtureState = IPhoneFixtureState()
     @State private var showsSettings = false
-    @State private var approvalReceipt: String?
 
     public init() {
         let polarNight = UIColor(red: 46 / 255, green: 52 / 255, blue: 64 / 255, alpha: 1)
@@ -42,11 +38,11 @@ public struct IPhoneControlSurface: View {
             TabView(selection: $selectedTab) {
                 NavigationStack {
                     IPhoneCommandCenter(
-                        isMacReachable: $isMacReachable,
-                        queuedCommands: $queuedCommands,
-                        approvalReceipt: $approvalReceipt,
+                        isMacReachable: $fixtureState.isMacReachable,
+                        queuedCommands: $fixtureState.queuedCommands,
+                        approvalReceipt: $fixtureState.approvalReceipt,
                         startNewDraft: {
-                            newDraftRoute = IPhoneNewDraftRoute(projectName: nil)
+                            fixtureState.newDraftRoute = IPhoneNewDraftRoute(projectName: nil)
                         },
                         chooseTab: { selectedTab = $0 },
                         chooseWorkProjection: {
@@ -67,11 +63,11 @@ public struct IPhoneControlSurface: View {
                 NavigationStack {
                     IPhoneWorkHub(
                         projection: $workProjection,
-                        isMacReachable: $isMacReachable,
-                        queuedCommands: $queuedCommands,
-                        approvalReceipt: $approvalReceipt,
+                        isMacReachable: $fixtureState.isMacReachable,
+                        queuedCommands: $fixtureState.queuedCommands,
+                        approvalReceipt: $fixtureState.approvalReceipt,
                         startNewDraft: {
-                            newDraftRoute = IPhoneNewDraftRoute(projectName: nil)
+                            fixtureState.newDraftRoute = IPhoneNewDraftRoute(projectName: nil)
                         }
                     )
                 }
@@ -85,11 +81,11 @@ public struct IPhoneControlSurface: View {
 
                 NavigationStack {
                     IPhoneProjectsHub(
-                        isMacReachable: $isMacReachable,
-                        queuedCommands: $queuedCommands,
-                        approvalReceipt: $approvalReceipt,
+                        isMacReachable: $fixtureState.isMacReachable,
+                        queuedCommands: $fixtureState.queuedCommands,
+                        approvalReceipt: $fixtureState.approvalReceipt,
                         startNewDraft: { projectName in
-                            newDraftRoute = IPhoneNewDraftRoute(projectName: projectName)
+                            fixtureState.newDraftRoute = IPhoneNewDraftRoute(projectName: projectName)
                         }
                     )
                 }
@@ -103,10 +99,10 @@ public struct IPhoneControlSurface: View {
 
                 NavigationStack {
                     IPhoneOperationsHub(
-                        isMacReachable: $isMacReachable,
-                        queuedCommands: $queuedCommands,
-                        approvalReceipt: $approvalReceipt,
-                        openApproval: { notificationRoute = .calendarApproval }
+                        isMacReachable: $fixtureState.isMacReachable,
+                        queuedCommands: $fixtureState.queuedCommands,
+                        approvalReceipt: $fixtureState.approvalReceipt,
+                        openApproval: { fixtureState.notificationRoute = .calendarApproval }
                     )
                 }
                 .tabItem {
@@ -119,8 +115,8 @@ public struct IPhoneControlSurface: View {
 
                 NavigationStack {
                     IPhoneLibraryHub(
-                        isMacReachable: isMacReachable,
-                        queuedCount: queuedCommands.count,
+                        isMacReachable: fixtureState.isMacReachable,
+                        queuedCount: fixtureState.queuedCommands.count,
                         openSettings: { showsSettings = true }
                     )
                 }
@@ -147,14 +143,14 @@ public struct IPhoneControlSurface: View {
                     }
             )
         }
-        .sheet(item: $notificationRoute) { route in
+        .sheet(item: $fixtureState.notificationRoute) { route in
             IPhoneApprovalSheet(
                 fixture: route.fixture,
-                isMacReachable: isMacReachable,
-                approvalReceipt: $approvalReceipt
+                isMacReachable: fixtureState.isMacReachable,
+                approvalReceipt: $fixtureState.approvalReceipt
             )
         }
-        .sheet(item: $newDraftRoute) { route in
+        .sheet(item: $fixtureState.newDraftRoute) { route in
             IPhoneNewDraftSheet(projectName: route.projectName)
         }
         .fullScreenCover(isPresented: $showsSettings) {
@@ -180,7 +176,7 @@ private enum IPhoneTab: String, CaseIterable, Identifiable {
     }
 }
 
-private struct IPhoneNewDraftRoute: Identifiable {
+struct IPhoneNewDraftRoute: Identifiable {
     let id = UUID()
     let projectName: String?
 }
@@ -2372,7 +2368,7 @@ private struct IPhoneSettingsDetail: View {
     }
 }
 
-private enum PhoneNotificationRoute: Identifiable {
+enum PhoneNotificationRoute: Identifiable {
     case calendarApproval
 
     var id: String {
@@ -2388,7 +2384,7 @@ private enum PhoneNotificationRoute: Identifiable {
     }
 }
 
-private struct PhoneQueuedCommand: Identifiable, Equatable {
+struct PhoneQueuedCommand: Identifiable, Equatable {
     let id: UUID
     var position: Int
     var threadTitle: String
