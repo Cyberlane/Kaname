@@ -1,0 +1,152 @@
+{
+  "corpusVersion": 1,
+  "entries": [
+    {
+      "category": "scenario",
+      "path": "Fixtures/scenarios/F-01-happy-coding-run.json",
+      "sha256": "94a5d9a40c023b03870bdfc50462762b4aa51b7da23e40cd3f32c5557d919083"
+    },
+    {
+      "category": "scenario",
+      "path": "Fixtures/scenarios/F-02-idempotent-enqueue.json",
+      "sha256": "7fcceb4699e7bc43c66011de87f35ab3243da63112e830a48da5cba586d74c44"
+    },
+    {
+      "category": "scenario",
+      "path": "Fixtures/scenarios/F-03-crash-before-admission.json",
+      "sha256": "26d5fffbfba2c10100a7d793d4893dad37b16f3f5bb2312ece122f9a30728ab2"
+    },
+    {
+      "category": "scenario",
+      "path": "Fixtures/scenarios/F-04-crash-after-dispatch.json",
+      "sha256": "2af4b6b2f18c40eb393fb5b37d60cfdbed821aa59dd0f420feaf81f9ca65c376"
+    },
+    {
+      "category": "scenario",
+      "path": "Fixtures/scenarios/F-05-unknown-observation.json",
+      "sha256": "d106a14d2ec83f35d5967120da93fb82d6bea4cb929eece71ce2e41d1c5847d9"
+    },
+    {
+      "category": "scenario",
+      "path": "Fixtures/scenarios/F-06-reconnect-duplicate.json",
+      "sha256": "a99ddff11697028063483f21f128e2dd78d5c7cdca44a188c0b5427bedbd3aea"
+    },
+    {
+      "category": "scenario",
+      "path": "Fixtures/scenarios/F-07-retention-snapshot.json",
+      "sha256": "aa15f252e27f2899b5508cbefe8988d6e765d4525fb9936de83d37cc9506eb38"
+    },
+    {
+      "category": "scenario",
+      "path": "Fixtures/scenarios/F-08-stale-approval.json",
+      "sha256": "f0f889837896d7e7298eb54f9eb6aee2cac1ad8b3cd5cde12f8207f67494e81b"
+    },
+    {
+      "category": "scenario",
+      "path": "Fixtures/scenarios/F-09-queue-conflict.json",
+      "sha256": "7d4f06b1be44bbe4bb9ca02da425cd3e87eaf5107387dda33ad0f0be61643a39"
+    },
+    {
+      "category": "scenario",
+      "path": "Fixtures/scenarios/F-10-interrupt-race.json",
+      "sha256": "8ae9b7a15c06bc3015d259e75d8f9395c0d231976d18cdf6bca1788ef9ea05bf"
+    },
+    {
+      "category": "scenario",
+      "path": "Fixtures/scenarios/F-11-notification-ambiguity.json",
+      "sha256": "29618d6aa33ebe47f2dd8a132582cb2361f0e14e22fbed4bd00dc9d82ce411c1"
+    },
+    {
+      "category": "scenario",
+      "path": "Fixtures/scenarios/F-12-scope-denial.json",
+      "sha256": "d50d782100ce7ca2135652ccfaffaeb067660eed2cb1298895c6174cacce3eca"
+    },
+    {
+      "category": "scenario",
+      "path": "Fixtures/scenarios/F-13-provider-outage.json",
+      "sha256": "fa1bbbc8f69ee695d4a1b77c9780a0a47389cc41640e519607948a82bc9c82a8"
+    },
+    {
+      "category": "scenario",
+      "path": "Fixtures/scenarios/F-14-malformed-envelope.json",
+      "sha256": "3619e564f9f5cb92bf86fd362ebf22f0e08c86430ef245e6d40a0fcabfc2ba98"
+    },
+    {
+      "category": "expected",
+      "path": "Fixtures/expected/v1/F-01.json",
+      "sha256": "b5c5f060c8162c3fd8d8ea49211c204f1597ae86e82e099abdc72110726bb7cb"
+    },
+    {
+      "category": "expected",
+      "path": "Fixtures/expected/v1/F-02.json",
+      "sha256": "7e152435909147daafcc492ea8dd5a91e7151e85b8cf5603814ca2cda079a87e"
+    },
+    {
+      "category": "expected",
+      "path": "Fixtures/expected/v1/F-03.json",
+      "sha256": "b3359b96565dbaab51f71ee2c915e73c5383fafd02e79686c9324ee91363d049"
+    },
+    {
+      "category": "expected",
+      "path": "Fixtures/expected/v1/F-04.json",
+      "sha256": "9ce1c1579b19679a91609ac81ecaf2c4e18f1431d106e87c970991650d34f2f5"
+    },
+    {
+      "category": "expected",
+      "path": "Fixtures/expected/v1/F-05.json",
+      "sha256": "3eeff262dd277565474320fd4da0f6342537003c2a23a10c3a2125d2d776598b"
+    },
+    {
+      "category": "expected",
+      "path": "Fixtures/expected/v1/F-06.json",
+      "sha256": "0ac0131eb42f7c36e4b587ad1db481ba2520941743adb91e47373030511e1df7"
+    },
+    {
+      "category": "expected",
+      "path": "Fixtures/expected/v1/F-07.json",
+      "sha256": "bd344f032b3f40281f51508cabb91aa853e97abe1183dc0b4cd71abd9e3ecf05"
+    },
+    {
+      "category": "expected",
+      "path": "Fixtures/expected/v1/F-08.json",
+      "sha256": "294f11d393af3aede0965588db948ec3aed54f2d742e1b815582e6ce309565f7"
+    },
+    {
+      "category": "expected",
+      "path": "Fixtures/expected/v1/F-09.json",
+      "sha256": "56892aa8bc61a1d08b14aae968e2d11621385154c56c4d9d719cff4d650dec0c"
+    },
+    {
+      "category": "expected",
+      "path": "Fixtures/expected/v1/F-10.json",
+      "sha256": "bac767e933e97137499a65ba8e62217ca28890e370c318197b5284abbe102d63"
+    },
+    {
+      "category": "expected",
+      "path": "Fixtures/expected/v1/F-11.json",
+      "sha256": "271da104ffe73531b1a1fafcf41c7cc6a58004df550a51a204e38cc2716a6449"
+    },
+    {
+      "category": "expected",
+      "path": "Fixtures/expected/v1/F-12.json",
+      "sha256": "55fa98e093bbc1ef2d1c2c376e0c652f8ed2c1d330df82118c7cb969c47e0e7e"
+    },
+    {
+      "category": "expected",
+      "path": "Fixtures/expected/v1/F-13.json",
+      "sha256": "7b873c47f6084862b81c45253caab414333e5a615b87ba85a61b2a8f25666c53"
+    },
+    {
+      "category": "expected",
+      "path": "Fixtures/expected/v1/F-14.json",
+      "sha256": "3116689fa13d3a89437b70ebc9aace48e117ddde2440e9ef9bc3b7284716c195"
+    }
+  ],
+  "scaleFixtures": {
+    "S-01": 500,
+    "S-02": 10000,
+    "S-03": 100000,
+    "S-04": 1000
+  },
+  "scenarioCount": 14
+}

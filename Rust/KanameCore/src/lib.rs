@@ -7,6 +7,7 @@ pub mod v1 {
     include!(concat!(env!("OUT_DIR"), "/kaname.v1.rs"));
 }
 
+pub mod fake_provider;
 pub mod journal;
 pub mod policy;
 
