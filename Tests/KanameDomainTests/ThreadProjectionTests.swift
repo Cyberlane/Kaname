@@ -56,15 +56,20 @@ struct ThreadProjectionTests {
     }
 
     @Test
-    func deterministicFixturesCoverReviewApprovalAndFailure() throws {
+    func deterministicFixturesCoverReviewApprovalsRunningWorkAndFailure() throws {
         let review = try Phase0Fixtures.codingReview.makeProjection()
-        let waiting = try Phase0Fixtures.waitingForCalendarApproval.makeProjection()
+        let waitingForCalendar = try Phase0Fixtures.waitingForCalendarApproval.makeProjection()
+        let waitingForEmail = try Phase0Fixtures.waitingForEmailApproval.makeProjection()
+        let running = try Phase0Fixtures.runningCodingTask.makeProjection()
         let failed = try Phase0Fixtures.failedResearch.makeProjection()
 
         #expect(review.attention == .needsReview)
-        #expect(waiting.attention == .needsResponse)
+        #expect(waitingForCalendar.attention == .needsResponse)
+        #expect(waitingForEmail.attention == .needsResponse)
+        #expect(running.attention == .running)
         #expect(failed.attention == .failed)
         #expect(Phase0Fixtures.waitingForCalendarApproval.queueItems.count == 1)
+        #expect(Phase0Fixtures.all.count == 5)
     }
 
     private func event(

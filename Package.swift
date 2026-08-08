@@ -10,22 +10,34 @@ let package = Package(
     ],
     products: [
         .library(name: "KanameDomain", targets: ["KanameDomain"]),
+        .library(name: "KanameConnectivity", targets: ["KanameConnectivity"]),
         .library(name: "KanameFixtures", targets: ["KanameFixtures"]),
+        .library(name: "KanamePrototypeUI", targets: ["KanamePrototypeUI"]),
         .executable(name: "KanamePrototype", targets: ["KanamePrototype"]),
+        .executable(name: "KanameProviderProbe", targets: ["KanameProviderProbe"]),
     ],
     targets: [
         .target(name: "KanameDomain"),
+        .target(name: "KanameConnectivity", dependencies: ["KanameDomain"]),
         .target(
             name: "KanameFixtures",
             dependencies: ["KanameDomain"]
         ),
+        .target(
+            name: "KanamePrototypeUI",
+            dependencies: ["KanameDomain", "KanameFixtures"]
+        ),
         .executableTarget(
             name: "KanamePrototype",
-            dependencies: ["KanameDomain", "KanameFixtures"]
+            dependencies: ["KanameDomain", "KanameFixtures", "KanamePrototypeUI"]
+        ),
+        .executableTarget(
+            name: "KanameProviderProbe",
+            dependencies: ["KanameConnectivity", "KanameDomain"]
         ),
         .testTarget(
             name: "KanameDomainTests",
-            dependencies: ["KanameDomain", "KanameFixtures"]
+            dependencies: ["KanameDomain", "KanameFixtures", "KanameConnectivity"]
         ),
     ]
 )

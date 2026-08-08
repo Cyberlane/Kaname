@@ -41,11 +41,15 @@ public struct Phase0Fixture: Sendable {
 public enum Phase0Fixtures {
     public static let codingReview = makeCodingReview()
     public static let waitingForCalendarApproval = makeWaitingForCalendarApproval()
+    public static let waitingForEmailApproval = makeWaitingForEmailApproval()
+    public static let runningCodingTask = makeRunningCodingTask()
     public static let failedResearch = makeFailedResearch()
 
     public static let all = [
         codingReview,
         waitingForCalendarApproval,
+        waitingForEmailApproval,
+        runningCodingTask,
         failedResearch,
     ]
 
@@ -174,6 +178,87 @@ public enum Phase0Fixtures {
                 event(1, .taskQueued, threadID, taskID, runID, startedAt),
                 event(2, .runStarted, threadID, taskID, runID, startedAt),
                 event(3, .runFailed, threadID, taskID, runID, startedAt),
+            ]
+        )
+    }
+
+    private static func makeWaitingForEmailApproval() -> Phase0Fixture {
+        let threadID = KanameID(rawValue: "thread-email-approval")
+        let taskID = KanameID(rawValue: "task-email-approval")
+        let runID = KanameID(rawValue: "run-email-approval")
+        let sessionID = KanameID(rawValue: "session-email-approval")
+        let approvalID = KanameID(rawValue: "approval-email-approval")
+        let startedAt = Date(timeIntervalSince1970: 1_762_150_000)
+
+        return Phase0Fixture(
+            name: "waiting-for-email-approval",
+            thread: KanameDomain.Thread(
+                id: threadID,
+                title: "Send the release-status draft",
+                workspaceKind: .email
+            ),
+            task: Task(id: taskID, threadID: threadID, title: "Prepare release update"),
+            providerSession: ProviderSession(id: sessionID, provider: "Fake Provider"),
+            run: Run(id: runID, taskID: taskID, providerSessionID: sessionID),
+            approvals: [
+                Approval(
+                    id: approvalID,
+                    action: .sendEmail,
+                    status: .pending,
+                    target: "selected recipient list",
+                    consequence: "send the reviewed status update outside Kaname",
+                    expiresAt: startedAt.addingTimeInterval(1_800)
+                ),
+            ],
+            queueItems: [],
+            events: [
+                event(1, .taskQueued, threadID, taskID, runID, startedAt),
+                event(2, .runStarted, threadID, taskID, runID, startedAt),
+                event(3, .approvalRequested, threadID, taskID, runID, startedAt, approvalID: approvalID),
+            ]
+        )
+    }
+
+    private static func makeRunningCodingTask() -> Phase0Fixture {
+        let threadID = KanameID(rawValue: "thread-running-coding")
+        let taskID = KanameID(rawValue: "task-running-coding")
+        let runID = KanameID(rawValue: "run-running-coding")
+        let sessionID = KanameID(rawValue: "session-running-coding")
+        let startedAt = Date(timeIntervalSince1970: 1_762_175_000)
+
+        return Phase0Fixture(
+            name: "running-coding-task",
+            thread: KanameDomain.Thread(
+                id: threadID,
+                title: "Map the repository knowledge boundary",
+                workspaceKind: .coding
+            ),
+            task: Task(id: taskID, threadID: threadID, title: "Inspect project context safely"),
+            providerSession: ProviderSession(
+                id: sessionID,
+                provider: "Fake Provider",
+                nativeSessionID: "fixture-session-running-coding"
+            ),
+            run: Run(id: runID, taskID: taskID, providerSessionID: sessionID),
+            approvals: [],
+            queueItems: [],
+            events: [
+                event(1, .taskQueued, threadID, taskID, runID, startedAt),
+                event(2, .runStarted, threadID, taskID, runID, startedAt),
+                event(
+                    3,
+                    .nativeProviderEvent,
+                    threadID,
+                    taskID,
+                    runID,
+                    startedAt,
+                    origin: EventOrigin(
+                        kind: .provider,
+                        provider: "Fake Provider",
+                        nativeType: "search.progress",
+                        rawPayload: Data("{\"filesScanned\":42}".utf8)
+                    )
+                ),
             ]
         )
     }
