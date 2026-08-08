@@ -10,7 +10,12 @@ use prost::Message;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, backup::Backup, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeSet, fmt, path::Path, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    path::Path,
+    time::Duration,
+};
 
 const MAXIMUM_REPLAY_PAGE: u32 = 500;
 const PROJECTION_SCHEMA_VERSION: u32 = 1;
@@ -91,6 +96,17 @@ pub struct ThreadProjection {
     pub pending_approval_ids: BTreeSet<String>,
     pub latest_sequence: u64,
     pub unsupported_event_count: u64,
+}
+
+/// A selected project's Thread and Inbox views are intentionally derived from
+/// the same per-thread projections.  There is no separately mutable Inbox
+/// authority to drift after a restart.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectProjection {
+    pub project_id: String,
+    pub threads: BTreeMap<String, ThreadProjection>,
+    pub attention_thread_ids: BTreeMap<String, Vec<String>>,
+    pub latest_store_position: u64,
 }
 
 impl ThreadProjection {
@@ -494,6 +510,47 @@ impl Journal {
         Ok(projection)
     }
 
+    /// Rebuilds a selected project's canonical thread state and its Inbox
+    /// grouping in one pass over the journal. Project streams have the
+    /// explicit `thread:project:<project-id>:` prefix; arbitrary SQL selectors
+    /// are never accepted from a client.
+    pub fn rebuild_project_projection(&self, selector_id: &str) -> Result<ProjectProjection> {
+        let project_id = selector_project(selector_id)?.to_owned();
+        let stream_prefix = format!("thread:project:{project_id}:");
+        let mut projection = ProjectProjection {
+            project_id,
+            threads: BTreeMap::new(),
+            attention_thread_ids: BTreeMap::new(),
+            latest_store_position: 0,
+        };
+        let mut statement = self.connection.prepare(
+            "SELECT wire FROM events WHERE stream_id LIKE ?1 ORDER BY store_position ASC",
+        )?;
+        let events = statement.query_map([format!("{stream_prefix}%")], |row| {
+            row.get::<_, Vec<u8>>(0)
+        })?;
+        for wire in events {
+            let event = v1::EventEnvelope::decode(wire?.as_slice())
+                .map_err(|_| JournalError::Integrity("stored_event_malformed".into()))?;
+            let thread = projection
+                .threads
+                .entry(event.stream_id.clone())
+                .or_insert_with(|| ThreadProjection::empty(event.stream_id.clone()));
+            thread.apply(&event)?;
+            projection.latest_store_position = event.store_position;
+        }
+        for (thread_id, thread) in &projection.threads {
+            if thread.attention != "none" {
+                projection
+                    .attention_thread_ids
+                    .entry(thread.attention.clone())
+                    .or_default()
+                    .push(thread_id.clone());
+            }
+        }
+        Ok(projection)
+    }
+
     pub fn create_snapshot(&mut self, selector_id: &str) -> Result<Snapshot> {
         self.require_writable()?;
         let projection = self.rebuild_thread_projection(selector_id)?;
@@ -746,6 +803,22 @@ fn selector_stream(selector_id: &str) -> Result<&str> {
         .strip_prefix("thread:")
         .filter(|stream| !stream.is_empty())
         .ok_or(JournalError::Protocol("unauthorized_selector"))
+}
+
+fn selector_project(selector_id: &str) -> Result<&str> {
+    let project = selector_id
+        .strip_prefix("project:")
+        .filter(|project| !project.is_empty() && project.len() <= 128);
+    match project {
+        Some(project)
+            if project
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-') =>
+        {
+            Ok(project)
+        }
+        _ => Err(JournalError::Protocol("unauthorized_selector")),
+    }
 }
 
 fn approval_identity(event: &v1::EventEnvelope) -> String {

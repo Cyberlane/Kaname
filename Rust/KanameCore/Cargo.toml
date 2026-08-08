@@ -12,6 +12,14 @@ path = "src/lib.rs"
 name = "kaname-protocol-fixture-tool"
 path = "src/bin/fixture_tool.rs"
 
+[[bin]]
+name = "kaname-local-core"
+path = "src/bin/local_core.rs"
+
+[[bin]]
+name = "kaname-phase1-measure"
+path = "src/bin/phase1_measure.rs"
+
 [dependencies]
 prost = "=0.14.4"
 hex = "=0.4.3"

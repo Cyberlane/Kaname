@@ -80,6 +80,10 @@ impl LocalPolicyCore {
         &mut self.journal
     }
 
+    pub fn into_journal(self) -> Journal {
+        self.journal
+    }
+
     pub fn effect_ledger(&self) -> &FakeEffectLedger {
         &self.ledger
     }

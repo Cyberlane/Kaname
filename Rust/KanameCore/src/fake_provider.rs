@@ -11,7 +11,8 @@ use crate::{
     v1,
 };
 use prost::Message;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 const CURSOR_KEY: [u8; 32] = [0x42; 32];
 const STREAM_ID: &str = "thread:fake-provider";
@@ -29,7 +30,8 @@ pub struct ScenarioMetadata {
     pub expected_effect_count: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderHealth {
     Ready,
     Degraded,
@@ -46,7 +48,7 @@ impl ProviderHealth {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ScenarioReport {
     pub fixture_id: String,
     pub task_state: String,
@@ -179,21 +181,38 @@ pub fn embedded_scenarios() -> Result<Vec<ScenarioMetadata>> {
 }
 
 pub fn run_scenario(metadata: &ScenarioMetadata) -> Result<ScenarioReport> {
-    let report = match metadata.fixture_id.as_str() {
-        "F-01" => run_f01(metadata)?,
-        "F-02" => run_f02(metadata)?,
-        "F-03" => run_f03(metadata)?,
-        "F-04" => run_f04(metadata)?,
-        "F-05" => run_f05(metadata)?,
-        "F-06" => run_f06(metadata)?,
-        "F-07" => run_f07(metadata)?,
-        "F-08" => run_f08(metadata)?,
-        "F-09" => run_f09(metadata)?,
-        "F-10" => run_f10(metadata)?,
-        "F-11" => run_f11(metadata)?,
-        "F-12" => run_f12(metadata)?,
-        "F-13" => run_f13(metadata)?,
-        "F-14" => run_f14(metadata)?,
+    Ok(run_scenario_in_journal(metadata, journal()?)?.0)
+}
+
+/// Runs the deterministic scenario using a caller-owned journal. The native
+/// XPC service uses this path so service restart exercises the same SQLite
+/// authority and corpus as the core tests, rather than a separate UI fixture.
+pub fn run_scenario_at_path(
+    metadata: &ScenarioMetadata,
+    path: impl AsRef<Path>,
+) -> Result<ScenarioReport> {
+    Ok(run_scenario_in_journal(metadata, Journal::open(path, &CURSOR_KEY)?)?.0)
+}
+
+fn run_scenario_in_journal(
+    metadata: &ScenarioMetadata,
+    journal: Journal,
+) -> Result<(ScenarioReport, Journal)> {
+    let (report, journal) = match metadata.fixture_id.as_str() {
+        "F-01" => run_f01(metadata, journal)?,
+        "F-02" => run_f02(metadata, journal)?,
+        "F-03" => run_f03(metadata, journal)?,
+        "F-04" => run_f04(metadata, journal)?,
+        "F-05" => run_f05(metadata, journal)?,
+        "F-06" => run_f06(metadata, journal)?,
+        "F-07" => run_f07(metadata, journal)?,
+        "F-08" => run_f08(metadata, journal)?,
+        "F-09" => run_f09(metadata, journal)?,
+        "F-10" => run_f10(metadata, journal)?,
+        "F-11" => run_f11(metadata, journal)?,
+        "F-12" => run_f12(metadata, journal)?,
+        "F-13" => run_f13(metadata, journal)?,
+        "F-14" => run_f14(metadata, journal)?,
         _ => return Err(JournalError::Protocol("unknown_corpus_fixture")),
     };
     if report.effect_count != metadata.expected_effect_count {
@@ -201,7 +220,7 @@ pub fn run_scenario(metadata: &ScenarioMetadata) -> Result<ScenarioReport> {
             "fixture_effect_count_mismatch".into(),
         ));
     }
-    Ok(report)
+    Ok((report, journal))
 }
 
 /// S-01 through S-04 are generated deterministically from literal IDs and a
@@ -218,7 +237,7 @@ pub fn scale_fixture(name: &str) -> Result<Vec<v1::EventEnvelope>> {
     let mut events = Vec::with_capacity(count);
     for index in 0..count {
         let stream_id = if many_streams {
-            format!("thread:scale-project-{:03}", index % 100)
+            format!("thread:project:scale-project:{:03}", index % 100)
         } else {
             "thread:scale-single".into()
         };
@@ -275,8 +294,7 @@ pub fn scale_fixture(name: &str) -> Result<Vec<v1::EventEnvelope>> {
     Ok(events)
 }
 
-fn run_f01(metadata: &ScenarioMetadata) -> Result<ScenarioReport> {
-    let mut journal = journal()?;
+fn run_f01(metadata: &ScenarioMetadata, mut journal: Journal) -> Result<(ScenarioReport, Journal)> {
     journal.append_event(event(
         "f01-queue",
         "task.queued",
@@ -292,31 +310,32 @@ fn run_f01(metadata: &ScenarioMetadata) -> Result<ScenarioReport> {
         metadata.fixed_clock_unix_millis + 99,
         None,
     ))?;
-    report(
+    let report = report(
         metadata,
         &journal,
         provider.health(),
         provider.effect_count(),
-    )
+    )?;
+    Ok((report, journal))
 }
 
-fn run_f02(metadata: &ScenarioMetadata) -> Result<ScenarioReport> {
-    let mut core = LocalPolicyCore::new(journal()?);
+fn run_f02(metadata: &ScenarioMetadata, journal: Journal) -> Result<(ScenarioReport, Journal)> {
+    let mut core = LocalPolicyCore::new(journal);
     let command = command("f02-command", "f02-key");
     core.enqueue(&command, "f02-queue", STREAM_ID, "synthetic queue")?;
     core.enqueue(&command, "f02-queue", STREAM_ID, "synthetic queue")?;
     let mut provider = FakeProvider::new(metadata.fixed_clock_unix_millis, Vec::new());
     provider.dispatch(core.journal_mut())?;
-    report(
+    let report = report(
         metadata,
         core.journal(),
         provider.health(),
         provider.effect_count(),
-    )
+    )?;
+    Ok((report, core.into_journal()))
 }
 
-fn run_f03(metadata: &ScenarioMetadata) -> Result<ScenarioReport> {
-    let mut journal = journal()?;
+fn run_f03(metadata: &ScenarioMetadata, mut journal: Journal) -> Result<(ScenarioReport, Journal)> {
     let pending = event(
         "f03-queue",
         "task.queued",
@@ -328,11 +347,11 @@ fn run_f03(metadata: &ScenarioMetadata) -> Result<ScenarioReport> {
         Err(JournalError::Protocol("injected_crash_before_event_commit"))
     ));
     journal.append_event(pending)?;
-    report(metadata, &journal, ProviderHealth::Ready, 0)
+    let report = report(metadata, &journal, ProviderHealth::Ready, 0)?;
+    Ok((report, journal))
 }
 
-fn run_f04(metadata: &ScenarioMetadata) -> Result<ScenarioReport> {
-    let mut journal = journal()?;
+fn run_f04(metadata: &ScenarioMetadata, mut journal: Journal) -> Result<(ScenarioReport, Journal)> {
     journal.append_event(event(
         "f04-queue",
         "task.queued",
@@ -348,31 +367,31 @@ fn run_f04(metadata: &ScenarioMetadata) -> Result<ScenarioReport> {
         None,
     ))?;
     provider.reconciliation_required();
-    report(
+    let report = report(
         metadata,
         &journal,
         provider.health(),
         provider.effect_count(),
-    )
+    )?;
+    Ok((report, journal))
 }
 
-fn run_f05(metadata: &ScenarioMetadata) -> Result<ScenarioReport> {
-    let mut journal = journal()?;
+fn run_f05(metadata: &ScenarioMetadata, mut journal: Journal) -> Result<(ScenarioReport, Journal)> {
     let mut provider = FakeProvider::new(
         metadata.fixed_clock_unix_millis,
         vec![unknown_observation("f05-unknown")],
     );
     provider.advance(&mut journal)?;
-    report(
+    let report = report(
         metadata,
         &journal,
         provider.health(),
         provider.effect_count(),
-    )
+    )?;
+    Ok((report, journal))
 }
 
-fn run_f06(metadata: &ScenarioMetadata) -> Result<ScenarioReport> {
-    let mut journal = journal()?;
+fn run_f06(metadata: &ScenarioMetadata, mut journal: Journal) -> Result<(ScenarioReport, Journal)> {
     let first = journal.append_event(event(
         "f06-queue",
         "task.queued",
@@ -400,11 +419,11 @@ fn run_f06(metadata: &ScenarioMetadata) -> Result<ScenarioReport> {
     {
         return Err(JournalError::Integrity("reconnect_dedup_failed".into()));
     }
-    report(metadata, &journal, ProviderHealth::Ready, 0)
+    let report = report(metadata, &journal, ProviderHealth::Ready, 0)?;
+    Ok((report, journal))
 }
 
-fn run_f07(metadata: &ScenarioMetadata) -> Result<ScenarioReport> {
-    let mut journal = journal()?;
+fn run_f07(metadata: &ScenarioMetadata, mut journal: Journal) -> Result<(ScenarioReport, Journal)> {
     journal.append_event(event(
         "f07-queue",
         "task.queued",
@@ -428,11 +447,12 @@ fn run_f07(metadata: &ScenarioMetadata) -> Result<ScenarioReport> {
     if corrupt.snapshot.is_some() {
         return Err(JournalError::Integrity("corrupt_snapshot_used".into()));
     }
-    report(metadata, &journal, ProviderHealth::Ready, 0)
+    let report = report(metadata, &journal, ProviderHealth::Ready, 0)?;
+    Ok((report, journal))
 }
 
-fn run_f08(metadata: &ScenarioMetadata) -> Result<ScenarioReport> {
-    let mut core = LocalPolicyCore::new(journal()?);
+fn run_f08(metadata: &ScenarioMetadata, journal: Journal) -> Result<(ScenarioReport, Journal)> {
+    let mut core = LocalPolicyCore::new(journal);
     let request = approval(
         "f08-approval",
         "target-revision-1",
@@ -457,11 +477,12 @@ fn run_f08(metadata: &ScenarioMetadata) -> Result<ScenarioReport> {
     {
         return Err(JournalError::Integrity("stale_approval_effect".into()));
     }
-    report(metadata, core.journal(), ProviderHealth::Ready, 0)
+    let report = report(metadata, core.journal(), ProviderHealth::Ready, 0)?;
+    Ok((report, core.into_journal()))
 }
 
-fn run_f09(metadata: &ScenarioMetadata) -> Result<ScenarioReport> {
-    let mut core = LocalPolicyCore::new(journal()?);
+fn run_f09(metadata: &ScenarioMetadata, journal: Journal) -> Result<(ScenarioReport, Journal)> {
+    let mut core = LocalPolicyCore::new(journal);
     core.enqueue(
         &command("f09-command", "f09-key"),
         "f09-queue",
@@ -475,11 +496,11 @@ fn run_f09(metadata: &ScenarioMetadata) -> Result<ScenarioReport> {
     ) {
         return Err(JournalError::Integrity("queue_conflict_missing".into()));
     }
-    report(metadata, core.journal(), ProviderHealth::Ready, 0)
+    let report = report(metadata, core.journal(), ProviderHealth::Ready, 0)?;
+    Ok((report, core.into_journal()))
 }
 
-fn run_f10(metadata: &ScenarioMetadata) -> Result<ScenarioReport> {
-    let mut journal = journal()?;
+fn run_f10(metadata: &ScenarioMetadata, mut journal: Journal) -> Result<(ScenarioReport, Journal)> {
     let mut provider = FakeProvider::new(
         metadata.fixed_clock_unix_millis,
         vec![FakeNativeObservation {
@@ -500,26 +521,28 @@ fn run_f10(metadata: &ScenarioMetadata) -> Result<ScenarioReport> {
     ))?;
     provider.advance(&mut journal)?;
     provider.reconciliation_required();
-    report(
+    let report = report(
         metadata,
         &journal,
         provider.health(),
         provider.effect_count(),
-    )
+    )?;
+    Ok((report, journal))
 }
 
-fn run_f11(metadata: &ScenarioMetadata) -> Result<ScenarioReport> {
-    let mut core = LocalPolicyCore::new(journal()?);
+fn run_f11(metadata: &ScenarioMetadata, journal: Journal) -> Result<(ScenarioReport, Journal)> {
+    let mut core = LocalPolicyCore::new(journal);
     core.record_notification_receipt("f11-attention", "delivery-1", STREAM_ID)?;
     core.record_notification_receipt("f11-attention", "delivery-1", STREAM_ID)?;
     if core.effect_ledger().notification_receipts != 1 {
         return Err(JournalError::Integrity("notification_dedup_failed".into()));
     }
-    report(metadata, core.journal(), ProviderHealth::Ready, 0)
+    let report = report(metadata, core.journal(), ProviderHealth::Ready, 0)?;
+    Ok((report, core.into_journal()))
 }
 
-fn run_f12(metadata: &ScenarioMetadata) -> Result<ScenarioReport> {
-    let mut core = LocalPolicyCore::new(journal()?);
+fn run_f12(metadata: &ScenarioMetadata, journal: Journal) -> Result<(ScenarioReport, Journal)> {
+    let mut core = LocalPolicyCore::new(journal);
     let scope = v1::Scope {
         project_id: "fixture-project".into(),
         workspace_id: "fixture-workspace".into(),
@@ -532,11 +555,12 @@ fn run_f12(metadata: &ScenarioMetadata) -> Result<ScenarioReport> {
         core.authorize_fake_provider(&scope, STREAM_ID),
         Err(JournalError::Protocol("scope_or_egress_denied"))
     ));
-    report(metadata, core.journal(), ProviderHealth::Ready, 0)
+    let report = report(metadata, core.journal(), ProviderHealth::Ready, 0)?;
+    Ok((report, core.into_journal()))
 }
 
-fn run_f13(metadata: &ScenarioMetadata) -> Result<ScenarioReport> {
-    let mut core = LocalPolicyCore::new(journal()?);
+fn run_f13(metadata: &ScenarioMetadata, journal: Journal) -> Result<(ScenarioReport, Journal)> {
+    let mut core = LocalPolicyCore::new(journal);
     core.enqueue(
         &command("f13-command", "f13-key"),
         "f13-queue",
@@ -546,11 +570,11 @@ fn run_f13(metadata: &ScenarioMetadata) -> Result<ScenarioReport> {
     core.edit_queue("f13-queue", 1, "still editable", "fixture")?;
     let mut provider = FakeProvider::new(metadata.fixed_clock_unix_millis, Vec::new());
     provider.outage();
-    report(metadata, core.journal(), provider.health(), 0)
+    let report = report(metadata, core.journal(), provider.health(), 0)?;
+    Ok((report, core.into_journal()))
 }
 
-fn run_f14(metadata: &ScenarioMetadata) -> Result<ScenarioReport> {
-    let mut journal = journal()?;
+fn run_f14(metadata: &ScenarioMetadata, mut journal: Journal) -> Result<(ScenarioReport, Journal)> {
     let mut malformed = command("f14-command", "f14-key");
     malformed.payload.as_mut().unwrap().value = vec![0_u8; MAXIMUM_ENVELOPE_BYTES];
     assert!(matches!(
@@ -561,7 +585,8 @@ fn run_f14(metadata: &ScenarioMetadata) -> Result<ScenarioReport> {
         journal.append_received_wire(&[0x80]),
         Err(JournalError::Protocol("malformed_event_envelope"))
     ));
-    report(metadata, &journal, ProviderHealth::Ready, 0)
+    let report = report(metadata, &journal, ProviderHealth::Ready, 0)?;
+    Ok((report, journal))
 }
 
 fn report(

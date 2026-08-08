@@ -190,6 +190,8 @@ private struct PrototypeWorkspace: View {
             )
         case .stack:
             StackPrototypeView()
+        case .localCore:
+            LocalCoreWorkspace()
         case .projects, .research, .obsidian, .email, .calendar, .automations:
             DomainHomeView(surface: selectedSurface) { flow in
                 newFlow = flow
@@ -236,10 +238,11 @@ private enum PrototypeSurface: String, CaseIterable, Identifiable {
     case calendar
     case automations
     case stack
+    case localCore
 
     static let workspaceSurfaces: [PrototypeSurface] = [.dashboard, .threads, .inbox]
     static let domainSurfaces: [PrototypeSurface] = [.projects, .research, .obsidian, .email, .calendar, .automations]
-    static let validationSurfaces: [PrototypeSurface] = [.stack]
+    static let validationSurfaces: [PrototypeSurface] = [.localCore, .stack]
 
     var id: String { rawValue }
 
@@ -256,6 +259,7 @@ private enum PrototypeSurface: String, CaseIterable, Identifiable {
         case .calendar: "Calendar & schedules"
         case .automations: "Automations"
         case .stack: "GitHub stack"
+        case .localCore: "Local core"
         }
     }
 
@@ -272,6 +276,7 @@ private enum PrototypeSurface: String, CaseIterable, Identifiable {
         case .calendar: "calendar"
         case .automations: "arrow.triangle.2.circlepath"
         case .stack: "square.3.layers.3d.down.right"
+        case .localCore: "internaldrive"
         }
     }
 }
