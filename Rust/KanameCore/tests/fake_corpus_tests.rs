@@ -66,18 +66,18 @@ fn scale_fixtures_are_exactly_reproducible_and_have_no_random_ids() {
 }
 
 #[test]
-fn persisted_fake_run_replays_the_same_journal_after_service_restart() {
+fn persisted_fake_runs_replay_the_same_journal_after_service_restart() {
     let directory = tempdir().unwrap();
-    let database = directory.path().join("f01.sqlite");
-    let metadata = embedded_scenarios()
-        .unwrap()
-        .into_iter()
-        .find(|scenario| scenario.fixture_id == "F-01")
-        .unwrap();
-    let first = run_scenario_at_path(&metadata, &database).unwrap();
-    let retried_after_restart = run_scenario_at_path(&metadata, &database).unwrap();
-    assert_eq!(first, retried_after_restart);
+    for metadata in embedded_scenarios().unwrap() {
+        let database = directory
+            .path()
+            .join(format!("{}.sqlite", metadata.fixture_id));
+        let first = run_scenario_at_path(&metadata, &database).unwrap();
+        let retried_after_restart = run_scenario_at_path(&metadata, &database).unwrap();
+        assert_eq!(first, retried_after_restart, "{}", metadata.fixture_id);
+    }
 
+    let database = directory.path().join("F-01.sqlite");
     let reopened = Journal::open(&database, &[0x42; 32]).unwrap();
     let projection = reopened
         .rebuild_thread_projection("thread:thread:fake-provider")

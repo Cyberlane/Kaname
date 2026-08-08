@@ -645,6 +645,41 @@ impl Journal {
         }
     }
 
+    /// Fixture reports are a bounded, checksummed replay cache for the Phase 1
+    /// fake adapter. The event journal remains the source of state; this cache
+    /// prevents a service reconnect from re-executing a completed deterministic
+    /// scenario merely to recreate its UI summary.
+    pub fn load_fixture_report(&self, fixture_id: &str) -> Result<Option<Vec<u8>>> {
+        let Some((report, checksum)) = self
+            .connection
+            .query_row(
+                "SELECT report, checksum FROM fixture_reports WHERE fixture_id = ?1",
+                [fixture_id],
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        if report.len() > MAXIMUM_ENVELOPE_BYTES || digest(&report) != checksum {
+            return Err(JournalError::Integrity("fixture_report_corrupt".into()));
+        }
+        Ok(Some(report))
+    }
+
+    pub fn save_fixture_report(&mut self, fixture_id: &str, report: &[u8]) -> Result<()> {
+        self.require_writable()?;
+        if !is_fixture_id(fixture_id) || report.is_empty() || report.len() > MAXIMUM_ENVELOPE_BYTES
+        {
+            return Err(JournalError::Protocol("invalid_fixture_report"));
+        }
+        self.connection.execute(
+            "INSERT INTO fixture_reports (fixture_id, report, checksum) VALUES (?1, ?2, ?3) ON CONFLICT(fixture_id) DO UPDATE SET report = excluded.report, checksum = excluded.checksum",
+            params![fixture_id, report, digest(report)],
+        )?;
+        Ok(())
+    }
+
     fn make_cursor(
         &self,
         selector_id: &str,
@@ -710,7 +745,13 @@ fn migrate(connection: &mut Connection) -> Result<()> {
            selector_id TEXT PRIMARY KEY,
            store_position INTEGER NOT NULL
          );
-         INSERT OR IGNORE INTO schema_migrations(version) VALUES (1);",
+         CREATE TABLE IF NOT EXISTS fixture_reports (
+           fixture_id TEXT PRIMARY KEY,
+           report BLOB NOT NULL,
+           checksum BLOB NOT NULL
+         );
+         INSERT OR IGNORE INTO schema_migrations(version) VALUES (1);
+         INSERT OR IGNORE INTO schema_migrations(version) VALUES (2);",
     )?;
     Ok(())
 }
@@ -819,6 +860,13 @@ fn selector_project(selector_id: &str) -> Result<&str> {
         }
         _ => Err(JournalError::Protocol("unauthorized_selector")),
     }
+}
+
+fn is_fixture_id(value: &str) -> bool {
+    value.len() == 4
+        && value.starts_with("F-")
+        && value.as_bytes()[2].is_ascii_digit()
+        && value.as_bytes()[3].is_ascii_digit()
 }
 
 fn approval_identity(event: &v1::EventEnvelope) -> String {

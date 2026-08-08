@@ -30,7 +30,7 @@ pub struct ScenarioMetadata {
     pub expected_effect_count: u64,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderHealth {
     Ready,
@@ -48,7 +48,7 @@ impl ProviderHealth {
     }
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ScenarioReport {
     pub fixture_id: String,
     pub task_state: String,
@@ -191,7 +191,17 @@ pub fn run_scenario_at_path(
     metadata: &ScenarioMetadata,
     path: impl AsRef<Path>,
 ) -> Result<ScenarioReport> {
-    Ok(run_scenario_in_journal(metadata, Journal::open(path, &CURSOR_KEY)?)?.0)
+    let journal = Journal::open(path, &CURSOR_KEY)?;
+    if let Some(report) = journal.load_fixture_report(&metadata.fixture_id)? {
+        let report = serde_json::from_slice::<ScenarioReport>(&report)
+            .map_err(|_| JournalError::Integrity("fixture_report_malformed".into()))?;
+        return validate_report(metadata, report);
+    }
+    let (report, mut journal) = run_scenario_in_journal(metadata, journal)?;
+    let encoded = serde_json::to_vec(&report)
+        .map_err(|_| JournalError::Integrity("fixture_report_encode_failed".into()))?;
+    journal.save_fixture_report(&metadata.fixture_id, &encoded)?;
+    Ok(report)
 }
 
 fn run_scenario_in_journal(
@@ -215,12 +225,18 @@ fn run_scenario_in_journal(
         "F-14" => run_f14(metadata, journal)?,
         _ => return Err(JournalError::Protocol("unknown_corpus_fixture")),
     };
-    if report.effect_count != metadata.expected_effect_count {
+    validate_report(metadata, report).map(|report| (report, journal))
+}
+
+fn validate_report(metadata: &ScenarioMetadata, report: ScenarioReport) -> Result<ScenarioReport> {
+    if report.fixture_id != metadata.fixture_id
+        || report.effect_count != metadata.expected_effect_count
+    {
         return Err(JournalError::Integrity(
             "fixture_effect_count_mismatch".into(),
         ));
     }
-    Ok((report, journal))
+    Ok(report)
 }
 
 /// S-01 through S-04 are generated deterministically from literal IDs and a
