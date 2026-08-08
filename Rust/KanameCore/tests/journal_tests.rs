@@ -251,3 +251,37 @@ fn backup_and_safe_read_only_mode_preserve_replay_without_allowing_mutation() {
         Err(JournalError::ReadOnly)
     ));
 }
+
+#[test]
+fn project_thread_and_inbox_projections_share_one_rebuildable_model_after_restart() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("kaname.sqlite");
+    let mut journal = Journal::open(&path, &CURSOR_KEY).unwrap();
+    for (stream, id, kind) in [
+        ("thread:project:demo:one", "one-queued", "task.queued"),
+        ("thread:project:demo:one", "one-running", "run.started"),
+        ("thread:project:demo:two", "two-queued", "task.queued"),
+        ("thread:project:demo:two", "two-failed", "run.failed"),
+    ] {
+        let mut item = event(id, kind, 1);
+        item.stream_id = stream.into();
+        journal.append_event(item).unwrap();
+    }
+    let before_restart = journal.rebuild_project_projection("project:demo").unwrap();
+    assert_eq!(before_restart.threads.len(), 2);
+    assert_eq!(
+        before_restart.attention_thread_ids["running"],
+        ["thread:project:demo:one"]
+    );
+    assert_eq!(
+        before_restart.attention_thread_ids["failed"],
+        ["thread:project:demo:two"]
+    );
+    drop(journal);
+
+    let reopened = Journal::open(&path, &CURSOR_KEY).unwrap();
+    assert_eq!(
+        reopened.rebuild_project_projection("project:demo").unwrap(),
+        before_restart
+    );
+}

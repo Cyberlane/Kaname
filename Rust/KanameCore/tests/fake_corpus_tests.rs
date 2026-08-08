@@ -1,6 +1,8 @@
 use kaname_core::fake_provider::{embedded_scenarios, run_scenario, scale_fixture};
+use kaname_core::{fake_provider::run_scenario_at_path, journal::Journal};
 use serde::Deserialize;
 use std::{collections::BTreeSet, path::PathBuf};
+use tempfile::tempdir;
 
 #[derive(Debug, Deserialize)]
 struct Expected {
@@ -61,6 +63,35 @@ fn scale_fixtures_are_exactly_reproducible_and_have_no_random_ids() {
             .raw_evidence_digest
             .starts_with("sha256:scale-")
     }));
+}
+
+#[test]
+fn persisted_fake_run_replays_the_same_journal_after_service_restart() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("f01.sqlite");
+    let metadata = embedded_scenarios()
+        .unwrap()
+        .into_iter()
+        .find(|scenario| scenario.fixture_id == "F-01")
+        .unwrap();
+    let first = run_scenario_at_path(&metadata, &database).unwrap();
+    let retried_after_restart = run_scenario_at_path(&metadata, &database).unwrap();
+    assert_eq!(first, retried_after_restart);
+
+    let reopened = Journal::open(&database, &[0x42; 32]).unwrap();
+    let projection = reopened
+        .rebuild_thread_projection("thread:thread:fake-provider")
+        .unwrap();
+    assert_eq!(projection.task_state, "accepted");
+    assert_eq!(projection.attention, "none");
+    assert_eq!(
+        reopened
+            .replay("thread:thread:fake-provider", None, 500)
+            .unwrap()
+            .events
+            .len(),
+        9
+    );
 }
 
 fn expected(id: &str) -> Expected {
