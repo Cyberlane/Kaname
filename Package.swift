@@ -15,6 +15,7 @@ let package = Package(
         .library(name: "KanamePrototypeUI", targets: ["KanamePrototypeUI"]),
         .executable(name: "KanamePrototype", targets: ["KanamePrototype"]),
         .executable(name: "KanameProviderProbe", targets: ["KanameProviderProbe"]),
+        .executable(name: "KanameXPCQualification", targets: ["KanameXPCQualification"]),
     ],
     targets: [
         .target(name: "KanameDomain"),
@@ -35,6 +36,7 @@ let package = Package(
             name: "KanameProviderProbe",
             dependencies: ["KanameConnectivity", "KanameDomain"]
         ),
+        .executableTarget(name: "KanameXPCQualification"),
         .testTarget(
             name: "KanameDomainTests",
             dependencies: ["KanameDomain", "KanameFixtures", "KanameConnectivity"]

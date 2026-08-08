@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package kaname.qualification.v1;
+
+message Envelope {
+  uint64 schema_major = 1;
+  string type_url = 2;
+  bytes payload = 3;
+  bytes cursor = 4;
+  string operation = 5;
+}

@@ -8,3 +8,6 @@
 
 # Swift Package Manager
 /.build/
+
+# Rust build output
+**/target/
