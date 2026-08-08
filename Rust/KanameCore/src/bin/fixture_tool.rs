@@ -1,4 +1,6 @@
-use kaname_core::v1::{EventEnvelope, EventProvenance, EvidenceRetentionClass, OpaqueTypedPayload, SchemaVersion};
+use kaname_core::v1::{
+    EventEnvelope, EventProvenance, EvidenceRetentionClass, OpaqueTypedPayload, SchemaVersion,
+};
 use prost::Message;
 use std::io::Write;
 
@@ -28,5 +30,7 @@ fn main() {
         causation_id: "command-schema-vector-001".into(),
         correlation_id: "task-schema-vector-001".into(),
     };
-    std::io::stdout().write_all(&event.encode_to_vec()).expect("write fixture");
+    std::io::stdout()
+        .write_all(&event.encode_to_vec())
+        .expect("write fixture");
 }
