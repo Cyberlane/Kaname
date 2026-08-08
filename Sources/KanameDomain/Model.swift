@@ -12,6 +12,64 @@ public struct Thread: Codable, Equatable, Sendable {
     }
 }
 
+public struct Task: Codable, Equatable, Sendable {
+    public let id: KanameID
+    public let threadID: KanameID
+    public let title: String
+
+    public init(id: KanameID, threadID: KanameID, title: String) {
+        self.id = id
+        self.threadID = threadID
+        self.title = title
+    }
+}
+
+public struct ProviderSession: Codable, Equatable, Sendable {
+    public let id: KanameID
+    public let provider: String
+    public let nativeSessionID: String?
+
+    public init(id: KanameID, provider: String, nativeSessionID: String? = nil) {
+        self.id = id
+        self.provider = provider
+        self.nativeSessionID = nativeSessionID
+    }
+}
+
+public struct Run: Codable, Equatable, Sendable {
+    public let id: KanameID
+    public let taskID: KanameID
+    public let providerSessionID: KanameID
+
+    public init(id: KanameID, taskID: KanameID, providerSessionID: KanameID) {
+        self.id = id
+        self.taskID = taskID
+        self.providerSessionID = providerSessionID
+    }
+}
+
+public struct QueueItem: Codable, Equatable, Sendable {
+    public let id: KanameID
+    public let threadID: KanameID
+    public let position: UInt64
+    public let body: String
+    public let createdAt: Date
+
+    public init(
+        id: KanameID,
+        threadID: KanameID,
+        position: UInt64,
+        body: String,
+        createdAt: Date
+    ) {
+        self.id = id
+        self.threadID = threadID
+        self.position = position
+        self.body = body
+        self.createdAt = createdAt
+    }
+}
+
 public enum WorkspaceKind: String, CaseIterable, Codable, Sendable {
     case coding
     case research

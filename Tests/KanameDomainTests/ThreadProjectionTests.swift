@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import KanameDomain
+import KanameFixtures
 
 struct ThreadProjectionTests {
     private let threadID = KanameID(rawValue: "thread-phase0")
@@ -52,6 +53,18 @@ struct ThreadProjectionTests {
         #expect(throws: ProjectionError.sequenceMustIncrease(previous: 3, received: 3)) {
             try projection.apply(event(sequence: 3, kind: .runStarted))
         }
+    }
+
+    @Test
+    func deterministicFixturesCoverReviewApprovalAndFailure() throws {
+        let review = try Phase0Fixtures.codingReview.makeProjection()
+        let waiting = try Phase0Fixtures.waitingForCalendarApproval.makeProjection()
+        let failed = try Phase0Fixtures.failedResearch.makeProjection()
+
+        #expect(review.attention == .needsReview)
+        #expect(waiting.attention == .needsResponse)
+        #expect(failed.attention == .failed)
+        #expect(Phase0Fixtures.waitingForCalendarApproval.queueItems.count == 1)
     }
 
     private func event(
