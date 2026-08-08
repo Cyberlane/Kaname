@@ -37,13 +37,13 @@ Release Rust measurement: 25 repetitions; macOS 26.6; `Mac16,12`; arm64; AC atta
 
 | Measurement | p50 | p95 | p99 | Target | Result |
 |---|---:|---:|---:|---:|---|
-| Rust command journal acceptance | 0.008 ms | 0.010 ms | 0.017 ms | 100 ms | pass (core-only boundary) |
-| Replay 500 events | 0.267 ms | 0.278 ms | 0.345 ms | 200 ms | pass |
-| Rebuild one 10,000-event Thread | 5.483 ms | 5.552 ms | 5.637 ms | 1 s | pass |
-| Rebuild selected 100,000-event Project | 65.904 ms | 66.719 ms | 66.844 ms | 5 s | pass |
-| Snapshot read and validation | 0.003 ms | 0.006 ms | 0.021 ms | 250 ms | pass |
+| Rust command journal acceptance | 0.007 ms | 0.012 ms | 0.016 ms | 100 ms | pass (core-only boundary) |
+| Replay 500 events | 0.258 ms | 0.264 ms | 0.317 ms | 200 ms | pass |
+| Rebuild one 10,000-event Thread | 5.307 ms | 5.366 ms | 5.368 ms | 1 s | pass |
+| Rebuild selected 100,000-event Project | 63.613 ms | 68.157 ms | 69.345 ms | 5 s | pass |
+| Snapshot read and validation | 0.003 ms | 0.008 ms | 0.036 ms | 250 ms | pass |
 
-Authenticated XPC F-01 replay: 25 repetitions, signed native client → signed local Mach service → persisted Rust journal/corpus. p50 **9.231 ms**, p95 **12.471 ms**, p99 **35.949 ms**, zero failures. This is a bounded end-to-end local fixture measurement; it includes the fake scenario replay and is below the 100 ms local-command budget, but it is not a substitute for future foreground-frame tracing.
+Authenticated XPC F-01 replay: 25 repetitions, signed native client → signed local Mach service → persisted Rust journal/corpus. p50 **10.916 ms**, p95 **14.140 ms**, p99 **206.487 ms**, zero failures. This is a bounded end-to-end local fixture measurement; its p95 is below the 100 ms local-command budget, but it is not a substitute for future foreground-frame tracing.
 
 ## Remaining boundary
 
