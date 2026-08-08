@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+package kaname.v1;
+
+import "kaname/v1/event.proto";
+
+message ReplayCursor {
+  string selector_id = 1;
+  uint64 after_store_position = 2;
+  uint64 high_water_mark = 3;
+  uint64 retention_horizon = 4;
+  bytes integrity_tag = 5;
+  reserved 6 to 15;
+}
+
+message ReplayRequest {
+  string selector_id = 1;
+  ReplayCursor cursor = 2;
+  uint32 page_size = 3;
+  reserved 4 to 15;
+}
+
+message SnapshotDescriptor {
+  string snapshot_id = 1;
+  string selector_id = 2;
+  uint64 high_water_mark = 3;
+  bytes checksum = 4;
+  uint32 projection_schema_version = 5;
+  bytes state = 6;
+  reserved 7 to 15;
+}
+
+enum ReplayBasis {
+  REPLAY_BASIS_UNSPECIFIED = 0;
+  REPLAY_BASIS_EVENTS = 1;
+  REPLAY_BASIS_SNAPSHOT = 2;
+  REPLAY_BASIS_RESYNC_REQUIRED = 3;
+}
+
+message ReplayResponse {
+  ReplayBasis basis = 1;
+  SnapshotDescriptor snapshot = 2;
+  repeated EventEnvelope events = 3;
+  ReplayCursor next_cursor = 4;
+  uint64 high_water_mark = 5;
+  bool has_more = 6;
+  string gap_reason = 7;
+  reserved 8 to 15;
+}

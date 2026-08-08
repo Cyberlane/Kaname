@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package kaname.v1;
+
+message AttentionRecord {
+  string attention_id = 1;
+  string stream_id = 2;
+  string kind = 3;
+  string safe_preview_class = 4;
+  string deep_link_target = 5;
+  int64 expires_at_unix_millis = 6;
+  reserved 7 to 15;
+  reserved "body", "private_content";
+}
+
+message NotificationReceipt {
+  string attention_id = 1;
+  string delivery_id = 2;
+  string state = 3;
+  int64 recorded_at_unix_millis = 4;
+  reserved 5 to 15;
+}

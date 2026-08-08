@@ -10,6 +10,7 @@ let package = Package(
     ],
     products: [
         .library(name: "KanameDomain", targets: ["KanameDomain"]),
+        .library(name: "KanameProtocol", targets: ["KanameProtocol"]),
         .library(name: "KanameConnectivity", targets: ["KanameConnectivity"]),
         .library(name: "KanameFixtures", targets: ["KanameFixtures"]),
         .library(name: "KanamePrototypeUI", targets: ["KanamePrototypeUI"]),
@@ -17,8 +18,17 @@ let package = Package(
         .executable(name: "KanameProviderProbe", targets: ["KanameProviderProbe"]),
         .executable(name: "KanameXPCQualification", targets: ["KanameXPCQualification"]),
     ],
+    dependencies: [
+        .package(url: "https://github.com/apple/swift-protobuf.git", exact: "1.38.1"),
+    ],
     targets: [
         .target(name: "KanameDomain"),
+        .target(
+            name: "KanameProtocol",
+            dependencies: [
+                .product(name: "SwiftProtobuf", package: "swift-protobuf"),
+            ]
+        ),
         .target(name: "KanameConnectivity", dependencies: ["KanameDomain"]),
         .target(
             name: "KanameFixtures",

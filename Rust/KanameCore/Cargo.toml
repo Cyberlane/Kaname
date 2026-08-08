@@ -1,0 +1,16 @@
+[package]
+name = "kaname_core"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "kaname_core"
+path = "src/lib.rs"
+
+[dependencies]
+prost = "=0.14.4"
+
+[build-dependencies]
+prost-build = "=0.14.4"
+protoc-bin-vendored = "=3.2.0"

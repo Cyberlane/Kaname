@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package kaname.v1;
+
+import "kaname/v1/common.proto";
+
+message ApprovalRequest {
+  string approval_id = 1;
+  string action_kind = 2;
+  Scope scope = 3;
+  string target_id = 4;
+  string target_revision = 5;
+  bytes effect_digest = 6;
+  string consequence = 7;
+  bool reversible = 8;
+  int64 expires_at_unix_millis = 9;
+  string policy_reference = 10;
+  bytes fingerprint = 11;
+  uint32 approval_payload_version = 12;
+  reserved 13 to 31;
+  reserved "recipient_address", "approval_secret";
+}
+
+enum ApprovalDecision {
+  APPROVAL_DECISION_UNSPECIFIED = 0;
+  APPROVAL_DECISION_APPROVE = 1;
+  APPROVAL_DECISION_REJECT = 2;
+}
+
+message ApprovalResolution {
+  string approval_id = 1;
+  ApprovalDecision decision = 2;
+  bytes expected_fingerprint = 3;
+  string actor_id = 4;
+  string device_id = 5;
+  string standing_rule_reference = 6;
+  reserved 7 to 15;
+}

@@ -1,0 +1,188 @@
+{
+  "enums": {
+    "approval.ApprovalDecision": {
+      "0": "APPROVAL_DECISION_UNSPECIFIED",
+      "1": "APPROVAL_DECISION_APPROVE",
+      "2": "APPROVAL_DECISION_REJECT"
+    },
+    "command.CommandDisposition": {
+      "0": "COMMAND_DISPOSITION_UNSPECIFIED",
+      "1": "COMMAND_DISPOSITION_ACCEPTED",
+      "2": "COMMAND_DISPOSITION_REJECTED",
+      "3": "COMMAND_DISPOSITION_DUPLICATE",
+      "4": "COMMAND_DISPOSITION_CONFLICT"
+    },
+    "common.EvidenceRetentionClass": {
+      "0": "EVIDENCE_RETENTION_CLASS_UNSPECIFIED",
+      "1": "EVIDENCE_RETENTION_CLASS_NONE",
+      "2": "EVIDENCE_RETENTION_CLASS_SEVEN_DAYS",
+      "3": "EVIDENCE_RETENTION_CLASS_SCOPED_EXTENSION"
+    },
+    "queue.QueueReceiptState": {
+      "0": "QUEUE_RECEIPT_STATE_UNSPECIFIED",
+      "1": "QUEUE_RECEIPT_STATE_SAVED_ON_PHONE",
+      "2": "QUEUE_RECEIPT_STATE_RECEIVED_BY_MAC",
+      "3": "QUEUE_RECEIPT_STATE_POLICY_ACCEPTED",
+      "4": "QUEUE_RECEIPT_STATE_PROVIDER_DISPATCH_ACCEPTED",
+      "5": "QUEUE_RECEIPT_STATE_RUN_STARTED"
+    },
+    "replay.ReplayBasis": {
+      "0": "REPLAY_BASIS_UNSPECIFIED",
+      "1": "REPLAY_BASIS_EVENTS",
+      "2": "REPLAY_BASIS_SNAPSHOT",
+      "3": "REPLAY_BASIS_RESYNC_REQUIRED"
+    }
+  },
+  "messages": {
+    "approval.ApprovalRequest": {
+      "1": "string approval_id",
+      "10": "string policy_reference",
+      "11": "bytes fingerprint",
+      "12": "uint32 approval_payload_version",
+      "2": "string action_kind",
+      "3": "Scope scope",
+      "4": "string target_id",
+      "5": "string target_revision",
+      "6": "bytes effect_digest",
+      "7": "string consequence",
+      "8": "bool reversible",
+      "9": "int64 expires_at_unix_millis"
+    },
+    "approval.ApprovalResolution": {
+      "1": "string approval_id",
+      "2": "ApprovalDecision decision",
+      "3": "bytes expected_fingerprint",
+      "4": "string actor_id",
+      "5": "string device_id",
+      "6": "string standing_rule_reference"
+    },
+    "command.CommandEnvelope": {
+      "1": "SchemaVersion schema_version",
+      "2": "string command_id",
+      "3": "string idempotency_key",
+      "4": "string kind",
+      "5": "OpaqueTypedPayload payload",
+      "6": "Scope scope",
+      "7": "string actor_id",
+      "8": "uint64 expected_revision",
+      "9": "int64 submitted_at_unix_millis"
+    },
+    "command.CommandOutcome": {
+      "1": "string command_id",
+      "2": "CommandDisposition disposition",
+      "3": "string reason_code",
+      "4": "uint64 store_position",
+      "5": "string receipt_id"
+    },
+    "common.EventProvenance": {
+      "1": "string source_kind",
+      "2": "string provider_instance_id",
+      "3": "string native_type",
+      "4": "bytes native_cursor",
+      "5": "string raw_evidence_digest",
+      "6": "EvidenceRetentionClass retention_class"
+    },
+    "common.OpaqueTypedPayload": {
+      "1": "string type_url",
+      "2": "string content_type",
+      "3": "bytes value",
+      "4": "uint32 payload_version"
+    },
+    "common.SchemaVersion": {
+      "1": "uint32 major",
+      "2": "uint32 minor"
+    },
+    "common.Scope": {
+      "1": "string project_id",
+      "2": "string workspace_id",
+      "3": "string account_id",
+      "4": "string authority_id",
+      "5": "string egress_class",
+      "6": "string destination_digest"
+    },
+    "event.EventEnvelope": {
+      "1": "SchemaVersion schema_version",
+      "10": "string causation_id",
+      "11": "string correlation_id",
+      "2": "string event_id",
+      "3": "uint64 store_position",
+      "4": "string stream_id",
+      "5": "uint64 stream_sequence",
+      "6": "int64 occurred_at_unix_millis",
+      "7": "string kind",
+      "8": "OpaqueTypedPayload payload",
+      "9": "EventProvenance provenance"
+    },
+    "event.RawEvidenceReference": {
+      "1": "string digest",
+      "2": "uint64 byte_count",
+      "3": "EvidenceRetentionClass retention_class",
+      "4": "int64 expires_at_unix_millis"
+    },
+    "notification.AttentionRecord": {
+      "1": "string attention_id",
+      "2": "string stream_id",
+      "3": "string kind",
+      "4": "string safe_preview_class",
+      "5": "string deep_link_target",
+      "6": "int64 expires_at_unix_millis"
+    },
+    "notification.NotificationReceipt": {
+      "1": "string attention_id",
+      "2": "string delivery_id",
+      "3": "string state",
+      "4": "int64 recorded_at_unix_millis"
+    },
+    "queue.QueueEdit": {
+      "1": "string item_id",
+      "2": "uint64 expected_revision",
+      "3": "string body",
+      "4": "string actor_id"
+    },
+    "queue.QueueItem": {
+      "1": "string item_id",
+      "2": "string stream_id",
+      "3": "uint64 revision",
+      "4": "uint64 position",
+      "5": "string body",
+      "6": "string author_id",
+      "7": "int64 created_at_unix_millis",
+      "8": "string disposition"
+    },
+    "queue.QueueReceipt": {
+      "1": "string item_id",
+      "2": "QueueReceiptState state",
+      "3": "uint64 revision",
+      "4": "int64 recorded_at_unix_millis"
+    },
+    "replay.ReplayCursor": {
+      "1": "string selector_id",
+      "2": "uint64 after_store_position",
+      "3": "uint64 high_water_mark",
+      "4": "uint64 retention_horizon",
+      "5": "bytes integrity_tag"
+    },
+    "replay.ReplayRequest": {
+      "1": "string selector_id",
+      "2": "ReplayCursor cursor",
+      "3": "uint32 page_size"
+    },
+    "replay.ReplayResponse": {
+      "1": "ReplayBasis basis",
+      "2": "SnapshotDescriptor snapshot",
+      "3": "EventEnvelope events",
+      "4": "ReplayCursor next_cursor",
+      "5": "uint64 high_water_mark",
+      "6": "bool has_more",
+      "7": "string gap_reason"
+    },
+    "replay.SnapshotDescriptor": {
+      "1": "string snapshot_id",
+      "2": "string selector_id",
+      "3": "uint64 high_water_mark",
+      "4": "bytes checksum",
+      "5": "uint32 projection_schema_version",
+      "6": "bytes state"
+    }
+  }
+}

@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+package kaname.v1;
+
+message QueueItem {
+  string item_id = 1;
+  string stream_id = 2;
+  uint64 revision = 3;
+  uint64 position = 4;
+  string body = 5;
+  string author_id = 6;
+  int64 created_at_unix_millis = 7;
+  string disposition = 8;
+  reserved 9 to 15;
+}
+
+message QueueEdit {
+  string item_id = 1;
+  uint64 expected_revision = 2;
+  string body = 3;
+  string actor_id = 4;
+  reserved 5 to 15;
+}
+
+enum QueueReceiptState {
+  QUEUE_RECEIPT_STATE_UNSPECIFIED = 0;
+  QUEUE_RECEIPT_STATE_SAVED_ON_PHONE = 1;
+  QUEUE_RECEIPT_STATE_RECEIVED_BY_MAC = 2;
+  QUEUE_RECEIPT_STATE_POLICY_ACCEPTED = 3;
+  QUEUE_RECEIPT_STATE_PROVIDER_DISPATCH_ACCEPTED = 4;
+  QUEUE_RECEIPT_STATE_RUN_STARTED = 5;
+}
+
+message QueueReceipt {
+  string item_id = 1;
+  QueueReceiptState state = 2;
+  uint64 revision = 3;
+  int64 recorded_at_unix_millis = 4;
+  reserved 5 to 15;
+}

@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package kaname.v1;
+
+import "kaname/v1/common.proto";
+
+message EventEnvelope {
+  SchemaVersion schema_version = 1;
+  string event_id = 2;
+  uint64 store_position = 3;
+  string stream_id = 4;
+  uint64 stream_sequence = 5;
+  int64 occurred_at_unix_millis = 6;
+  string kind = 7;
+  OpaqueTypedPayload payload = 8;
+  EventProvenance provenance = 9;
+  string causation_id = 10;
+  string correlation_id = 11;
+  reserved 12 to 31;
+  reserved "canonical_bytes";
+}
+
+message RawEvidenceReference {
+  string digest = 1;
+  uint64 byte_count = 2;
+  EvidenceRetentionClass retention_class = 3;
+  int64 expires_at_unix_millis = 4;
+  reserved 5 to 15;
+  reserved "raw_data";
+}

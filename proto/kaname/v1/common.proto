@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+package kaname.v1;
+
+// Shared version information. A major change is never silently accepted.
+message SchemaVersion {
+  uint32 major = 1;
+  uint32 minor = 2;
+  reserved 3 to 15;
+  reserved "patch";
+}
+
+// A payload whose bytes are retained verbatim even when its type is unknown.
+message OpaqueTypedPayload {
+  string type_url = 1;
+  string content_type = 2;
+  bytes value = 3;
+  uint32 payload_version = 4;
+  reserved 5 to 15;
+  reserved "json_value";
+}
+
+enum EvidenceRetentionClass {
+  EVIDENCE_RETENTION_CLASS_UNSPECIFIED = 0;
+  EVIDENCE_RETENTION_CLASS_NONE = 1;
+  EVIDENCE_RETENTION_CLASS_SEVEN_DAYS = 2;
+  EVIDENCE_RETENTION_CLASS_SCOPED_EXTENSION = 3;
+}
+
+message EventProvenance {
+  string source_kind = 1;
+  string provider_instance_id = 2;
+  string native_type = 3;
+  bytes native_cursor = 4;
+  string raw_evidence_digest = 5;
+  EvidenceRetentionClass retention_class = 6;
+  reserved 7 to 15;
+  reserved "raw_payload";
+}
+
+message Scope {
+  string project_id = 1;
+  string workspace_id = 2;
+  string account_id = 3;
+  string authority_id = 4;
+  string egress_class = 5;
+  string destination_digest = 6;
+  reserved 7 to 15;
+}
