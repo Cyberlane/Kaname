@@ -8,6 +8,10 @@ publish = false
 name = "kaname_core"
 path = "src/lib.rs"
 
+[[bin]]
+name = "kaname-protocol-fixture-tool"
+path = "src/bin/fixture_tool.rs"
+
 [dependencies]
 prost = "=0.14.4"
 

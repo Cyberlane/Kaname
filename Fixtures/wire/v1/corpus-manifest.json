@@ -1,0 +1,18 @@
+{
+  "fixtures": [
+    {
+      "classification": "unknown-outer-event-preservation",
+      "containsPrivateData": false,
+      "fixture": "rust-event-envelope.bin",
+      "schemaVersion": "v1",
+      "sha256": "55f8820c6846af69c0cba796c0782f7c2d0c9768ac95f3ae5982390ab254466b"
+    },
+    {
+      "classification": "unknown-outer-event-preservation",
+      "containsPrivateData": false,
+      "fixture": "swift-event-envelope.bin",
+      "schemaVersion": "v1",
+      "sha256": "55f8820c6846af69c0cba796c0782f7c2d0c9768ac95f3ae5982390ab254466b"
+    }
+  ]
+}

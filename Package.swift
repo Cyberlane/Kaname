@@ -17,6 +17,7 @@ let package = Package(
         .executable(name: "KanamePrototype", targets: ["KanamePrototype"]),
         .executable(name: "KanameProviderProbe", targets: ["KanameProviderProbe"]),
         .executable(name: "KanameXPCQualification", targets: ["KanameXPCQualification"]),
+        .executable(name: "KanameProtocolFixtureTool", targets: ["KanameProtocolFixtureTool"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-protobuf.git", exact: "1.38.1"),
@@ -47,9 +48,20 @@ let package = Package(
             dependencies: ["KanameConnectivity", "KanameDomain"]
         ),
         .executableTarget(name: "KanameXPCQualification"),
+        .executableTarget(
+            name: "KanameProtocolFixtureTool",
+            dependencies: [
+                "KanameProtocol",
+                .product(name: "SwiftProtobuf", package: "swift-protobuf"),
+            ]
+        ),
         .testTarget(
             name: "KanameDomainTests",
             dependencies: ["KanameDomain", "KanameFixtures", "KanameConnectivity"]
+        ),
+        .testTarget(
+            name: "KanameProtocolTests",
+            dependencies: ["KanameProtocol"]
         ),
     ]
 )
