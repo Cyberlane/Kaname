@@ -8,6 +8,7 @@ pub mod v1 {
 }
 
 pub mod journal;
+pub mod policy;
 
 pub const SCHEMA_MAJOR: u32 = 1;
 pub const MAXIMUM_ENVELOPE_BYTES: usize = 64 * 1024;

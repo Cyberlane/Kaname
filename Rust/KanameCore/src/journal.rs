@@ -123,13 +123,22 @@ impl ThreadProjection {
                 self.pending_approval_ids.insert(approval_identity(event));
                 self.task_state = "waiting_for_user".into();
             }
-            "approval.approved" | "approval.rejected" | "approval.stale" | "approval.expired" => {
+            "approval.approved" | "approval.rejected" | "approval.expired" => {
                 self.pending_approval_ids.remove(&approval_identity(event));
                 self.task_state = if self.pending_approval_ids.is_empty() {
                     "running".into()
                 } else {
                     "waiting_for_user".into()
                 };
+            }
+            "approval.stale" => self.task_state = "waiting_for_user".into(),
+            "run.provider_completed"
+                if matches!(
+                    self.task_state.as_str(),
+                    "accepted" | "cancelled" | "failed" | "interrupted"
+                ) =>
+            {
+                self.unsupported_event_count += 1
             }
             "run.provider_completed" => self.task_state = "completed".into(),
             "review.accepted" => self.task_state = "accepted".into(),
@@ -138,6 +147,14 @@ impl ThreadProjection {
             "run.cancelled" => self.task_state = "cancelled".into(),
             "run.interrupted" => self.task_state = "interrupted".into(),
             "provider.native_event_observed" => self.unsupported_event_count += 1,
+            "command.admitted"
+            | "queue.enqueued"
+            | "queue.edited"
+            | "queue.removed"
+            | "queue.revision_conflict"
+            | "notification.receipt_recorded"
+            | "policy.denied"
+            | "run.reconciliation_required" => {}
             _ => return Err(JournalError::Protocol("unknown_event_kind")),
         }
         self.latest_sequence = event.stream_sequence;
