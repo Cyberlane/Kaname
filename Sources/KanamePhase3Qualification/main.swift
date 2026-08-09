@@ -239,6 +239,22 @@ private struct Context {
         receipt.state = .active
         receipt.reasonCode = "local_code_confirmed"
         try await relayClient.recordEnrollmentReceipt(receipt)
+        let session = try makeSession(state)
+        try await session.restore()
+        var reachability = Kaname_V1_SyncReceipt()
+        reachability.envelopeID = "enrollment-heartbeat-\(runID)"
+        reachability.senderDeviceID = state.macDeviceID
+        reachability.senderSequence = 1
+        reachability.state = .received
+        reachability.reasonCode = "mac_authority_reachable"
+        reachability.macStorePosition = 1
+        reachability.recordedAtUnixMillis = nowMillis
+        _ = try await session.sendPayload(
+            payloadID: "enrollment-heartbeat-\(runID)",
+            payloadKind: "sync.receipt",
+            plaintext: try reachability.serializedData(),
+            nowUnixMillis: nowMillis
+        )
         print("enrollment_active")
     }
 

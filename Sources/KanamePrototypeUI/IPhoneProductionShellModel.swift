@@ -415,7 +415,6 @@ final class IPhoneProductionShellModel: ObservableObject {
                 statusMessage = "Enrollment is still awaiting Mac confirmation."
                 return
             }
-            try await syncSession.dispatchQueuedCommands(nowUnixMillis: now.unixMillis)
             let result = try await syncSession.pollIncoming(nowUnixMillis: now.unixMillis)
             let sessionSnapshot = await syncSession.snapshot()
             queuedCommands = sessionSnapshot.queuedCommands
@@ -425,9 +424,20 @@ final class IPhoneProductionShellModel: ObservableObject {
             await applyAcceptedRotationIfPresent(sessionSnapshot)
             await applyRevocationIfPresent(sessionSnapshot)
             if snapshot.phase == .active {
-                await shell.setReachability(.reachable, reasonCode: "encrypted_reconciliation_succeeded")
+                if result.applied > 0 {
+                    await shell.setReachability(
+                        .reachable,
+                        reasonCode: "authenticated_mac_envelope_received"
+                    )
+                }
                 snapshot = await shell.snapshot()
-                statusMessage = "Encrypted reconciliation applied \(result.applied) delivery item(s) with \(result.duplicates) duplicate(s)."
+                if snapshot.reachability == .reachable {
+                    try await syncSession.dispatchQueuedCommands(nowUnixMillis: now.unixMillis)
+                    queuedCommands = await syncSession.snapshot().queuedCommands
+                    statusMessage = "Authenticated Mac reachability dispatched the encrypted queue once and applied \(result.applied) incoming item(s)."
+                } else {
+                    statusMessage = "Relay is reachable, but no authenticated Mac envelope arrived; queued commands remain protected on this iPhone."
+                }
             }
         } catch {
             await shell.setReachability(.degraded, reasonCode: "live_reconciliation_failed")
