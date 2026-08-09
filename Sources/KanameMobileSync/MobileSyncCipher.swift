@@ -128,8 +128,8 @@ public enum MobileSyncCipher {
         createdAtUnixMillis: Int64,
         expiresAtUnixMillis: Int64
     ) throws -> Kaname_V1_DevicePublicIdentity {
-        guard validIdentifier(deviceID),
-              validIdentifier(keyID),
+        guard MobileSyncIdentifier.isValid(deviceID),
+              MobileSyncIdentifier.isValid(keyID),
               !displayName.isEmpty,
               displayName.utf8.count <= 128,
               ["ios", "macos"].contains(platform),
@@ -167,11 +167,11 @@ public enum MobileSyncCipher {
         nowUnixMillis: Int64
     ) throws {
         guard header.schemaVersion.major == 1,
-              validIdentifier(header.envelopeID),
-              validIdentifier(header.senderDeviceID),
-              validIdentifier(header.senderKeyID),
-              validIdentifier(header.recipientDeviceID),
-              validIdentifier(header.recipientKeyID),
+              MobileSyncIdentifier.isValid(header.envelopeID),
+              MobileSyncIdentifier.isValid(header.senderDeviceID),
+              MobileSyncIdentifier.isValid(header.senderKeyID),
+              MobileSyncIdentifier.isValid(header.recipientDeviceID),
+              MobileSyncIdentifier.isValid(header.recipientKeyID),
               header.senderDeviceID != header.recipientDeviceID,
               header.senderSequence > 0,
               header.sentAtUnixMillis > 0,
@@ -194,16 +194,4 @@ public enum MobileSyncCipher {
         }
     }
 
-    private static func validIdentifier(_ value: String) -> Bool {
-        !value.isEmpty
-            && value.utf8.count <= 128
-            && value.utf8.allSatisfy { byte in
-                (65...90).contains(byte)
-                    || (97...122).contains(byte)
-                    || (48...57).contains(byte)
-                    || byte == 45
-                    || byte == 46
-                    || byte == 58
-            }
-    }
 }

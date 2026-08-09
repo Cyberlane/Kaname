@@ -114,6 +114,25 @@ struct MobileSyncCipherTests {
     }
 
     @Test
+    func publicIdentityRejectsIdentifiersOutsideTheSharedGrammar() throws {
+        guard #available(macOS 14.0, iOS 17.0, *) else { return }
+        let phone = Curve25519.KeyAgreement.PrivateKey()
+
+        #expect(throws: MobileSyncError.invalidIdentity) {
+            try MobileSyncCipher.publicIdentity(
+                deviceID: "iphone/justin",
+                keyID: "iphone-key-1",
+                displayName: "Justin's iPhone",
+                platform: "ios",
+                keyGeneration: 1,
+                publicKey: phone.publicKey,
+                createdAtUnixMillis: now,
+                expiresAtUnixMillis: now + 86_400_000
+            )
+        }
+    }
+
+    @Test
     func keychainContractIsDeviceOnlyAndAvailableAfterFirstUnlock() throws {
         let store = try KeychainMobileSyncKeyStore(service: "com.cyber-lane.kaname.mobile-sync")
         let attributes = KeychainMobileSyncKeyStore.storageAttributes(
@@ -127,6 +146,13 @@ struct MobileSyncCipherTests {
         #expect(!CFBooleanGetValue(synchronizable))
         #expect(attributes[kSecValueData] == nil)
         #expect(attributes[kSecUseDataProtectionKeychain] as? Bool == true)
+    }
+
+    @Test
+    func keychainStoreRejectsIdentifiersOutsideTheSharedGrammar() {
+        #expect(throws: MobileSyncKeyStoreError.invalidIdentifier) {
+            try KeychainMobileSyncKeyStore(service: "com.cyber-lane.kaname/mobile-sync")
+        }
     }
 
     private func header(sequence: UInt64) -> Kaname_V1_SyncAuthenticatedHeader {

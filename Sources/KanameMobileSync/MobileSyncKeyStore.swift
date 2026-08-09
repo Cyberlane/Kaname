@@ -18,8 +18,8 @@ public struct KeychainMobileSyncKeyStore: Sendable {
     public let accessGroup: String?
 
     public init(service: String, accessGroup: String? = nil) throws {
-        guard Self.validIdentifier(service),
-              accessGroup.map(Self.validIdentifier) ?? true else {
+        guard MobileSyncIdentifier.isValid(service),
+              accessGroup.map(MobileSyncIdentifier.isValid) ?? true else {
             throw MobileSyncKeyStoreError.invalidIdentifier
         }
         self.service = service
@@ -36,7 +36,7 @@ public struct KeychainMobileSyncKeyStore: Sendable {
         _ privateKey: Curve25519.KeyAgreement.PrivateKey,
         keyID: String
     ) throws {
-        guard Self.validIdentifier(keyID) else {
+        guard MobileSyncIdentifier.isValid(keyID) else {
             throw MobileSyncKeyStoreError.invalidIdentifier
         }
         var query = Self.storageAttributes(service: service, keyID: keyID)
@@ -56,7 +56,7 @@ public struct KeychainMobileSyncKeyStore: Sendable {
     }
 
     public func load(keyID: String) throws -> Curve25519.KeyAgreement.PrivateKey {
-        guard Self.validIdentifier(keyID) else {
+        guard MobileSyncIdentifier.isValid(keyID) else {
             throw MobileSyncKeyStoreError.invalidIdentifier
         }
         var query = Self.lookupAttributes(service: service, keyID: keyID)
@@ -81,7 +81,7 @@ public struct KeychainMobileSyncKeyStore: Sendable {
     }
 
     public func remove(keyID: String) throws {
-        guard Self.validIdentifier(keyID) else {
+        guard MobileSyncIdentifier.isValid(keyID) else {
             throw MobileSyncKeyStoreError.invalidIdentifier
         }
         var query = Self.lookupAttributes(service: service, keyID: keyID)
@@ -118,16 +118,4 @@ public struct KeychainMobileSyncKeyStore: Sendable {
         ]
     }
 
-    private static func validIdentifier(_ value: String) -> Bool {
-        !value.isEmpty
-            && value.utf8.count <= 128
-            && value.utf8.allSatisfy { byte in
-                (65...90).contains(byte)
-                    || (97...122).contains(byte)
-                    || (48...57).contains(byte)
-                    || byte == 45
-                    || byte == 46
-                    || byte == 58
-            }
-    }
 }
