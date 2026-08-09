@@ -16,6 +16,8 @@ final class IPhoneProductionShellModel: ObservableObject {
 
     private let shell: MobileEnrollmentShell
     private let syncSession: MobileSyncSession
+    private var queueSaveGeneration = 0
+    private var pendingQueueSave: Task<Void, Never>?
 
     init(
         shell: MobileEnrollmentShell,
@@ -97,12 +99,21 @@ final class IPhoneProductionShellModel: ObservableObject {
 
     func replaceQueuedCommands(_ commands: [MobileQueuedCommand]) {
         queuedCommands = commands
-        Task {
+        queueSaveGeneration += 1
+        let generation = queueSaveGeneration
+        pendingQueueSave?.cancel()
+        pendingQueueSave = Task {
             do {
+                try await Task.sleep(for: .milliseconds(200))
+                guard !Task.isCancelled else { return }
                 try await syncSession.replaceQueuedCommands(commands)
+                guard generation == queueSaveGeneration else { return }
                 queuedCommands = await syncSession.snapshot().queuedCommands
                 statusMessage = "The encrypted offline queue was saved with device data protection."
+            } catch is CancellationError {
+                return
             } catch {
+                guard generation == queueSaveGeneration else { return }
                 queuedCommands = await syncSession.snapshot().queuedCommands
                 statusMessage = "Queue change was rejected safely: \(error)"
             }
