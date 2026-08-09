@@ -37,6 +37,10 @@ public struct IPhoneControlSurface: View {
             get: { mobileShell.isMacReachable },
             set: { mobileShell.setSimulatedReachability($0) }
         )
+        let queuedCommands = Binding(
+            get: { mobileShell.queuedCommands },
+            set: { mobileShell.replaceQueuedCommands($0) }
+        )
         ZStack {
             Nord.polarNight0
                 .ignoresSafeArea()
@@ -45,7 +49,7 @@ public struct IPhoneControlSurface: View {
                 NavigationStack {
                     IPhoneCommandCenter(
                         isMacReachable: isMacReachable,
-                        queuedCommands: $fixtureState.queuedCommands,
+                        queuedCommands: queuedCommands,
                         approvalReceipt: $fixtureState.approvalReceipt,
                         mobileShell: mobileShell,
                         startNewDraft: {
@@ -71,7 +75,7 @@ public struct IPhoneControlSurface: View {
                     IPhoneWorkHub(
                         projection: $workProjection,
                         isMacReachable: isMacReachable,
-                        queuedCommands: $fixtureState.queuedCommands,
+                        queuedCommands: queuedCommands,
                         approvalReceipt: $fixtureState.approvalReceipt,
                         startNewDraft: {
                             fixtureState.newDraftRoute = IPhoneNewDraftRoute(projectName: nil)
@@ -89,7 +93,7 @@ public struct IPhoneControlSurface: View {
                 NavigationStack {
                     IPhoneProjectsHub(
                         isMacReachable: isMacReachable,
-                        queuedCommands: $fixtureState.queuedCommands,
+                        queuedCommands: queuedCommands,
                         approvalReceipt: $fixtureState.approvalReceipt,
                         startNewDraft: { projectName in
                             fixtureState.newDraftRoute = IPhoneNewDraftRoute(projectName: projectName)
@@ -107,7 +111,7 @@ public struct IPhoneControlSurface: View {
                 NavigationStack {
                     IPhoneOperationsHub(
                         isMacReachable: isMacReachable,
-                        queuedCommands: $fixtureState.queuedCommands,
+                        queuedCommands: queuedCommands,
                         approvalReceipt: $fixtureState.approvalReceipt,
                         openApproval: { fixtureState.notificationRoute = .calendarApproval }
                     )
@@ -123,7 +127,7 @@ public struct IPhoneControlSurface: View {
                 NavigationStack {
                     IPhoneLibraryHub(
                         isMacReachable: mobileShell.isMacReachable,
-                        queuedCount: fixtureState.queuedCommands.count,
+                        queuedCount: mobileShell.queuedCommands.count,
                         openSettings: { showsSettings = true }
                     )
                 }
@@ -2508,24 +2512,22 @@ enum PhoneNotificationRoute: Identifiable {
     }
 }
 
-struct PhoneQueuedCommand: Identifiable, Equatable {
-    let id: UUID
-    var position: Int
-    var threadTitle: String
-    var body: String
-    var createdLabel: String
+typealias PhoneQueuedCommand = MobileQueuedCommand
 
-    static let fixtureItems = [
-        PhoneQueuedCommand(
-            id: UUID(),
+extension MobileQueuedCommand {
+    static let simulatorItems = [
+        MobileQueuedCommand(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000101")!,
             position: 1,
+            streamID: "thread-calendar-reschedule",
             threadTitle: "Reschedule a calendar event",
             body: "Please preserve the existing attendees.",
             createdLabel: "Just now"
         ),
-        PhoneQueuedCommand(
-            id: UUID(),
+        MobileQueuedCommand(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000102")!,
             position: 2,
+            streamID: "thread-knowledge-boundary",
             threadTitle: "Map the repository knowledge boundary",
             body: "After the current scan, summarize the missing project instructions.",
             createdLabel: "2 min ago"

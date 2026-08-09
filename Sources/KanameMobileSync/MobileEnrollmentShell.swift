@@ -63,7 +63,9 @@ public protocol MobileSyncPrivateKeyStore: Sendable {
 public actor InMemoryMobileSyncPrivateKeyStore: MobileSyncPrivateKeyStore {
     private var keys: [String: Curve25519.KeyAgreement.PrivateKey] = [:]
 
-    public init() {}
+    public init(initialKeys: [String: Curve25519.KeyAgreement.PrivateKey] = [:]) {
+        self.keys = initialKeys
+    }
 
     public func createKey(keyID: String) throws -> Curve25519.KeyAgreement.PublicKey {
         guard MobileSyncIdentifier.isValid(keyID) else {

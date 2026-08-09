@@ -3,7 +3,6 @@
 /// enrollment and reachability are owned separately by the production mobile
 /// shell, so fixture state cannot claim transport authority.
 struct IPhoneFixtureState {
-    var queuedCommands = PhoneQueuedCommand.fixtureItems
     var notificationRoute: PhoneNotificationRoute?
     var newDraftRoute: IPhoneNewDraftRoute?
     var approvalReceipt: String?

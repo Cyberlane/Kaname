@@ -1,5 +1,6 @@
 #if os(iOS)
 import Combine
+import CryptoKit
 import Foundation
 import KanameMobileSync
 import SwiftUI
@@ -10,24 +11,72 @@ final class IPhoneProductionShellModel: ObservableObject {
     @Published private(set) var snapshot: MobileEnrollmentSnapshot
     @Published private(set) var confirmationCode: String?
     @Published private(set) var statusMessage: String?
+    @Published private(set) var queuedCommands: [MobileQueuedCommand]
 
     private let shell: MobileEnrollmentShell
+    private let syncSession: MobileSyncSession
 
-    init(shell: MobileEnrollmentShell, initialSnapshot: MobileEnrollmentSnapshot) {
+    init(
+        shell: MobileEnrollmentShell,
+        syncSession: MobileSyncSession,
+        initialSnapshot: MobileEnrollmentSnapshot,
+        initialQueue: [MobileQueuedCommand],
+        seedQueueOnRestore: Bool
+    ) {
         self.shell = shell
+        self.syncSession = syncSession
         self.snapshot = initialSnapshot
+        self.queuedCommands = initialQueue
+        Task {
+            await restoreSimulatorQueue(
+                seed: seedQueueOnRestore ? initialQueue : nil
+            )
+        }
     }
 
     static func simulator() -> IPhoneProductionShellModel {
-        let store = InMemoryMobileSyncPrivateKeyStore()
+        let phoneKey = try! Curve25519.KeyAgreement.PrivateKey(
+            rawRepresentation: Data(repeating: 0x11, count: 32)
+        )
+        let macKey = try! Curve25519.KeyAgreement.PrivateKey(
+            rawRepresentation: Data(repeating: 0x22, count: 32)
+        )
+        let store = InMemoryMobileSyncPrivateKeyStore(
+            initialKeys: ["iphone-simulator-key": phoneKey]
+        )
         let shell = try! MobileEnrollmentShell(
             deviceID: "iphone-simulator",
             displayName: "Kaname iPhone Simulator",
             keyStore: store
         )
+        let configuration = try! MobileSyncEndpointConfiguration(
+            deviceID: "iphone-simulator",
+            keyID: "iphone-simulator-key",
+            peerDeviceID: "mac-simulator",
+            peerKeyID: "mac-simulator-key",
+            peerPublicKey: macKey.publicKey
+        )
+        let stateURL = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        )[0]
+            .appendingPathComponent("Kaname", isDirectory: true)
+            .appendingPathComponent("mobile-sync-simulator.json")
+        let stateStore = ProtectedFileMobileSyncStateStore(fileURL: stateURL)
+        let shouldSeedQueue = !FileManager.default.fileExists(atPath: stateURL.path)
+        let initialQueue = shouldSeedQueue ? MobileQueuedCommand.simulatorItems : []
+        let syncSession = try! MobileSyncSession(
+            configuration: configuration,
+            keyStore: store,
+            transport: LocalCiphertextRelay(),
+            stateStore: stateStore
+        )
         return IPhoneProductionShellModel(
             shell: shell,
-            initialSnapshot: MobileEnrollmentSnapshot(deviceID: "iphone-simulator")
+            syncSession: syncSession,
+            initialSnapshot: MobileEnrollmentSnapshot(deviceID: "iphone-simulator"),
+            initialQueue: initialQueue,
+            seedQueueOnRestore: shouldSeedQueue
         )
     }
 
@@ -42,6 +91,20 @@ final class IPhoneProductionShellModel: ObservableObject {
             statusMessage = reachable
                 ? "Simulator reachability is available. No network connection was opened."
                 : "Simulator reachability is unavailable. Commands remain local."
+        }
+    }
+
+    func replaceQueuedCommands(_ commands: [MobileQueuedCommand]) {
+        queuedCommands = commands
+        Task {
+            do {
+                try await syncSession.replaceQueuedCommands(commands)
+                queuedCommands = await syncSession.snapshot().queuedCommands
+                statusMessage = "The encrypted offline queue was saved with device data protection."
+            } catch {
+                queuedCommands = await syncSession.snapshot().queuedCommands
+                statusMessage = "Queue change was rejected safely: \(error)"
+            }
         }
     }
 
@@ -76,6 +139,23 @@ final class IPhoneProductionShellModel: ObservableObject {
             } catch {
                 statusMessage = "Enrollment reset failed safely: \(error)"
             }
+        }
+    }
+
+    private func restoreSimulatorQueue(seed: [MobileQueuedCommand]?) async {
+        do {
+            try await syncSession.restore()
+            let restored = await syncSession.snapshot().queuedCommands
+            if restored.isEmpty, let seed {
+                try await syncSession.replaceQueuedCommands(seed)
+                queuedCommands = await syncSession.snapshot().queuedCommands
+            } else {
+                queuedCommands = restored
+            }
+        } catch {
+            queuedCommands = []
+            statusMessage = "Protected queue state could not be restored; mobile sync is read-only: \(error)"
+            try? await syncSession.enterReadOnly(reason: "protected_state_restore_failed")
         }
     }
 }
