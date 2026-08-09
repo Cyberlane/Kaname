@@ -3,7 +3,9 @@ import Foundation
 import KanameProtocol
 
 public enum MobileSyncTransportError: Error, Equatable, Sendable {
+    case invalidConfiguration
     case disconnected
+    case unauthorized
     case invalidEnvelope
     case envelopeTooLarge
     case envelopeIDReused
@@ -11,6 +13,8 @@ public enum MobileSyncTransportError: Error, Equatable, Sendable {
     case invalidPageSize
     case deliveryNotFound
     case recipientMismatch
+    case invalidResponse
+    case relayRejected(String)
 }
 
 public struct MobileRelaySendReceipt: Equatable, Sendable {
@@ -65,12 +69,62 @@ public protocol MobileSyncTransport: Sendable {
     ) async throws
 }
 
+public struct MobileRelayEnvelopeRoute: Equatable, Sendable {
+    public let envelopeID: String
+    public let senderDeviceID: String
+    public let recipientDeviceID: String
+    public let senderSequence: UInt64
+    public let payloadKind: String
+    public let authenticatedHeaderBytes: Int
+    public let ciphertextBytes: Int
+
+}
+
+public enum MobileRelayEnvelopeRouting {
+    public static let maximumEnvelopeBytes = 80 * 1024
+
+    public static func route(_ envelopeWire: Data) throws -> MobileRelayEnvelopeRoute {
+        guard !envelopeWire.isEmpty else {
+            throw MobileSyncTransportError.invalidEnvelope
+        }
+        guard envelopeWire.count <= maximumEnvelopeBytes else {
+            throw MobileSyncTransportError.envelopeTooLarge
+        }
+        guard let envelope = try? Kaname_V1_EncryptedSyncEnvelope(serializedBytes: envelopeWire),
+              !envelope.authenticatedHeader.isEmpty,
+              !envelope.encapsulatedKey.isEmpty,
+              !envelope.ciphertext.isEmpty,
+              let header = try? Kaname_V1_SyncAuthenticatedHeader(
+                serializedBytes: envelope.authenticatedHeader
+              ),
+              header.schemaVersion.major == 1,
+              MobileSyncIdentifier.isValid(header.envelopeID),
+              MobileSyncIdentifier.isValid(header.senderDeviceID),
+              MobileSyncIdentifier.isValid(header.recipientDeviceID),
+              header.senderDeviceID != header.recipientDeviceID,
+              header.senderSequence > 0,
+              !header.payloadKind.isEmpty,
+              header.payloadKind.utf8.count <= 128 else {
+            throw MobileSyncTransportError.invalidEnvelope
+        }
+        return MobileRelayEnvelopeRoute(
+            envelopeID: header.envelopeID,
+            senderDeviceID: header.senderDeviceID,
+            recipientDeviceID: header.recipientDeviceID,
+            senderSequence: header.senderSequence,
+            payloadKind: header.payloadKind,
+            authenticatedHeaderBytes: envelope.authenticatedHeader.count,
+            ciphertextBytes: envelope.ciphertext.count
+        )
+    }
+}
+
 /// Provider-neutral, network-free relay used to prove the mobile transport
 /// contract before any hosting decision. It stores the exact encrypted wire
 /// envelope plus bounded routing metadata. It has no plaintext input, output,
 /// cache, log, or inspection path.
 public actor LocalCiphertextRelay: MobileSyncTransport {
-    public static let maximumEnvelopeBytes = 80 * 1024
+    public static let maximumEnvelopeBytes = MobileRelayEnvelopeRouting.maximumEnvelopeBytes
     public static let maximumPageSize = 100
 
     private struct StoredDelivery: Sendable {
@@ -106,9 +160,9 @@ public actor LocalCiphertextRelay: MobileSyncTransport {
         guard connected else {
             throw MobileSyncTransportError.disconnected
         }
-        let routed = try Self.route(envelopeWire)
+        let routed = try MobileRelayEnvelopeRouting.route(envelopeWire)
         let envelopeDigest = Data(SHA256.hash(data: envelopeWire))
-        if let existingIndex = deliveryIndexByEnvelopeID[routed.header.envelopeID] {
+        if let existingIndex = deliveryIndexByEnvelopeID[routed.envelopeID] {
             let existing = deliveries[existingIndex]
             guard existing.envelopeWire == envelopeWire,
                   existing.envelopeDigest == envelopeDigest else {
@@ -127,13 +181,13 @@ public actor LocalCiphertextRelay: MobileSyncTransport {
         let stored = StoredDelivery(
             deliveryID: deliveryID,
             relayPosition: relayPosition,
-            envelopeID: routed.header.envelopeID,
-            senderDeviceID: routed.header.senderDeviceID,
-            recipientDeviceID: routed.header.recipientDeviceID,
-            senderSequence: routed.header.senderSequence,
-            payloadKind: routed.header.payloadKind,
-            authenticatedHeaderBytes: routed.envelope.authenticatedHeader.count,
-            ciphertextBytes: routed.envelope.ciphertext.count,
+            envelopeID: routed.envelopeID,
+            senderDeviceID: routed.senderDeviceID,
+            recipientDeviceID: routed.recipientDeviceID,
+            senderSequence: routed.senderSequence,
+            payloadKind: routed.payloadKind,
+            authenticatedHeaderBytes: routed.authenticatedHeaderBytes,
+            ciphertextBytes: routed.ciphertextBytes,
             envelopeDigest: envelopeDigest,
             envelopeWire: envelopeWire,
             recordedAtUnixMillis: nowUnixMillis,
@@ -222,35 +276,4 @@ public actor LocalCiphertextRelay: MobileSyncTransport {
         }
     }
 
-    private static func route(
-        _ envelopeWire: Data
-    ) throws -> (
-        envelope: Kaname_V1_EncryptedSyncEnvelope,
-        header: Kaname_V1_SyncAuthenticatedHeader
-    ) {
-        guard !envelopeWire.isEmpty else {
-            throw MobileSyncTransportError.invalidEnvelope
-        }
-        guard envelopeWire.count <= maximumEnvelopeBytes else {
-            throw MobileSyncTransportError.envelopeTooLarge
-        }
-        guard let envelope = try? Kaname_V1_EncryptedSyncEnvelope(serializedBytes: envelopeWire),
-              !envelope.authenticatedHeader.isEmpty,
-              !envelope.encapsulatedKey.isEmpty,
-              !envelope.ciphertext.isEmpty,
-              let header = try? Kaname_V1_SyncAuthenticatedHeader(
-                serializedBytes: envelope.authenticatedHeader
-              ),
-              header.schemaVersion.major == 1,
-              MobileSyncIdentifier.isValid(header.envelopeID),
-              MobileSyncIdentifier.isValid(header.senderDeviceID),
-              MobileSyncIdentifier.isValid(header.recipientDeviceID),
-              header.senderDeviceID != header.recipientDeviceID,
-              header.senderSequence > 0,
-              !header.payloadKind.isEmpty,
-              header.payloadKind.utf8.count <= 128 else {
-            throw MobileSyncTransportError.invalidEnvelope
-        }
-        return (envelope, header)
-    }
 }

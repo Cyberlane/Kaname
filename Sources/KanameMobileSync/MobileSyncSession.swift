@@ -69,10 +69,81 @@ public struct MobileSyncReceiptRecord: Codable, Equatable, Identifiable, Sendabl
     public let recordedAtUnixMillis: Int64
 }
 
+public struct MobileReceivedQueueCommand: Codable, Equatable, Identifiable, Sendable {
+    public var id: String { itemID }
+    public let envelopeID: String
+    public let itemID: String
+    public let streamID: String
+    public let revision: UInt64
+    public let position: UInt64
+    public let body: String
+    public let authorID: String
+    public let createdAtUnixMillis: Int64
+    public let exactQueueItemWire: Data
+}
+
+public struct MobilePendingApproval: Codable, Equatable, Identifiable, Sendable {
+    public var id: String { approvalID }
+    public let envelopeID: String
+    public let approvalID: String
+    public let actionKind: String
+    public let targetID: String
+    public let targetRevision: String
+    public let consequence: String
+    public let reversible: Bool
+    public let expiresAtUnixMillis: Int64
+    public let policyReference: String
+    public let egressClass: String
+    public let destinationDigest: String
+    public let fingerprint: Data
+    public let exactRequestWire: Data
+}
+
+public struct MobileReceivedApprovalCommand: Codable, Equatable, Identifiable, Sendable {
+    public var id: String { "\(approvalID):\(resolvedAtUnixMillis)" }
+    public let envelopeID: String
+    public let streamID: String
+    public let approvalID: String
+    public let decisionRawValue: Int
+    public let expectedFingerprint: Data
+    public let actorID: String
+    public let deviceID: String
+    public let currentTargetRevision: String
+    public let resolvedAtUnixMillis: Int64
+    public let exactCommandWire: Data
+}
+
+public struct MobileReceivedKeyRotation: Codable, Equatable, Identifiable, Sendable {
+    public var id: String { "\(deviceID):\(nextKeyID)" }
+    public let envelopeID: String
+    public let deviceID: String
+    public let previousKeyID: String
+    public let nextKeyID: String
+    public let nextKeyGeneration: UInt64
+    public let nextPublicKey: Data
+    public let nextIdentityDigest: Data
+    public let exactRotationWire: Data
+}
+
+public struct MobileReceivedRevocation: Codable, Equatable, Identifiable, Sendable {
+    public var id: String { "\(deviceID):\(keyID):\(revokedAtUnixMillis)" }
+    public let envelopeID: String
+    public let deviceID: String
+    public let keyID: String
+    public let revokedAtUnixMillis: Int64
+    public let reasonCode: String
+    public let exactRevocationWire: Data
+}
+
 public struct MobileSyncSessionSnapshot: Equatable, Sendable {
     public let queuedCommands: [MobileQueuedCommand]
     public let recentHistory: [MobileCachedHistoryRecord]
     public let receipts: [MobileSyncReceiptRecord]
+    public let receivedQueueCommands: [MobileReceivedQueueCommand]
+    public let pendingApprovals: [MobilePendingApproval]
+    public let receivedApprovalCommands: [MobileReceivedApprovalCommand]
+    public let receivedKeyRotations: [MobileReceivedKeyRotation]
+    public let receivedRevocations: [MobileReceivedRevocation]
     public let outgoingSequence: UInt64
     public let incomingSequence: UInt64
     public let relayCursor: UInt64
@@ -197,6 +268,11 @@ public actor MobileSyncSession {
         var queuedCommands: [MobileQueuedCommand] = []
         var recentHistory: [MobileCachedHistoryRecord] = []
         var receipts: [MobileSyncReceiptRecord] = []
+        var receivedQueueCommands: [MobileReceivedQueueCommand]?
+        var pendingApprovals: [MobilePendingApproval]?
+        var receivedApprovalCommands: [MobileReceivedApprovalCommand]?
+        var receivedKeyRotations: [MobileReceivedKeyRotation]?
+        var receivedRevocations: [MobileReceivedRevocation]?
         var outbox: [OutboundEnvelope] = []
         var outgoingSequence: UInt64 = 0
         var outgoingEnvelopeDigest = Data()
@@ -254,6 +330,11 @@ public actor MobileSyncSession {
             queuedCommands: state.queuedCommands.sorted { $0.position < $1.position },
             recentHistory: state.recentHistory,
             receipts: state.receipts,
+            receivedQueueCommands: state.receivedQueueCommands ?? [],
+            pendingApprovals: state.pendingApprovals ?? [],
+            receivedApprovalCommands: state.receivedApprovalCommands ?? [],
+            receivedKeyRotations: state.receivedKeyRotations ?? [],
+            receivedRevocations: state.receivedRevocations ?? [],
             outgoingSequence: state.outgoingSequence,
             incomingSequence: state.incomingSequence,
             relayCursor: state.relayCursor,
@@ -488,6 +569,7 @@ public actor MobileSyncSession {
         try applyPlaintext(
             opened.plaintext,
             payloadKind: opened.header.payloadKind,
+            envelopeID: opened.header.envelopeID,
             nowUnixMillis: nowUnixMillis
         )
         state.incomingSequence = opened.header.senderSequence
@@ -501,9 +583,43 @@ public actor MobileSyncSession {
     private func applyPlaintext(
         _ plaintext: Data,
         payloadKind: String,
+        envelopeID: String,
         nowUnixMillis: Int64
     ) throws {
         switch payloadKind {
+        case "queue.enqueue":
+            let item = try Kaname_V1_QueueItem(serializedBytes: plaintext)
+            guard MobileSyncIdentifier.isValid(item.itemID),
+                  MobileSyncIdentifier.isValid(item.streamID),
+                  MobileSyncIdentifier.isValid(item.authorID),
+                  item.revision > 0,
+                  item.position > 0,
+                  !item.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  item.body.utf8.count <= MobileSyncCipher.maximumPlaintextBytes / 2,
+                  item.createdAtUnixMillis > 0,
+                  item.disposition == "queued" else {
+                throw MobileSyncSessionError.invalidPayload
+            }
+            var received = state.receivedQueueCommands ?? []
+            if !received.contains(where: {
+                $0.itemID == item.itemID && $0.revision == item.revision
+            }) {
+                received.append(
+                    MobileReceivedQueueCommand(
+                        envelopeID: envelopeID,
+                        itemID: item.itemID,
+                        streamID: item.streamID,
+                        revision: item.revision,
+                        position: item.position,
+                        body: item.body,
+                        authorID: item.authorID,
+                        createdAtUnixMillis: item.createdAtUnixMillis,
+                        exactQueueItemWire: plaintext
+                    )
+                )
+                received.sort { ($0.position, $0.createdAtUnixMillis) < ($1.position, $1.createdAtUnixMillis) }
+                state.receivedQueueCommands = received
+            }
         case "queue.receipt":
             let receipt = try Kaname_V1_QueueReceipt(serializedBytes: plaintext)
             guard let itemID = UUID(uuidString: receipt.itemID),
@@ -562,15 +678,140 @@ public actor MobileSyncSession {
             }
         case "approval.receipt":
             let receipt = try Kaname_V1_ApprovalCommandReceipt(serializedBytes: plaintext)
-            let mapped: MobileQueueDeliveryState = receipt.decision == .approve
-                ? .policyAccepted
-                : .rejected
+            guard MobileSyncIdentifier.isValid(receipt.approvalID),
+                  receipt.fingerprint.count == SHA256.byteCount,
+                  !receipt.reasonCode.isEmpty else {
+                throw MobileSyncSessionError.invalidPayload
+            }
+            let mapped: MobileQueueDeliveryState = receipt.reasonCode.hasPrefix("stale_")
+                ? .rejected
+                : (receipt.decision == .approve ? .policyAccepted : .rejected)
             appendReceipt(
                 subjectID: receipt.approvalID,
                 state: mapped,
                 reasonCode: receipt.reasonCode,
                 recordedAtUnixMillis: nowUnixMillis
             )
+            state.pendingApprovals?.removeAll { $0.approvalID == receipt.approvalID }
+        case "approval.request":
+            let request = try Kaname_V1_ApprovalRequest(serializedBytes: plaintext)
+            guard MobileSyncIdentifier.isValid(request.approvalID),
+                  !request.actionKind.isEmpty,
+                  request.actionKind.utf8.count <= 128,
+                  !request.targetID.isEmpty,
+                  !request.targetRevision.isEmpty,
+                  request.effectDigest.count == SHA256.byteCount,
+                  !request.consequence.isEmpty,
+                  request.expiresAtUnixMillis > nowUnixMillis,
+                  !request.policyReference.isEmpty,
+                  request.fingerprint.count == SHA256.byteCount,
+                  request.approvalPayloadVersion > 0 else {
+                throw MobileSyncSessionError.invalidPayload
+            }
+            var approvals = state.pendingApprovals ?? []
+            let pending = MobilePendingApproval(
+                envelopeID: envelopeID,
+                approvalID: request.approvalID,
+                actionKind: request.actionKind,
+                targetID: request.targetID,
+                targetRevision: request.targetRevision,
+                consequence: request.consequence,
+                reversible: request.reversible,
+                expiresAtUnixMillis: request.expiresAtUnixMillis,
+                policyReference: request.policyReference,
+                egressClass: request.scope.egressClass,
+                destinationDigest: request.scope.destinationDigest,
+                fingerprint: request.fingerprint,
+                exactRequestWire: plaintext
+            )
+            if let index = approvals.firstIndex(where: { $0.approvalID == request.approvalID }) {
+                guard approvals[index] == pending else {
+                    throw MobileSyncSessionError.payloadIDReused
+                }
+            } else {
+                approvals.append(pending)
+                state.pendingApprovals = approvals
+            }
+        case "approval.command":
+            let command = try Kaname_V1_ApprovalCommand(serializedBytes: plaintext)
+            guard MobileSyncIdentifier.isValid(command.streamID),
+                  MobileSyncIdentifier.isValid(command.request.approvalID),
+                  command.request.approvalID == command.resolution.approvalID,
+                  command.request.fingerprint == command.resolution.expectedFingerprint,
+                  command.request.fingerprint.count == SHA256.byteCount,
+                  command.resolution.decision == .approve || command.resolution.decision == .reject,
+                  MobileSyncIdentifier.isValid(command.resolution.actorID),
+                  MobileSyncIdentifier.isValid(command.resolution.deviceID),
+                  command.resolvedAtUnixMillis > 0,
+                  !command.currentTargetRevision.isEmpty else {
+                throw MobileSyncSessionError.invalidPayload
+            }
+            var commands = state.receivedApprovalCommands ?? []
+            let received = MobileReceivedApprovalCommand(
+                envelopeID: envelopeID,
+                streamID: command.streamID,
+                approvalID: command.request.approvalID,
+                decisionRawValue: command.resolution.decision.rawValue,
+                expectedFingerprint: command.resolution.expectedFingerprint,
+                actorID: command.resolution.actorID,
+                deviceID: command.resolution.deviceID,
+                currentTargetRevision: command.currentTargetRevision,
+                resolvedAtUnixMillis: command.resolvedAtUnixMillis,
+                exactCommandWire: plaintext
+            )
+            if !commands.contains(received) {
+                commands.append(received)
+                state.receivedApprovalCommands = commands
+            }
+        case "device.rotation":
+            let rotation = try Kaname_V1_DeviceKeyRotation(serializedBytes: plaintext)
+            let identityWire = try rotation.nextIdentity.serializedData()
+            guard MobileSyncIdentifier.isValid(rotation.deviceID),
+                  MobileSyncIdentifier.isValid(rotation.previousKeyID),
+                  rotation.nextIdentity.deviceID == rotation.deviceID,
+                  MobileSyncIdentifier.isValid(rotation.nextIdentity.keyID),
+                  rotation.nextIdentity.hpkePublicKey.count == 32,
+                  rotation.nextIdentity.keyGeneration > 0,
+                  rotation.transcriptDigest.count == SHA256.byteCount,
+                  rotation.rotatedAtUnixMillis > 0 else {
+                throw MobileSyncSessionError.invalidPayload
+            }
+            var rotations = state.receivedKeyRotations ?? []
+            let received = MobileReceivedKeyRotation(
+                envelopeID: envelopeID,
+                deviceID: rotation.deviceID,
+                previousKeyID: rotation.previousKeyID,
+                nextKeyID: rotation.nextIdentity.keyID,
+                nextKeyGeneration: rotation.nextIdentity.keyGeneration,
+                nextPublicKey: rotation.nextIdentity.hpkePublicKey,
+                nextIdentityDigest: Data(SHA256.hash(data: identityWire)),
+                exactRotationWire: plaintext
+            )
+            if !rotations.contains(received) {
+                rotations.append(received)
+                state.receivedKeyRotations = rotations
+            }
+        case "device.revocation":
+            let revocation = try Kaname_V1_DeviceRevocation(serializedBytes: plaintext)
+            guard MobileSyncIdentifier.isValid(revocation.deviceID),
+                  MobileSyncIdentifier.isValid(revocation.keyID),
+                  revocation.revokedAtUnixMillis > 0,
+                  !revocation.reasonCode.isEmpty else {
+                throw MobileSyncSessionError.invalidPayload
+            }
+            var revocations = state.receivedRevocations ?? []
+            let received = MobileReceivedRevocation(
+                envelopeID: envelopeID,
+                deviceID: revocation.deviceID,
+                keyID: revocation.keyID,
+                revokedAtUnixMillis: revocation.revokedAtUnixMillis,
+                reasonCode: revocation.reasonCode,
+                exactRevocationWire: plaintext
+            )
+            if !revocations.contains(received) {
+                revocations.append(received)
+                state.receivedRevocations = revocations
+            }
         default:
             throw MobileSyncSessionError.unsupportedPayloadKind
         }
@@ -661,6 +902,11 @@ public actor MobileSyncSession {
               }),
               state.recentHistory.count <= historyLimit,
               state.receipts.count <= Self.maximumReceipts,
+              (state.receivedQueueCommands?.count ?? 0) <= Self.maximumQueueItems,
+              (state.pendingApprovals?.count ?? 0) <= Self.maximumReceipts,
+              (state.receivedApprovalCommands?.count ?? 0) <= Self.maximumReceipts,
+              (state.receivedKeyRotations?.count ?? 0) <= 32,
+              (state.receivedRevocations?.count ?? 0) <= 32,
               state.outbox.count <= Self.maximumQueueItems + Self.maximumReceipts,
               Set(state.outbox.map(\.payloadID)).count == state.outbox.count,
               state.outbox.allSatisfy({ $0.senderSequence > 0 }),

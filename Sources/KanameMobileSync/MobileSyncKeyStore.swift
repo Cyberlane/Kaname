@@ -100,10 +100,7 @@ public struct KeychainMobileSyncKeyStore: Sendable {
         service: String,
         keyID: String
     ) -> [CFString: Any] {
-        var attributes = lookupAttributes(service: service, keyID: keyID)
-        attributes[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        attributes[kSecAttrSynchronizable] = kCFBooleanFalse
-        return attributes
+        MobileSyncKeychainProtection.storageAttributes(service: service, account: keyID)
     }
 
     private static func lookupAttributes(
@@ -118,4 +115,20 @@ public struct KeychainMobileSyncKeyStore: Sendable {
         ]
     }
 
+}
+
+public enum MobileSyncKeychainProtection {
+    public static func storageAttributes(
+        service: String,
+        account: String
+    ) -> [CFString: Any] {
+        [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service,
+            kSecAttrAccount: account,
+            kSecUseDataProtectionKeychain: true,
+            kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+            kSecAttrSynchronizable: kCFBooleanFalse as Any,
+        ]
+    }
 }

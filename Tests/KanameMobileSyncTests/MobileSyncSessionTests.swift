@@ -149,6 +149,7 @@ struct MobileSyncSessionTests {
         var receipt = Kaname_V1_ApprovalCommandReceipt()
         receipt.approvalID = "approval-stale-1"
         receipt.decision = .reject
+        receipt.fingerprint = Data(repeating: 0x53, count: SHA256.byteCount)
         receipt.storePosition = 33
         receipt.reasonCode = "stale_target_revision"
         _ = try await fixture.mac.sendPayload(
@@ -164,6 +165,121 @@ struct MobileSyncSessionTests {
         #expect(snapshot.receipts[0].subjectID == receipt.approvalID)
         #expect(snapshot.receipts[0].state == .rejected)
         #expect(snapshot.receipts[0].reasonCode == "stale_target_revision")
+    }
+
+    @Test
+    func encryptedQueueApprovalRotationAndRevocationReachOnlyTheirAuthorityPeer() async throws {
+        guard #available(macOS 14.0, iOS 17.0, *) else { return }
+        let fixture = try Fixture()
+
+        var queue = Kaname_V1_QueueItem()
+        queue.itemID = "queue-live-1"
+        queue.streamID = "thread-live-1"
+        queue.revision = 2
+        queue.position = 1
+        queue.body = "Run the Phase 3 reconciliation check."
+        queue.authorID = "iphone-justin"
+        queue.createdAtUnixMillis = now
+        queue.disposition = "queued"
+        _ = try await fixture.phone.sendPayload(
+            payloadID: "queue-live-1",
+            payloadKind: "queue.enqueue",
+            plaintext: try queue.serializedData(),
+            nowUnixMillis: now
+        )
+        _ = try await fixture.mac.pollIncoming(nowUnixMillis: now + 1)
+        let receivedQueue = await fixture.mac.snapshot().receivedQueueCommands
+        #expect(receivedQueue.map(\.itemID) == ["queue-live-1"])
+        #expect(receivedQueue[0].body == queue.body)
+
+        var request = Kaname_V1_ApprovalRequest()
+        request.approvalID = "approval-live-1"
+        request.actionKind = "codex.workspace_write"
+        request.scope.projectID = "coding-ade"
+        request.scope.workspaceID = "phase3-worktree"
+        request.scope.authorityID = "mac-authority"
+        request.scope.egressClass = "encrypted-relay-only"
+        request.scope.destinationDigest = "sha256:destination"
+        request.targetID = "worktree-phase3"
+        request.targetRevision = "revision-1"
+        request.effectDigest = Data(repeating: 0x61, count: SHA256.byteCount)
+        request.consequence = "Allow one recoverable write in the isolated qualification worktree."
+        request.reversible = true
+        request.expiresAtUnixMillis = now + 60_000
+        request.policyReference = "phase3-mobile-explicit"
+        request.fingerprint = Data(repeating: 0x62, count: SHA256.byteCount)
+        request.approvalPayloadVersion = 1
+        _ = try await fixture.mac.sendPayload(
+            payloadID: "approval-live-1",
+            payloadKind: "approval.request",
+            plaintext: try request.serializedData(),
+            nowUnixMillis: now + 2
+        )
+        _ = try await fixture.phone.pollIncoming(nowUnixMillis: now + 3)
+        let pending = try #require(await fixture.phone.snapshot().pendingApprovals.first)
+        #expect(pending.targetRevision == "revision-1")
+        #expect(pending.egressClass == "encrypted-relay-only")
+
+        var resolution = Kaname_V1_ApprovalResolution()
+        resolution.approvalID = request.approvalID
+        resolution.decision = .approve
+        resolution.expectedFingerprint = request.fingerprint
+        resolution.actorID = "justin"
+        resolution.deviceID = "iphone-justin"
+        var command = Kaname_V1_ApprovalCommand()
+        command.streamID = "thread-live-1"
+        command.request = request
+        command.resolution = resolution
+        command.resolvedAtUnixMillis = now + 4
+        command.currentTargetRevision = request.targetRevision
+        _ = try await fixture.phone.sendPayload(
+            payloadID: "approval-command-live-1",
+            payloadKind: "approval.command",
+            plaintext: try command.serializedData(),
+            nowUnixMillis: now + 4
+        )
+        _ = try await fixture.mac.pollIncoming(nowUnixMillis: now + 5)
+        #expect(await fixture.mac.snapshot().receivedApprovalCommands.count == 1)
+
+        let nextPhoneKey = Curve25519.KeyAgreement.PrivateKey()
+        let nextIdentity = try MobileSyncCipher.publicIdentity(
+            deviceID: "iphone-justin",
+            keyID: "iphone-key-2",
+            displayName: "Justin's iPhone",
+            platform: "ios",
+            keyGeneration: 2,
+            publicKey: nextPhoneKey.publicKey,
+            createdAtUnixMillis: now,
+            expiresAtUnixMillis: now + 86_400_000
+        )
+        var rotation = Kaname_V1_DeviceKeyRotation()
+        rotation.deviceID = "iphone-justin"
+        rotation.previousKeyID = "iphone-key-1"
+        rotation.nextIdentity = nextIdentity
+        rotation.transcriptDigest = Data(repeating: 0x63, count: SHA256.byteCount)
+        rotation.rotatedAtUnixMillis = now + 6
+        _ = try await fixture.phone.sendPayload(
+            payloadID: "rotation-live-1",
+            payloadKind: "device.rotation",
+            plaintext: try rotation.serializedData(),
+            nowUnixMillis: now + 6
+        )
+        _ = try await fixture.mac.pollIncoming(nowUnixMillis: now + 7)
+        #expect(await fixture.mac.snapshot().receivedKeyRotations.first?.nextKeyID == "iphone-key-2")
+
+        var revocation = Kaname_V1_DeviceRevocation()
+        revocation.deviceID = "iphone-justin"
+        revocation.keyID = "iphone-key-1"
+        revocation.revokedAtUnixMillis = now + 8
+        revocation.reasonCode = "qualification_lost_device"
+        _ = try await fixture.mac.sendPayload(
+            payloadID: "revocation-live-1",
+            payloadKind: "device.revocation",
+            plaintext: try revocation.serializedData(),
+            nowUnixMillis: now + 8
+        )
+        _ = try await fixture.phone.pollIncoming(nowUnixMillis: now + 9)
+        #expect(await fixture.phone.snapshot().receivedRevocations.first?.reasonCode == "qualification_lost_device")
     }
 
     @Test
