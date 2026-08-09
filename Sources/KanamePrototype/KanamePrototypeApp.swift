@@ -146,7 +146,7 @@ private struct PrototypeWorkspace: View {
                     }
                 }
             } detail: {
-            ContextInspector(fixture: selectedFixture)
+            inspector
                 .background(Nord.polarNight1)
                 .navigationSplitViewColumnWidth(min: 280, ideal: 340, max: 440)
             }
@@ -165,6 +165,15 @@ private struct PrototypeWorkspace: View {
             }
         }
         .animation(.easeOut(duration: 0.16), value: showsSettings)
+    }
+
+    @ViewBuilder
+    private var inspector: some View {
+        if selectedSurface == .liveCodex {
+            LiveCodexContextInspector()
+        } else {
+            ContextInspector(fixture: selectedFixture)
+        }
     }
 
     @ViewBuilder
@@ -2477,6 +2486,30 @@ private struct ContextInspector: View {
             }
         }
         .navigationTitle("Inspector")
+    }
+}
+
+private struct LiveCodexContextInspector: View {
+    var body: some View {
+        List {
+            Section("Execution contract") {
+                LabeledContent("Provider", value: "Codex app-server")
+                LabeledContent("Model", value: "GPT-5.6 Terra")
+                LabeledContent("Reasoning", value: "Extra high")
+                LabeledContent("Workspace", value: "Selected in this review")
+            }
+            Section("Isolation") {
+                LabeledContent("Filesystem", value: "Selected worktree only")
+                LabeledContent("Network", value: "Denied during write runs")
+                LabeledContent("MCP servers", value: "None")
+                LabeledContent("Apps", value: "Disabled")
+            }
+            Section("Authority") {
+                Text("The local journal owns approvals and review decisions. Provider completion never accepts work automatically.")
+                Text("Only the context explicitly selected in the coding surface is sent to Codex.")
+            }
+        }
+        .navigationTitle("Live boundary")
     }
 }
 
