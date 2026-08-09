@@ -1,4 +1,5 @@
 @preconcurrency import Foundation
+import Darwin
 
 enum ProviderConnectivityError: Error, LocalizedError, Sendable {
     case executableNotFound(String)
@@ -29,6 +30,36 @@ struct CapturedProcessOutput: Sendable {
     let standardOutput: String
     let standardError: String
     let exitStatus: Int32
+    let standardOutputWasTruncated: Bool
+    let standardErrorWasTruncated: Bool
+}
+
+private final class ProcessExitLatch: @unchecked Sendable {
+    private let lock = NSLock()
+    private let semaphore = DispatchSemaphore(value: 0)
+    private var finished = false
+
+    func signal() {
+        lock.lock()
+        finished = true
+        lock.unlock()
+        semaphore.signal()
+    }
+
+    func wait() {
+        lock.lock()
+        let alreadyFinished = finished
+        lock.unlock()
+        guard !alreadyFinished else { return }
+        semaphore.wait()
+    }
+
+    func wait(timeout: DispatchTime) -> Bool {
+        lock.lock()
+        let alreadyFinished = finished
+        lock.unlock()
+        return alreadyFinished || semaphore.wait(timeout: timeout) == .success
+    }
 }
 
 final class RunningLocalProcess: @unchecked Sendable {
@@ -36,17 +67,38 @@ final class RunningLocalProcess: @unchecked Sendable {
     let standardInput: FileHandle
     let standardOutput: FileHandle
     let standardError: FileHandle
+    fileprivate let exitLatch: ProcessExitLatch
 
-    init(process: Process, standardInput: FileHandle, standardOutput: FileHandle, standardError: FileHandle) {
+    fileprivate init(
+        process: Process,
+        standardInput: FileHandle,
+        standardOutput: FileHandle,
+        standardError: FileHandle,
+        exitLatch: ProcessExitLatch
+    ) {
         self.process = process
         self.standardInput = standardInput
         self.standardOutput = standardOutput
         self.standardError = standardError
+        self.exitLatch = exitLatch
     }
 
     func terminate() {
-        guard process.isRunning else { return }
-        process.terminate()
+        if process.isRunning {
+            process.terminate()
+        }
+        // Foundation raises if a Process is deallocated before it has reaped.
+        // All Kaname provider shutdowns are fail-closed, so wait for the exact
+        // child after asking it to terminate rather than leaving a live child
+        // behind or crashing the caller during deallocation.
+        if !exitLatch.wait(timeout: .now() + 2), process.isRunning {
+            Darwin.kill(process.processIdentifier, SIGKILL)
+            exitLatch.wait()
+        }
+    }
+
+    func waitForExit() {
+        exitLatch.wait()
     }
 }
 
@@ -73,7 +125,8 @@ enum LocalProcess {
         executable: String,
         arguments: [String],
         workingDirectory: URL,
-        environmentOverrides: [String: String] = [:]
+        environmentOverrides: [String: String] = [:],
+        environmentRemovals: Set<String> = []
     ) throws -> RunningLocalProcess {
         guard let executableURL = resolveExecutable(named: executable) else {
             throw ProviderConnectivityError.executableNotFound(executable)
@@ -89,7 +142,16 @@ enum LocalProcess {
         process.standardInput = input
         process.standardOutput = output
         process.standardError = error
-        process.environment = ProcessInfo.processInfo.environment.merging(environmentOverrides) { _, replacement in replacement }
+        var environment = ProcessInfo.processInfo.environment
+            .merging(environmentOverrides) { _, replacement in replacement }
+        for name in environmentRemovals {
+            environment.removeValue(forKey: name)
+        }
+        process.environment = environment
+        let exitLatch = ProcessExitLatch()
+        process.terminationHandler = { _ in
+            exitLatch.signal()
+        }
 
         do {
             try process.run()
@@ -101,7 +163,8 @@ enum LocalProcess {
             process: process,
             standardInput: input.fileHandleForWriting,
             standardOutput: output.fileHandleForReading,
-            standardError: error.fileHandleForReading
+            standardError: error.fileHandleForReading,
+            exitLatch: exitLatch
         )
     }
 
@@ -110,30 +173,71 @@ enum LocalProcess {
         arguments: [String],
         workingDirectory: URL,
         timeout: Duration,
-        environmentOverrides: [String: String] = [:]
+        environmentOverrides: [String: String] = [:],
+        environmentRemovals: Set<String> = [],
+        maximumOutputBytes: Int = 1_048_576
     ) async throws -> CapturedProcessOutput {
         let running = try start(
             executable: executable,
             arguments: arguments,
             workingDirectory: workingDirectory,
-            environmentOverrides: environmentOverrides
+            environmentOverrides: environmentOverrides,
+            environmentRemovals: environmentRemovals
         )
+
+        let outputTask = _Concurrency.Task.detached {
+            readBounded(running.standardOutput, maximumBytes: maximumOutputBytes)
+        }
+        let errorTask = _Concurrency.Task.detached {
+            readBounded(running.standardError, maximumBytes: maximumOutputBytes)
+        }
 
         do {
             let status = try await waitForExit(of: running, timeout: timeout, command: executable)
-            let output = String(decoding: running.standardOutput.readDataToEndOfFile(), as: UTF8.self)
-            let error = String(decoding: running.standardError.readDataToEndOfFile(), as: UTF8.self)
-            return CapturedProcessOutput(standardOutput: output, standardError: error, exitStatus: status)
+            let output = await outputTask.value
+            let error = await errorTask.value
+            return CapturedProcessOutput(
+                standardOutput: String(decoding: output.data, as: UTF8.self),
+                standardError: String(decoding: error.data, as: UTF8.self),
+                exitStatus: status,
+                standardOutputWasTruncated: output.truncated,
+                standardErrorWasTruncated: error.truncated
+            )
         } catch {
             running.terminate()
+            _ = await outputTask.value
+            _ = await errorTask.value
             throw error
         }
+    }
+
+    private struct BoundedData: Sendable {
+        let data: Data
+        let truncated: Bool
+    }
+
+    private static func readBounded(_ file: FileHandle, maximumBytes: Int) -> BoundedData {
+        let boundedMaximum = max(1, maximumBytes)
+        var retained = Data()
+        var truncated = false
+        while true {
+            let chunk = file.availableData
+            guard !chunk.isEmpty else { break }
+            let remaining = boundedMaximum - retained.count
+            if remaining > 0 {
+                retained.append(chunk.prefix(remaining))
+            }
+            if chunk.count > max(0, remaining) {
+                truncated = true
+            }
+        }
+        return BoundedData(data: retained, truncated: truncated)
     }
 
     private static func waitForExit(of running: RunningLocalProcess, timeout: Duration, command: String) async throws -> Int32 {
         try await withThrowingTaskGroup(of: Int32.self) { group in
             group.addTask {
-                running.process.waitUntilExit()
+                running.exitLatch.wait()
                 return running.process.terminationStatus
             }
             group.addTask {

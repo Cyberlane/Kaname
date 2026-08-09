@@ -17,6 +17,7 @@ let package = Package(
         .library(name: "KanamePrototypeUI", targets: ["KanamePrototypeUI"]),
         .executable(name: "KanamePrototype", targets: ["KanamePrototype"]),
         .executable(name: "KanameProviderProbe", targets: ["KanameProviderProbe"]),
+        .executable(name: "KanameCodexSessionProbe", targets: ["KanameCodexSessionProbe"]),
         .executable(name: "KanameXPCQualification", targets: ["KanameXPCQualification"]),
         .executable(name: "KanameLocalControlService", targets: ["KanameLocalControlService"]),
         .executable(name: "KanameLocalCoreXPCMeasure", targets: ["KanameLocalCoreXPCMeasure"]),
@@ -27,14 +28,28 @@ let package = Package(
     ],
     targets: [
         .target(name: "KanameDomain"),
-        .target(name: "KanameLocalCore"),
+        .target(
+            name: "KanameLocalCore",
+            dependencies: [
+                "KanameProtocol",
+                .product(name: "SwiftProtobuf", package: "swift-protobuf"),
+            ]
+        ),
         .target(
             name: "KanameProtocol",
             dependencies: [
                 .product(name: "SwiftProtobuf", package: "swift-protobuf"),
             ]
         ),
-        .target(name: "KanameConnectivity", dependencies: ["KanameDomain"]),
+        .target(
+            name: "KanameConnectivity",
+            dependencies: [
+                "KanameDomain",
+                "KanameLocalCore",
+                "KanameProtocol",
+                .product(name: "SwiftProtobuf", package: "swift-protobuf"),
+            ]
+        ),
         .target(
             name: "KanameFixtures",
             dependencies: ["KanameDomain"]
@@ -45,10 +60,14 @@ let package = Package(
         ),
         .executableTarget(
             name: "KanamePrototype",
-            dependencies: ["KanameDomain", "KanameFixtures", "KanamePrototypeUI", "KanameLocalCore"]
+            dependencies: ["KanameDomain", "KanameFixtures", "KanamePrototypeUI", "KanameLocalCore", "KanameConnectivity"]
         ),
         .executableTarget(
             name: "KanameProviderProbe",
+            dependencies: ["KanameConnectivity", "KanameDomain"]
+        ),
+        .executableTarget(
+            name: "KanameCodexSessionProbe",
             dependencies: ["KanameConnectivity", "KanameDomain"]
         ),
         .executableTarget(name: "KanameXPCQualification"),
@@ -69,7 +88,7 @@ let package = Package(
         ),
         .testTarget(
             name: "KanameDomainTests",
-            dependencies: ["KanameDomain", "KanameFixtures", "KanameConnectivity", "KanameLocalCore"]
+            dependencies: ["KanameDomain", "KanameFixtures", "KanameConnectivity", "KanameLocalCore", "KanameProtocol"]
         ),
         .testTarget(
             name: "KanameProtocolTests",

@@ -66,7 +66,7 @@ private struct PrototypeWorkspace: View {
                         }
                     }
 
-                    Section("Phase 0 validation") {
+                    Section("Validation") {
                         ForEach(PrototypeSurface.validationSurfaces) { surface in
                             SurfaceButton(
                                 surface: surface,
@@ -192,6 +192,8 @@ private struct PrototypeWorkspace: View {
             StackPrototypeView()
         case .localCore:
             LocalCoreWorkspace()
+        case .liveCodex:
+            CodexLiveWorkspace()
         case .projects, .research, .obsidian, .email, .calendar, .automations:
             DomainHomeView(surface: selectedSurface) { flow in
                 newFlow = flow
@@ -239,10 +241,11 @@ private enum PrototypeSurface: String, CaseIterable, Identifiable {
     case automations
     case stack
     case localCore
+    case liveCodex
 
     static let workspaceSurfaces: [PrototypeSurface] = [.dashboard, .threads, .inbox]
     static let domainSurfaces: [PrototypeSurface] = [.projects, .research, .obsidian, .email, .calendar, .automations]
-    static let validationSurfaces: [PrototypeSurface] = [.localCore, .stack]
+    static let validationSurfaces: [PrototypeSurface] = [.liveCodex, .localCore, .stack]
 
     var id: String { rawValue }
 
@@ -260,6 +263,7 @@ private enum PrototypeSurface: String, CaseIterable, Identifiable {
         case .automations: "Automations"
         case .stack: "GitHub stack"
         case .localCore: "Local core"
+        case .liveCodex: "Codex live review"
         }
     }
 
@@ -277,6 +281,7 @@ private enum PrototypeSurface: String, CaseIterable, Identifiable {
         case .automations: "arrow.triangle.2.circlepath"
         case .stack: "square.3.layers.3d.down.right"
         case .localCore: "internaldrive"
+        case .liveCodex: "shield.lefthalf.filled"
         }
     }
 }

@@ -71,8 +71,8 @@ private final class LocalControlService: NSObject, LocalCoreControlService {
         do {
             let response = try Self.runCore(
                 executable: coreExecutable,
-                fixtureID: fixtureID,
-                journalPath: journalDirectory.appendingPathComponent("\(fixtureID).sqlite"),
+                arguments: ["scenario-store", fixtureID, journalDirectory.appendingPathComponent("\(fixtureID).sqlite").path],
+                standardInput: nil,
                 timeout: 5
             )
             _ = try LocalCoreRunner.decodeScenarioReport(response)
@@ -87,23 +87,119 @@ private final class LocalControlService: NSObject, LocalCoreControlService {
         }
     }
 
+    func appendEvent(_ request: Data, reply: @escaping (Data?, String) -> Void) {
+        guard !request.isEmpty, request.count <= LocalCoreRunner.maximumResponseBytes else {
+            reply(nil, "invalid_event")
+            return
+        }
+        do {
+            let response = try Self.runCore(
+                executable: coreExecutable,
+                arguments: [
+                    "append-event",
+                    journalDirectory.appendingPathComponent("live-provider.sqlite").path,
+                ],
+                standardInput: request,
+                timeout: 5
+            )
+            _ = try LocalCoreRunner.decodeEventAppendReport(response)
+            reply(response, "")
+        } catch let error as LocalCoreRunnerError {
+            switch error {
+            case .timedOut: reply(nil, "core_timed_out")
+            default: reply(nil, "core_failed")
+            }
+        } catch {
+            reply(nil, "core_failed")
+        }
+    }
+
+    func authorizeAction(_ request: Data, reply: @escaping (Data?, String) -> Void) {
+        runWireOperation("authorize-action", request: request, reply: reply)
+    }
+
+    func recordReview(_ request: Data, reply: @escaping (Data?, String) -> Void) {
+        runWireOperation("record-review", request: request, reply: reply)
+    }
+
+    func replay(_ request: Data, reply: @escaping (Data?, String) -> Void) {
+        runWireOperation("replay", request: request, reply: reply)
+    }
+
+    private func runWireOperation(
+        _ operation: String,
+        request: Data,
+        reply: @escaping (Data?, String) -> Void
+    ) {
+        guard !request.isEmpty, request.count <= LocalCoreRunner.maximumResponseBytes else {
+            reply(nil, "invalid_request")
+            return
+        }
+        do {
+            let response = try Self.runCore(
+                executable: coreExecutable,
+                arguments: [
+                    operation,
+                    journalDirectory.appendingPathComponent("live-provider.sqlite").path,
+                ],
+                standardInput: request,
+                timeout: 5
+            )
+            guard let wire = Self.decodeHexResponse(response) else {
+                reply(nil, "core_failed")
+                return
+            }
+            reply(wire, "")
+        } catch let error as LocalCoreRunnerError {
+            switch error {
+            case .timedOut: reply(nil, "core_timed_out")
+            default: reply(nil, "core_failed")
+            }
+        } catch {
+            reply(nil, "core_failed")
+        }
+    }
+
+    private static func decodeHexResponse(_ response: Data) -> Data? {
+        let text = String(decoding: response, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, text.count.isMultiple(of: 2) else { return nil }
+        var output = Data(capacity: text.count / 2)
+        var index = text.startIndex
+        while index < text.endIndex {
+            let next = text.index(index, offsetBy: 2)
+            guard let byte = UInt8(text[index..<next], radix: 16) else { return nil }
+            output.append(byte)
+            index = next
+        }
+        return output
+    }
+
     private static func runCore(
         executable: URL,
-        fixtureID: String,
-        journalPath: URL,
+        arguments: [String],
+        standardInput: Data?,
         timeout: TimeInterval
     ) throws -> Data {
         guard FileManager.default.isExecutableFile(atPath: executable.path) else {
             throw LocalCoreRunnerError.unavailable
         }
-        try FileManager.default.createDirectory(at: journalPath.deletingLastPathComponent(), withIntermediateDirectories: true)
+        guard let journalPath = arguments.last else {
+            throw LocalCoreRunnerError.unavailable
+        }
+        try FileManager.default.createDirectory(
+            at: URL(fileURLWithPath: journalPath).deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
         let process = Process()
         let standardOutput = Pipe()
         let standardError = Pipe()
+        let input = Pipe()
         process.executableURL = executable
-        process.arguments = ["scenario-store", fixtureID, journalPath.path]
+        process.arguments = arguments
         process.standardOutput = standardOutput
         process.standardError = standardError
+        process.standardInput = input
         let timedOut = LockedFlag()
         let timer = DispatchSource.makeTimerSource(queue: .global(qos: .userInitiated))
         timer.schedule(deadline: .now() + timeout)
@@ -114,6 +210,10 @@ private final class LocalControlService: NSObject, LocalCoreControlService {
         timer.resume()
         defer { timer.cancel() }
         try process.run()
+        if let standardInput {
+            try input.fileHandleForWriting.write(contentsOf: standardInput)
+        }
+        try input.fileHandleForWriting.close()
         process.waitUntilExit()
         let output = standardOutput.fileHandleForReading.readDataToEndOfFile()
         _ = standardError.fileHandleForReading.readDataToEndOfFile()

@@ -1,4 +1,6 @@
 import Foundation
+import KanameProtocol
+import SwiftProtobuf
 
 public struct LocalCoreScenarioReport: Codable, Equatable, Sendable {
     public let fixtureID: String
@@ -20,12 +22,31 @@ public struct LocalCoreScenarioReport: Codable, Equatable, Sendable {
     }
 }
 
+/// A bounded receipt from the Rust authority after it assigns durable ordering
+/// to one locally-produced provider event.
+public struct LocalCoreEventAppendReport: Codable, Equatable, Sendable {
+    public let eventID: String
+    public let streamID: String
+    public let storePosition: UInt64
+    public let streamSequence: UInt64
+    public let duplicate: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case eventID = "event_id"
+        case streamID = "stream_id"
+        case storePosition = "store_position"
+        case streamSequence = "stream_sequence"
+        case duplicate
+    }
+}
+
 public enum LocalCoreRunnerError: Error, Equatable, Sendable {
     case unavailable
     case invalidFixtureID
     case timedOut
     case failed(code: String)
     case malformedReport
+    case malformedAppendReport
 }
 
 /// The native client and its local Mach service exchange opaque bounded Data.
@@ -35,6 +56,10 @@ public enum LocalCoreRunnerError: Error, Equatable, Sendable {
 @objc(KanameLocalCoreControlService)
 public protocol LocalCoreControlService {
     func runScenario(_ request: Data, reply: @escaping (Data?, String) -> Void)
+    func appendEvent(_ request: Data, reply: @escaping (Data?, String) -> Void)
+    func authorizeAction(_ request: Data, reply: @escaping (Data?, String) -> Void)
+    func recordReview(_ request: Data, reply: @escaping (Data?, String) -> Void)
+    func replay(_ request: Data, reply: @escaping (Data?, String) -> Void)
 }
 #endif
 
@@ -80,6 +105,106 @@ public struct LocalCoreRunner: Sendable {
 #endif
     }
 
+    /// The request is a generated protobuf wire envelope. The local service,
+    /// not SwiftUI or the provider adapter, owns durable ordering and SQLite
+    /// mutation. This preserves the same signed-XPC boundary used for Phase 1.
+    public func appendEventWire(_ eventWire: Data, timeout: TimeInterval = 5) async throws -> LocalCoreEventAppendReport {
+        guard !eventWire.isEmpty, eventWire.count <= Self.maximumResponseBytes else {
+            throw LocalCoreRunnerError.malformedAppendReport
+        }
+#if os(macOS)
+        let output = try await Task.detached(priority: .userInitiated) {
+            try runBoundedService(
+                machService: machService,
+                requirement: serviceRequirement,
+                request: eventWire,
+                timeout: timeout,
+                operation: .appendEvent
+            )
+        }.value
+        return try Self.decodeEventAppendReport(output)
+#else
+        throw LocalCoreRunnerError.unavailable
+#endif
+    }
+
+    public func authorizeAction(
+        _ command: Kaname_V1_ApprovalCommand,
+        timeout: TimeInterval = 5
+    ) async throws -> Kaname_V1_ApprovalCommandReceipt {
+#if os(macOS)
+        let output = try await Task.detached(priority: .userInitiated) {
+            try runBoundedService(
+                machService: machService,
+                requirement: serviceRequirement,
+                request: try command.serializedData(),
+                timeout: timeout,
+                operation: .authorizeAction
+            )
+        }.value
+        guard output.count <= Self.maximumResponseBytes,
+              let receipt = try? Kaname_V1_ApprovalCommandReceipt(serializedBytes: output),
+              !receipt.approvalID.isEmpty,
+              !receipt.fingerprint.isEmpty,
+              receipt.storePosition > 0 else {
+            throw LocalCoreRunnerError.malformedAppendReport
+        }
+        return receipt
+#else
+        throw LocalCoreRunnerError.unavailable
+#endif
+    }
+
+    public func recordReview(
+        _ command: Kaname_V1_CommandEnvelope,
+        timeout: TimeInterval = 5
+    ) async throws -> Kaname_V1_CommandOutcome {
+#if os(macOS)
+        let output = try await Task.detached(priority: .userInitiated) {
+            try runBoundedService(
+                machService: machService,
+                requirement: serviceRequirement,
+                request: try command.serializedData(),
+                timeout: timeout,
+                operation: .recordReview
+            )
+        }.value
+        guard output.count <= Self.maximumResponseBytes,
+              let outcome = try? Kaname_V1_CommandOutcome(serializedBytes: output),
+              !outcome.commandID.isEmpty,
+              outcome.storePosition > 0 else {
+            throw LocalCoreRunnerError.malformedAppendReport
+        }
+        return outcome
+#else
+        throw LocalCoreRunnerError.unavailable
+#endif
+    }
+
+    public func replay(
+        _ request: Kaname_V1_ReplayRequest,
+        timeout: TimeInterval = 5
+    ) async throws -> Kaname_V1_ReplayResponse {
+#if os(macOS)
+        let output = try await Task.detached(priority: .userInitiated) {
+            try runBoundedService(
+                machService: machService,
+                requirement: serviceRequirement,
+                request: try request.serializedData(),
+                timeout: timeout,
+                operation: .replay
+            )
+        }.value
+        guard output.count <= Self.maximumResponseBytes,
+              let response = try? Kaname_V1_ReplayResponse(serializedBytes: output) else {
+            throw LocalCoreRunnerError.malformedAppendReport
+        }
+        return response
+#else
+        throw LocalCoreRunnerError.unavailable
+#endif
+    }
+
     public static func decodeScenarioReport(_ data: Data) throws -> LocalCoreScenarioReport {
         guard data.count <= Self.maximumResponseBytes,
               let report = try? JSONDecoder().decode(LocalCoreScenarioReport.self, from: data),
@@ -89,14 +214,35 @@ public struct LocalCoreRunner: Sendable {
         }
         return report
     }
+
+    public static func decodeEventAppendReport(_ data: Data) throws -> LocalCoreEventAppendReport {
+        guard data.count <= Self.maximumResponseBytes,
+              let report = try? JSONDecoder().decode(LocalCoreEventAppendReport.self, from: data),
+              !report.eventID.isEmpty,
+              !report.streamID.isEmpty,
+              report.storePosition > 0,
+              report.streamSequence > 0 else {
+            throw LocalCoreRunnerError.malformedAppendReport
+        }
+        return report
+    }
 }
 
 #if os(macOS)
+private enum LocalCoreServiceOperation {
+    case scenario
+    case appendEvent
+    case authorizeAction
+    case recordReview
+    case replay
+}
+
 private func runBoundedService(
     machService: String,
     requirement: String,
     request: Data,
-    timeout: TimeInterval
+    timeout: TimeInterval,
+    operation: LocalCoreServiceOperation = .scenario
 ) throws -> Data {
     let connection = NSXPCConnection(machServiceName: machService, options: [])
     connection.remoteObjectInterface = NSXPCInterface(with: LocalCoreControlService.self)
@@ -119,13 +265,20 @@ private func runBoundedService(
         connection.invalidate()
         throw LocalCoreRunnerError.unavailable
     }
-    service.runScenario(request) { response, code in
+    let reply: (Data?, String) -> Void = { response, code in
         if let response, response.count <= LocalCoreRunner.maximumResponseBytes {
             result.setSuccess(response)
         } else {
             result.setFailure(code.isEmpty ? "malformed_response" : code)
         }
         completion.signal()
+    }
+    switch operation {
+    case .scenario: service.runScenario(request, reply: reply)
+    case .appendEvent: service.appendEvent(request, reply: reply)
+    case .authorizeAction: service.authorizeAction(request, reply: reply)
+    case .recordReview: service.recordReview(request, reply: reply)
+    case .replay: service.replay(request, reply: reply)
     }
     guard completion.wait(timeout: .now() + timeout) == .success else {
         connection.invalidate()

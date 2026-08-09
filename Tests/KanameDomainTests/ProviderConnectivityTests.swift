@@ -70,6 +70,30 @@ struct ProviderConnectivityTests {
     }
 
     @Test
+    func localProcessRemovesHostHarnessVariablesBeforeLaunchingAProviderChild() async throws {
+        let result = try await LocalProcess.capture(
+            executable: "/bin/sh",
+            arguments: [
+                "-c",
+                "if test -z \"$T3_KANAME_TEST_TOKEN\" && test -z \"$CODEX_THREAD_ID\"; then printf isolated; else printf inherited; fi",
+            ],
+            workingDirectory: URL(fileURLWithPath: FileManager.default.currentDirectoryPath),
+            timeout: .seconds(2),
+            environmentOverrides: [
+                "T3_KANAME_TEST_TOKEN": "must-not-reach-child",
+                "CODEX_THREAD_ID": "must-not-reach-child",
+            ],
+            environmentRemovals: CodexMCPIsolation.inheritedEnvironmentRemovals(from: [
+                "T3_KANAME_TEST_TOKEN": "present",
+            ])
+        )
+
+        #expect(result.exitStatus == 0)
+        #expect(result.standardOutput == "isolated")
+        #expect(result.standardError.isEmpty)
+    }
+
+    @Test
     func openCodeInventoryExcludesUnconnectedCatalogProviders() {
         let payload: [String: Any] = [
             "data": [

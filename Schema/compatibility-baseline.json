@@ -34,6 +34,20 @@
     }
   },
   "messages": {
+    "approval.ApprovalCommand": {
+      "1": "string stream_id",
+      "2": "ApprovalRequest request",
+      "3": "ApprovalResolution resolution",
+      "4": "int64 resolved_at_unix_millis",
+      "5": "string current_target_revision"
+    },
+    "approval.ApprovalCommandReceipt": {
+      "1": "string approval_id",
+      "2": "ApprovalDecision decision",
+      "3": "bytes fingerprint",
+      "4": "uint64 store_position",
+      "5": "string reason_code"
+    },
     "approval.ApprovalRequest": {
       "1": "string approval_id",
       "10": "string policy_reference",
@@ -55,6 +69,12 @@
       "4": "string actor_id",
       "5": "string device_id",
       "6": "string standing_rule_reference"
+    },
+    "approval.ReviewDecision": {
+      "1": "string stream_id",
+      "2": "bytes evidence_digest",
+      "3": "bool accepted",
+      "4": "string knowledge_update_proposal"
     },
     "command.CommandEnvelope": {
       "1": "SchemaVersion schema_version",

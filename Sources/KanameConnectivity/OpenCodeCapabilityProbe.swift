@@ -64,6 +64,7 @@ private enum OpenCodeLocalServer {
                         return url
                     }
                 }
+                process.waitForExit()
                 throw ProviderConnectivityError.processExited(
                     command: "opencode serve",
                     status: process.process.terminationStatus,

@@ -36,3 +36,33 @@ message ApprovalResolution {
   string standing_rule_reference = 6;
   reserved 7 to 15;
 }
+
+// One signed local-client decision submitted atomically to the control plane.
+// The request and its resolution travel together so the Rust authority can
+// fingerprint, stale-check, journal, and resolve the exact proposal before a
+// provider receives write authority.
+message ApprovalCommand {
+  string stream_id = 1;
+  ApprovalRequest request = 2;
+  ApprovalResolution resolution = 3;
+  int64 resolved_at_unix_millis = 4;
+  string current_target_revision = 5;
+  reserved 6 to 15;
+}
+
+message ApprovalCommandReceipt {
+  string approval_id = 1;
+  ApprovalDecision decision = 2;
+  bytes fingerprint = 3;
+  uint64 store_position = 4;
+  string reason_code = 5;
+  reserved 6 to 15;
+}
+
+message ReviewDecision {
+  string stream_id = 1;
+  bytes evidence_digest = 2;
+  bool accepted = 3;
+  string knowledge_update_proposal = 4;
+  reserved 5 to 15;
+}

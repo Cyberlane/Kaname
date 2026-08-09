@@ -161,6 +161,85 @@ public nonisolated struct Kaname_V1_ApprovalResolution: Sendable {
   public init() {}
 }
 
+/// One signed local-client decision submitted atomically to the control plane.
+/// The request and its resolution travel together so the Rust authority can
+/// fingerprint, stale-check, journal, and resolve the exact proposal before a
+/// provider receives write authority.
+public nonisolated struct Kaname_V1_ApprovalCommand: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var streamID: String = String()
+
+  public var request: Kaname_V1_ApprovalRequest {
+    get {_request ?? Kaname_V1_ApprovalRequest()}
+    set {_request = newValue}
+  }
+  /// Returns true if `request` has been explicitly set.
+  public var hasRequest: Bool {self._request != nil}
+  /// Clears the value of `request`. Subsequent reads from it will return its default value.
+  public mutating func clearRequest() {self._request = nil}
+
+  public var resolution: Kaname_V1_ApprovalResolution {
+    get {_resolution ?? Kaname_V1_ApprovalResolution()}
+    set {_resolution = newValue}
+  }
+  /// Returns true if `resolution` has been explicitly set.
+  public var hasResolution: Bool {self._resolution != nil}
+  /// Clears the value of `resolution`. Subsequent reads from it will return its default value.
+  public mutating func clearResolution() {self._resolution = nil}
+
+  public var resolvedAtUnixMillis: Int64 = 0
+
+  public var currentTargetRevision: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _request: Kaname_V1_ApprovalRequest? = nil
+  fileprivate var _resolution: Kaname_V1_ApprovalResolution? = nil
+}
+
+public nonisolated struct Kaname_V1_ApprovalCommandReceipt: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var approvalID: String = String()
+
+  public var decision: Kaname_V1_ApprovalDecision = .unspecified
+
+  public var fingerprint: Data = Data()
+
+  public var storePosition: UInt64 = 0
+
+  public var reasonCode: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Kaname_V1_ReviewDecision: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var streamID: String = String()
+
+  public var evidenceDigest: Data = Data()
+
+  public var accepted: Bool = false
+
+  public var knowledgeUpdateProposal: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 // MARK: - Code below here is support for the SwiftProtobuf runtime.
 
 fileprivate nonisolated let _protobuf_package = "kaname.v1"
@@ -366,6 +445,155 @@ nonisolated extension Kaname_V1_ApprovalResolution: SwiftProtobuf.Message, Swift
     if lhs.actorID != rhs.actorID {return false}
     if lhs.deviceID != rhs.deviceID {return false}
     if lhs.standingRuleReference != rhs.standingRuleReference {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Kaname_V1_ApprovalCommand: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ApprovalCommand"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}stream_id\0\u{1}request\0\u{1}resolution\0\u{3}resolved_at_unix_millis\0\u{3}current_target_revision\0\u{c}\u{6}\u{a}")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.streamID) }()
+      case 2: try { try decoder.decodeSingularMessageField(value: &self._request) }()
+      case 3: try { try decoder.decodeSingularMessageField(value: &self._resolution) }()
+      case 4: try { try decoder.decodeSingularInt64Field(value: &self.resolvedAtUnixMillis) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.currentTargetRevision) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.streamID.isEmpty {
+      try visitor.visitSingularStringField(value: self.streamID, fieldNumber: 1)
+    }
+    try { if let v = self._request {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    } }()
+    try { if let v = self._resolution {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
+    } }()
+    if self.resolvedAtUnixMillis != 0 {
+      try visitor.visitSingularInt64Field(value: self.resolvedAtUnixMillis, fieldNumber: 4)
+    }
+    if !self.currentTargetRevision.isEmpty {
+      try visitor.visitSingularStringField(value: self.currentTargetRevision, fieldNumber: 5)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kaname_V1_ApprovalCommand, rhs: Kaname_V1_ApprovalCommand) -> Bool {
+    if lhs.streamID != rhs.streamID {return false}
+    if lhs._request != rhs._request {return false}
+    if lhs._resolution != rhs._resolution {return false}
+    if lhs.resolvedAtUnixMillis != rhs.resolvedAtUnixMillis {return false}
+    if lhs.currentTargetRevision != rhs.currentTargetRevision {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Kaname_V1_ApprovalCommandReceipt: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ApprovalCommandReceipt"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}approval_id\0\u{1}decision\0\u{1}fingerprint\0\u{3}store_position\0\u{3}reason_code\0\u{c}\u{6}\u{a}")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.approvalID) }()
+      case 2: try { try decoder.decodeSingularEnumField(value: &self.decision) }()
+      case 3: try { try decoder.decodeSingularBytesField(value: &self.fingerprint) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.storePosition) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.reasonCode) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.approvalID.isEmpty {
+      try visitor.visitSingularStringField(value: self.approvalID, fieldNumber: 1)
+    }
+    if self.decision != .unspecified {
+      try visitor.visitSingularEnumField(value: self.decision, fieldNumber: 2)
+    }
+    if !self.fingerprint.isEmpty {
+      try visitor.visitSingularBytesField(value: self.fingerprint, fieldNumber: 3)
+    }
+    if self.storePosition != 0 {
+      try visitor.visitSingularUInt64Field(value: self.storePosition, fieldNumber: 4)
+    }
+    if !self.reasonCode.isEmpty {
+      try visitor.visitSingularStringField(value: self.reasonCode, fieldNumber: 5)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kaname_V1_ApprovalCommandReceipt, rhs: Kaname_V1_ApprovalCommandReceipt) -> Bool {
+    if lhs.approvalID != rhs.approvalID {return false}
+    if lhs.decision != rhs.decision {return false}
+    if lhs.fingerprint != rhs.fingerprint {return false}
+    if lhs.storePosition != rhs.storePosition {return false}
+    if lhs.reasonCode != rhs.reasonCode {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Kaname_V1_ReviewDecision: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ReviewDecision"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}stream_id\0\u{3}evidence_digest\0\u{1}accepted\0\u{3}knowledge_update_proposal\0\u{c}\u{5}\u{b}")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.streamID) }()
+      case 2: try { try decoder.decodeSingularBytesField(value: &self.evidenceDigest) }()
+      case 3: try { try decoder.decodeSingularBoolField(value: &self.accepted) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.knowledgeUpdateProposal) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.streamID.isEmpty {
+      try visitor.visitSingularStringField(value: self.streamID, fieldNumber: 1)
+    }
+    if !self.evidenceDigest.isEmpty {
+      try visitor.visitSingularBytesField(value: self.evidenceDigest, fieldNumber: 2)
+    }
+    if self.accepted != false {
+      try visitor.visitSingularBoolField(value: self.accepted, fieldNumber: 3)
+    }
+    if !self.knowledgeUpdateProposal.isEmpty {
+      try visitor.visitSingularStringField(value: self.knowledgeUpdateProposal, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kaname_V1_ReviewDecision, rhs: Kaname_V1_ReviewDecision) -> Bool {
+    if lhs.streamID != rhs.streamID {return false}
+    if lhs.evidenceDigest != rhs.evidenceDigest {return false}
+    if lhs.accepted != rhs.accepted {return false}
+    if lhs.knowledgeUpdateProposal != rhs.knowledgeUpdateProposal {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
