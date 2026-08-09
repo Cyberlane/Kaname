@@ -9,14 +9,18 @@ import AppKit
 
 @main
 struct KanamePrototypeApp: App {
+#if os(macOS)
+    @NSApplicationDelegateAdaptor(KanameDesktopAppDelegate.self) private var appDelegate
+#endif
+
     var body: some Scene {
 #if os(macOS)
         WindowGroup {
-            PrototypeWorkspace()
+            KanameDesktopWorkspace()
                 .tint(Nord.frost2)
                 .preferredColorScheme(.dark)
         }
-        .defaultSize(width: 1_440, height: 900)
+        .defaultSize(width: 1_520, height: 940)
 #else
         WindowGroup {
             IPhoneControlSurface()
@@ -26,6 +30,87 @@ struct KanamePrototypeApp: App {
 #endif
     }
 }
+
+#if os(macOS)
+@MainActor
+final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
+    private var fallbackWindow: NSWindow?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        DispatchQueue.main.async { [weak self] in
+            self?.ensureVisibleWindow()
+        }
+    }
+
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication,
+        hasVisibleWindows flag: Bool
+    ) -> Bool {
+        if !flag { ensureVisibleWindow() }
+        return true
+    }
+
+    private func ensureVisibleWindow() {
+        if let existing = NSApplication.shared.windows.first(where: { $0.isVisible }) {
+            existing.sharingType = .readOnly
+            existing.makeKeyAndOrderFront(nil)
+            NSApplication.shared.activate(ignoringOtherApps: true)
+            captureSnapshotIfRequested(window: existing)
+            return
+        }
+        let controller = NSHostingController(
+            rootView: KanameDesktopWorkspace()
+                .tint(Nord.frost2)
+                .preferredColorScheme(.dark)
+        )
+        let window = NSWindow(contentViewController: controller)
+        window.title = "Kaname"
+        window.sharingType = .readOnly
+        window.setContentSize(NSSize(width: 1_520, height: 940))
+        window.minSize = NSSize(width: 1_080, height: 700)
+        window.center()
+        window.setFrameAutosaveName("KanameDesktopWindow")
+        window.makeKeyAndOrderFront(nil)
+        fallbackWindow = window
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        captureSnapshotIfRequested(window: window)
+    }
+
+    private func captureSnapshotIfRequested(window: NSWindow) {
+        guard let flagIndex = CommandLine.arguments.firstIndex(of: "--snapshot"),
+              CommandLine.arguments.indices.contains(flagIndex + 1) else { return }
+        let outputURL = URL(fileURLWithPath: CommandLine.arguments[flagIndex + 1])
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            if let capture = CGWindowListCreateImage(
+                .null,
+                .optionIncludingWindow,
+                CGWindowID(window.windowNumber),
+                [.boundsIgnoreFraming, .bestResolution]
+            ),
+            let png = NSBitmapImageRep(cgImage: capture)
+                .representation(using: .png, properties: [:]) {
+                try? png.write(to: outputURL, options: .atomic)
+                NSApplication.shared.terminate(nil)
+                return
+            }
+            guard let contentView = window.contentView else {
+                NSApplication.shared.terminate(nil)
+                return
+            }
+            contentView.layoutSubtreeIfNeeded()
+            guard let bitmap = contentView.bitmapImageRepForCachingDisplay(in: contentView.bounds) else {
+                NSApplication.shared.terminate(nil)
+                return
+            }
+            contentView.cacheDisplay(in: contentView.bounds, to: bitmap)
+            if let png = bitmap.representation(using: .png, properties: [:]) {
+                try? png.write(to: outputURL, options: .atomic)
+            }
+            NSApplication.shared.terminate(nil)
+        }
+    }
+}
+#endif
 
 private struct PrototypeWorkspace: View {
     @State private var selectedFixtureName = Phase0Fixtures.codingReview.name

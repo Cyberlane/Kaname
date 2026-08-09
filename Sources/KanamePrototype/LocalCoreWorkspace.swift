@@ -15,6 +15,7 @@ private final class LocalCoreWorkspaceModel: ObservableObject {
     @Published private(set) var runs: [LocalCoreRun] = []
 
     func loadCorpus() {
+        guard state != .loading, runs.isEmpty else { return }
         guard let runner = LocalCoreRunner.bundled() else {
             state = .unavailable
             return
@@ -92,6 +93,11 @@ struct LocalCoreWorkspace: View {
     @StateObject private var model = LocalCoreWorkspaceModel()
     @State private var surface: Surface = .dashboard
     @State private var selectedRun: LocalCoreRun?
+    private let autoLoadsCorpus: Bool
+
+    init(autoLoadsCorpus: Bool = CommandLine.arguments.contains("--load-local-core")) {
+        self.autoLoadsCorpus = autoLoadsCorpus
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -114,6 +120,9 @@ struct LocalCoreWorkspace: View {
             }
         }
         .background(Nord.polarNight0)
+        .task {
+            if autoLoadsCorpus { model.loadCorpus() }
+        }
     }
 
     private var header: some View {
