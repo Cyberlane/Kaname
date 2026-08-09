@@ -101,6 +101,7 @@ private final class CodexLiveWorkspaceModel: ObservableObject {
                 state = .ready
             } catch {
                 state = .failed(error.localizedDescription)
+                await closeSession()
             }
         }
     }
@@ -148,7 +149,7 @@ private final class CodexLiveWorkspaceModel: ObservableObject {
                         handle(event)
                     } catch {
                         state = .failed("The local journal rejected a provider observation. The run was stopped without accepting a result.")
-                        await session.close()
+                        await closeSession()
                         return
                     }
                 }
@@ -157,7 +158,7 @@ private final class CodexLiveWorkspaceModel: ObservableObject {
                 _ = try await session.start(CodexCodingRequest(prompt: providerPrompt))
             } catch {
                 state = .failed(error.localizedDescription)
-                await session.close()
+                await closeSession()
             }
         }
     }
@@ -212,6 +213,7 @@ private final class CodexLiveWorkspaceModel: ObservableObject {
                 )
             } catch {
                 state = .failed(error.localizedDescription)
+                await closeSession()
             }
         }
     }
@@ -233,6 +235,7 @@ private final class CodexLiveWorkspaceModel: ObservableObject {
                 questionAnswer = ""
             } catch {
                 state = .failed(error.localizedDescription)
+                await closeSession()
             }
         }
     }
@@ -244,7 +247,7 @@ private final class CodexLiveWorkspaceModel: ObservableObject {
                 try await session.interrupt()
             } catch {
                 state = .failed("Kaname could not interrupt the provider. No result was accepted.")
-                await session.close()
+                await closeSession()
             }
         }
     }
@@ -268,11 +271,13 @@ private final class CodexLiveWorkspaceModel: ObservableObject {
                 )
                 reviewStorePosition = outcome.storePosition
                 state = accepted ? .accepted : .rejected
+                await closeSession()
                 #if os(macOS)
                 NSApplication.shared.requestUserAttention(.informationalRequest)
                 #endif
             } catch {
                 state = .failed("The signed local control plane rejected the review decision: \(error.localizedDescription)")
+                await closeSession()
             }
         }
     }
@@ -294,6 +299,11 @@ private final class CodexLiveWorkspaceModel: ObservableObject {
             state = .interrupted
         case .runFailed:
             state = .failed(event.text ?? "The provider failed without an accepted result.")
+            let failedSession = session
+            session = nil
+            eventTask?.cancel()
+            eventTask = nil
+            _Concurrency.Task { await failedSession?.close() }
         case .approvalRequested:
             break
         case .sessionStarted, .runStarted, .messageDelta, .itemStarted, .itemCompleted,
@@ -314,8 +324,17 @@ private final class CodexLiveWorkspaceModel: ObservableObject {
                 #endif
             } catch {
                 state = .failed("Evidence collection failed: \(error.localizedDescription)")
+                await closeSession()
             }
         }
+    }
+
+    private func closeSession() async {
+        let activeSession = session
+        session = nil
+        eventTask?.cancel()
+        eventTask = nil
+        await activeSession?.close()
     }
 
     private func resetSessionState() {
