@@ -191,7 +191,7 @@ impl ThreadProjection {
 /// SQLite-backed authority. The cursor key is supplied by the qualified host;
 /// it is deliberately not persisted in SQLite or a fixture.
 pub struct Journal {
-    connection: Connection,
+    pub(crate) connection: Connection,
     cursor_key: Vec<u8>,
     read_only: bool,
 }
@@ -698,7 +698,7 @@ impl Journal {
         cursor
     }
 
-    fn require_writable(&self) -> Result<()> {
+    pub(crate) fn require_writable(&self) -> Result<()> {
         if self.read_only {
             Err(JournalError::ReadOnly)
         } else {
@@ -750,8 +750,53 @@ fn migrate(connection: &mut Connection) -> Result<()> {
            report BLOB NOT NULL,
            checksum BLOB NOT NULL
          );
+         CREATE TABLE IF NOT EXISTS device_enrollments (
+           enrollment_id TEXT PRIMARY KEY,
+           device_id TEXT NOT NULL,
+           state INTEGER NOT NULL,
+           challenge_wire BLOB NOT NULL,
+           challenge_digest BLOB NOT NULL,
+           expires_at_unix_millis INTEGER NOT NULL,
+           decision_wire BLOB,
+           decision_digest BLOB,
+           decided_at_unix_millis INTEGER
+         );
+         CREATE UNIQUE INDEX IF NOT EXISTS device_enrollments_pending_device
+           ON device_enrollments(device_id) WHERE state = 1;
+         CREATE TABLE IF NOT EXISTS mobile_devices (
+           device_id TEXT PRIMARY KEY,
+           key_id TEXT NOT NULL,
+           key_generation INTEGER NOT NULL,
+           state INTEGER NOT NULL,
+           identity_wire BLOB NOT NULL,
+           identity_digest BLOB NOT NULL,
+           enrolled_at_unix_millis INTEGER NOT NULL,
+           revoked_at_unix_millis INTEGER,
+           last_sender_sequence INTEGER NOT NULL DEFAULT 0,
+           last_envelope_digest BLOB NOT NULL DEFAULT X''
+         );
+         CREATE TABLE IF NOT EXISTS mobile_device_key_history (
+           device_id TEXT NOT NULL,
+           key_id TEXT NOT NULL,
+           key_generation INTEGER NOT NULL,
+           identity_wire BLOB NOT NULL,
+           retired_at_unix_millis INTEGER NOT NULL,
+           PRIMARY KEY(device_id, key_id)
+         );
+         CREATE TABLE IF NOT EXISTS mobile_sync_envelopes (
+           envelope_id TEXT PRIMARY KEY,
+           sender_device_id TEXT NOT NULL,
+           sender_key_id TEXT NOT NULL,
+           sender_sequence INTEGER NOT NULL,
+           authenticated_header_wire BLOB NOT NULL,
+           envelope_wire BLOB NOT NULL,
+           envelope_digest BLOB NOT NULL,
+           received_at_unix_millis INTEGER NOT NULL,
+           UNIQUE(sender_device_id, sender_key_id, sender_sequence)
+         );
          INSERT OR IGNORE INTO schema_migrations(version) VALUES (1);
-         INSERT OR IGNORE INTO schema_migrations(version) VALUES (2);",
+         INSERT OR IGNORE INTO schema_migrations(version) VALUES (2);
+         INSERT OR IGNORE INTO schema_migrations(version) VALUES (3);",
     )?;
     Ok(())
 }

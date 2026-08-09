@@ -9,6 +9,7 @@ pub mod v1 {
 
 pub mod fake_provider;
 pub mod journal;
+pub mod mobile;
 pub mod policy;
 
 pub const SCHEMA_MAJOR: u32 = 1;
