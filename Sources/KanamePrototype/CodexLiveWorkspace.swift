@@ -253,7 +253,8 @@ private final class CodexLiveWorkspaceModel: ObservableObject {
     func reject() { recordReview(accepted: false) }
 
     private func recordReview(accepted: Bool) {
-        guard state == .reviewing, let runner, let evidence, evidence.passed else { return }
+        guard state == .reviewing, let runner, let evidence,
+              !accepted || evidence.passed else { return }
         _Concurrency.Task {
             do {
                 let outcome = try await Phase2ControlPlane.recordReview(
@@ -476,7 +477,7 @@ struct CodexLiveWorkspace: View {
                 Button("Accept verified result", action: model.accept)
                     .buttonStyle(.borderedProminent).tint(Nord.auroraGreen).disabled(!evidence.passed || model.state != .reviewing)
                 Button("Reject result", action: model.reject)
-                    .buttonStyle(.bordered).disabled(!evidence.passed || model.state != .reviewing)
+                    .buttonStyle(.bordered).disabled(model.state != .reviewing)
                 if let position = model.reviewStorePosition {
                     Text("Review journal position \(position)").font(.caption).foregroundStyle(.secondary)
                 }

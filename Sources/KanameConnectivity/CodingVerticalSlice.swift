@@ -145,7 +145,7 @@ public enum CodingWorkspaceInspector {
         workspaceURL: URL,
         verificationExecutable: String = "swift",
         verificationArguments: [String] = ["test"],
-        timeout: Duration = .seconds(180)
+        timeout: Duration = .seconds(600)
     ) async throws -> CodingEvidenceSnapshot {
         let root = workspaceURL.standardizedFileURL
         async let statusResult = git(["status", "--short", "--branch"], in: root)
