@@ -1,0 +1,9 @@
+# Routine production review excludes tests and prototype presentation code.
+Tests/**
+Rust/**/tests/**
+Sources/KanamePrototype/**
+Sources/KanamePrototypeUI/**
+iOS/KanameIPhonePrototype/**
+
+# SwiftProtobuf output is intentionally not ignored here. Mori classifies it
+# as generated so the exclusion remains visible in file coverage.

@@ -11,3 +11,9 @@
 
 # Rust build output
 **/target/
+
+# Commit the project-local Mori Agent Skill despite the global .agents ignore.
+!.agents/
+!.agents/skills/
+!.agents/skills/mori-review-similarity/
+!.agents/skills/mori-review-similarity/**
