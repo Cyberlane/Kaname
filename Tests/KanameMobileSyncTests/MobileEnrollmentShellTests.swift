@@ -127,6 +127,63 @@ struct MobileEnrollmentShellTests {
     }
 
     @Test
+    func pendingRotationCanResumeAfterShellRestart() async throws {
+        guard #available(macOS 14.0, iOS 17.0, *) else { return }
+        let keyStore = InMemoryMobileSyncPrivateKeyStore()
+        let original = try await activeShell(keyStore: keyStore)
+        let proposal = try await original.prepareKeyRotation(
+            nextKeyID: "iphone-key-2",
+            nextGeneration: 2,
+            rotatedAtUnixMillis: now,
+            expiresAtUnixMillis: now + 86_400_000
+        )
+        let enrollment = await original.snapshot()
+        let pending = try #require(await original.pendingKeyRotationSnapshot())
+        let restored = try MobileEnrollmentShell(
+            deviceID: "iphone-justin",
+            displayName: "Justin's iPhone",
+            keyStore: keyStore,
+            initialSnapshot: enrollment
+        )
+
+        try await restored.restorePendingKeyRotation(pending)
+        try await restored.finalizeKeyRotation(
+            acceptedNextIdentityDigest: proposal.nextIdentityDigest
+        )
+
+        #expect(await restored.snapshot().keyID == "iphone-key-2")
+        #expect(await restored.pendingKeyRotationSnapshot() == nil)
+        #expect(await keyStore.storedKeyIDs() == ["iphone-key-2"])
+    }
+
+    @Test
+    func pendingRotationRestoreRequiresTheProtectedNextKey() async throws {
+        guard #available(macOS 14.0, iOS 17.0, *) else { return }
+        let keyStore = InMemoryMobileSyncPrivateKeyStore()
+        let original = try await activeShell(keyStore: keyStore)
+        _ = try await original.prepareKeyRotation(
+            nextKeyID: "iphone-key-2",
+            nextGeneration: 2,
+            rotatedAtUnixMillis: now,
+            expiresAtUnixMillis: now + 86_400_000
+        )
+        let enrollment = await original.snapshot()
+        let pending = try #require(await original.pendingKeyRotationSnapshot())
+        try await keyStore.deleteKey(keyID: "iphone-key-2")
+        let restored = try MobileEnrollmentShell(
+            deviceID: "iphone-justin",
+            displayName: "Justin's iPhone",
+            keyStore: keyStore,
+            initialSnapshot: enrollment
+        )
+
+        await #expect(throws: MobileSyncKeyStoreError.keyNotFound) {
+            try await restored.restorePendingKeyRotation(pending)
+        }
+        #expect(await restored.pendingKeyRotationSnapshot() == nil)
+    }
+
+    @Test
     func lostDeviceRevocationDeletesLocalKeysAndBlocksReenrollment() async throws {
         guard #available(macOS 14.0, iOS 17.0, *) else { return }
         let keyStore = InMemoryMobileSyncPrivateKeyStore()

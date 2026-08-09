@@ -65,6 +65,27 @@ public struct MobileKeyRotationProposal: Sendable {
     }
 }
 
+public struct MobilePendingKeyRotationSnapshot: Codable, Equatable, Sendable {
+    public let previousKeyID: String
+    public let nextKeyID: String
+    public let nextGeneration: UInt64
+    public let nextIdentityDigest: Data
+
+    public static func restoring(
+        previousKeyID: String,
+        nextKeyID: String,
+        nextGeneration: UInt64,
+        nextIdentityDigest: Data
+    ) -> Self {
+        Self(
+            previousKeyID: previousKeyID,
+            nextKeyID: nextKeyID,
+            nextGeneration: nextGeneration,
+            nextIdentityDigest: nextIdentityDigest
+        )
+    }
+}
+
 @available(macOS 14.0, iOS 17.0, *)
 public protocol MobileSyncPrivateKeyStore: Sendable {
     func createKey(keyID: String) async throws -> Curve25519.KeyAgreement.PublicKey
@@ -355,6 +376,38 @@ public actor MobileEnrollmentShell {
         state.keyGeneration = pendingRotation.nextGeneration
         state.reasonCode = "key_rotation_accepted"
         self.pendingRotation = nil
+    }
+
+    public func pendingKeyRotationSnapshot() -> MobilePendingKeyRotationSnapshot? {
+        pendingRotation.map {
+            MobilePendingKeyRotationSnapshot.restoring(
+                previousKeyID: $0.previousKeyID,
+                nextKeyID: $0.nextKeyID,
+                nextGeneration: $0.nextGeneration,
+                nextIdentityDigest: $0.nextIdentityDigest
+            )
+        }
+    }
+
+    public func restorePendingKeyRotation(
+        _ recovery: MobilePendingKeyRotationSnapshot
+    ) async throws {
+        guard state.phase == .active,
+              pendingRotation == nil,
+              state.keyID == recovery.previousKeyID,
+              recovery.nextGeneration == state.keyGeneration + 1,
+              MobileSyncIdentifier.isValid(recovery.nextKeyID),
+              recovery.nextIdentityDigest.count == 32 else {
+            throw MobileEnrollmentShellError.rotationMismatch
+        }
+        _ = try await keyStore.privateKey(keyID: recovery.nextKeyID)
+        pendingRotation = PendingRotation(
+            previousKeyID: recovery.previousKeyID,
+            nextKeyID: recovery.nextKeyID,
+            nextGeneration: recovery.nextGeneration,
+            nextIdentityDigest: recovery.nextIdentityDigest
+        )
+        state.reasonCode = "key_rotation_pending_mac_acceptance"
     }
 
     public func cancelKeyRotation() async throws {

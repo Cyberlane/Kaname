@@ -95,6 +95,8 @@ private enum QualificationCommandRunner {
         switch command {
         case "bootstrap":
             try await context.bootstrap()
+        case "launch-config":
+            try context.launchConfiguration()
         case "accept-enrollment":
             guard CommandLine.arguments.count == 3 else { throw QualificationError.invalidCommand }
             try await context.acceptEnrollment(code: CommandLine.arguments[2])
@@ -190,6 +192,19 @@ private struct Context {
         }
         _ = try keyStore.load(keyID: state.macKeyID)
         try save(state)
+        try writeLaunchConfiguration(state: state, publicKey: publicKey)
+    }
+
+    func launchConfiguration() throws {
+        let state = try load()
+        let publicKey = try keyStore.load(keyID: state.macKeyID).publicKey
+        try writeLaunchConfiguration(state: state, publicKey: publicKey)
+    }
+
+    private func writeLaunchConfiguration(
+        state: AuthorityState,
+        publicKey: Curve25519.KeyAgreement.PublicKey
+    ) throws {
         let launch = PhoneLaunchConfiguration(
             relayURL: relayURL,
             deviceID: state.phoneDeviceID,

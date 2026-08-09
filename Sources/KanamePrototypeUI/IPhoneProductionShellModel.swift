@@ -26,15 +26,32 @@ final class IPhoneProductionShellModel: ObservableObject {
     private let relayClient: MobileEnrollmentRelayClient?
     private let liveKeyStore: KeychainMobileSyncKeyStore?
     private let credentialStore: KeychainMobileRelayCredentialStore?
+    private let liveStateURL: URL?
     private var currentKeyID: String?
     private var pendingRotation: PendingRotation?
     private var queueSaveGeneration = 0
     private var pendingQueueSave: Task<Void, Never>?
 
-    private struct PendingRotation {
+    private struct PendingRotation: Codable {
+        let previousKeyID: String
         let nextKeyID: String
+        let nextGeneration: UInt64
         let nextIdentityDigest: Data
         let envelopeID: String
+
+        var shellSnapshot: MobilePendingKeyRotationSnapshot {
+            MobilePendingKeyRotationSnapshot.restoring(
+                previousKeyID: previousKeyID,
+                nextKeyID: nextKeyID,
+                nextGeneration: nextGeneration,
+                nextIdentityDigest: nextIdentityDigest
+            )
+        }
+    }
+
+    private struct LiveDurableState: Codable {
+        let enrollment: MobileEnrollmentSnapshot
+        let pendingRotation: PendingRotation?
     }
 
     private init(
@@ -46,7 +63,10 @@ final class IPhoneProductionShellModel: ObservableObject {
         liveConfiguration: Phase3LiveConfiguration? = nil,
         relayClient: MobileEnrollmentRelayClient? = nil,
         liveKeyStore: KeychainMobileSyncKeyStore? = nil,
-        credentialStore: KeychainMobileRelayCredentialStore? = nil
+        credentialStore: KeychainMobileRelayCredentialStore? = nil,
+        liveStateURL: URL? = nil,
+        currentKeyID: String? = nil,
+        pendingRotation: PendingRotation? = nil
     ) {
         self.shell = shell
         self.syncSession = syncSession
@@ -56,7 +76,9 @@ final class IPhoneProductionShellModel: ObservableObject {
         self.relayClient = relayClient
         self.liveKeyStore = liveKeyStore
         self.credentialStore = credentialStore
-        self.currentKeyID = liveConfiguration?.keyID
+        self.liveStateURL = liveStateURL
+        self.currentKeyID = currentKeyID ?? liveConfiguration?.keyID
+        self.pendingRotation = pendingRotation
         self.isLiveQualification = liveConfiguration != nil
         if liveConfiguration == nil {
             Task {
@@ -132,37 +154,69 @@ final class IPhoneProductionShellModel: ObservableObject {
         configuration: Phase3LiveConfiguration
     ) throws -> IPhoneProductionShellModel {
         try configuration.validate()
+        let stateURL = liveEnrollmentStateURL(deviceID: configuration.deviceID)
+        let durableState = try loadLiveState(from: stateURL)
         let credentialStore = try KeychainMobileRelayCredentialStore(
             service: "com.cyberlane.kaname.phase3.relay"
         )
-        try credentialStore.replace(token: configuration.bearerToken)
-        let storedToken = try credentialStore.load()
+        let restoredPhase = durableState?.enrollment.phase
+        let blocksRelay = restoredPhase == .rejected || restoredPhase == .revoked
         let keyStore = try KeychainMobileSyncKeyStore(
             service: "com.cyberlane.kaname.phase3.mobile-sync"
         )
         let shell = try MobileEnrollmentShell(
             deviceID: configuration.deviceID,
             displayName: configuration.displayName,
-            keyStore: keyStore
+            keyStore: keyStore,
+            initialSnapshot: durableState?.enrollment
         )
-        let relayClient = try MobileEnrollmentRelayClient(
+        if blocksRelay {
+            try? credentialStore.remove()
+        } else {
+            try credentialStore.replace(token: configuration.bearerToken)
+        }
+        let relayClient = try blocksRelay ? nil : MobileEnrollmentRelayClient(
             baseURL: configuration.relayURL,
-            bearerToken: storedToken
+            bearerToken: credentialStore.load()
         )
+        let initialSnapshot = durableState?.enrollment
+            ?? MobileEnrollmentSnapshot(deviceID: configuration.deviceID)
         let model = IPhoneProductionShellModel(
             shell: shell,
             syncSession: nil,
-            initialSnapshot: MobileEnrollmentSnapshot(deviceID: configuration.deviceID),
+            initialSnapshot: initialSnapshot,
             initialQueue: [],
             seedQueueOnRestore: false,
             liveConfiguration: configuration,
             relayClient: relayClient,
             liveKeyStore: keyStore,
-            credentialStore: credentialStore
+            credentialStore: credentialStore,
+            liveStateURL: stateURL,
+            currentKeyID: initialSnapshot.keyID ?? configuration.keyID,
+            pendingRotation: durableState?.pendingRotation
         )
-        model.keychainStatus = "Relay credential created and read from the device-only Keychain."
+        model.keychainStatus = blocksRelay
+            ? "Terminal enrollment state remains enforced after restart; no relay credential was restored."
+            : "Relay credential created and read from the device-only Keychain."
         Task { await model.bootstrapLive() }
         return model
+    }
+
+    private static func liveEnrollmentStateURL(deviceID: String) -> URL {
+        FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        )[0]
+            .appendingPathComponent("Kaname", isDirectory: true)
+            .appendingPathComponent("phase3-\(deviceID)-enrollment.json")
+    }
+
+    private static func loadLiveState(from url: URL) throws -> LiveDurableState? {
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return try JSONDecoder().decode(
+            LiveDurableState.self,
+            from: Data(contentsOf: url)
+        )
     }
 
     var isMacReachable: Bool {
@@ -357,10 +411,14 @@ final class IPhoneProductionShellModel: ObservableObject {
                     nowUnixMillis: now.unixMillis
                 )
                 pendingRotation = PendingRotation(
+                    previousKeyID: currentKeyID,
                     nextKeyID: nextKeyID,
+                    nextGeneration: generation,
                     nextIdentityDigest: proposal.nextIdentityDigest,
                     envelopeID: envelopeID
                 )
+                snapshot = await shell.snapshot()
+                try saveLiveState()
                 statusMessage = "New device-only key created; waiting for Mac acceptance before retiring \(currentKeyID)."
             } catch {
                 statusMessage = "Key rotation failed safely: \(error)"
@@ -369,30 +427,78 @@ final class IPhoneProductionShellModel: ObservableObject {
     }
 
     private func bootstrapLive(now: Date = Date()) async {
-        guard let liveConfiguration, let relayClient, let liveKeyStore else { return }
+        guard let liveConfiguration, let liveKeyStore else { return }
         do {
-            try? liveKeyStore.remove(keyID: liveConfiguration.keyID)
-            let proposal = try await shell.prepareEnrollment(
-                enrollmentID: liveConfiguration.enrollmentID,
-                keyID: liveConfiguration.keyID,
-                keyGeneration: 1,
-                createdAtUnixMillis: now.unixMillis,
-                expiresAtUnixMillis: now.unixMillis + 15 * 60 * 1_000
-            )
-            _ = try liveKeyStore.load(keyID: liveConfiguration.keyID)
-            keychainStatus = "HPKE private key created and read from the device-only Keychain."
-            try await relayClient.createEnrollment(proposal)
-            confirmationCode = proposal.confirmationCode
-            syncSession = try makeLiveSession(keyID: liveConfiguration.keyID)
-            try await syncSession?.restore()
-            try await seedLiveQualificationQueueIfNeeded(now: now)
-            snapshot = await shell.snapshot()
-            statusMessage = "Physical-device enrollment is waiting for the same six-digit code on the Mac."
+            switch snapshot.phase {
+            case .unenrolled:
+                guard let relayClient else {
+                    throw Phase3LiveConfigurationError.invalidConfiguration
+                }
+                try? liveKeyStore.remove(keyID: liveConfiguration.keyID)
+                let proposal = try await shell.prepareEnrollment(
+                    enrollmentID: liveConfiguration.enrollmentID,
+                    keyID: liveConfiguration.keyID,
+                    keyGeneration: 1,
+                    createdAtUnixMillis: now.unixMillis,
+                    expiresAtUnixMillis: now.unixMillis + 15 * 60 * 1_000
+                )
+                _ = try liveKeyStore.load(keyID: liveConfiguration.keyID)
+                keychainStatus = "HPKE private key created and read from the device-only Keychain."
+                try await relayClient.createEnrollment(proposal)
+                confirmationCode = proposal.confirmationCode
+                currentKeyID = liveConfiguration.keyID
+                syncSession = try makeLiveSession(keyID: liveConfiguration.keyID)
+                try await syncSession?.restore()
+                try await seedLiveQualificationQueueIfNeeded(now: now)
+                snapshot = await shell.snapshot()
+                try saveLiveState()
+                statusMessage = "Physical-device enrollment is waiting for the same six-digit code on the Mac."
+            case .awaitingLocalConfirmation:
+                try await restoreLiveSessionProjection(keyStore: liveKeyStore)
+                statusMessage = "Enrollment restarted without persisting its comparison code; it remains blocked until an existing Mac decision arrives."
+                await synchronizeLive(now: now)
+            case .active:
+                if let pendingRotation {
+                    try await shell.restorePendingKeyRotation(pendingRotation.shellSnapshot)
+                }
+                try await restoreLiveSessionProjection(keyStore: liveKeyStore)
+                await shell.setReachability(
+                    .checking,
+                    reasonCode: "restored_awaiting_authenticated_mac"
+                )
+                snapshot = await shell.snapshot()
+                try saveLiveState()
+                statusMessage = "Protected enrollment, key custody, queue, receipts, and history restored; authenticated Mac reachability is being rechecked."
+            case .rejected:
+                statusMessage = "Rejected enrollment remains rejected after restart."
+            case .revoked:
+                syncSession = nil
+                pendingApproval = nil
+                keychainStatus = "Revocation remains enforced after restart; no private key or relay credential was restored."
+                statusMessage = "Lost-device revocation remains enforced; mobile sync is disabled."
+            }
         } catch {
             await shell.setReachability(.degraded, reasonCode: "live_bootstrap_failed")
             snapshot = await shell.snapshot()
+            try? saveLiveState()
             statusMessage = "Live enrollment bootstrap failed safely: \(error)"
         }
+    }
+
+    private func restoreLiveSessionProjection(
+        keyStore: KeychainMobileSyncKeyStore
+    ) async throws {
+        guard let currentKeyID else {
+            throw Phase3LiveConfigurationError.invalidConfiguration
+        }
+        _ = try keyStore.load(keyID: currentKeyID)
+        syncSession = try makeLiveSession(keyID: currentKeyID)
+        try await syncSession?.restore()
+        guard let restored = await syncSession?.snapshot() else { return }
+        queuedCommands = restored.queuedCommands.filter(\.isPendingReconciliation)
+        pendingApproval = restored.pendingApprovals.first
+        lastReceipt = restored.receipts.last
+        syncReadOnlyReason = restored.readOnlyReason
     }
 
     private func synchronizeLive(now: Date) async {
@@ -409,6 +515,7 @@ final class IPhoneProductionShellModel: ObservableObject {
                     try await shell.applyEnrollmentReceipt(receipt)
                     confirmationCode = nil
                     snapshot = await shell.snapshot()
+                    try saveLiveState()
                 }
             }
             guard snapshot.phase == .active, let syncSession else {
@@ -417,7 +524,7 @@ final class IPhoneProductionShellModel: ObservableObject {
             }
             let result = try await syncSession.pollIncoming(nowUnixMillis: now.unixMillis)
             let sessionSnapshot = await syncSession.snapshot()
-            queuedCommands = sessionSnapshot.queuedCommands
+            queuedCommands = sessionSnapshot.queuedCommands.filter(\.isPendingReconciliation)
             pendingApproval = sessionSnapshot.pendingApprovals.first
             lastReceipt = sessionSnapshot.receipts.last
             syncReadOnlyReason = sessionSnapshot.readOnlyReason
@@ -431,9 +538,10 @@ final class IPhoneProductionShellModel: ObservableObject {
                     )
                 }
                 snapshot = await shell.snapshot()
+                try saveLiveState()
                 if snapshot.reachability == .reachable {
                     try await syncSession.dispatchQueuedCommands(nowUnixMillis: now.unixMillis)
-                    queuedCommands = await syncSession.snapshot().queuedCommands
+                    queuedCommands = await syncSession.snapshot().queuedCommands.filter(\.isPendingReconciliation)
                     statusMessage = "Authenticated Mac reachability dispatched the encrypted queue once and applied \(result.applied) incoming item(s)."
                 } else {
                     statusMessage = "Relay is reachable, but no authenticated Mac envelope arrived; queued commands remain protected on this iPhone."
@@ -442,6 +550,7 @@ final class IPhoneProductionShellModel: ObservableObject {
         } catch {
             await shell.setReachability(.degraded, reasonCode: "live_reconciliation_failed")
             snapshot = await shell.snapshot()
+            try? saveLiveState()
             statusMessage = "Live reconciliation failed safely: \(error)"
         }
     }
@@ -464,6 +573,7 @@ final class IPhoneProductionShellModel: ObservableObject {
             syncSession = try makeLiveSession(keyID: pendingRotation.nextKeyID)
             try await syncSession?.restore()
             snapshot = await shell.snapshot()
+            try saveLiveState()
             keychainStatus = "Old HPKE key deleted after Mac accepted generation \(snapshot.keyGeneration)."
         } catch {
             statusMessage = "Accepted rotation could not finalize safely: \(error)"
@@ -489,11 +599,33 @@ final class IPhoneProductionShellModel: ObservableObject {
             syncSession = nil
             pendingApproval = nil
             snapshot = await shell.snapshot()
+            pendingRotation = nil
+            try saveLiveState()
             keychainStatus = "Revocation deleted the active HPKE key and relay credential from this device."
             statusMessage = "Lost-device revocation applied; mobile sync is disabled."
         } catch {
             statusMessage = "Revocation failed safely: \(error)"
         }
+    }
+
+    private func saveLiveState() throws {
+        guard let liveStateURL else { return }
+        let directory = liveStateURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let data = try JSONEncoder().encode(
+            LiveDurableState(
+                enrollment: snapshot,
+                pendingRotation: pendingRotation
+            )
+        )
+        try data.write(to: liveStateURL, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+            ofItemAtPath: liveStateURL.path
+        )
     }
 
     private func makeLiveSession(keyID: String) throws -> MobileSyncSession {
@@ -633,6 +765,17 @@ private enum Phase3LiveConfigurationError: Error {
 private extension Date {
     var unixMillis: Int64 {
         Int64(timeIntervalSince1970 * 1_000)
+    }
+}
+
+private extension MobileQueuedCommand {
+    var isPendingReconciliation: Bool {
+        switch deliveryState {
+        case .savedOnPhone, .relayAccepted, .receivedByMac, .resyncRequired:
+            true
+        case .policyAccepted, .providerDispatchAccepted, .runStarted, .rejected:
+            false
+        }
     }
 }
 
