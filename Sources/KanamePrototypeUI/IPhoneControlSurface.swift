@@ -2311,14 +2311,44 @@ private struct IPhoneIntegrationsView: View {
 }
 
 private struct IPhoneNotificationRoutesView: View {
+    @AppStorage("kaname.notification.calendar.preview-level")
+    private var calendarPreviewLevelRaw = MobileNotificationPreviewLevel.hidden.rawValue
+
+    private var previewLevel: MobileNotificationPreviewLevel {
+        MobileNotificationPreviewLevel(rawValue: calendarPreviewLevelRaw) ?? .hidden
+    }
+
+    private var preview: MobileSafeNotificationContent {
+        MobileNotificationPreviewRenderer.content(
+            level: previewLevel,
+            dataClass: .calendar,
+            safePreviewClass: "approval-required"
+        )
+    }
+
     var body: some View {
         List {
             Section("Current rules") {
                 IPhoneSessionRow(name: "Approval required", provider: "Calendar decision", state: "Enabled", tint: Nord.auroraYellow)
                 IPhoneSessionRow(name: "CI failure", provider: "GitHub workflow", state: "Enabled", tint: Nord.auroraRed)
             }
+            Section("Calendar preview policy") {
+                Picker("Visible content", selection: $calendarPreviewLevelRaw) {
+                    ForEach(MobileNotificationPreviewLevel.allCases, id: \.self) { level in
+                        Text(level.iPhoneDisplayName).tag(level.rawValue)
+                    }
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(preview.title)
+                        .font(.subheadline.weight(.semibold))
+                    Text(preview.body)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 4)
+            }
             Section("Privacy boundary") {
-                Text("The fixture shows no sensitive content in notification previews and sends no notification.")
+                Text("This local simulation renders only canned safe text from a content-free attention record. It does not import UserNotifications, request permission, contact APNs, or schedule a system notification.")
                     .font(.caption)
             }
         }
@@ -2410,7 +2440,8 @@ private struct IPhoneSettingsControlSurface: View {
     @Environment(\.dismiss) private var dismiss
     @State private var usesNord = true
     @State private var haptics = true
-    @State private var showSensitivePreviews = false
+    @AppStorage("kaname.notification.calendar.preview-level")
+    private var calendarPreviewLevelRaw = MobileNotificationPreviewLevel.hidden.rawValue
 
     var body: some View {
         NavigationStack {
@@ -2452,7 +2483,11 @@ private struct IPhoneSettingsControlSurface: View {
                 }
 
                 Section("Privacy and notifications") {
-                    Toggle("Sensitive notification previews", isOn: $showSensitivePreviews)
+                    Picker("Calendar previews", selection: $calendarPreviewLevelRaw) {
+                        ForEach(MobileNotificationPreviewLevel.allCases, id: \.self) { level in
+                            Text(level.iPhoneDisplayName).tag(level.rawValue)
+                        }
+                    }
                     NavigationLink("Approval defaults") {
                         IPhoneSettingsDetail(title: "Approval defaults", detail: "High-consequence work always shows target, consequence, egress, alternative, freshness, and current authority before it can proceed.")
                     }
@@ -2473,6 +2508,16 @@ private struct IPhoneSettingsControlSurface: View {
             }
         }
         .tint(Nord.frost1)
+    }
+}
+
+private extension MobileNotificationPreviewLevel {
+    var iPhoneDisplayName: String {
+        switch self {
+        case .hidden: "Hidden"
+        case .categoryOnly: "Category only"
+        case .safeDetail: "Safe detail"
+        }
     }
 }
 
