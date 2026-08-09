@@ -10,7 +10,7 @@ public struct IPhoneControlSurface: View {
     @State private var workProjection: IPhoneWorkProjection = .inbox
     @State private var fixtureState = IPhoneFixtureState()
     @State private var showsSettings = false
-    @StateObject private var mobileShell = IPhoneProductionShellModel.simulator()
+    @StateObject private var mobileShell = IPhoneProductionShellModel.configured()
 
     public init() {
         let polarNight = UIColor(red: 46 / 255, green: 52 / 255, blue: 64 / 255, alpha: 1)
@@ -166,6 +166,13 @@ public struct IPhoneControlSurface: View {
         }
         .fullScreenCover(isPresented: $showsSettings) {
             IPhoneSettingsControlSurface()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("kanameAPNsToken"))) { notification in
+            guard let token = notification.object as? Data else { return }
+            mobileShell.registerPushToken(token)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("kanameRemoteWake"))) { _ in
+            _Concurrency.Task { await mobileShell.pollEnrollmentAndSync() }
         }
     }
 }
@@ -389,7 +396,7 @@ private struct IPhoneConnectionView: View {
                 IPhoneControlTitle(
                     title: "Device connection",
                     eyebrow: "ENCRYPTED MOBILE SHELL",
-                    trailingLabel: "Simulator"
+                    trailingLabel: mobileShell.isLiveQualification ? "Live" : "Simulator"
                 )
 
                 VStack(alignment: .leading, spacing: 14) {
@@ -430,7 +437,9 @@ private struct IPhoneConnectionView: View {
                         Text(confirmationCode)
                             .font(.system(.title, design: .monospaced, weight: .bold))
                             .tracking(5)
-                        Text("This value exists only in memory and is absent from the enrollment request. No Mac received it.")
+                        Text(mobileShell.isLiveQualification
+                             ? "This value exists only in memory and is absent from the relay request. Confirm the same value on the Mac."
+                             : "This value exists only in memory and is absent from the enrollment request. No Mac received it.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
@@ -440,24 +449,73 @@ private struct IPhoneConnectionView: View {
                 }
 
                 VStack(spacing: 10) {
-                    if mobileShell.snapshot.phase == .unenrolled {
-                        Button("Prepare simulator enrollment") {
-                            mobileShell.prepareSimulatorEnrollment()
+                    if mobileShell.isLiveQualification {
+                        Button(mobileShell.snapshot.phase == .active ? "Sync encrypted state" : "Check enrollment") {
+                            _Concurrency.Task { await mobileShell.pollEnrollmentAndSync() }
                         }
                         .buttonStyle(.borderedProminent)
+                        if mobileShell.snapshot.phase == .active {
+                            Button("Rotate device key") {
+                                mobileShell.rotateLiveKey()
+                            }
+                            .buttonStyle(.bordered)
+                        }
                     } else {
-                        Button("Remove ephemeral enrollment", role: .destructive) {
-                            mobileShell.resetSimulatorEnrollment()
+                        if mobileShell.snapshot.phase == .unenrolled {
+                            Button("Prepare simulator enrollment") {
+                                mobileShell.prepareSimulatorEnrollment()
+                            }
+                            .buttonStyle(.borderedProminent)
+                        } else {
+                            Button("Remove ephemeral enrollment", role: .destructive) {
+                                mobileShell.resetSimulatorEnrollment()
+                            }
+                            .buttonStyle(.bordered)
+                        }
+
+                        Button(mobileShell.isMacReachable ? "Simulate Mac unavailable" : "Simulate Mac reachable") {
+                            mobileShell.setSimulatedReachability(!mobileShell.isMacReachable)
                         }
                         .buttonStyle(.bordered)
                     }
-
-                    Button(mobileShell.isMacReachable ? "Simulate Mac unavailable" : "Simulate Mac reachable") {
-                        mobileShell.setSimulatedReachability(!mobileShell.isMacReachable)
-                    }
-                    .buttonStyle(.bordered)
                 }
                 .frame(maxWidth: .infinity)
+
+                if let pending = mobileShell.pendingApproval {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Label("Current approval required", systemImage: "checkmark.shield.fill")
+                            .font(.headline)
+                            .foregroundStyle(Nord.auroraYellow)
+                        IPhoneApprovalDetailRow("Target", value: pending.targetID)
+                        IPhoneApprovalDetailRow("Revision", value: pending.targetRevision)
+                        IPhoneApprovalDetailRow("Consequence", value: pending.consequence)
+                        IPhoneApprovalDetailRow("Data egress", value: pending.egressClass)
+                        IPhoneApprovalDetailRow("Alternative", value: "Reject or wait; the authority performs no action")
+                        HStack {
+                            Button("Reject", role: .destructive) {
+                                mobileShell.resolvePendingApproval(approve: false)
+                            }
+                            .buttonStyle(.bordered)
+                            Spacer()
+                            Button("Approve") {
+                                mobileShell.resolvePendingApproval(approve: true)
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+                    }
+                    .padding(16)
+                    .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                }
+
+                if let keychainStatus = mobileShell.keychainStatus {
+                    IPhoneFixtureNotice(text: keychainStatus)
+                }
+                if let pushStatus = mobileShell.pushStatus {
+                    IPhoneFixtureNotice(text: pushStatus)
+                }
+                if let receipt = mobileShell.lastReceipt {
+                    IPhoneFixtureNotice(text: "Receipt: \(receipt.state.rawValue) · \(receipt.reasonCode)")
+                }
 
                 if let statusMessage = mobileShell.statusMessage {
                     IPhoneFixtureNotice(text: statusMessage)
@@ -469,7 +527,8 @@ private struct IPhoneConnectionView: View {
                             get: { mobileShell.isMacReachable },
                             set: { mobileShell.setSimulatedReachability($0) }
                         ),
-                        queuedCommands: $queuedCommands
+                        queuedCommands: $queuedCommands,
+                        isLiveQualification: mobileShell.isLiveQualification
                     )
                 } label: {
                     IPhoneNavigationTile(
@@ -504,18 +563,20 @@ private struct IPhoneConnectionView: View {
                         icon: "externaldrive.badge.timemachine",
                         tint: Nord.frost1
                     )
-                    Button(
-                        mobileShell.syncReadOnlyReason == nil
-                            ? "Simulate safe read-only mode"
-                            : "Finish simulated recovery"
-                    ) {
-                        if mobileShell.syncReadOnlyReason == nil {
-                            mobileShell.simulateReadOnlyRecovery()
-                        } else {
-                            mobileShell.finishSimulatedRecovery()
+                    if !mobileShell.isLiveQualification {
+                        Button(
+                            mobileShell.syncReadOnlyReason == nil
+                                ? "Simulate safe read-only mode"
+                                : "Finish simulated recovery"
+                        ) {
+                            if mobileShell.syncReadOnlyReason == nil {
+                                mobileShell.simulateReadOnlyRecovery()
+                            } else {
+                                mobileShell.finishSimulatedRecovery()
+                            }
                         }
+                        .buttonStyle(.bordered)
                     }
-                    .buttonStyle(.bordered)
                 }
                 .padding(16)
                 .background(
@@ -524,8 +585,10 @@ private struct IPhoneConnectionView: View {
                 )
 
                 IPhoneFixtureBoundaryCard(
-                    title: "Live operations remain off",
-                    detail: "This production shell exercises enrollment, protected queue state, recovery mode, and honest receipts. It creates no Keychain item, network connection, physical-device enrollment, hosted relay record, or system notification."
+                    title: mobileShell.isLiveQualification ? "Bounded live qualification" : "Live operations remain off",
+                    detail: mobileShell.isLiveQualification
+                        ? "Only end-to-end encrypted Phase 3 qualification traffic uses the authenticated relay. Provider, repository, email, calendar, and account operations remain disconnected."
+                        : "This production shell exercises enrollment, protected queue state, recovery mode, and honest receipts. It creates no Keychain item, network connection, physical-device enrollment, hosted relay record, or system notification."
                 )
             }
             .padding(16)
@@ -3147,6 +3210,7 @@ private struct IPhoneComposer: View {
 private struct IPhoneQueueView: View {
     @Binding var isMacReachable: Bool
     @Binding var queuedCommands: [PhoneQueuedCommand]
+    var isLiveQualification = false
     @State private var reconciliationNotice: String?
 
     var body: some View {
@@ -3192,12 +3256,14 @@ private struct IPhoneQueueView: View {
                 }
             }
 
-            Section {
-                Button(isMacReachable ? "Simulate Mac unavailable" : "Simulate Mac reconnect") {
-                    isMacReachable.toggle()
-                    reconciliationNotice = isMacReachable
-                        ? "Fixture connectivity changed. Commands remain queued here; no dispatch occurred."
-                        : "Fixture connectivity changed. New follow-ups will join this editable queue."
+            if !isLiveQualification {
+                Section {
+                    Button(isMacReachable ? "Simulate Mac unavailable" : "Simulate Mac reconnect") {
+                        isMacReachable.toggle()
+                        reconciliationNotice = isMacReachable
+                            ? "Fixture connectivity changed. Commands remain queued here; no dispatch occurred."
+                            : "Fixture connectivity changed. New follow-ups will join this editable queue."
+                    }
                 }
             }
 

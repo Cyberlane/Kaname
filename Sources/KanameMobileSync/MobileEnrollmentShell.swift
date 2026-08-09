@@ -2,7 +2,7 @@ import CryptoKit
 import Foundation
 import KanameProtocol
 
-public enum MobileEnrollmentPhase: String, Equatable, Sendable {
+public enum MobileEnrollmentPhase: String, Codable, Equatable, Sendable {
     case unenrolled
     case awaitingLocalConfirmation
     case active
@@ -10,14 +10,14 @@ public enum MobileEnrollmentPhase: String, Equatable, Sendable {
     case revoked
 }
 
-public enum MobileReachability: String, Equatable, Sendable {
+public enum MobileReachability: String, Codable, Equatable, Sendable {
     case unavailable
     case checking
     case reachable
     case degraded
 }
 
-public struct MobileEnrollmentSnapshot: Equatable, Sendable {
+public struct MobileEnrollmentSnapshot: Codable, Equatable, Sendable {
     public var phase: MobileEnrollmentPhase
     public var reachability: MobileReachability
     public var deviceID: String
@@ -179,17 +179,19 @@ public actor MobileEnrollmentShell {
         deviceID: String,
         displayName: String,
         keyStore: any MobileSyncPrivateKeyStore,
-        entropy: any MobileEnrollmentEntropy = SystemMobileEnrollmentEntropy()
+        entropy: any MobileEnrollmentEntropy = SystemMobileEnrollmentEntropy(),
+        initialSnapshot: MobileEnrollmentSnapshot? = nil
     ) throws {
         guard MobileSyncIdentifier.isValid(deviceID),
               !displayName.isEmpty,
-              displayName.utf8.count <= 128 else {
+              displayName.utf8.count <= 128,
+              Self.isValid(initialSnapshot: initialSnapshot, deviceID: deviceID) else {
             throw MobileSyncError.invalidIdentity
         }
         self.keyStore = keyStore
         self.entropy = entropy
         self.displayName = displayName
-        self.state = MobileEnrollmentSnapshot(deviceID: deviceID)
+        self.state = initialSnapshot ?? MobileEnrollmentSnapshot(deviceID: deviceID)
     }
 
     public func snapshot() -> MobileEnrollmentSnapshot {
@@ -390,5 +392,23 @@ public actor MobileEnrollmentShell {
             try await keyStore.deleteKey(keyID: keyID)
         }
         state = MobileEnrollmentSnapshot(deviceID: state.deviceID)
+    }
+
+    private static func isValid(
+        initialSnapshot: MobileEnrollmentSnapshot?,
+        deviceID: String
+    ) -> Bool {
+        guard let initialSnapshot else { return true }
+        guard initialSnapshot.deviceID == deviceID else { return false }
+        switch initialSnapshot.phase {
+        case .unenrolled:
+            return initialSnapshot.keyID == nil
+                && initialSnapshot.keyGeneration == 0
+                && initialSnapshot.enrollmentID == nil
+        case .awaitingLocalConfirmation, .active, .rejected, .revoked:
+            return initialSnapshot.keyID.map(MobileSyncIdentifier.isValid) ?? false
+                && initialSnapshot.keyGeneration > 0
+                && (initialSnapshot.enrollmentID.map(MobileSyncIdentifier.isValid) ?? false)
+        }
     }
 }

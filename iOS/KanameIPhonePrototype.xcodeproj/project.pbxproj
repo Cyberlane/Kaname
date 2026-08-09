@@ -14,6 +14,7 @@
 /* Begin PBXFileReference section */
 		A10000000000000000000010 /* KanameIPhonePrototype.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = KanameIPhonePrototype.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000011 /* IPhonePrototypeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IPhonePrototypeApp.swift; sourceTree = "<group>"; };
+		A10000000000000000000012 /* KanameIPhonePrototype.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = KanameIPhonePrototype.entitlements; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -40,6 +41,7 @@
 			isa = PBXGroup;
 			children = (
 				A10000000000000000000011 /* IPhonePrototypeApp.swift */,
+				A10000000000000000000012 /* KanameIPhonePrototype.entitlements */,
 			);
 			path = KanameIPhonePrototype;
 			sourceTree = "<group>";
@@ -82,6 +84,15 @@
 			attributes = {
 				LastSwiftUpdateCheck = 1620;
 				LastUpgradeCheck = 1620;
+				TargetAttributes = {
+					A10000000000000000000050 = {
+						DevelopmentTeam = UR92876NGQ;
+						SystemCapabilities = {
+							com.apple.BackgroundModes = { enabled = 1; };
+							com.apple.Push = { enabled = 1; };
+						};
+					};
+				};
 			};
 			buildConfigurationList = A10000000000000000000071 /* Build configuration list for PBXProject "KanameIPhonePrototype" */;
 			compatibilityVersion = "Xcode 14.0";
@@ -149,12 +160,14 @@
 		A10000000000000000000082 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGN_ENTITLEMENTS = KanameIPhonePrototype/KanameIPhonePrototype.entitlements;
+				CODE_SIGNING_ALLOWED = YES;
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = UR92876NGQ;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Kaname;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIBackgroundModes = "remote-notification";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UIRequiresFullScreen = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
@@ -171,12 +184,14 @@
 		A10000000000000000000083 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGN_ENTITLEMENTS = KanameIPhonePrototype/KanameIPhonePrototype.entitlements;
+				CODE_SIGNING_ALLOWED = YES;
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = UR92876NGQ;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Kaname;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIBackgroundModes = "remote-notification";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UIRequiresFullScreen = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;

@@ -16,14 +16,20 @@ public enum MobileSyncKeyStoreError: Error, Equatable, Sendable {
 public struct KeychainMobileSyncKeyStore: Sendable {
     public let service: String
     public let accessGroup: String?
+    public let useDataProtectionKeychain: Bool
 
-    public init(service: String, accessGroup: String? = nil) throws {
+    public init(
+        service: String,
+        accessGroup: String? = nil,
+        useDataProtectionKeychain: Bool = true
+    ) throws {
         guard MobileSyncIdentifier.isValid(service),
               accessGroup.map(MobileSyncIdentifier.isValid) ?? true else {
             throw MobileSyncKeyStoreError.invalidIdentifier
         }
         self.service = service
         self.accessGroup = accessGroup
+        self.useDataProtectionKeychain = useDataProtectionKeychain
     }
 
     public func generateAndStore(keyID: String) throws -> Curve25519.KeyAgreement.PublicKey {
@@ -39,7 +45,11 @@ public struct KeychainMobileSyncKeyStore: Sendable {
         guard MobileSyncIdentifier.isValid(keyID) else {
             throw MobileSyncKeyStoreError.invalidIdentifier
         }
-        var query = Self.storageAttributes(service: service, keyID: keyID)
+        var query = Self.storageAttributes(
+            service: service,
+            keyID: keyID,
+            useDataProtectionKeychain: useDataProtectionKeychain
+        )
         if let accessGroup {
             query[kSecAttrAccessGroup] = accessGroup
         }
@@ -59,7 +69,11 @@ public struct KeychainMobileSyncKeyStore: Sendable {
         guard MobileSyncIdentifier.isValid(keyID) else {
             throw MobileSyncKeyStoreError.invalidIdentifier
         }
-        var query = Self.lookupAttributes(service: service, keyID: keyID)
+        var query = Self.lookupAttributes(
+            service: service,
+            keyID: keyID,
+            useDataProtectionKeychain: useDataProtectionKeychain
+        )
         if let accessGroup {
             query[kSecAttrAccessGroup] = accessGroup
         }
@@ -84,7 +98,11 @@ public struct KeychainMobileSyncKeyStore: Sendable {
         guard MobileSyncIdentifier.isValid(keyID) else {
             throw MobileSyncKeyStoreError.invalidIdentifier
         }
-        var query = Self.lookupAttributes(service: service, keyID: keyID)
+        var query = Self.lookupAttributes(
+            service: service,
+            keyID: keyID,
+            useDataProtectionKeychain: useDataProtectionKeychain
+        )
         if let accessGroup {
             query[kSecAttrAccessGroup] = accessGroup
         }
@@ -98,21 +116,30 @@ public struct KeychainMobileSyncKeyStore: Sendable {
     /// key bytes and no synchronizable or migratable storage class.
     public static func storageAttributes(
         service: String,
-        keyID: String
+        keyID: String,
+        useDataProtectionKeychain: Bool = true
     ) -> [CFString: Any] {
-        MobileSyncKeychainProtection.storageAttributes(service: service, account: keyID)
+        MobileSyncKeychainProtection.storageAttributes(
+            service: service,
+            account: keyID,
+            useDataProtectionKeychain: useDataProtectionKeychain
+        )
     }
 
     private static func lookupAttributes(
         service: String,
-        keyID: String
+        keyID: String,
+        useDataProtectionKeychain: Bool
     ) -> [CFString: Any] {
-        [
+        var attributes: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: service,
             kSecAttrAccount: keyID,
-            kSecUseDataProtectionKeychain: true,
         ]
+        if useDataProtectionKeychain {
+            attributes[kSecUseDataProtectionKeychain] = true
+        }
+        return attributes
     }
 
 }
@@ -120,15 +147,19 @@ public struct KeychainMobileSyncKeyStore: Sendable {
 public enum MobileSyncKeychainProtection {
     public static func storageAttributes(
         service: String,
-        account: String
+        account: String,
+        useDataProtectionKeychain: Bool = true
     ) -> [CFString: Any] {
-        [
+        var attributes: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: service,
             kSecAttrAccount: account,
-            kSecUseDataProtectionKeychain: true,
             kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
             kSecAttrSynchronizable: kCFBooleanFalse as Any,
         ]
+        if useDataProtectionKeychain {
+            attributes[kSecUseDataProtectionKeychain] = true
+        }
+        return attributes
     }
 }
