@@ -1,8 +1,17 @@
 import CryptoKit
-import Darwin
 import Foundation
 import KanameMobileSync
 import KanameProtocol
+
+private func isValidQualificationIdentifier(_ value: String) -> Bool {
+    guard let first = value.utf8.first,
+          (first >= 48 && first <= 57) || (first >= 65 && first <= 90) || (first >= 97 && first <= 122),
+          value.utf8.count <= 128 else { return false }
+    return value.utf8.allSatisfy {
+        ($0 >= 48 && $0 <= 57) || ($0 >= 65 && $0 <= 90) || ($0 >= 97 && $0 <= 122)
+            || [45, 46, 58, 95].contains($0)
+    }
+}
 
 private struct AuthorityState: Codable {
     let runID: String
@@ -96,7 +105,7 @@ private enum QualificationCommandRunner {
         case "bootstrap":
             try await context.bootstrap()
         case "launch-config":
-            try context.launchConfiguration()
+            try await context.launchConfiguration()
         case "accept-enrollment":
             guard CommandLine.arguments.count == 3 else { throw QualificationError.invalidCommand }
             try await context.acceptEnrollment(code: CommandLine.arguments[2])
@@ -130,7 +139,7 @@ private struct Context {
     private let rootURL: URL
     private let stateURL: URL
     private let sessionStateURL: URL
-    private let keyStore: KeychainMobileSyncKeyStore
+    private let keyStore: QualificationFileMobileSyncPrivateKeyStore
     private let relayClient: MobileEnrollmentRelayClient
     private let transport: HTTPMobileSyncTransport
 
@@ -146,7 +155,7 @@ private struct Context {
         guard let runID = environment["KANAME_RUN_ID"] else {
             throw QualificationError.missingEnvironment("KANAME_RUN_ID")
         }
-        guard Self.isValidIdentifier(runID), runID.utf8.count <= 40 else {
+        guard isValidQualificationIdentifier(runID), runID.utf8.count <= 40 else {
             throw QualificationError.invalidRunID
         }
         let rootURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -159,22 +168,12 @@ private struct Context {
         self.rootURL = rootURL
         self.stateURL = rootURL.appendingPathComponent("authority.json")
         self.sessionStateURL = rootURL.appendingPathComponent("sync.json")
-        self.keyStore = try KeychainMobileSyncKeyStore(
-            service: "com.cyberlane.kaname.phase3.authority",
-            useDataProtectionKeychain: false
+        self.keyStore = QualificationFileMobileSyncPrivateKeyStore(
+            expectedKeyID: "mac-phase3-key-\(runID)",
+            fileURL: rootURL.appendingPathComponent("mac-private-key.bin")
         )
         self.relayClient = try MobileEnrollmentRelayClient(baseURL: relayURL, bearerToken: relayToken)
         self.transport = try HTTPMobileSyncTransport(baseURL: relayURL, bearerToken: relayToken)
-    }
-
-    private static func isValidIdentifier(_ value: String) -> Bool {
-        guard let first = value.utf8.first,
-              (first >= 48 && first <= 57) || (first >= 65 && first <= 90) || (first >= 97 && first <= 122),
-              value.utf8.count <= 128 else { return false }
-        return value.utf8.allSatisfy {
-            ($0 >= 48 && $0 <= 57) || ($0 >= 65 && $0 <= 90) || ($0 >= 97 && $0 <= 122)
-                || [45, 46, 58, 95].contains($0)
-        }
     }
 
     func bootstrap() async throws {
@@ -185,19 +184,19 @@ private struct Context {
         )
         let state = initialState()
         let publicKey: Curve25519.KeyAgreement.PublicKey
-        if let existing = try? keyStore.load(keyID: state.macKeyID) {
+        if let existing = try? await keyStore.privateKey(keyID: state.macKeyID) {
             publicKey = existing.publicKey
         } else {
-            publicKey = try keyStore.generateAndStore(keyID: state.macKeyID)
+            publicKey = try await keyStore.createKey(keyID: state.macKeyID)
         }
-        _ = try keyStore.load(keyID: state.macKeyID)
+        _ = try await keyStore.privateKey(keyID: state.macKeyID)
         try save(state)
         try writeLaunchConfiguration(state: state, publicKey: publicKey)
     }
 
-    func launchConfiguration() throws {
+    func launchConfiguration() async throws {
         let state = try load()
-        let publicKey = try keyStore.load(keyID: state.macKeyID).publicKey
+        let publicKey = try await keyStore.privateKey(keyID: state.macKeyID).publicKey
         try writeLaunchConfiguration(state: state, publicKey: publicKey)
     }
 
@@ -474,7 +473,7 @@ private struct Context {
             throw QualificationError.unsafeCleanupPath
         }
         try await relayClient.deleteQualificationData()
-        try? keyStore.remove(keyID: state.macKeyID)
+        try? await keyStore.deleteKey(keyID: state.macKeyID)
         if FileManager.default.fileExists(atPath: rootURL.path) {
             try FileManager.default.removeItem(at: rootURL)
         }
@@ -526,14 +525,8 @@ private struct Context {
     }
 
     private func save(_ state: AuthorityState) throws {
-        try FileManager.default.createDirectory(
-            at: rootURL,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
         let data = try JSONEncoder().encode(state)
-        try data.write(to: stateURL, options: [.atomic, .completeFileProtection])
-        _ = chmod(stateURL.path, S_IRUSR | S_IWUSR)
+        try QualificationProtectedFile.write(data, to: stateURL)
     }
 
     private var nowMillis: Int64 {
