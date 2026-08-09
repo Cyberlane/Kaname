@@ -213,6 +213,26 @@ public nonisolated struct Kaname_V1_DeviceEnrollmentDecision: Sendable {
   public init() {}
 }
 
+public nonisolated struct Kaname_V1_DeviceEnrollmentReceipt: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var enrollmentID: String = String()
+
+  public var deviceID: String = String()
+
+  public var state: Kaname_V1_DeviceEnrollmentState = .unspecified
+
+  public var duplicate: Bool = false
+
+  public var reasonCode: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 public nonisolated struct Kaname_V1_DeviceKeyRotation: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -531,6 +551,56 @@ nonisolated extension Kaname_V1_DeviceEnrollmentDecision: SwiftProtobuf.Message,
     if lhs.macDeviceID != rhs.macDeviceID {return false}
     if lhs.transcriptDigest != rhs.transcriptDigest {return false}
     if lhs.decidedAtUnixMillis != rhs.decidedAtUnixMillis {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Kaname_V1_DeviceEnrollmentReceipt: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceEnrollmentReceipt"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}enrollment_id\0\u{3}device_id\0\u{1}state\0\u{1}duplicate\0\u{3}reason_code\0\u{c}\u{6}\u{a}")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.enrollmentID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.deviceID) }()
+      case 3: try { try decoder.decodeSingularEnumField(value: &self.state) }()
+      case 4: try { try decoder.decodeSingularBoolField(value: &self.duplicate) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.reasonCode) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.enrollmentID.isEmpty {
+      try visitor.visitSingularStringField(value: self.enrollmentID, fieldNumber: 1)
+    }
+    if !self.deviceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.deviceID, fieldNumber: 2)
+    }
+    if self.state != .unspecified {
+      try visitor.visitSingularEnumField(value: self.state, fieldNumber: 3)
+    }
+    if self.duplicate != false {
+      try visitor.visitSingularBoolField(value: self.duplicate, fieldNumber: 4)
+    }
+    if !self.reasonCode.isEmpty {
+      try visitor.visitSingularStringField(value: self.reasonCode, fieldNumber: 5)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kaname_V1_DeviceEnrollmentReceipt, rhs: Kaname_V1_DeviceEnrollmentReceipt) -> Bool {
+    if lhs.enrollmentID != rhs.enrollmentID {return false}
+    if lhs.deviceID != rhs.deviceID {return false}
+    if lhs.state != rhs.state {return false}
+    if lhs.duplicate != rhs.duplicate {return false}
+    if lhs.reasonCode != rhs.reasonCode {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

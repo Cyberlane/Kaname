@@ -37,6 +37,7 @@ pub enum EnrollmentAdmission {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnrollmentDecisionResult {
+    pub device_id: String,
     pub state: v1::DeviceEnrollmentState,
     pub duplicate: bool,
     pub device: Option<DeviceRecord>,
@@ -160,6 +161,11 @@ impl Journal {
                 None
             };
             return Ok(EnrollmentDecisionResult {
+                device_id: challenge
+                    .proposed_device
+                    .as_ref()
+                    .map(|identity| identity.device_id.clone())
+                    .unwrap_or_default(),
                 state: resolved_state,
                 duplicate: true,
                 device,
@@ -211,6 +217,7 @@ impl Journal {
             None
         };
         Ok(EnrollmentDecisionResult {
+            device_id: identity.device_id,
             state: resolved_state,
             duplicate: false,
             device,

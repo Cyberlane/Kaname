@@ -235,6 +235,13 @@
       "4": "bytes transcript_digest",
       "5": "int64 decided_at_unix_millis"
     },
+    "sync.DeviceEnrollmentReceipt": {
+      "1": "string enrollment_id",
+      "2": "string device_id",
+      "3": "DeviceEnrollmentState state",
+      "4": "bool duplicate",
+      "5": "string reason_code"
+    },
     "sync.DeviceKeyRotation": {
       "1": "string device_id",
       "2": "string previous_key_id",

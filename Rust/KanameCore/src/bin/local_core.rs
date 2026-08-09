@@ -1,6 +1,7 @@
 use kaname_core::{
     fake_provider::{embedded_scenarios, run_scenario, run_scenario_at_path, scale_fixture},
     journal::{Journal, ReplayBasis as JournalReplayBasis},
+    mobile::{EnrollmentAdmission, SyncAdmission},
     policy::{ApprovalResolutionResult, LocalPolicyCore, approval_fingerprint},
     v1::{self, EventEnvelope},
 };
@@ -39,8 +40,17 @@ fn main() {
         }
         [operation, journal_path] if operation == "record-review" => record_review(journal_path),
         [operation, journal_path] if operation == "replay" => replay(journal_path),
+        [operation, journal_path] if operation == "mobile-propose" => {
+            mobile_propose(journal_path)
+        }
+        [operation, journal_path] if operation == "mobile-decide" => mobile_decide(journal_path),
+        [operation, journal_path, recipient_device_id, recipient_key_id]
+            if operation == "mobile-admit" =>
+        {
+            mobile_admit(journal_path, recipient_device_id, recipient_key_id)
+        }
         [operation, fixture_id] if operation == "scale" => scale(fixture_id),
-        _ => Err("usage: kaname-local-core scenario <F-01..F-14> | scenario-store <F-01..F-14> <journal-path> | append-event <journal-path> < event-envelope.bin | authorize-action <journal-path> < approval-command.bin | record-review <journal-path> < command-envelope.bin | replay <journal-path> < replay-request.bin | scale <S-01..S-04>".to_owned()),
+        _ => Err("usage: kaname-local-core scenario <F-01..F-14> | scenario-store <F-01..F-14> <journal-path> | append-event <journal-path> < event-envelope.bin | authorize-action <journal-path> < approval-command.bin | record-review <journal-path> < command-envelope.bin | replay <journal-path> < replay-request.bin | mobile-propose <journal-path> < enrollment-challenge.bin | mobile-decide <journal-path> < enrollment-decision.bin | mobile-admit <journal-path> <recipient-device-id> <recipient-key-id> < encrypted-envelope.bin | scale <S-01..S-04>".to_owned()),
     };
     match result {
         Ok(json) => println!("{json}"),
@@ -285,6 +295,140 @@ fn replay_wire(journal_path: &str, wire: &[u8]) -> Result<String, String> {
     Ok(hex::encode(response.encode_to_vec()))
 }
 
+fn mobile_propose(journal_path: &str) -> Result<String, String> {
+    let wire = read_standard_input()?;
+    mobile_propose_wire(journal_path, &wire, now_unix_millis()?)
+}
+
+fn mobile_propose_wire(
+    journal_path: &str,
+    wire: &[u8],
+    now_unix_millis: i64,
+) -> Result<String, String> {
+    let challenge = v1::DeviceEnrollmentChallenge::decode(wire)
+        .map_err(|_| "malformed_device_enrollment_challenge")?;
+    let device_id = challenge
+        .proposed_device
+        .as_ref()
+        .map(|identity| identity.device_id.clone())
+        .ok_or("enrollment_missing_device")?;
+    let mut journal = Journal::open(journal_path, &CURSOR_KEY).map_err(|error| error.to_string())?;
+    let admission = journal
+        .propose_mobile_device(&challenge, now_unix_millis)
+        .map_err(|error| error.to_string())?;
+    let receipt = v1::DeviceEnrollmentReceipt {
+        enrollment_id: challenge.enrollment_id,
+        device_id,
+        state: v1::DeviceEnrollmentState::Pending as i32,
+        duplicate: admission == EnrollmentAdmission::Duplicate,
+        reason_code: match admission {
+            EnrollmentAdmission::Pending => "pending_local_confirmation",
+            EnrollmentAdmission::Duplicate => "duplicate_pending_enrollment",
+        }
+        .into(),
+    };
+    Ok(hex::encode(receipt.encode_to_vec()))
+}
+
+fn mobile_decide(journal_path: &str) -> Result<String, String> {
+    let wire = read_standard_input()?;
+    mobile_decide_wire(journal_path, &wire, now_unix_millis()?)
+}
+
+fn mobile_decide_wire(
+    journal_path: &str,
+    wire: &[u8],
+    now_unix_millis: i64,
+) -> Result<String, String> {
+    let decision = v1::DeviceEnrollmentDecision::decode(wire)
+        .map_err(|_| "malformed_device_enrollment_decision")?;
+    let mut journal = Journal::open(journal_path, &CURSOR_KEY).map_err(|error| error.to_string())?;
+    let result = journal
+        .decide_mobile_device(&decision, now_unix_millis)
+        .map_err(|error| error.to_string())?;
+    let receipt = v1::DeviceEnrollmentReceipt {
+        enrollment_id: decision.enrollment_id,
+        device_id: result.device_id,
+        state: result.state as i32,
+        duplicate: result.duplicate,
+        reason_code: match result.state {
+            v1::DeviceEnrollmentState::Active => "enrollment_activated",
+            v1::DeviceEnrollmentState::Rejected => "enrollment_rejected",
+            _ => "invalid_enrollment_state",
+        }
+        .into(),
+    };
+    Ok(hex::encode(receipt.encode_to_vec()))
+}
+
+fn mobile_admit(
+    journal_path: &str,
+    expected_recipient_device_id: &str,
+    expected_recipient_key_id: &str,
+) -> Result<String, String> {
+    let wire = read_standard_input()?;
+    mobile_admit_wire(
+        journal_path,
+        &wire,
+        expected_recipient_device_id,
+        expected_recipient_key_id,
+        now_unix_millis()?,
+    )
+}
+
+fn mobile_admit_wire(
+    journal_path: &str,
+    wire: &[u8],
+    expected_recipient_device_id: &str,
+    expected_recipient_key_id: &str,
+    now_unix_millis: i64,
+) -> Result<String, String> {
+    let envelope = v1::EncryptedSyncEnvelope::decode(wire)
+        .map_err(|_| "malformed_encrypted_sync_envelope")?;
+    let header = v1::SyncAuthenticatedHeader::decode(envelope.authenticated_header.as_slice())
+        .map_err(|_| "malformed_sync_header")?;
+    let mut journal = Journal::open(journal_path, &CURSOR_KEY).map_err(|error| error.to_string())?;
+    let admission = journal
+        .record_authenticated_mobile_sync_wire(
+            wire,
+            expected_recipient_device_id,
+            expected_recipient_key_id,
+            now_unix_millis,
+        )
+        .map_err(|error| error.to_string())?;
+    let (state, reason_code) = match admission {
+        SyncAdmission::Accepted { .. } => (
+            v1::SyncReceiptState::Decrypted,
+            "authenticated_envelope_recorded",
+        ),
+        SyncAdmission::Duplicate { .. } => (
+            v1::SyncReceiptState::Decrypted,
+            "duplicate_authenticated_envelope",
+        ),
+        SyncAdmission::ResyncRequired { .. } => (
+            v1::SyncReceiptState::ResyncRequired,
+            "sender_sequence_gap",
+        ),
+    };
+    let receipt = v1::SyncReceipt {
+        envelope_id: header.envelope_id,
+        sender_device_id: header.sender_device_id,
+        sender_sequence: header.sender_sequence,
+        state: state as i32,
+        reason_code: reason_code.into(),
+        mac_store_position: 0,
+        recorded_at_unix_millis: now_unix_millis,
+    };
+    Ok(hex::encode(receipt.encode_to_vec()))
+}
+
+fn now_unix_millis() -> Result<i64, String> {
+    let duration = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?;
+    i64::try_from(duration.as_millis()).map_err(|_| "system_time_out_of_range".into())
+}
+
 fn append_event_wire(journal_path: &str, wire: &[u8]) -> Result<String, String> {
     let event = EventEnvelope::decode(wire).map_err(|_| "malformed_event_envelope")?;
     if event.store_position != 0 || event.stream_sequence != 0 {
@@ -395,8 +539,10 @@ mod tests {
     use super::*;
     use kaname_core::v1::{
         ApprovalCommand, ApprovalDecision, ApprovalRequest, ApprovalResolution, CommandDisposition,
-        CommandEnvelope, EventProvenance, EvidenceRetentionClass, OpaqueTypedPayload,
-        ReplayRequest, ReviewDecision, SchemaVersion, Scope,
+        CommandEnvelope, DeviceEnrollmentChallenge, DeviceEnrollmentDecision,
+        DeviceEnrollmentReceipt, DeviceEnrollmentState, DevicePublicIdentity, EncryptedSyncEnvelope,
+        EventProvenance, EvidenceRetentionClass, OpaqueTypedPayload, ReplayRequest, ReviewDecision,
+        SchemaVersion, Scope, SyncAuthenticatedHeader, SyncReceipt, SyncReceiptState,
     };
     use tempfile::tempdir;
 
@@ -448,6 +594,101 @@ mod tests {
             append_event_wire(path.to_str().unwrap(), &forged.encode_to_vec()),
             Err("live_provider_event_kind_not_allowed".into())
         );
+    }
+
+    #[test]
+    fn signed_host_mobile_operations_return_bounded_authority_receipts() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("mobile.sqlite");
+        let path = path.to_str().unwrap();
+        let now = 1_786_220_000_000;
+        let identity = DevicePublicIdentity {
+            device_id: "iphone-justin".into(),
+            key_id: "iphone-key-1".into(),
+            display_name: "Justin's iPhone".into(),
+            platform: "ios".into(),
+            hpke_public_key: vec![0x31; 32],
+            key_generation: 1,
+            created_at_unix_millis: now,
+            expires_at_unix_millis: now + 86_400_000,
+        };
+        let challenge = DeviceEnrollmentChallenge {
+            schema_version: Some(SchemaVersion { major: 1, minor: 0 }),
+            enrollment_id: "enrollment-1".into(),
+            proposed_device: Some(identity),
+            mac_nonce: vec![0x4d; 32],
+            confirmation_digest: vec![0x43; 32],
+            expires_at_unix_millis: now + 60_000,
+        };
+        let proposed = DeviceEnrollmentReceipt::decode(
+            hex::decode(mobile_propose_wire(path, &challenge.encode_to_vec(), now).unwrap())
+                .unwrap()
+                .as_slice(),
+        )
+        .unwrap();
+        assert_eq!(proposed.state, DeviceEnrollmentState::Pending as i32);
+
+        let decision = DeviceEnrollmentDecision {
+            enrollment_id: challenge.enrollment_id,
+            state: DeviceEnrollmentState::Active as i32,
+            mac_device_id: "mac-authority".into(),
+            transcript_digest: vec![0x54; 32],
+            decided_at_unix_millis: now,
+        };
+        let decided = DeviceEnrollmentReceipt::decode(
+            hex::decode(mobile_decide_wire(path, &decision.encode_to_vec(), now).unwrap())
+                .unwrap()
+                .as_slice(),
+        )
+        .unwrap();
+        assert_eq!(decided.device_id, "iphone-justin");
+        assert_eq!(decided.state, DeviceEnrollmentState::Active as i32);
+
+        let header = SyncAuthenticatedHeader {
+            schema_version: Some(SchemaVersion { major: 1, minor: 0 }),
+            envelope_id: "envelope-1".into(),
+            sender_device_id: "iphone-justin".into(),
+            sender_key_id: "iphone-key-1".into(),
+            recipient_device_id: "mac-authority".into(),
+            recipient_key_id: "mac-key-1".into(),
+            sender_sequence: 1,
+            previous_envelope_digest: Vec::new(),
+            sent_at_unix_millis: now,
+            expires_at_unix_millis: now + 60_000,
+            payload_kind: "queue.enqueue".into(),
+            plaintext_digest: vec![0x50; 32],
+            content_type: "application/x-protobuf".into(),
+        };
+        let envelope = EncryptedSyncEnvelope {
+            authenticated_header: header.encode_to_vec(),
+            encapsulated_key: vec![0x45; 32],
+            ciphertext: vec![0x43; 48],
+        };
+        let admitted = SyncReceipt::decode(
+            hex::decode(
+                mobile_admit_wire(
+                    path,
+                    &envelope.encode_to_vec(),
+                    "mac-authority",
+                    "mac-key-1",
+                    now,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .as_slice(),
+        )
+        .unwrap();
+        assert_eq!(admitted.state, SyncReceiptState::Decrypted as i32);
+        assert_eq!(admitted.sender_sequence, 1);
+        assert!(mobile_admit_wire(
+            path,
+            &envelope.encode_to_vec(),
+            "wrong-mac",
+            "mac-key-1",
+            now,
+        )
+        .is_err());
     }
 
     #[test]

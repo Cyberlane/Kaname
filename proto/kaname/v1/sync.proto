@@ -48,6 +48,15 @@ message DeviceEnrollmentDecision {
   reserved 6 to 15;
 }
 
+message DeviceEnrollmentReceipt {
+  string enrollment_id = 1;
+  string device_id = 2;
+  DeviceEnrollmentState state = 3;
+  bool duplicate = 4;
+  string reason_code = 5;
+  reserved 6 to 15;
+}
+
 message DeviceKeyRotation {
   string device_id = 1;
   string previous_key_id = 2;

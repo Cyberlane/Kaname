@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import KanameProtocol
 @testable import KanameLocalCore
 
 struct LocalCoreRunnerTests {
@@ -35,6 +36,35 @@ struct LocalCoreRunnerTests {
 
         #expect(throws: LocalCoreRunnerError.malformedAppendReport) {
             try LocalCoreRunner.decodeEventAppendReport(Data("{}".utf8))
+        }
+    }
+
+    @Test
+    func decodesOnlyIdentifiedMobileAuthorityReceipts() throws {
+        var enrollment = Kaname_V1_DeviceEnrollmentReceipt()
+        enrollment.enrollmentID = "enrollment-1"
+        enrollment.deviceID = "iphone-justin"
+        enrollment.state = .active
+        enrollment.reasonCode = "enrollment_activated"
+        let decodedEnrollment = try LocalCoreRunner.decodeEnrollmentReceipt(
+            enrollment.serializedData()
+        )
+        #expect(decodedEnrollment.state == .active)
+
+        var sync = Kaname_V1_SyncReceipt()
+        sync.envelopeID = "envelope-1"
+        sync.senderDeviceID = "iphone-justin"
+        sync.senderSequence = 1
+        sync.state = .decrypted
+        sync.reasonCode = "authenticated_envelope_recorded"
+        let decodedSync = try LocalCoreRunner.decodeSyncReceipt(sync.serializedData())
+        #expect(decodedSync.state == .decrypted)
+
+        #expect(throws: LocalCoreRunnerError.malformedAppendReport) {
+            try LocalCoreRunner.decodeEnrollmentReceipt(Data())
+        }
+        #expect(throws: LocalCoreRunnerError.malformedAppendReport) {
+            try LocalCoreRunner.decodeSyncReceipt(Data())
         }
     }
 }

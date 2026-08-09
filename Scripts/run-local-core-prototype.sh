@@ -62,5 +62,7 @@ codesign --force --sign "$signing_identity" --identifier "$app_identifier" "$app
     --requirement "$client_requirement" \
     --core-executable "$core_path" \
     --journal-directory "$journal_directory" \
+    --local-device-id "mac-authority" \
+    --local-key-id "mac-key-1" \
     --launch-agent-plist "$launch_agent_plist"
 open -n "$app_path"

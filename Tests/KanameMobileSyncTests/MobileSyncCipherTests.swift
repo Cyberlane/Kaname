@@ -3,6 +3,7 @@ import Foundation
 import KanameMobileSync
 import KanameProtocol
 import Testing
+import Security
 
 struct MobileSyncCipherTests {
     private let now: Int64 = 1_786_220_000_000
@@ -110,6 +111,22 @@ struct MobileSyncCipherTests {
         #expect(identity.hpkePublicKey == phone.publicKey.rawRepresentation)
         #expect(try MobileSyncCipher.decodePublicKey(from: identity).rawRepresentation == phone.publicKey.rawRepresentation)
         #expect(identity.unknownFields.data.isEmpty)
+    }
+
+    @Test
+    func keychainContractIsDeviceOnlyAndAvailableAfterFirstUnlock() throws {
+        let store = try KeychainMobileSyncKeyStore(service: "com.cyber-lane.kaname.mobile-sync")
+        let attributes = KeychainMobileSyncKeyStore.storageAttributes(
+            service: store.service,
+            keyID: "mac-key-1"
+        )
+        let accessibility = attributes[kSecAttrAccessible] as! CFString
+        let synchronizable = attributes[kSecAttrSynchronizable] as! CFBoolean
+
+        #expect(accessibility == kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)
+        #expect(!CFBooleanGetValue(synchronizable))
+        #expect(attributes[kSecValueData] == nil)
+        #expect(attributes[kSecUseDataProtectionKeychain] as? Bool == true)
     }
 
     private func header(sequence: UInt64) -> Kaname_V1_SyncAuthenticatedHeader {

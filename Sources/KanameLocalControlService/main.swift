@@ -18,6 +18,8 @@ private struct Arguments {
     let coreExecutable: URL
     let journalDirectory: URL
     let launchAgentPlist: URL?
+    let localDeviceID: String?
+    let localKeyID: String?
 
     init(_ arguments: [String]) throws {
         switch arguments.dropFirst().first {
@@ -42,6 +44,13 @@ private struct Arguments {
         coreExecutable = URL(fileURLWithPath: core)
         self.journalDirectory = URL(fileURLWithPath: journalDirectory, isDirectory: true)
         launchAgentPlist = Self.value(after: "--launch-agent-plist", in: arguments).map(URL.init(fileURLWithPath:))
+        let localDeviceID = Self.value(after: "--local-device-id", in: arguments)
+        let localKeyID = Self.value(after: "--local-key-id", in: arguments)
+        guard (localDeviceID == nil) == (localKeyID == nil) else {
+            throw ServiceError.usage
+        }
+        self.localDeviceID = localDeviceID
+        self.localKeyID = localKeyID
     }
 
     private static func value(after flag: String, in arguments: [String]) -> String? {
@@ -55,10 +64,19 @@ private struct Arguments {
 private final class LocalControlService: NSObject, LocalCoreControlService {
     private let coreExecutable: URL
     private let journalDirectory: URL
+    private let localDeviceID: String?
+    private let localKeyID: String?
 
-    init(coreExecutable: URL, journalDirectory: URL) {
+    init(
+        coreExecutable: URL,
+        journalDirectory: URL,
+        localDeviceID: String?,
+        localKeyID: String?
+    ) {
         self.coreExecutable = coreExecutable
         self.journalDirectory = journalDirectory
+        self.localDeviceID = localDeviceID
+        self.localKeyID = localKeyID
     }
 
     func runScenario(_ request: Data, reply: @escaping (Data?, String) -> Void) {
@@ -126,9 +144,31 @@ private final class LocalControlService: NSObject, LocalCoreControlService {
         runWireOperation("replay", request: request, reply: reply)
     }
 
+    func proposeMobileDevice(_ request: Data, reply: @escaping (Data?, String) -> Void) {
+        runWireOperation("mobile-propose", request: request, reply: reply)
+    }
+
+    func decideMobileDevice(_ request: Data, reply: @escaping (Data?, String) -> Void) {
+        runWireOperation("mobile-decide", request: request, reply: reply)
+    }
+
+    func recordAuthenticatedMobileSync(_ request: Data, reply: @escaping (Data?, String) -> Void) {
+        guard let localDeviceID, let localKeyID else {
+            reply(nil, "mobile_not_configured")
+            return
+        }
+        runWireOperation(
+            "mobile-admit",
+            request: request,
+            extraArguments: [localDeviceID, localKeyID],
+            reply: reply
+        )
+    }
+
     private func runWireOperation(
         _ operation: String,
         request: Data,
+        extraArguments: [String] = [],
         reply: @escaping (Data?, String) -> Void
     ) {
         guard !request.isEmpty, request.count <= LocalCoreRunner.maximumResponseBytes else {
@@ -141,7 +181,7 @@ private final class LocalControlService: NSObject, LocalCoreControlService {
                 arguments: [
                     operation,
                     journalDirectory.appendingPathComponent("live-provider.sqlite").path,
-                ],
+                ] + extraArguments,
                 standardInput: request,
                 timeout: 5
             )
@@ -250,7 +290,9 @@ private enum KanameLocalControlServiceMain {
                 let listener = NSXPCListener(machServiceName: arguments.machService)
                 let delegate = ListenerDelegate(service: LocalControlService(
                     coreExecutable: arguments.coreExecutable,
-                    journalDirectory: arguments.journalDirectory
+                    journalDirectory: arguments.journalDirectory,
+                    localDeviceID: arguments.localDeviceID,
+                    localKeyID: arguments.localKeyID
                 ))
                 listener.delegate = delegate
                 listener.setConnectionCodeSigningRequirement(arguments.requirement)
@@ -271,15 +313,23 @@ private enum LaunchAgent {
         guard let plist = arguments.launchAgentPlist else { throw ServiceError.usage }
         let executable = URL(fileURLWithPath: CommandLine.arguments[0])
         let errorLog = plist.deletingLastPathComponent().appendingPathComponent("kaname-local-control-service.stderr.log")
+        var programArguments = [
+            executable.path, "--host", "--mach-service", arguments.machService,
+            "--requirement", arguments.requirement,
+            "--core-executable", arguments.coreExecutable.path,
+            "--journal-directory", arguments.journalDirectory.path,
+        ]
+        if let localDeviceID = arguments.localDeviceID,
+           let localKeyID = arguments.localKeyID {
+            programArguments += [
+                "--local-device-id", localDeviceID,
+                "--local-key-id", localKeyID,
+            ]
+        }
         let propertyList: [String: Any] = [
             "Label": arguments.machService,
             "MachServices": [arguments.machService: true],
-            "ProgramArguments": [
-                executable.path, "--host", "--mach-service", arguments.machService,
-                "--requirement", arguments.requirement,
-                "--core-executable", arguments.coreExecutable.path,
-                "--journal-directory", arguments.journalDirectory.path,
-            ],
+            "ProgramArguments": programArguments,
             "RunAtLoad": true,
             "KeepAlive": false,
             "StandardErrorPath": errorLog.path,

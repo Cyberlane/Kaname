@@ -85,7 +85,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "KanameLocalCoreXPCMeasure",
-            dependencies: ["KanameLocalCore"]
+            dependencies: ["KanameLocalCore", "KanameMobileSync", "KanameProtocol"]
         ),
         .executableTarget(
             name: "KanameProtocolFixtureTool",
