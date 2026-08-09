@@ -45,9 +45,9 @@ private final class CodexLiveWorkspaceModel: ObservableObject {
     @Published var worktreePath = ""
     @Published var task = "Add one focused regression test for the approved Kaname coding workflow, keep the change isolated, and run the relevant verification."
     @Published var searchQuery = "CodexLiveSession"
-    @Published var obsidianNotePath = "Projects/Coding ADE/Overview.md"
+    @Published var obsidianNotePath = ""
     @Published var questionAnswer = ""
-    @Published var knowledgeUpdateProposal = "Record the accepted coding result, exact evidence, and remaining boundaries in the Kaname Phase 2 closure note."
+    @Published var knowledgeUpdateProposal = "Record the accepted coding result, exact evidence, and remaining boundaries in the selected project note."
     @Published var selectedContextIDs: Set<String> = []
     @Published var selectedSearchIDs: Set<String> = []
     @Published private(set) var state: State = .idle
