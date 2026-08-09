@@ -8,6 +8,7 @@ private struct ProbeEvent: Codable {
     let nativeType: String
     let threadID: String?
     let turnID: String?
+    let approvalID: String?
     let text: String?
     let retainedPayloadBytes: Int
     let payloadWasTruncated: Bool
@@ -41,6 +42,14 @@ private struct KanameCodexSessionProbe {
             sandbox: .readOnly
         )
         _ = try await session.start(request)
+        let arguments = Array(CommandLine.arguments.dropFirst())
+        let interruptionTask = interruptDelayMilliseconds(arguments: arguments).map { delay in
+            _Concurrency.Task {
+                try? await _Concurrency.Task.sleep(for: .milliseconds(delay))
+                try? await session.interrupt()
+            }
+        }
+        defer { interruptionTask?.cancel() }
 
         for await event in events {
             guard shouldRender(event) else { continue }
@@ -49,10 +58,23 @@ private struct KanameCodexSessionProbe {
                 nativeType: event.nativeType,
                 threadID: event.threadID,
                 turnID: event.turnID,
+                approvalID: event.approvalID,
                 text: event.kind == .itemCompleted ? event.text : nil,
                 retainedPayloadBytes: event.payload?.count ?? 0,
                 payloadWasTruncated: event.payloadWasTruncated
             ))
+            if event.kind == .questionRequested,
+               let answer = value(after: "--answer", arguments: arguments),
+               let requestID = event.approvalID,
+               let payload = event.payload,
+               let object = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
+               let questions = object["questions"] as? [[String: Any]] {
+                let answers = Dictionary(uniqueKeysWithValues: questions.compactMap { question -> (String, [String])? in
+                    guard let id = question["id"] as? String else { return nil }
+                    return (id, [answer])
+                })
+                try await session.answerQuestion(requestID: requestID, answers: answers)
+            }
             if event.kind == .providerCompleted || event.kind == .runFailed || event.kind == .runInterrupted {
                 await session.close()
                 break
@@ -84,13 +106,23 @@ private struct KanameCodexSessionProbe {
     }
 
     private static func prompt(arguments: [String]) -> String {
-        guard let index = arguments.firstIndex(of: "--prompt"),
-              arguments.indices.contains(index + 1)
-        else {
+        guard let prompt = value(after: "--prompt", arguments: arguments) else {
             return """
             Review the current Kaname worktree's Codex live-session adapter for correctness and safety. Do not modify files, do not use the network, and do not ask for additional permissions. Return a concise review covering protocol assumptions, event/approval handling, and the most important missing verification.
             """
         }
+        return prompt
+    }
+
+    private static func interruptDelayMilliseconds(arguments: [String]) -> Int64? {
+        guard let raw = value(after: "--interrupt-after-milliseconds", arguments: arguments),
+              let value = Int64(raw), value > 0, value <= 60_000 else { return nil }
+        return value
+    }
+
+    private static func value(after flag: String, arguments: [String]) -> String? {
+        guard let index = arguments.firstIndex(of: flag),
+              arguments.indices.contains(index + 1) else { return nil }
         return arguments[index + 1]
     }
 
