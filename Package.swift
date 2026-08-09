@@ -14,6 +14,7 @@ let package = Package(
         .library(name: "KanameProtocol", targets: ["KanameProtocol"]),
         .library(name: "KanameConnectivity", targets: ["KanameConnectivity"]),
         .library(name: "KanameMobileSync", targets: ["KanameMobileSync"]),
+        .library(name: "KanameDesktop", targets: ["KanameDesktop"]),
         .library(name: "KanameFixtures", targets: ["KanameFixtures"]),
         .library(name: "KanamePrototypeUI", targets: ["KanamePrototypeUI"]),
         .executable(name: "KanamePrototype", targets: ["KanamePrototype"]),
@@ -67,9 +68,20 @@ let package = Package(
             name: "KanamePrototypeUI",
             dependencies: ["KanameDomain", "KanameFixtures", "KanameMobileSync", "KanameProtocol"]
         ),
+        .target(
+            name: "KanameDesktop",
+            dependencies: ["KanameDomain", "KanameMobileSync"]
+        ),
         .executableTarget(
             name: "KanamePrototype",
-            dependencies: ["KanameDomain", "KanameFixtures", "KanamePrototypeUI", "KanameLocalCore", "KanameConnectivity"]
+            dependencies: [
+                "KanameDesktop",
+                "KanameDomain",
+                "KanameFixtures",
+                "KanamePrototypeUI",
+                "KanameLocalCore",
+                "KanameConnectivity",
+            ]
         ),
         .executableTarget(
             name: "KanameProviderProbe",
@@ -110,6 +122,10 @@ let package = Package(
         .testTarget(
             name: "KanameMobileSyncTests",
             dependencies: ["KanameMobileSync", "KanameProtocol"]
+        ),
+        .testTarget(
+            name: "KanameDesktopTests",
+            dependencies: ["KanameDesktop"]
         ),
     ]
 )
