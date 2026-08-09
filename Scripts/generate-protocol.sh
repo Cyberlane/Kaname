@@ -43,6 +43,7 @@ proto_inputs=(
   kaname/v1/approval.proto
   kaname/v1/queue.proto
   kaname/v1/notification.proto
+  kaname/v1/sync.proto
 )
 
 "$protoc" \

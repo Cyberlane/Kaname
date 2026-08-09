@@ -7,6 +7,10 @@
 - Received `OpaqueTypedPayload.value` bytes are retained verbatim. They are not
   a canonical protobuf serialization claim.
 - Field numbers and names reserved in the source schemas must never be reused.
+- Adds the Phase 3 public-device identity, local-confirmation enrollment,
+  key-rotation and revocation records, authenticated HPKE header, encrypted
+  sync envelope, and reconciliation receipt. Private keys, confirmation codes,
+  plaintext, and notification previews are explicitly excluded from the wire.
 
 ## Compatibility rule
 

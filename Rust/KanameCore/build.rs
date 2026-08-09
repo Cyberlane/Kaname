@@ -7,6 +7,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "../../proto/kaname/v1/approval.proto",
         "../../proto/kaname/v1/queue.proto",
         "../../proto/kaname/v1/notification.proto",
+        "../../proto/kaname/v1/sync.proto",
     ];
     let protoc = protoc_bin_vendored::protoc_bin_path()?;
     let mut config = prost_build::Config::new();

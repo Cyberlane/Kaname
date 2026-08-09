@@ -13,6 +13,7 @@ let package = Package(
         .library(name: "KanameLocalCore", targets: ["KanameLocalCore"]),
         .library(name: "KanameProtocol", targets: ["KanameProtocol"]),
         .library(name: "KanameConnectivity", targets: ["KanameConnectivity"]),
+        .library(name: "KanameMobileSync", targets: ["KanameMobileSync"]),
         .library(name: "KanameFixtures", targets: ["KanameFixtures"]),
         .library(name: "KanamePrototypeUI", targets: ["KanamePrototypeUI"]),
         .executable(name: "KanamePrototype", targets: ["KanamePrototype"]),
@@ -46,6 +47,13 @@ let package = Package(
             dependencies: [
                 "KanameDomain",
                 "KanameLocalCore",
+                "KanameProtocol",
+                .product(name: "SwiftProtobuf", package: "swift-protobuf"),
+            ]
+        ),
+        .target(
+            name: "KanameMobileSync",
+            dependencies: [
                 "KanameProtocol",
                 .product(name: "SwiftProtobuf", package: "swift-protobuf"),
             ]
@@ -93,6 +101,10 @@ let package = Package(
         .testTarget(
             name: "KanameProtocolTests",
             dependencies: ["KanameProtocol"]
+        ),
+        .testTarget(
+            name: "KanameMobileSyncTests",
+            dependencies: ["KanameMobileSync", "KanameProtocol"]
         ),
     ]
 )

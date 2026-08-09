@@ -1,0 +1,118 @@
+syntax = "proto3";
+
+package kaname.v1;
+
+import "kaname/v1/common.proto";
+
+// Public device identity. Private key material never enters this protocol.
+message DevicePublicIdentity {
+  string device_id = 1;
+  string key_id = 2;
+  string display_name = 3;
+  string platform = 4;
+  bytes hpke_public_key = 5;
+  uint64 key_generation = 6;
+  int64 created_at_unix_millis = 7;
+  int64 expires_at_unix_millis = 8;
+  reserved 9 to 31;
+  reserved "private_key", "apns_token";
+}
+
+enum DeviceEnrollmentState {
+  DEVICE_ENROLLMENT_STATE_UNSPECIFIED = 0;
+  DEVICE_ENROLLMENT_STATE_PENDING = 1;
+  DEVICE_ENROLLMENT_STATE_ACTIVE = 2;
+  DEVICE_ENROLLMENT_STATE_REJECTED = 3;
+  DEVICE_ENROLLMENT_STATE_REVOKED = 4;
+}
+
+// Enrollment is confirmed locally by Justin on both devices. The short
+// confirmation value itself is never stored or transported by Kaname.
+message DeviceEnrollmentChallenge {
+  SchemaVersion schema_version = 1;
+  string enrollment_id = 2;
+  DevicePublicIdentity proposed_device = 3;
+  bytes mac_nonce = 4;
+  bytes confirmation_digest = 5;
+  int64 expires_at_unix_millis = 6;
+  reserved 7 to 31;
+  reserved "confirmation_code", "private_key";
+}
+
+message DeviceEnrollmentDecision {
+  string enrollment_id = 1;
+  DeviceEnrollmentState state = 2;
+  string mac_device_id = 3;
+  bytes transcript_digest = 4;
+  int64 decided_at_unix_millis = 5;
+  reserved 6 to 15;
+}
+
+message DeviceKeyRotation {
+  string device_id = 1;
+  string previous_key_id = 2;
+  DevicePublicIdentity next_identity = 3;
+  bytes transcript_digest = 4;
+  int64 rotated_at_unix_millis = 5;
+  reserved 6 to 15;
+}
+
+message DeviceRevocation {
+  string device_id = 1;
+  string key_id = 2;
+  int64 revoked_at_unix_millis = 3;
+  string reason_code = 4;
+  reserved 5 to 15;
+}
+
+// This exact serialized header is used as HPKE authenticated data. Relays may
+// decode it for routing but cannot alter it without making decryption fail.
+message SyncAuthenticatedHeader {
+  SchemaVersion schema_version = 1;
+  string envelope_id = 2;
+  string sender_device_id = 3;
+  string sender_key_id = 4;
+  string recipient_device_id = 5;
+  string recipient_key_id = 6;
+  uint64 sender_sequence = 7;
+  bytes previous_envelope_digest = 8;
+  int64 sent_at_unix_millis = 9;
+  int64 expires_at_unix_millis = 10;
+  string payload_kind = 11;
+  bytes plaintext_digest = 12;
+  string content_type = 13;
+  reserved 14 to 31;
+  reserved "plaintext", "notification_preview";
+}
+
+// RFC 9180 authenticated HPKE using X25519, HKDF-SHA256, and ChaCha20-Poly1305.
+// authenticated_header is retained byte-for-byte and is never reconstructed
+// for integrity checks.
+message EncryptedSyncEnvelope {
+  bytes authenticated_header = 1;
+  bytes encapsulated_key = 2;
+  bytes ciphertext = 3;
+  reserved 4 to 15;
+  reserved "plaintext", "private_key", "shared_secret";
+}
+
+enum SyncReceiptState {
+  SYNC_RECEIPT_STATE_UNSPECIFIED = 0;
+  SYNC_RECEIPT_STATE_RECEIVED = 1;
+  SYNC_RECEIPT_STATE_DECRYPTED = 2;
+  SYNC_RECEIPT_STATE_POLICY_ACCEPTED = 3;
+  SYNC_RECEIPT_STATE_APPLIED = 4;
+  SYNC_RECEIPT_STATE_REJECTED = 5;
+  SYNC_RECEIPT_STATE_RESYNC_REQUIRED = 6;
+}
+
+message SyncReceipt {
+  string envelope_id = 1;
+  string sender_device_id = 2;
+  uint64 sender_sequence = 3;
+  SyncReceiptState state = 4;
+  string reason_code = 5;
+  uint64 mac_store_position = 6;
+  int64 recorded_at_unix_millis = 7;
+  reserved 8 to 15;
+}

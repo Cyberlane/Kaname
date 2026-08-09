@@ -31,6 +31,22 @@
       "1": "REPLAY_BASIS_EVENTS",
       "2": "REPLAY_BASIS_SNAPSHOT",
       "3": "REPLAY_BASIS_RESYNC_REQUIRED"
+    },
+    "sync.DeviceEnrollmentState": {
+      "0": "DEVICE_ENROLLMENT_STATE_UNSPECIFIED",
+      "1": "DEVICE_ENROLLMENT_STATE_PENDING",
+      "2": "DEVICE_ENROLLMENT_STATE_ACTIVE",
+      "3": "DEVICE_ENROLLMENT_STATE_REJECTED",
+      "4": "DEVICE_ENROLLMENT_STATE_REVOKED"
+    },
+    "sync.SyncReceiptState": {
+      "0": "SYNC_RECEIPT_STATE_UNSPECIFIED",
+      "1": "SYNC_RECEIPT_STATE_RECEIVED",
+      "2": "SYNC_RECEIPT_STATE_DECRYPTED",
+      "3": "SYNC_RECEIPT_STATE_POLICY_ACCEPTED",
+      "4": "SYNC_RECEIPT_STATE_APPLIED",
+      "5": "SYNC_RECEIPT_STATE_REJECTED",
+      "6": "SYNC_RECEIPT_STATE_RESYNC_REQUIRED"
     }
   },
   "messages": {
@@ -203,6 +219,73 @@
       "4": "bytes checksum",
       "5": "uint32 projection_schema_version",
       "6": "bytes state"
+    },
+    "sync.DeviceEnrollmentChallenge": {
+      "1": "SchemaVersion schema_version",
+      "2": "string enrollment_id",
+      "3": "DevicePublicIdentity proposed_device",
+      "4": "bytes mac_nonce",
+      "5": "bytes confirmation_digest",
+      "6": "int64 expires_at_unix_millis"
+    },
+    "sync.DeviceEnrollmentDecision": {
+      "1": "string enrollment_id",
+      "2": "DeviceEnrollmentState state",
+      "3": "string mac_device_id",
+      "4": "bytes transcript_digest",
+      "5": "int64 decided_at_unix_millis"
+    },
+    "sync.DeviceKeyRotation": {
+      "1": "string device_id",
+      "2": "string previous_key_id",
+      "3": "DevicePublicIdentity next_identity",
+      "4": "bytes transcript_digest",
+      "5": "int64 rotated_at_unix_millis"
+    },
+    "sync.DevicePublicIdentity": {
+      "1": "string device_id",
+      "2": "string key_id",
+      "3": "string display_name",
+      "4": "string platform",
+      "5": "bytes hpke_public_key",
+      "6": "uint64 key_generation",
+      "7": "int64 created_at_unix_millis",
+      "8": "int64 expires_at_unix_millis"
+    },
+    "sync.DeviceRevocation": {
+      "1": "string device_id",
+      "2": "string key_id",
+      "3": "int64 revoked_at_unix_millis",
+      "4": "string reason_code"
+    },
+    "sync.EncryptedSyncEnvelope": {
+      "1": "bytes authenticated_header",
+      "2": "bytes encapsulated_key",
+      "3": "bytes ciphertext"
+    },
+    "sync.SyncAuthenticatedHeader": {
+      "1": "SchemaVersion schema_version",
+      "10": "int64 expires_at_unix_millis",
+      "11": "string payload_kind",
+      "12": "bytes plaintext_digest",
+      "13": "string content_type",
+      "2": "string envelope_id",
+      "3": "string sender_device_id",
+      "4": "string sender_key_id",
+      "5": "string recipient_device_id",
+      "6": "string recipient_key_id",
+      "7": "uint64 sender_sequence",
+      "8": "bytes previous_envelope_digest",
+      "9": "int64 sent_at_unix_millis"
+    },
+    "sync.SyncReceipt": {
+      "1": "string envelope_id",
+      "2": "string sender_device_id",
+      "3": "uint64 sender_sequence",
+      "4": "SyncReceiptState state",
+      "5": "string reason_code",
+      "6": "uint64 mac_store_position",
+      "7": "int64 recorded_at_unix_millis"
     }
   }
 }
