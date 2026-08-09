@@ -1,5 +1,6 @@
 import Foundation
 import KanameLocalCore
+import Darwin
 
 private enum ServiceError: Error {
     case usage
@@ -54,10 +55,9 @@ private struct Arguments {
     }
 
     private static func value(after flag: String, in arguments: [String]) -> String? {
-        guard let index = arguments.firstIndex(of: flag), arguments.indices.contains(index + 1) else {
-            return nil
-        }
-        return arguments[index + 1]
+        zip(arguments, arguments.dropFirst())
+            .first(where: { current, _ in current == flag })?
+            .1
     }
 }
 
@@ -73,10 +73,8 @@ private final class LocalControlService: NSObject, LocalCoreControlService {
         localDeviceID: String?,
         localKeyID: String?
     ) {
-        self.coreExecutable = coreExecutable
-        self.journalDirectory = journalDirectory
-        self.localDeviceID = localDeviceID
-        self.localKeyID = localKeyID
+        (self.coreExecutable, self.journalDirectory) = (coreExecutable, journalDirectory)
+        (self.localDeviceID, self.localKeyID) = (localDeviceID, localKeyID)
     }
 
     func runScenario(_ request: Data, reply: @escaping (Data?, String) -> Void) {
@@ -87,9 +85,11 @@ private final class LocalControlService: NSObject, LocalCoreControlService {
             return
         }
         do {
+            let journal = journalDirectory.appendingPathComponent("\(fixtureID).sqlite")
             let response = try Self.runCore(
                 executable: coreExecutable,
-                arguments: ["scenario-store", fixtureID, journalDirectory.appendingPathComponent("\(fixtureID).sqlite").path],
+                arguments: ["scenario-store", fixtureID, journal.path],
+                journal: journal,
                 standardInput: nil,
                 timeout: 5
             )
@@ -111,12 +111,14 @@ private final class LocalControlService: NSObject, LocalCoreControlService {
             return
         }
         do {
+            let journal = journalDirectory.appendingPathComponent("live-provider.sqlite")
             let response = try Self.runCore(
                 executable: coreExecutable,
                 arguments: [
                     "append-event",
-                    journalDirectory.appendingPathComponent("live-provider.sqlite").path,
+                    journal.path,
                 ],
+                journal: journal,
                 standardInput: request,
                 timeout: 5
             )
@@ -176,12 +178,14 @@ private final class LocalControlService: NSObject, LocalCoreControlService {
             return
         }
         do {
+            let journal = journalDirectory.appendingPathComponent("live-provider.sqlite")
             let response = try Self.runCore(
                 executable: coreExecutable,
                 arguments: [
                     operation,
-                    journalDirectory.appendingPathComponent("live-provider.sqlite").path,
+                    journal.path,
                 ] + extraArguments,
+                journal: journal,
                 standardInput: request,
                 timeout: 5
             )
@@ -218,19 +222,21 @@ private final class LocalControlService: NSObject, LocalCoreControlService {
     private static func runCore(
         executable: URL,
         arguments: [String],
+        journal: URL,
         standardInput: Data?,
         timeout: TimeInterval
     ) throws -> Data {
         guard FileManager.default.isExecutableFile(atPath: executable.path) else {
             throw LocalCoreRunnerError.unavailable
         }
-        guard let journalPath = arguments.last else {
-            throw LocalCoreRunnerError.unavailable
-        }
+        let journalDirectory = journal.deletingLastPathComponent()
         try FileManager.default.createDirectory(
-            at: URL(fileURLWithPath: journalPath).deletingLastPathComponent(),
+            at: journalDirectory,
             withIntermediateDirectories: true
         )
+        guard chmod(journalDirectory.path, 0o700) == 0 else {
+            throw LocalCoreRunnerError.unavailable
+        }
         let process = Process()
         let standardOutput = Pipe()
         let standardError = Pipe()
@@ -261,6 +267,9 @@ private final class LocalControlService: NSObject, LocalCoreControlService {
         guard process.terminationStatus == 0 else {
             throw LocalCoreRunnerError.failed(code: "core_failed")
         }
+        guard chmod(journal.path, 0o600) == 0 else {
+            throw LocalCoreRunnerError.failed(code: "journal_permissions")
+        }
         return output
     }
 }
@@ -273,10 +282,14 @@ private final class ListenerDelegate: NSObject, NSXPCListenerDelegate {
     }
 
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
+        configure(connection)
+        return true
+    }
+
+    private func configure(_ connection: NSXPCConnection) {
         connection.exportedInterface = NSXPCInterface(with: LocalCoreControlService.self)
         connection.exportedObject = service
         connection.activate()
-        return true
     }
 }
 
