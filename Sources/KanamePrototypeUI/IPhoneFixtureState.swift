@@ -1,9 +1,8 @@
 #if os(iOS)
-/// Ephemeral state for the Phase 0 iPhone fixture. It intentionally remains in
-/// the prototype target: no provider, account, queue, or approval is persisted
-/// or contacted by this build.
+/// Deterministic content used by domains that are not connected yet. Device
+/// enrollment and reachability are owned separately by the production mobile
+/// shell, so fixture state cannot claim transport authority.
 struct IPhoneFixtureState {
-    var isMacReachable = false
     var queuedCommands = PhoneQueuedCommand.fixtureItems
     var notificationRoute: PhoneNotificationRoute?
     var newDraftRoute: IPhoneNewDraftRoute?

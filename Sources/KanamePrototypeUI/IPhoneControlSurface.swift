@@ -3,12 +3,14 @@ import SwiftUI
 import UIKit
 import KanameDomain
 import KanameFixtures
+import KanameMobileSync
 
 public struct IPhoneControlSurface: View {
     @State private var selectedTab: IPhoneTab = .home
     @State private var workProjection: IPhoneWorkProjection = .inbox
     @State private var fixtureState = IPhoneFixtureState()
     @State private var showsSettings = false
+    @StateObject private var mobileShell = IPhoneProductionShellModel.simulator()
 
     public init() {
         let polarNight = UIColor(red: 46 / 255, green: 52 / 255, blue: 64 / 255, alpha: 1)
@@ -31,6 +33,10 @@ public struct IPhoneControlSurface: View {
     }
 
     public var body: some View {
+        let isMacReachable = Binding(
+            get: { mobileShell.isMacReachable },
+            set: { mobileShell.setSimulatedReachability($0) }
+        )
         ZStack {
             Nord.polarNight0
                 .ignoresSafeArea()
@@ -38,9 +44,10 @@ public struct IPhoneControlSurface: View {
             TabView(selection: $selectedTab) {
                 NavigationStack {
                     IPhoneCommandCenter(
-                        isMacReachable: $fixtureState.isMacReachable,
+                        isMacReachable: isMacReachable,
                         queuedCommands: $fixtureState.queuedCommands,
                         approvalReceipt: $fixtureState.approvalReceipt,
+                        mobileShell: mobileShell,
                         startNewDraft: {
                             fixtureState.newDraftRoute = IPhoneNewDraftRoute(projectName: nil)
                         },
@@ -63,7 +70,7 @@ public struct IPhoneControlSurface: View {
                 NavigationStack {
                     IPhoneWorkHub(
                         projection: $workProjection,
-                        isMacReachable: $fixtureState.isMacReachable,
+                        isMacReachable: isMacReachable,
                         queuedCommands: $fixtureState.queuedCommands,
                         approvalReceipt: $fixtureState.approvalReceipt,
                         startNewDraft: {
@@ -81,7 +88,7 @@ public struct IPhoneControlSurface: View {
 
                 NavigationStack {
                     IPhoneProjectsHub(
-                        isMacReachable: $fixtureState.isMacReachable,
+                        isMacReachable: isMacReachable,
                         queuedCommands: $fixtureState.queuedCommands,
                         approvalReceipt: $fixtureState.approvalReceipt,
                         startNewDraft: { projectName in
@@ -99,7 +106,7 @@ public struct IPhoneControlSurface: View {
 
                 NavigationStack {
                     IPhoneOperationsHub(
-                        isMacReachable: $fixtureState.isMacReachable,
+                        isMacReachable: isMacReachable,
                         queuedCommands: $fixtureState.queuedCommands,
                         approvalReceipt: $fixtureState.approvalReceipt,
                         openApproval: { fixtureState.notificationRoute = .calendarApproval }
@@ -115,7 +122,7 @@ public struct IPhoneControlSurface: View {
 
                 NavigationStack {
                     IPhoneLibraryHub(
-                        isMacReachable: fixtureState.isMacReachable,
+                        isMacReachable: mobileShell.isMacReachable,
                         queuedCount: fixtureState.queuedCommands.count,
                         openSettings: { showsSettings = true }
                     )
@@ -146,7 +153,7 @@ public struct IPhoneControlSurface: View {
         .sheet(item: $fixtureState.notificationRoute) { route in
             IPhoneApprovalSheet(
                 fixture: route.fixture,
-                isMacReachable: fixtureState.isMacReachable,
+                isMacReachable: mobileShell.isMacReachable,
                 approvalReceipt: $fixtureState.approvalReceipt
             )
         }
@@ -201,6 +208,7 @@ private struct IPhoneCommandCenter: View {
     @Binding var isMacReachable: Bool
     @Binding var queuedCommands: [PhoneQueuedCommand]
     @Binding var approvalReceipt: String?
+    @ObservedObject var mobileShell: IPhoneProductionShellModel
     let startNewDraft: () -> Void
     let chooseTab: (IPhoneTab) -> Void
     let chooseWorkProjection: (IPhoneWorkProjection) -> Void
@@ -219,8 +227,8 @@ private struct IPhoneCommandCenter: View {
                 )
 
                 NavigationLink {
-                    IPhoneQueueView(
-                        isMacReachable: $isMacReachable,
+                    IPhoneConnectionView(
+                        mobileShell: mobileShell,
                         queuedCommands: $queuedCommands
                     )
                 } label: {
@@ -364,6 +372,122 @@ private struct IPhoneCommandCenter: View {
             await IPhoneFixtureRefresh.wait()
             localNotice = "Command Centre refreshed locally. No Mac, provider, or account was contacted."
         }
+    }
+}
+
+private struct IPhoneConnectionView: View {
+    @ObservedObject var mobileShell: IPhoneProductionShellModel
+    @Binding var queuedCommands: [PhoneQueuedCommand]
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                IPhoneControlTitle(
+                    title: "Device connection",
+                    eyebrow: "ENCRYPTED MOBILE SHELL",
+                    trailingLabel: "Simulator"
+                )
+
+                VStack(alignment: .leading, spacing: 14) {
+                    Label(
+                        mobileShell.snapshot.phase.displayName,
+                        systemImage: mobileShell.snapshot.phase.symbolName
+                    )
+                    .font(.headline)
+                    .foregroundStyle(mobileShell.snapshot.phase.tint)
+
+                    IPhoneMetricRow(
+                        label: "Device",
+                        value: mobileShell.snapshot.deviceID,
+                        icon: "iphone",
+                        tint: Nord.frost1
+                    )
+                    IPhoneMetricRow(
+                        label: "Reachability",
+                        value: mobileShell.snapshot.reachability.displayName,
+                        icon: "network",
+                        tint: mobileShell.isMacReachable ? Nord.auroraGreen : Nord.auroraYellow
+                    )
+                    IPhoneMetricRow(
+                        label: "Queued locally",
+                        value: "\(queuedCommands.count)",
+                        icon: "tray.full.fill",
+                        tint: Nord.frost2
+                    )
+                }
+                .padding(16)
+                .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+                if let confirmationCode = mobileShell.confirmationCode {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Compare on both devices")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Nord.frost1)
+                        Text(confirmationCode)
+                            .font(.system(.title, design: .monospaced, weight: .bold))
+                            .tracking(5)
+                        Text("This value exists only in memory and is absent from the enrollment request. No Mac received it.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(16)
+                    .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                }
+
+                VStack(spacing: 10) {
+                    if mobileShell.snapshot.phase == .unenrolled {
+                        Button("Prepare simulator enrollment") {
+                            mobileShell.prepareSimulatorEnrollment()
+                        }
+                        .buttonStyle(.borderedProminent)
+                    } else {
+                        Button("Remove ephemeral enrollment", role: .destructive) {
+                            mobileShell.resetSimulatorEnrollment()
+                        }
+                        .buttonStyle(.bordered)
+                    }
+
+                    Button(mobileShell.isMacReachable ? "Simulate Mac unavailable" : "Simulate Mac reachable") {
+                        mobileShell.setSimulatedReachability(!mobileShell.isMacReachable)
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .frame(maxWidth: .infinity)
+
+                if let statusMessage = mobileShell.statusMessage {
+                    IPhoneFixtureNotice(text: statusMessage)
+                }
+
+                NavigationLink {
+                    IPhoneQueueView(
+                        isMacReachable: Binding(
+                            get: { mobileShell.isMacReachable },
+                            set: { mobileShell.setSimulatedReachability($0) }
+                        ),
+                        queuedCommands: $queuedCommands
+                    )
+                } label: {
+                    IPhoneNavigationTile(
+                        "Offline queue",
+                        detail: "\(queuedCommands.count) editable items",
+                        icon: "tray.full.fill",
+                        tint: Nord.frost2
+                    )
+                }
+                .buttonStyle(.plain)
+
+                IPhoneFixtureBoundaryCard(
+                    title: "Live operations remain off",
+                    detail: "This production shell exercises enrollment state, ephemeral key custody, reachability, and honest receipts. It creates no Keychain item, network connection, physical-device enrollment, relay record, or notification."
+                )
+            }
+            .padding(16)
+            .padding(.bottom, 20)
+        }
+        .background(Nord.polarNight0)
+        .navigationTitle("Connection")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 

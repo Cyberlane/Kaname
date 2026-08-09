@@ -8,6 +8,7 @@
 
 # Swift Package Manager
 /.build/
+/iOS/KanameIPhonePrototype.xcodeproj/project.xcworkspace/
 
 # Rust build output
 **/target/

@@ -6,7 +6,7 @@ let package = Package(
     name: "Kaname",
     platforms: [
         .macOS(.v13),
-        .iOS(.v16),
+        .iOS(.v17),
     ],
     products: [
         .library(name: "KanameDomain", targets: ["KanameDomain"]),
@@ -64,7 +64,7 @@ let package = Package(
         ),
         .target(
             name: "KanamePrototypeUI",
-            dependencies: ["KanameDomain", "KanameFixtures"]
+            dependencies: ["KanameDomain", "KanameFixtures", "KanameMobileSync"]
         ),
         .executableTarget(
             name: "KanamePrototype",

@@ -1,0 +1,107 @@
+import CryptoKit
+import Foundation
+import KanameMobileSync
+import KanameProtocol
+import Testing
+
+struct MobileEnrollmentShellTests {
+    private let now: Int64 = 1_786_220_000_000
+
+    @Test
+    func proposalKeepsConfirmationCodeOutOfDurableStateAndWire() async throws {
+        guard #available(macOS 14.0, iOS 17.0, *) else { return }
+        let keyStore = InMemoryMobileSyncPrivateKeyStore()
+        let shell = try MobileEnrollmentShell(
+            deviceID: "iphone-justin",
+            displayName: "Justin's iPhone",
+            keyStore: keyStore,
+            entropy: FixedEnrollmentEntropy()
+        )
+
+        let proposal = try await shell.prepareEnrollment(
+            enrollmentID: "enrollment-1",
+            keyID: "iphone-key-1",
+            keyGeneration: 1,
+            createdAtUnixMillis: now,
+            expiresAtUnixMillis: now + 60_000
+        )
+        let snapshot = await shell.snapshot()
+        let wire = try proposal.challenge.serializedData()
+
+        #expect(proposal.confirmationCode == "204681")
+        #expect(snapshot.phase == .awaitingLocalConfirmation)
+        #expect(snapshot.enrollmentID == "enrollment-1")
+        #expect(snapshot.keyID == "iphone-key-1")
+        #expect(!wire.contains(Data("204681".utf8)))
+        #expect(proposal.challenge.confirmationDigest.count == 32)
+        #expect(await keyStore.storedKeyIDs() == ["iphone-key-1"])
+    }
+
+    @Test
+    func authorityReceiptAndReachabilityDriveExplicitShellState() async throws {
+        guard #available(macOS 14.0, iOS 17.0, *) else { return }
+        let shell = try MobileEnrollmentShell(
+            deviceID: "iphone-justin",
+            displayName: "Justin's iPhone",
+            keyStore: InMemoryMobileSyncPrivateKeyStore(),
+            entropy: FixedEnrollmentEntropy()
+        )
+        _ = try await shell.prepareEnrollment(
+            enrollmentID: "enrollment-1",
+            keyID: "iphone-key-1",
+            keyGeneration: 1,
+            createdAtUnixMillis: now,
+            expiresAtUnixMillis: now + 60_000
+        )
+        await shell.setReachability(.reachable)
+
+        var receipt = Kaname_V1_DeviceEnrollmentReceipt()
+        receipt.enrollmentID = "enrollment-1"
+        receipt.deviceID = "iphone-justin"
+        receipt.state = .active
+        receipt.reasonCode = "enrollment_activated"
+        try await shell.applyEnrollmentReceipt(receipt)
+
+        let snapshot = await shell.snapshot()
+        #expect(snapshot.phase == .active)
+        #expect(snapshot.reachability == .reachable)
+        #expect(snapshot.reasonCode == "enrollment_activated")
+    }
+
+    @Test
+    func mismatchedReceiptCannotActivateAnotherDevice() async throws {
+        guard #available(macOS 14.0, iOS 17.0, *) else { return }
+        let shell = try MobileEnrollmentShell(
+            deviceID: "iphone-justin",
+            displayName: "Justin's iPhone",
+            keyStore: InMemoryMobileSyncPrivateKeyStore(),
+            entropy: FixedEnrollmentEntropy()
+        )
+        _ = try await shell.prepareEnrollment(
+            enrollmentID: "enrollment-1",
+            keyID: "iphone-key-1",
+            keyGeneration: 1,
+            createdAtUnixMillis: now,
+            expiresAtUnixMillis: now + 60_000
+        )
+        var receipt = Kaname_V1_DeviceEnrollmentReceipt()
+        receipt.enrollmentID = "enrollment-other"
+        receipt.deviceID = "iphone-justin"
+        receipt.state = .active
+
+        await #expect(throws: MobileEnrollmentShellError.receiptMismatch) {
+            try await shell.applyEnrollmentReceipt(receipt)
+        }
+        #expect(await shell.snapshot().phase == .awaitingLocalConfirmation)
+    }
+}
+
+private struct FixedEnrollmentEntropy: MobileEnrollmentEntropy {
+    func nonce(count: Int) throws -> Data {
+        Data(repeating: 0x4d, count: count)
+    }
+
+    func confirmationCode() -> String {
+        "204681"
+    }
+}
