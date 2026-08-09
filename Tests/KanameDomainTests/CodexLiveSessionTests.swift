@@ -199,6 +199,77 @@ struct CodexLiveSessionTests {
     }
 
     @Test
+    func requestUserInputMapsToQuestionRequestedWithStableIDsAndRedactedJournalMetadata() throws {
+        let requestID = CodexAppServerRequestID.string("request-user-input-042")
+        let questionText = "test-only-question-text-must-not-be-persisted"
+        let firstOptionID = "option-001"
+        let firstOptionLabel = "test-only-option-label-must-not-be-persisted"
+        let secondOptionID = "option-002"
+        let parameters = try JSONSerialization.data(withJSONObject: [
+            "threadId": "native-thread-question-001",
+            "turnId": "native-turn-question-001",
+            "questions": [[
+                "id": "question-001",
+                "question": questionText,
+                "options": [
+                    ["id": firstOptionID, "label": firstOptionLabel],
+                    ["id": secondOptionID, "label": "second test-only option"],
+                ],
+            ]],
+        ])
+        let event = CodexRunEvent.from(.serverRequest(
+            id: requestID,
+            method: "item/tool/requestUserInput",
+            parameters: parameters
+        )).withApprovalID(requestID.stableValue)
+
+        #expect(event.kind == .questionRequested)
+        #expect(event.approvalID == "string-request-user-input-042")
+        #expect(event.threadID == "native-thread-question-001")
+        #expect(event.turnID == "native-turn-question-001")
+        let retainedPayload = try #require(event.payload)
+        let payloadObject = try #require(
+            JSONSerialization.jsonObject(with: retainedPayload) as? [String: Any]
+        )
+        let payloadQuestions = try #require(payloadObject["questions"] as? [[String: Any]])
+        let payloadQuestion = try #require(payloadQuestions.first)
+        let payloadOptions = try #require(payloadQuestion["options"] as? [[String: Any]])
+        #expect(payloadQuestion["id"] as? String == "question-001")
+        #expect(payloadOptions.compactMap { $0["id"] as? String } == [firstOptionID, secondOptionID])
+
+        let context = CodexJournalContext(
+            projectID: KanameID(rawValue: "kaname"),
+            threadID: KanameID(rawValue: "thread-001"),
+            runID: KanameID(rawValue: "run-001"),
+            providerInstance: codexInstance()
+        )
+        let envelope = event.journalEnvelope(
+            context: context,
+            ordinal: 8,
+            occurredAt: Date(timeIntervalSince1970: 1_762_000_000)
+        )
+        let retainedMetadata = try #require(
+            JSONSerialization.jsonObject(with: envelope.payload.value) as? [String: Any]
+        )
+
+        #expect(envelope.kind == "question.requested")
+        #expect(envelope.causationID == "string-request-user-input-042")
+        #expect(Set(retainedMetadata.keys) == Set([
+            "nativeKind",
+            "nativeType",
+            "nativeThreadID",
+            "nativeTurnID",
+            "approvalID",
+            "textByteCount",
+            "rawPayloadByteCount",
+            "payloadWasTruncated",
+        ]))
+        let encodedMetadata = String(decoding: envelope.payload.value, as: UTF8.self)
+        #expect(!encodedMetadata.contains(questionText))
+        #expect(!encodedMetadata.contains(firstOptionLabel))
+    }
+
+    @Test
     func onlyActiveMcpStartupStatesStopTheRun() throws {
         let disabled = try notification(
             method: "mcpServer/startupStatus/updated",
