@@ -12,6 +12,7 @@ final class IPhoneProductionShellModel: ObservableObject {
     @Published private(set) var confirmationCode: String?
     @Published private(set) var statusMessage: String?
     @Published private(set) var queuedCommands: [MobileQueuedCommand]
+    @Published private(set) var syncReadOnlyReason: String?
 
     private let shell: MobileEnrollmentShell
     private let syncSession: MobileSyncSession
@@ -108,6 +109,30 @@ final class IPhoneProductionShellModel: ObservableObject {
         }
     }
 
+    func simulateReadOnlyRecovery() {
+        Task {
+            do {
+                try await syncSession.enterReadOnly(reason: "simulated_authority_recovery")
+                syncReadOnlyReason = await syncSession.snapshot().readOnlyReason
+                statusMessage = "Recovery mode preserves visible history and queue state while rejecting sync mutations."
+            } catch {
+                statusMessage = "Recovery mode failed safely: \(error)"
+            }
+        }
+    }
+
+    func finishSimulatedRecovery() {
+        Task {
+            do {
+                try await syncSession.leaveReadOnlyForRecovery()
+                syncReadOnlyReason = await syncSession.snapshot().readOnlyReason
+                statusMessage = "Simulator recovery completed; queue editing is available again."
+            } catch {
+                statusMessage = "Recovery completion failed safely: \(error)"
+            }
+        }
+    }
+
     func prepareSimulatorEnrollment(now: Date = Date()) {
         Task {
             do {
@@ -145,7 +170,9 @@ final class IPhoneProductionShellModel: ObservableObject {
     private func restoreSimulatorQueue(seed: [MobileQueuedCommand]?) async {
         do {
             try await syncSession.restore()
-            let restored = await syncSession.snapshot().queuedCommands
+            let snapshot = await syncSession.snapshot()
+            let restored = snapshot.queuedCommands
+            syncReadOnlyReason = snapshot.readOnlyReason
             if restored.isEmpty, let seed {
                 try await syncSession.replaceQueuedCommands(seed)
                 queuedCommands = await syncSession.snapshot().queuedCommands
@@ -156,6 +183,7 @@ final class IPhoneProductionShellModel: ObservableObject {
             queuedCommands = []
             statusMessage = "Protected queue state could not be restored; mobile sync is read-only: \(error)"
             try? await syncSession.enterReadOnly(reason: "protected_state_restore_failed")
+            syncReadOnlyReason = "protected_state_restore_failed"
         }
     }
 }

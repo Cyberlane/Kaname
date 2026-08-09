@@ -180,6 +180,42 @@ struct MobileSyncSessionTests {
         #expect(try await store.load() == expected)
     }
 
+    @Test
+    func readOnlyDegradationPreservesInspectionAndRejectsEveryMutation() async throws {
+        guard #available(macOS 14.0, iOS 17.0, *) else { return }
+        let fixture = try Fixture()
+        let command = queuedCommand(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000031")!,
+            position: 1,
+            body: "Preserve this during recovery"
+        )
+        try await fixture.phone.replaceQueuedCommands([command])
+        try await fixture.phone.enterReadOnly(reason: "authority_backup_recovery")
+
+        let visible = await fixture.phone.snapshot()
+        #expect(visible.queuedCommands == [command])
+        #expect(visible.readOnlyReason == "authority_backup_recovery")
+        await #expect(throws: MobileSyncSessionError.readOnly("authority_backup_recovery")) {
+            try await fixture.phone.replaceQueuedCommands([])
+        }
+        await #expect(throws: MobileSyncSessionError.readOnly("authority_backup_recovery")) {
+            try await fixture.phone.sendPayload(
+                payloadID: "blocked-during-recovery",
+                payloadKind: "sync.receipt",
+                plaintext: Data([0x01]),
+                nowUnixMillis: now
+            )
+        }
+        await #expect(throws: MobileSyncSessionError.readOnly("authority_backup_recovery")) {
+            try await fixture.phone.pollIncoming(nowUnixMillis: now)
+        }
+
+        let restored = try fixture.makePhoneSession()
+        try await restored.restore()
+        #expect((await restored.snapshot()).readOnlyReason == "authority_backup_recovery")
+        #expect((await restored.snapshot()).queuedCommands == [command])
+    }
+
     @available(macOS 14.0, iOS 17.0, *)
     private struct Fixture {
         let phoneKey = Curve25519.KeyAgreement.PrivateKey()

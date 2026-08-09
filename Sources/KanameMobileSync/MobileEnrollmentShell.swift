@@ -52,6 +52,19 @@ public struct MobileEnrollmentProposal: Sendable {
     }
 }
 
+public struct MobileKeyRotationProposal: Sendable {
+    public let rotation: Kaname_V1_DeviceKeyRotation
+    public let nextIdentityDigest: Data
+
+    public init(
+        rotation: Kaname_V1_DeviceKeyRotation,
+        nextIdentityDigest: Data
+    ) {
+        self.rotation = rotation
+        self.nextIdentityDigest = nextIdentityDigest
+    }
+}
+
 @available(macOS 14.0, iOS 17.0, *)
 public protocol MobileSyncPrivateKeyStore: Sendable {
     func createKey(keyID: String) async throws -> Curve25519.KeyAgreement.PublicKey
@@ -137,17 +150,30 @@ public struct SystemMobileEnrollmentEntropy: MobileEnrollmentEntropy {
 
 public enum MobileEnrollmentShellError: Error, Equatable, Sendable {
     case enrollmentAlreadyPending
+    case enrollmentNotAllowed
+    case enrollmentNotActive
     case invalidConfirmationCode
     case receiptMismatch
+    case rotationAlreadyPending
+    case rotationMismatch
+    case revocationMismatch
     case unsupportedReceiptState
 }
 
 @available(macOS 14.0, iOS 17.0, *)
 public actor MobileEnrollmentShell {
+    private struct PendingRotation: Sendable {
+        let previousKeyID: String
+        let nextKeyID: String
+        let nextGeneration: UInt64
+        let nextIdentityDigest: Data
+    }
+
     private let keyStore: any MobileSyncPrivateKeyStore
     private let entropy: any MobileEnrollmentEntropy
     private let displayName: String
     private var state: MobileEnrollmentSnapshot
+    private var pendingRotation: PendingRotation?
 
     public init(
         deviceID: String,
@@ -182,8 +208,10 @@ public actor MobileEnrollmentShell {
         createdAtUnixMillis: Int64,
         expiresAtUnixMillis: Int64
     ) async throws -> MobileEnrollmentProposal {
-        guard state.phase != .awaitingLocalConfirmation else {
-            throw MobileEnrollmentShellError.enrollmentAlreadyPending
+        guard state.phase == .unenrolled else {
+            throw state.phase == .awaitingLocalConfirmation
+                ? MobileEnrollmentShellError.enrollmentAlreadyPending
+                : MobileEnrollmentShellError.enrollmentNotAllowed
         }
         let publicKey = try await keyStore.createKey(keyID: keyID)
         do {
@@ -255,7 +283,109 @@ public actor MobileEnrollmentShell {
         state.reasonCode = receipt.reasonCode
     }
 
+    public func prepareKeyRotation(
+        nextKeyID: String,
+        nextGeneration: UInt64,
+        rotatedAtUnixMillis: Int64,
+        expiresAtUnixMillis: Int64
+    ) async throws -> MobileKeyRotationProposal {
+        guard state.phase == .active, let previousKeyID = state.keyID else {
+            throw MobileEnrollmentShellError.enrollmentNotActive
+        }
+        guard pendingRotation == nil else {
+            throw MobileEnrollmentShellError.rotationAlreadyPending
+        }
+        guard nextGeneration == state.keyGeneration + 1 else {
+            throw MobileEnrollmentShellError.rotationMismatch
+        }
+        let publicKey = try await keyStore.createKey(keyID: nextKeyID)
+        do {
+            let identity = try MobileSyncCipher.publicIdentity(
+                deviceID: state.deviceID,
+                keyID: nextKeyID,
+                displayName: displayName,
+                platform: "ios",
+                keyGeneration: nextGeneration,
+                publicKey: publicKey,
+                createdAtUnixMillis: rotatedAtUnixMillis,
+                expiresAtUnixMillis: expiresAtUnixMillis
+            )
+            let identityWire = try identity.serializedData()
+            let nextIdentityDigest = Data(SHA256.hash(data: identityWire))
+            var transcript = Data("kaname.key-rotation.v1".utf8)
+            transcript.append(Data(state.deviceID.utf8))
+            transcript.append(Data(previousKeyID.utf8))
+            transcript.append(identityWire)
+            transcript.append(Data(String(rotatedAtUnixMillis).utf8))
+
+            var rotation = Kaname_V1_DeviceKeyRotation()
+            rotation.deviceID = state.deviceID
+            rotation.previousKeyID = previousKeyID
+            rotation.nextIdentity = identity
+            rotation.transcriptDigest = Data(SHA256.hash(data: transcript))
+            rotation.rotatedAtUnixMillis = rotatedAtUnixMillis
+            pendingRotation = PendingRotation(
+                previousKeyID: previousKeyID,
+                nextKeyID: nextKeyID,
+                nextGeneration: nextGeneration,
+                nextIdentityDigest: nextIdentityDigest
+            )
+            state.reasonCode = "key_rotation_pending_mac_acceptance"
+            return MobileKeyRotationProposal(
+                rotation: rotation,
+                nextIdentityDigest: nextIdentityDigest
+            )
+        } catch {
+            try? await keyStore.deleteKey(keyID: nextKeyID)
+            throw error
+        }
+    }
+
+    public func finalizeKeyRotation(
+        acceptedNextIdentityDigest: Data
+    ) async throws {
+        guard let pendingRotation,
+              pendingRotation.nextIdentityDigest == acceptedNextIdentityDigest else {
+            throw MobileEnrollmentShellError.rotationMismatch
+        }
+        try await keyStore.deleteKey(keyID: pendingRotation.previousKeyID)
+        state.keyID = pendingRotation.nextKeyID
+        state.keyGeneration = pendingRotation.nextGeneration
+        state.reasonCode = "key_rotation_accepted"
+        self.pendingRotation = nil
+    }
+
+    public func cancelKeyRotation() async throws {
+        guard let pendingRotation else { return }
+        try await keyStore.deleteKey(keyID: pendingRotation.nextKeyID)
+        self.pendingRotation = nil
+        state.reasonCode = "key_rotation_cancelled"
+    }
+
+    public func applyRevocation(_ revocation: Kaname_V1_DeviceRevocation) async throws {
+        guard state.phase == .active,
+              revocation.deviceID == state.deviceID,
+              revocation.keyID == state.keyID,
+              !revocation.reasonCode.isEmpty else {
+            throw MobileEnrollmentShellError.revocationMismatch
+        }
+        if let pendingRotation {
+            try? await keyStore.deleteKey(keyID: pendingRotation.nextKeyID)
+            self.pendingRotation = nil
+        }
+        if let keyID = state.keyID {
+            try await keyStore.deleteKey(keyID: keyID)
+        }
+        state.phase = .revoked
+        state.reachability = .unavailable
+        state.reasonCode = revocation.reasonCode
+    }
+
     public func resetLocalEnrollment() async throws {
+        if let pendingRotation {
+            try? await keyStore.deleteKey(keyID: pendingRotation.nextKeyID)
+            self.pendingRotation = nil
+        }
         if let keyID = state.keyID {
             try await keyStore.deleteKey(keyID: keyID)
         }

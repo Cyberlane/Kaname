@@ -481,9 +481,51 @@ private struct IPhoneConnectionView: View {
                 }
                 .buttonStyle(.plain)
 
+                VStack(alignment: .leading, spacing: 12) {
+                    IPhoneSectionHeader(
+                        title: "Recovery controls",
+                        detail: "Simulator-only proof of fail-closed mobile behavior"
+                    )
+                    IPhoneMetricRow(
+                        label: "Lost device",
+                        value: "Mac revokes old key",
+                        icon: "iphone.slash",
+                        tint: Nord.auroraRed
+                    )
+                    IPhoneMetricRow(
+                        label: "Key rotation",
+                        value: "Old key retired after acceptance",
+                        icon: "key.horizontal.fill",
+                        tint: Nord.auroraYellow
+                    )
+                    IPhoneMetricRow(
+                        label: "Backup recovery",
+                        value: "Read-only replay first",
+                        icon: "externaldrive.badge.timemachine",
+                        tint: Nord.frost1
+                    )
+                    Button(
+                        mobileShell.syncReadOnlyReason == nil
+                            ? "Simulate safe read-only mode"
+                            : "Finish simulated recovery"
+                    ) {
+                        if mobileShell.syncReadOnlyReason == nil {
+                            mobileShell.simulateReadOnlyRecovery()
+                        } else {
+                            mobileShell.finishSimulatedRecovery()
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .padding(16)
+                .background(
+                    Nord.polarNight1,
+                    in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+                )
+
                 IPhoneFixtureBoundaryCard(
                     title: "Live operations remain off",
-                    detail: "This production shell exercises enrollment state, ephemeral key custody, reachability, and honest receipts. It creates no Keychain item, network connection, physical-device enrollment, relay record, or notification."
+                    detail: "This production shell exercises enrollment, protected queue state, recovery mode, and honest receipts. It creates no Keychain item, network connection, physical-device enrollment, hosted relay record, or system notification."
                 )
             }
             .padding(16)
