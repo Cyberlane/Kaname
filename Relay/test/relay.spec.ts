@@ -1,5 +1,7 @@
-import { exports } from "cloudflare:workers";
-import { beforeEach, describe, expect, it } from "vitest";
+import { env, exports } from "cloudflare:workers";
+import { createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import worker from "../src/index";
 
 const authorization = { authorization: "Bearer qualification-test-token" };
 
@@ -17,6 +19,7 @@ async function cleanup(): Promise<void> {
 
 describe("Phase 3 ciphertext relay", () => {
   beforeEach(cleanup);
+  afterEach(() => vi.unstubAllGlobals());
 
   it("requires authentication and never accepts a changed duplicate", async () => {
     const unauthenticated = await exports.default.fetch("https://relay.test/v1/deliveries?recipient=mac-authority&after=0&limit=10");
@@ -100,7 +103,113 @@ describe("Phase 3 ciphertext relay", () => {
     expect(push.status).toBe(204);
     expect((await request("/v1/devices/iphone-justin/push-token", { method: "DELETE" })).status).toBe(204);
   });
+
+  it("sends only the safe APNs hint and records the provider result", async () => {
+    const bindings = {
+      DB: env.DB,
+      RELAY_BEARER_TOKEN: env.RELAY_BEARER_TOKEN,
+      APNS_KEY_P8: await ephemeralAPNsPrivateKey(),
+      APNS_KEY_ID: "QUALIFY123",
+      APNS_TEAM_ID: "TEAM123456",
+      APNS_TOPIC: "com.cyberlane.kaname.iphoneprototype",
+    };
+    let observed: Request | undefined;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      observed = new Request(input, init);
+      return new Response(null, { status: 200 });
+    }));
+
+    let ctx = createExecutionContext();
+    const registered = await worker.fetch(
+      incomingRequest("/v1/devices/iphone-justin/push-token", {
+        method: "PUT",
+        body: JSON.stringify({ token: "ab".repeat(32), environment: "sandbox" }),
+      }),
+      bindings,
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(registered.status).toBe(204);
+
+    ctx = createExecutionContext();
+    const sent = await worker.fetch(
+      incomingRequest("/v1/envelopes", {
+        method: "POST",
+        body: JSON.stringify({
+          ...envelope("encrypted-work-content"),
+          senderDeviceID: "mac-authority",
+          recipientDeviceID: "iphone-justin",
+        }),
+      }),
+      bindings,
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(sent.status).toBe(201);
+
+    const apnsRequest = expectDefined(observed);
+    expect(apnsRequest.url).toBe(`https://api.sandbox.push.apple.com/3/device/${"ab".repeat(32)}`);
+    expect(apnsRequest.method).toBe("POST");
+    expect(apnsRequest.headers.get("apns-topic")).toBe("com.cyberlane.kaname.iphoneprototype");
+    expect(apnsRequest.headers.get("apns-push-type")).toBe("alert");
+    expect(apnsRequest.headers.get("apns-priority")).toBe("10");
+    expect(await apnsRequest.json()).toEqual({
+      aps: {
+        alert: {
+          title: "Kaname",
+          body: "Open Kaname to view this update.",
+        },
+        sound: "default",
+        "content-available": 1,
+      },
+    });
+
+    const authorization = expectDefined(apnsRequest.headers.get("authorization"));
+    const token = expectDefined(authorization.match(/^bearer (.+)$/)?.[1]);
+    const [header, claims, signature] = token.split(".");
+    expect(JSON.parse(decodeBase64URL(header))).toEqual({ alg: "ES256", kid: "QUALIFY123" });
+    expect(JSON.parse(decodeBase64URL(claims))).toMatchObject({ iss: "TEAM123456" });
+    expect(signature.length).toBeGreaterThan(40);
+
+    const stored = await env.DB.prepare(
+      "SELECT last_push_status FROM push_devices WHERE device_id = ?1",
+    ).bind("iphone-justin").first<{ last_push_status: number }>();
+    expect(stored?.last_push_status).toBe(200);
+  });
 });
+
+const IncomingRequest = Request<unknown, IncomingRequestCfProperties>;
+
+function incomingRequest(path: string, init: RequestInit): Request {
+  return new IncomingRequest(`https://relay.test${path}`, {
+    ...init,
+    headers: { ...authorization, "content-type": "application/json", ...init.headers },
+  });
+}
+
+async function ephemeralAPNsPrivateKey(): Promise<string> {
+  const pair = await crypto.subtle.generateKey(
+    { name: "ECDSA", namedCurve: "P-256" },
+    true,
+    ["sign", "verify"],
+  );
+  const bytes = new Uint8Array(await crypto.subtle.exportKey("pkcs8", pair.privateKey));
+  const encoded = btoa(String.fromCharCode(...bytes));
+  const lines = encoded.match(/.{1,64}/g) ?? [];
+  return `-----BEGIN PRIVATE KEY-----\n${lines.join("\n")}\n-----END PRIVATE KEY-----`;
+}
+
+function decodeBase64URL(value: string): string {
+  const padded = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+  return atob(padded);
+}
+
+function expectDefined<T>(value: T | null | undefined): T {
+  if (value === null || value === undefined) {
+    throw new Error("Expected value to be defined");
+  }
+  return value;
+}
 
 function envelope(value: string, sequence = 1): Record<string, unknown> {
   return {
