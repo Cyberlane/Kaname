@@ -390,7 +390,7 @@ public struct DesktopPreferences: Codable, Equatable, Sendable {
 }
 
 public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
-    public static let currentVersion = 9
+    public static let currentVersion = 10
 
     public var version: Int
     public var projects: [DesktopProject]
@@ -546,7 +546,7 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
     }
 
     func migratedToCurrent(now: Int64) throws -> DesktopAppSnapshot {
-        guard (1...8).contains(version) else { throw DesktopModelError.unsupportedVersion }
+        guard (1...9).contains(version) else { throw DesktopModelError.unsupportedVersion }
         var migrated = self
         migrated.version = Self.currentVersion
         if migrated.domains == .empty {
@@ -1002,17 +1002,44 @@ public final class DesktopAppModel: ObservableObject {
         return selected
     }
 
-    public func attachNativeProviderRun(id: String, nativeThreadID: String, nativeTurnID: String) {
+    public func attachNativeProviderRun(id: String, nativeThreadID: String, nativeTurnID: String?) {
+        let timestamp = now()
         mutate { snapshot in
             guard let index = snapshot.operations.providerRuns.firstIndex(where: { $0.id == id }) else { return }
             snapshot.operations.providerRuns[index].nativeThreadID = nativeThreadID
-            snapshot.operations.providerRuns[index].nativeTurnID = nativeTurnID
+            if let nativeTurnID {
+                snapshot.operations.providerRuns[index].nativeTurnID = nativeTurnID
+            }
+            guard let threadID = snapshot.operations.providerRuns[index].threadID else { return }
+            let provider = snapshot.operations.providerRuns[index].provider
+            let sessionID = "session-\(Self.stableLocalDigest("\(provider)|\(nativeThreadID)"))"
+            let descriptor = Self.providerSessionDescriptor(provider: provider)
+            let session = DesktopProviderSessionRecord(
+                id: sessionID,
+                threadID: threadID,
+                provider: provider,
+                nativeSessionID: nativeThreadID,
+                source: "Kaname native adapter",
+                capabilities: descriptor.capabilities,
+                limitations: descriptor.limitations,
+                state: .running,
+                lastReconciledAtUnixMillis: timestamp
+            )
+            if let sessionIndex = snapshot.operations.providerSessions.firstIndex(where: { $0.id == sessionID }) {
+                snapshot.operations.providerSessions[sessionIndex] = session
+            } else {
+                snapshot.operations.providerSessions.append(session)
+            }
         }
     }
 
-    public func latestNativeThreadID(threadID: String) -> String? {
+    public func latestNativeThreadID(threadID: String, provider: String? = nil) -> String? {
         snapshot.operations.providerRuns
-            .filter { $0.threadID == threadID && $0.nativeThreadID != nil }
+            .filter {
+                guard $0.threadID == threadID, $0.nativeThreadID != nil else { return false }
+                guard let provider else { return true }
+                return $0.provider.caseInsensitiveCompare(provider) == .orderedSame
+            }
             .max { $0.startedAtUnixMillis < $1.startedAtUnixMillis }?
             .nativeThreadID
     }
@@ -1057,35 +1084,54 @@ public final class DesktopAppModel: ObservableObject {
     }
 
     public func completeProviderRun(id: String, tokenUsage: Int? = nil) {
-        let timestamp = now()
-        mutate { snapshot in
-            guard let index = snapshot.operations.providerRuns.firstIndex(where: { $0.id == id }) else { return }
-            snapshot.operations.providerRuns[index].state = .completed
-            snapshot.operations.providerRuns[index].tokenUsage = tokenUsage
-            snapshot.operations.providerRuns[index].costSummary = tokenUsage.map { "\($0) tokens" } ?? "Usage not reported"
-            snapshot.operations.providerRuns[index].completedAtUnixMillis = timestamp
-            guard let threadID = snapshot.operations.providerRuns[index].threadID,
-                  let threadIndex = snapshot.threads.firstIndex(where: { $0.id == threadID }) else { return }
-            let assistant = snapshot.threads[threadIndex].messages.last(where: { $0.role == .assistant })?.body
-            snapshot.threads[threadIndex].summary = assistant.map(Self.provisionalConversationTitle) ?? "Provider completed."
-            snapshot.threads[threadIndex].attention = .needsResponse
-            snapshot.threads[threadIndex].unread = true
-            snapshot.threads[threadIndex].updatedAtUnixMillis = timestamp
-        }
+        finishProviderRun(id: id, outcome: .completed(tokenUsage))
     }
 
     public func stopProviderRun(id: String, interrupted: Bool, error: String) {
+        finishProviderRun(id: id, outcome: .stopped(interrupted: interrupted, error: Self.normalized(error)))
+    }
+
+    private enum ProviderRunOutcome {
+        case completed(Int?)
+        case stopped(interrupted: Bool, error: String)
+    }
+
+    private func finishProviderRun(id: String, outcome: ProviderRunOutcome) {
         let timestamp = now()
         mutate { snapshot in
             guard let index = snapshot.operations.providerRuns.firstIndex(where: { $0.id == id }) else { return }
-            snapshot.operations.providerRuns[index].state = interrupted ? .interrupted : .failed
-            snapshot.operations.providerRuns[index].errorSummary = Self.normalized(error)
-            snapshot.operations.providerRuns[index].costSummary = interrupted ? "Interrupted" : "Failed"
+            let sessionState: DesktopProviderSessionState
+            let threadSummary: String
+            let attention: DesktopAttention
+            switch outcome {
+            case let .completed(tokenUsage):
+                snapshot.operations.providerRuns[index].state = .completed
+                snapshot.operations.providerRuns[index].tokenUsage = tokenUsage
+                snapshot.operations.providerRuns[index].costSummary = tokenUsage.map { "\($0) tokens" } ?? "Usage not reported"
+                sessionState = .ready
+                let threadID = snapshot.operations.providerRuns[index].threadID
+                let assistant = snapshot.threads.first(where: { $0.id == threadID })?.messages.last(where: { $0.role == .assistant })?.body
+                threadSummary = assistant.map(Self.provisionalConversationTitle) ?? "Provider completed."
+                attention = .needsResponse
+            case let .stopped(interrupted, error):
+                snapshot.operations.providerRuns[index].state = interrupted ? .interrupted : .failed
+                snapshot.operations.providerRuns[index].errorSummary = error
+                snapshot.operations.providerRuns[index].costSummary = interrupted ? "Interrupted" : "Failed"
+                sessionState = interrupted ? .recoverable : .interrupted
+                threadSummary = interrupted ? "Provider turn interrupted. You can retry it." : error
+                attention = interrupted ? .needsResponse : .failed
+            }
             snapshot.operations.providerRuns[index].completedAtUnixMillis = timestamp
+            Self.reconcileProviderSession(
+                snapshot: &snapshot,
+                runIndex: index,
+                state: sessionState,
+                timestamp: timestamp
+            )
             guard let threadID = snapshot.operations.providerRuns[index].threadID,
                   let threadIndex = snapshot.threads.firstIndex(where: { $0.id == threadID }) else { return }
-            snapshot.threads[threadIndex].summary = interrupted ? "Provider turn interrupted. You can retry it." : Self.normalized(error)
-            snapshot.threads[threadIndex].attention = interrupted ? .needsResponse : .failed
+            snapshot.threads[threadIndex].summary = threadSummary
+            snapshot.threads[threadIndex].attention = attention
             snapshot.threads[threadIndex].unread = true
             snapshot.threads[threadIndex].updatedAtUnixMillis = timestamp
         }
@@ -1110,6 +1156,22 @@ public final class DesktopAppModel: ObservableObject {
                 }
             }
         }
+    }
+
+    private static func reconcileProviderSession(
+        snapshot: inout DesktopAppSnapshot,
+        runIndex: Int,
+        state: DesktopProviderSessionState,
+        timestamp: Int64
+    ) {
+        let run = snapshot.operations.providerRuns[runIndex]
+        guard let nativeID = run.nativeThreadID,
+              let sessionIndex = snapshot.operations.providerSessions.firstIndex(where: {
+                  $0.nativeSessionID == nativeID
+                      && $0.provider.caseInsensitiveCompare(run.provider) == .orderedSame
+              }) else { return }
+        snapshot.operations.providerSessions[sessionIndex].state = state
+        snapshot.operations.providerSessions[sessionIndex].lastReconciledAtUnixMillis = timestamp
     }
 
     @discardableResult
@@ -1542,11 +1604,234 @@ public final class DesktopAppModel: ObservableObject {
             state: .proposed,
             createdAtUnixMillis: timestamp
         )
+        let decision = DesktopComparisonDecisionRecord(
+            id: "decision-\(comparison.id)",
+            comparisonID: comparison.id,
+            frozenContextDigest: Self.stableLocalDigest(cleanBrief),
+            selectedRunID: nil,
+            continuedThreadID: nil,
+            decidedAtUnixMillis: nil
+        )
         mutate { snapshot in
             snapshot.operations.providerRuns.append(contentsOf: runs)
             snapshot.operations.comparisons.append(comparison)
+            snapshot.operations.comparisonDecisions.append(decision)
         }
         return comparison.id
+    }
+
+    public func prepareProviderComparison(id: String, projectID: String?) -> [String] {
+        guard let comparisonIndex = snapshot.operations.comparisons.firstIndex(where: {
+            $0.id == id && $0.state == .proposed
+        }) else { return [] }
+        let comparison = snapshot.operations.comparisons[comparisonIndex]
+        let timestamp = now()
+        var preparedRunIDs: [String] = []
+        mutate { snapshot in
+            for runID in comparison.runIDs {
+                guard let runIndex = snapshot.operations.providerRuns.firstIndex(where: {
+                    $0.id == runID && $0.threadID == nil
+                }) else { continue }
+                let provider = snapshot.operations.providerRuns[runIndex].provider
+                let threadID = UUID().uuidString.lowercased()
+                let messageID = UUID().uuidString.lowercased()
+                let thread = DesktopThread(
+                    id: threadID,
+                    projectID: projectID,
+                    title: "\(comparison.title) · \(provider)",
+                    summary: "Frozen equal-context comparison run",
+                    kind: .coding,
+                    attention: .queued,
+                    provider: provider,
+                    model: "Use provider default",
+                    updatedAtUnixMillis: timestamp,
+                    messages: [DesktopMessage(
+                        id: messageID,
+                        role: .user,
+                        body: comparison.brief,
+                        createdAtUnixMillis: timestamp
+                    )]
+                )
+                snapshot.threads.append(thread)
+                snapshot.operations.providerRuns[runIndex].threadID = threadID
+                snapshot.operations.providerRuns[runIndex].sourceMessageID = messageID
+                snapshot.operations.providerRuns[runIndex].model = "Use provider default"
+                snapshot.operations.providerRuns[runIndex].costSummary = "Queued from frozen context"
+                preparedRunIDs.append(runID)
+            }
+            snapshot.operations.comparisons[comparisonIndex].state = preparedRunIDs.isEmpty ? .failed : .running
+        }
+        return preparedRunIDs
+    }
+
+    public func selectProviderComparisonResult(comparisonID: String, runID: String) -> String? {
+        guard let comparison = snapshot.operations.comparisons.first(where: { $0.id == comparisonID }),
+              comparison.runIDs.contains(runID),
+              let run = snapshot.operations.providerRuns.first(where: { $0.id == runID && $0.state == .completed }),
+              let threadID = run.threadID else { return nil }
+        let timestamp = now()
+        mutate { snapshot in
+            if let index = snapshot.operations.comparisons.firstIndex(where: { $0.id == comparisonID }) {
+                snapshot.operations.comparisons[index].state = .completed
+            }
+            if let index = snapshot.operations.comparisonDecisions.firstIndex(where: { $0.comparisonID == comparisonID }) {
+                snapshot.operations.comparisonDecisions[index].selectedRunID = runID
+                snapshot.operations.comparisonDecisions[index].continuedThreadID = threadID
+                snapshot.operations.comparisonDecisions[index].decidedAtUnixMillis = timestamp
+            }
+        }
+        return threadID
+    }
+
+    @discardableResult
+    public func proposeWorktree(
+        projectID: String,
+        threadID: String,
+        rootWorkspacePath: String,
+        worktreePath: String,
+        branch: String,
+        baseRevision: String
+    ) -> String? {
+        let root = Self.normalized(rootWorkspacePath)
+        let target = Self.normalized(worktreePath)
+        let cleanBranch = Self.normalized(branch)
+        let cleanBase = Self.normalized(baseRevision)
+        guard snapshot.projects.contains(where: { $0.id == projectID }),
+              snapshot.threads.contains(where: { $0.id == threadID && $0.projectID == projectID }),
+              !root.isEmpty, !target.isEmpty, !cleanBranch.isEmpty, !cleanBase.isEmpty else { return nil }
+        let timestamp = now()
+        let record = DesktopWorktreeRecord(
+            id: UUID().uuidString.lowercased(),
+            projectID: projectID,
+            threadID: threadID,
+            rootWorkspacePath: root,
+            worktreePath: target,
+            branch: cleanBranch,
+            baseRevision: cleanBase,
+            headRevision: nil,
+            changedFileCount: 0,
+            diffSummary: "Not created",
+            testCommand: "",
+            testSummary: "Not run",
+            diagnosticSummary: "Not inspected",
+            state: .proposed,
+            createdAtUnixMillis: timestamp,
+            updatedAtUnixMillis: timestamp
+        )
+        mutate { $0.operations.worktrees.append(record) }
+        return record.id
+    }
+
+    public func updateWorktree(
+        id: String,
+        headRevision: String?,
+        changedFileCount: Int,
+        diffSummary: String,
+        testCommand: String? = nil,
+        testSummary: String? = nil,
+        diagnosticSummary: String? = nil,
+        state: DesktopWorktreeState
+    ) {
+        let timestamp = now()
+        mutate { snapshot in
+            guard let index = snapshot.operations.worktrees.firstIndex(where: { $0.id == id }) else { return }
+            snapshot.operations.worktrees[index].headRevision = headRevision
+            snapshot.operations.worktrees[index].changedFileCount = max(0, changedFileCount)
+            snapshot.operations.worktrees[index].diffSummary = String(diffSummary.prefix(32_000))
+            if let testCommand { snapshot.operations.worktrees[index].testCommand = String(testCommand.prefix(4_096)) }
+            if let testSummary { snapshot.operations.worktrees[index].testSummary = String(testSummary.prefix(32_000)) }
+            if let diagnosticSummary { snapshot.operations.worktrees[index].diagnosticSummary = String(diagnosticSummary.prefix(32_000)) }
+            snapshot.operations.worktrees[index].state = state
+            snapshot.operations.worktrees[index].updatedAtUnixMillis = timestamp
+        }
+    }
+
+    @discardableResult
+    public func recordQualityGate(
+        threadID: String,
+        worktreeID: String?,
+        kind: DesktopQualityGateKind,
+        command: String,
+        summary: String,
+        state: DesktopActionState,
+        artifactIDs: [String] = []
+    ) -> String? {
+        guard snapshot.threads.contains(where: { $0.id == threadID }),
+              worktreeID == nil || snapshot.operations.worktrees.contains(where: { $0.id == worktreeID }) else { return nil }
+        let record = DesktopQualityGateRecord(
+            id: UUID().uuidString.lowercased(),
+            threadID: threadID,
+            worktreeID: worktreeID,
+            kind: kind,
+            command: String(Self.normalized(command).prefix(4_096)),
+            summary: String(Self.normalized(summary).prefix(32_000)),
+            state: state,
+            artifactIDs: artifactIDs,
+            recordedAtUnixMillis: now()
+        )
+        mutate { snapshot in
+            snapshot.operations.qualityGates.removeAll {
+                $0.threadID == threadID && $0.worktreeID == worktreeID && $0.kind == kind
+            }
+            snapshot.operations.qualityGates.append(record)
+        }
+        return record.id
+    }
+
+    public func recordSubagentActivity(
+        threadID: String,
+        runID: String,
+        provider: String,
+        nativeID: String,
+        title: String,
+        detail: String,
+        state: DesktopSubagentState
+    ) {
+        let id = "subagent-\(Self.stableLocalDigest("\(runID)|\(nativeID)"))"
+        let timestamp = now()
+        mutate { snapshot in
+            if let index = snapshot.operations.subagents.firstIndex(where: { $0.id == id }) {
+                snapshot.operations.subagents[index].detail = String(detail.prefix(8_192))
+                snapshot.operations.subagents[index].state = state
+                snapshot.operations.subagents[index].completedAtUnixMillis = [.completed, .failed, .interrupted].contains(state) ? timestamp : nil
+            } else {
+                snapshot.operations.subagents.append(DesktopSubagentRecord(
+                    id: id,
+                    threadID: threadID,
+                    runID: runID,
+                    parentID: nil,
+                    provider: provider,
+                    title: String(Self.normalized(title).prefix(240)),
+                    detail: String(detail.prefix(8_192)),
+                    state: state,
+                    startedAtUnixMillis: timestamp,
+                    completedAtUnixMillis: [.completed, .failed, .interrupted].contains(state) ? timestamp : nil
+                ))
+            }
+        }
+    }
+
+    public func replacePullRequests(workspaceID: String, records: [DesktopPullRequestReconciliation]) {
+        mutate { snapshot in
+            snapshot.operations.pullRequests.removeAll { $0.workspaceID == workspaceID }
+            snapshot.operations.pullRequests.append(contentsOf: records.map { record in
+                DesktopPullRequestRecord(
+                    id: "\(record.repository)#\(record.number)",
+                    workspaceID: workspaceID,
+                    repository: record.repository,
+                    number: record.number,
+                    title: record.title,
+                    url: record.url,
+                    headBranch: record.headBranch,
+                    baseBranch: record.baseBranch,
+                    checkSummary: record.checkSummary,
+                    reviewSummary: record.reviewSummary,
+                    mergeAfterIDs: record.mergeAfterIDs,
+                    state: record.state,
+                    lastReconciledAtUnixMillis: record.reconciledAtUnixMillis
+                )
+            })
+        }
     }
 
     @discardableResult
@@ -1580,6 +1865,22 @@ public final class DesktopAppModel: ObservableObject {
         )
         mutate { $0.operations.gitStackLayers.append(layer) }
         return layer.id
+    }
+
+    public func updateGitStackLayer(
+        id: String,
+        pullRequestURL: String?,
+        checkSummary: String,
+        reviewSummary: String,
+        state: DesktopActionState
+    ) {
+        mutate { snapshot in
+            guard let index = snapshot.operations.gitStackLayers.firstIndex(where: { $0.id == id }) else { return }
+            snapshot.operations.gitStackLayers[index].pullRequestURL = pullRequestURL
+            snapshot.operations.gitStackLayers[index].checkSummary = String(checkSummary.prefix(4_096))
+            snapshot.operations.gitStackLayers[index].reviewSummary = String(reviewSummary.prefix(4_096))
+            snapshot.operations.gitStackLayers[index].state = state
+        }
     }
 
     @discardableResult
@@ -1706,6 +2007,22 @@ public final class DesktopAppModel: ObservableObject {
 
     private static func stableLocalDigest(_ value: String) -> String {
         SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func providerSessionDescriptor(provider: String) -> (
+        capabilities: [String],
+        limitations: [String]
+    ) {
+        switch provider.lowercased() {
+        case "codex":
+            (["Streaming", "Persistent resume", "Questions", "Approvals", "Diff events"], [])
+        case "claude":
+            (["Streaming", "Persistent resume", "Plan mode", "Subagent events"], ["Kaname keeps writes disabled until a worktree grant is approved"])
+        case "opencode", "open code":
+            (["Streaming", "Persistent resume", "Plan agent", "Model routing"], ["Some native event kinds remain provider-specific"])
+        default:
+            ([], ["This provider is not supported by the installed Kaname build"])
+        }
     }
 
     private static func normalized(_ value: String) -> String {

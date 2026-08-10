@@ -138,6 +138,7 @@ public enum KanameConversationServiceError: Error, Equatable, LocalizedError, Se
 }
 
 public struct KanameConversationServiceStore: Sendable {
+    public static let maximumEvidenceBytes = 16 * 1_024 * 1_024
     public let rootDirectory: URL
 
     public init(rootDirectory: URL) {
@@ -197,6 +198,41 @@ public struct KanameConversationServiceStore: Sendable {
         if FileManager.default.fileExists(atPath: url.path) {
             try FileManager.default.removeItem(at: url)
         }
+    }
+
+    public func appendEvidence(_ payload: Data, threadID: String, runID: String) throws {
+        try validate(threadID)
+        try validate(runID)
+        guard !payload.isEmpty else { return }
+        let url = try evidenceURL(threadID: threadID, runID: runID)
+        let existingSize = ((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+        guard existingSize < Self.maximumEvidenceBytes else { return }
+        let retained = payload.prefix(Self.maximumEvidenceBytes - existingSize)
+        if !FileManager.default.fileExists(atPath: url.path) {
+            try Data(retained).write(to: url, options: .atomic)
+        } else {
+            let handle = try FileHandle(forWritingTo: url)
+            defer { try? handle.close() }
+            try handle.seekToEnd()
+            try handle.write(contentsOf: retained)
+        }
+        let separator = Data("\n".utf8)
+        if existingSize + retained.count < Self.maximumEvidenceBytes {
+            let handle = try FileHandle(forWritingTo: url)
+            defer { try? handle.close() }
+            try handle.seekToEnd()
+            try handle.write(contentsOf: separator)
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
+    public func evidenceURL(threadID: String, runID: String) throws -> URL {
+        try validate(threadID)
+        try validate(runID)
+        let directory = try privateDirectory(
+            threadDirectory(threadID).appending(path: "Evidence", directoryHint: .isDirectory)
+        )
+        return directory.appending(path: "\(runID).jsonl")
     }
 
     public func writeWorkerState(_ state: KanameConversationWorkerState) throws {

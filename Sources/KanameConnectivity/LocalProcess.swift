@@ -228,6 +228,36 @@ enum LocalProcess {
         }
     }
 
+    static func captureSuccessfulText(
+        executable: String,
+        arguments: [String],
+        workingDirectory: URL,
+        timeout: Duration,
+        environmentRemovals: Set<String> = [],
+        maximumOutputBytes: Int = 1_048_576,
+        preserveWhitespace: Bool = false
+    ) async throws -> String {
+        let output = try await capture(
+            executable: executable,
+            arguments: arguments,
+            workingDirectory: workingDirectory,
+            timeout: timeout,
+            environmentRemovals: environmentRemovals,
+            maximumOutputBytes: maximumOutputBytes
+        )
+        guard output.exitStatus == 0, !output.standardOutputWasTruncated, !output.standardErrorWasTruncated else {
+            let detail = output.standardError.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw ProviderConnectivityError.processExited(
+                command: ([executable] + arguments).joined(separator: " "),
+                status: output.exitStatus,
+                detail: detail.isEmpty ? nil : String(detail.prefix(4_096))
+            )
+        }
+        return preserveWhitespace
+            ? output.standardOutput
+            : output.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private struct BoundedData: Sendable {
         let data: Data
         let truncated: Bool

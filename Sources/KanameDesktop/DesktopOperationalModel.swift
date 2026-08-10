@@ -292,6 +292,12 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
     public var composerDrafts: [String: String]
     public var comparisons: [DesktopComparisonRecord]
     public var automationRuns: [DesktopAutomationRunRecord]
+    public var providerSessions: [DesktopProviderSessionRecord]
+    public var worktrees: [DesktopWorktreeRecord]
+    public var subagents: [DesktopSubagentRecord]
+    public var comparisonDecisions: [DesktopComparisonDecisionRecord]
+    public var pullRequests: [DesktopPullRequestRecord]
+    public var qualityGates: [DesktopQualityGateRecord]
     public var audit: [DesktopAuditRecord]
 
     public static let empty = DesktopOperationalSnapshot(
@@ -305,6 +311,12 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         composerDrafts: [:],
         comparisons: [],
         automationRuns: [],
+        providerSessions: [],
+        worktrees: [],
+        subagents: [],
+        comparisonDecisions: [],
+        pullRequests: [],
+        qualityGates: [],
         audit: []
     )
 
@@ -319,6 +331,12 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         case composerDrafts
         case comparisons
         case automationRuns
+        case providerSessions
+        case worktrees
+        case subagents
+        case comparisonDecisions
+        case pullRequests
+        case qualityGates
         case audit
     }
 
@@ -333,6 +351,12 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         composerDrafts: [String: String],
         comparisons: [DesktopComparisonRecord],
         automationRuns: [DesktopAutomationRunRecord],
+        providerSessions: [DesktopProviderSessionRecord],
+        worktrees: [DesktopWorktreeRecord],
+        subagents: [DesktopSubagentRecord],
+        comparisonDecisions: [DesktopComparisonDecisionRecord],
+        pullRequests: [DesktopPullRequestRecord],
+        qualityGates: [DesktopQualityGateRecord],
         audit: [DesktopAuditRecord]
     ) {
         self.researchSources = researchSources
@@ -345,6 +369,12 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         self.composerDrafts = composerDrafts
         self.comparisons = comparisons
         self.automationRuns = automationRuns
+        self.providerSessions = providerSessions
+        self.worktrees = worktrees
+        self.subagents = subagents
+        self.comparisonDecisions = comparisonDecisions
+        self.pullRequests = pullRequests
+        self.qualityGates = qualityGates
         self.audit = audit
     }
 
@@ -360,6 +390,12 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         composerDrafts = try container.decodeIfPresent([String: String].self, forKey: .composerDrafts) ?? [:]
         comparisons = try container.decode([DesktopComparisonRecord].self, forKey: .comparisons)
         automationRuns = try container.decode([DesktopAutomationRunRecord].self, forKey: .automationRuns)
+        providerSessions = try container.decodeIfPresent([DesktopProviderSessionRecord].self, forKey: .providerSessions) ?? []
+        worktrees = try container.decodeIfPresent([DesktopWorktreeRecord].self, forKey: .worktrees) ?? []
+        subagents = try container.decodeIfPresent([DesktopSubagentRecord].self, forKey: .subagents) ?? []
+        comparisonDecisions = try container.decodeIfPresent([DesktopComparisonDecisionRecord].self, forKey: .comparisonDecisions) ?? []
+        pullRequests = try container.decodeIfPresent([DesktopPullRequestRecord].self, forKey: .pullRequests) ?? []
+        qualityGates = try container.decodeIfPresent([DesktopQualityGateRecord].self, forKey: .qualityGates) ?? []
         audit = try container.decode([DesktopAuditRecord].self, forKey: .audit)
     }
 }

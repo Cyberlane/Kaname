@@ -121,19 +121,27 @@ private enum KanameConversationWorker {
                 processIdentifier: ProcessInfo.processInfo.processIdentifier,
                 updatedAtUnixMillis: Int64(Date().timeIntervalSince1970 * 1_000)
             ))
-            if activeWorkspace != request.workspacePath {
+            if request.provider.caseInsensitiveCompare("Codex") == .orderedSame {
+                if activeWorkspace != request.workspacePath {
+                    await session?.close()
+                    session = makeSession(request)
+                    activeWorkspace = request.workspacePath
+                    sessionHasNativeThread = false
+                }
+                guard let session else { continue }
+                sessionHasNativeThread = await processCodex(
+                    request,
+                    session: session,
+                    store: store,
+                    continueExistingSession: sessionHasNativeThread
+                ) || sessionHasNativeThread
+            } else {
                 await session?.close()
-                session = makeSession(request)
-                activeWorkspace = request.workspacePath
+                session = nil
+                activeWorkspace = nil
                 sessionHasNativeThread = false
+                _ = await processNativeProvider(request, store: store)
             }
-            guard let session else { continue }
-            sessionHasNativeThread = await process(
-                request,
-                session: session,
-                store: store,
-                continueExistingSession: sessionHasNativeThread
-            ) || sessionHasNativeThread
             try store.finishRequest(at: requestURL, threadID: threadID)
         }
         await session?.close()
@@ -145,17 +153,13 @@ private enum KanameConversationWorker {
         ))
     }
 
-    private static func process(
+    private static func processCodex(
         _ request: KanameConversationServiceRequest,
         session: CodexLiveSession,
         store: KanameConversationServiceStore,
         continueExistingSession: Bool
     ) async -> Bool {
         let writer = ServiceEventWriter(store: store, request: request)
-        guard request.provider.caseInsensitiveCompare("Codex") == .orderedSame else {
-            try? await writer.append(kind: .serviceFailed, text: "\(request.provider) is not supported by this conversation worker.")
-            return false
-        }
         let runner = LocalCoreRunner(
             machService: request.localCoreMachService,
             serviceRequirement: request.localCoreRequirement
@@ -176,6 +180,9 @@ private enum KanameConversationWorker {
         let terminal = _Concurrency.Task<CodexRunEventKind, Error> {
             for await event in stream {
                 _ = try await recorder.record(event)
+                if let payload = event.payload {
+                    try store.appendEvidence(payload, threadID: request.threadID, runID: request.runID)
+                }
                 try await writer.append(kind: .provider, providerEvent: event)
                 if [.providerCompleted, .runFailed, .runInterrupted].contains(event.kind) { return event.kind }
             }
@@ -223,6 +230,76 @@ private enum KanameConversationWorker {
         }
         controls.cancel()
         return didStartSession
+    }
+
+    private static func processNativeProvider(
+        _ request: KanameConversationServiceRequest,
+        store: KanameConversationServiceStore
+    ) async -> Bool {
+        let writer = ServiceEventWriter(store: store, request: request)
+        guard let driver = NativeConversationDriver(providerName: request.provider),
+              let providerID = ProviderInstanceID(rawValue: "\(driver.rawValue)Local") else {
+            try? await writer.append(kind: .serviceFailed, text: "\(request.provider) has no installed Kaname conversation adapter.")
+            return false
+        }
+        let providerKind: ProviderDriverKind = driver == .claude ? .claudeAgent : .openCode
+        let provider = ProviderInstance(id: providerID, driver: providerKind, displayName: "\(driver.displayName) local")
+        let runner = LocalCoreRunner(
+            machService: request.localCoreMachService,
+            serviceRequirement: request.localCoreRequirement
+        )
+        let recorder = CodexJournalRecorder(
+            runner: runner,
+            context: CodexJournalContext(
+                projectID: KanameID(rawValue: request.projectID),
+                threadID: KanameID(rawValue: request.threadID),
+                runID: KanameID(rawValue: request.runID),
+                providerInstance: provider
+            )
+        )
+        let session = NativeProviderConversationSession()
+        let stream = await session.events(for: NativeConversationRequest(
+            driver: driver,
+            prompt: request.prompt,
+            workspace: URL(fileURLWithPath: request.workspacePath),
+            model: request.model,
+            reasoningEffort: request.reasoningEffort,
+            resumableSessionID: request.resumableNativeThreadID
+        ))
+        try? await writer.append(
+            kind: .serviceStarted,
+            providerEvent: CodexRunEvent(
+                kind: .runStarted,
+                nativeType: "kaname/service-started",
+                threadID: request.resumableNativeThreadID
+            )
+        )
+        let controls = _Concurrency.Task<Void, Never> {
+            while !_Concurrency.Task.isCancelled {
+                if store.consumeInterrupt(threadID: request.threadID, runID: request.runID) {
+                    await session.interrupt()
+                }
+                try? await _Concurrency.Task.sleep(for: .milliseconds(100))
+            }
+        }
+        var completed = false
+        do {
+            for await event in stream {
+                _ = try await recorder.record(event)
+                if let payload = event.payload {
+                    try store.appendEvidence(payload, threadID: request.threadID, runID: request.runID)
+                }
+                try await writer.append(kind: .provider, providerEvent: event)
+                if [.providerCompleted, .runFailed, .runInterrupted].contains(event.kind) {
+                    completed = event.kind == .providerCompleted
+                    break
+                }
+            }
+        } catch {
+            try? await writer.append(kind: .serviceFailed, text: error.localizedDescription)
+        }
+        controls.cancel()
+        return completed
     }
 
     private static func makeSession(_ request: KanameConversationServiceRequest) -> CodexLiveSession {

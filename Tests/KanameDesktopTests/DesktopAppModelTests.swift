@@ -191,6 +191,54 @@ struct DesktopAppModelTests {
     }
 
     @Test
+    func versionNineWorkspaceAddsCodingControlCollections() throws {
+        let snapshot = DesktopAppSnapshot.starter(now: 1_000)
+        var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot)) as? [String: Any])
+        object["version"] = 9
+        var operations = try #require(object["operations"] as? [String: Any])
+        for key in ["providerSessions", "worktrees", "subagents", "comparisonDecisions", "pullRequests", "qualityGates"] {
+            operations.removeValue(forKey: key)
+        }
+        object["operations"] = operations
+        let model = DesktopAppModel(
+            store: MemoryDesktopStateStore(data: try JSONSerialization.data(withJSONObject: object)),
+            now: { 2_000 }
+        )
+
+        #expect(model.snapshot.version == DesktopAppSnapshot.currentVersion)
+        #expect(model.snapshot.operations.providerSessions.isEmpty)
+        #expect(model.snapshot.operations.worktrees.isEmpty)
+        #expect(model.snapshot.operations.subagents.isEmpty)
+        #expect(model.snapshot.operations.comparisonDecisions.isEmpty)
+        #expect(model.snapshot.operations.pullRequests.isEmpty)
+        #expect(model.snapshot.operations.qualityGates.isEmpty)
+    }
+
+    @Test
+    func equalContextComparisonCreatesSeparateThreadsAndExplicitSelection() throws {
+        let model = DesktopAppModel(store: MemoryDesktopStateStore(), now: { 1_000 })
+        let projectID = try #require(model.snapshot.projects.first?.id)
+        let comparisonID = try #require(model.createProviderComparison(
+            title: "Compare safely",
+            brief: "Review this exact frozen brief.",
+            providers: ["Codex", "Claude", "OpenCode"]
+        ))
+        let runIDs = model.prepareProviderComparison(id: comparisonID, projectID: projectID)
+        #expect(runIDs.count == 3)
+        let threads = runIDs.compactMap { model.providerRun(id: $0)?.threadID }.compactMap(model.thread(id:))
+        #expect(Set(threads.map(\.id)).count == 3)
+        #expect(Set(threads.flatMap(\.messages).map(\.body)) == ["Review this exact frozen brief."])
+        #expect(Set(threads.map(\.provider)) == ["Codex", "Claude", "OpenCode"])
+
+        let selectedRunID = try #require(runIDs.first)
+        _ = model.beginProviderRun(id: selectedRunID)
+        model.completeProviderRun(id: selectedRunID, tokenUsage: 123)
+        let selectedThreadID = model.selectProviderComparisonResult(comparisonID: comparisonID, runID: selectedRunID)
+        #expect(selectedThreadID == model.providerRun(id: selectedRunID)?.threadID)
+        #expect(model.snapshot.operations.comparisonDecisions.first { $0.comparisonID == comparisonID }?.selectedRunID == selectedRunID)
+    }
+
+    @Test
     func provisionalConversationTitleIsSingleLineAndBounded() throws {
         let model = DesktopAppModel(store: MemoryDesktopStateStore(), now: { 1_000 })
         let threadID = model.createConversation(kind: .coding, projectID: nil)

@@ -41,5 +41,6 @@ public struct KanameDesktopEnvironment: Equatable, Sendable {
     public var runtimeDirectory: URL { applicationSupportRoot.appending(path: "Runtime", directoryHint: .isDirectory) }
     public var instanceLockURL: URL { runtimeDirectory.appending(path: "desktop-instance.lock") }
     public var updateDirectory: URL { applicationSupportRoot.appending(path: "Updates", directoryHint: .isDirectory) }
+    public var worktreeDirectory: URL { applicationSupportRoot.appending(path: "Worktrees", directoryHint: .isDirectory) }
     public var healthHandshakeURL: URL { runtimeDirectory.appending(path: "ui-health.json") }
 }

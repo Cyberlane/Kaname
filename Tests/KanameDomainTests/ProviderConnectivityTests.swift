@@ -313,6 +313,10 @@ struct ProviderConnectivityTests {
         #expect(try store.events(threadID: "thread-1") == [event])
         try store.acknowledge(event)
         #expect(try store.events(threadID: "thread-1").isEmpty)
+        try store.appendEvidence(Data("{\"type\":\"message\"}".utf8), threadID: "thread-1", runID: "run-1")
+        let evidenceURL = try store.evidenceURL(threadID: "thread-1", runID: "run-1")
+        #expect(try Data(contentsOf: evidenceURL).starts(with: Data("{\"type\":\"message\"}".utf8)))
+        #expect((try FileManager.default.attributesOfItem(atPath: evidenceURL.path)[.posixPermissions] as? NSNumber)?.intValue == 0o600)
         try store.requestInterrupt(threadID: "thread-1", runID: "run-1")
         #expect(store.consumeInterrupt(threadID: "thread-1", runID: "run-1"))
         #expect(!store.consumeInterrupt(threadID: "thread-1", runID: "run-1"))
@@ -327,6 +331,50 @@ struct ProviderConnectivityTests {
         #expect(answer.1 == ["question-1": ["Proceed"]])
         try store.finishRequest(at: queued[0].0, threadID: "thread-1")
         #expect(try store.pendingRequests(threadID: "thread-1").isEmpty)
+    }
+
+    @Test
+    func nativeConversationAdaptersPreservePlanAuthorityResumeAndStreamingEvidence() throws {
+        let workspace = URL(fileURLWithPath: "/tmp/workspace")
+        let claude = NativeConversationRequest(
+            driver: .claude,
+            prompt: "Inspect only",
+            workspace: workspace,
+            model: "Use provider default",
+            reasoningEffort: "high",
+            resumableSessionID: "claude-session"
+        )
+        let claudeArguments = NativeProviderConversationSession.arguments(for: claude)
+        #expect(claudeArguments.contains("plan"))
+        #expect(claudeArguments.contains("stream-json"))
+        #expect(claudeArguments.contains("--resume"))
+        #expect(!claudeArguments.contains("--dangerously-skip-permissions"))
+
+        var claudeParser = NativeProviderStreamParser(driver: .claude)
+        let system = Data(#"{"type":"system","session_id":"session-1"}"#.utf8)
+        let delta = Data(#"{"type":"stream_event","session_id":"session-1","event":{"delta":{"type":"text_delta","text":"Hello"}}}"#.utf8)
+        #expect(claudeParser.consume(line: system).contains { $0.kind == .sessionStarted })
+        let claudeEvents = claudeParser.consume(line: delta)
+        #expect(claudeEvents.contains { $0.kind == .messageDelta && $0.text == "Hello" })
+        #expect(claudeEvents.first?.payload == delta)
+        #expect(claudeParser.sessionID == "session-1")
+
+        let openCode = NativeConversationRequest(
+            driver: .openCode,
+            prompt: "Inspect only",
+            workspace: workspace,
+            model: "openai/gpt-5",
+            reasoningEffort: "high",
+            resumableSessionID: "oc-session"
+        )
+        let openCodeArguments = NativeProviderConversationSession.arguments(for: openCode)
+        #expect(openCodeArguments.contains("plan"))
+        #expect(openCodeArguments.contains("--session"))
+        #expect(!openCodeArguments.contains("--auto"))
+        var openCodeParser = NativeProviderStreamParser(driver: .openCode)
+        let text = Data(#"{"type":"text","sessionID":"oc-session","part":{"type":"text","text":"Ready"}}"#.utf8)
+        #expect(openCodeParser.consume(line: text).contains { $0.kind == .messageDelta && $0.text == "Ready" })
+        #expect(openCodeParser.sessionID == "oc-session")
     }
 
     @Test
@@ -468,6 +516,67 @@ struct ProviderConnectivityTests {
         )
         #expect(result.text == "Plan only.")
         #expect(result.sessionIdentifier == "fixture")
+    }
+
+    @Test
+    func managedWorktreeLifecycleRequiresExactApprovalAndRefusesDirtyCleanup() async throws {
+        let sandbox = FileManager.default.temporaryDirectory
+            .appending(path: "kaname-worktree-test-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let repository = sandbox.appending(path: "repository", directoryHint: .isDirectory)
+        let managedRoot = sandbox.appending(path: "managed", directoryHint: .isDirectory)
+        let target = managedRoot.appending(path: "feature", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: sandbox) }
+        try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+        _ = try await LocalProcess.capture(executable: "git", arguments: ["init", "-b", "main"], workingDirectory: repository, timeout: .seconds(5))
+        try Data("foundation\n".utf8).write(to: repository.appending(path: "README.md"))
+        _ = try await LocalProcess.capture(executable: "git", arguments: ["add", "README.md"], workingDirectory: repository, timeout: .seconds(5))
+        _ = try await LocalProcess.capture(
+            executable: "git",
+            arguments: ["-c", "user.name=Kaname Test", "-c", "user.email=test@invalid.example", "-c", "commit.gpgsign=false", "commit", "-m", "initial"],
+            workingDirectory: repository,
+            timeout: .seconds(5)
+        )
+        let service = DesktopGitControlService(managedRoot: managedRoot, timeout: .seconds(5))
+        let snapshot = try await service.createWorktree(
+            repository: repository,
+            target: target,
+            branch: "kaname/fixture",
+            baseRevision: "HEAD",
+            grant: LocalGitMutationGrant(approvalID: "approved-create", kind: .createWorktree, exactTarget: target.path)
+        )
+        #expect(snapshot.branch == "kaname/fixture")
+        #expect(snapshot.changedFiles.isEmpty)
+
+        try Data("dirty\n".utf8).write(to: target.appending(path: "dirty.txt"))
+        await #expect(throws: DesktopGitControlError.worktreeDirty) {
+            try await service.removeWorktree(
+                repository: repository,
+                target: target,
+                grant: LocalGitMutationGrant(approvalID: "approved-remove", kind: .cleanupWorktree, exactTarget: target.path)
+            )
+        }
+        try FileManager.default.removeItem(at: target.appending(path: "dirty.txt"))
+        try await service.removeWorktree(
+            repository: repository,
+            target: target,
+            grant: LocalGitMutationGrant(approvalID: "approved-remove", kind: .cleanupWorktree, exactTarget: target.path)
+        )
+        #expect(!FileManager.default.fileExists(atPath: target.path))
+    }
+
+    @Test
+    func githubPullRequestEvidenceParserPreservesChecksReviewsAndBranches() throws {
+        let fixture = Data("""
+        [{"number":42,"title":"Safe change","url":"https://github.com/example/repo/pull/42","headRefName":"feature","baseRefName":"main","state":"OPEN","mergeStateStatus":"CLEAN","statusCheckRollup":[{"conclusion":"SUCCESS"},{"conclusion":"FAILURE"}],"reviews":[{"state":"APPROVED"}]}]
+        """.utf8)
+        let result = try GitHubControlService.decodePullRequests(fixture)
+        let pullRequest = try #require(result.first)
+        #expect(pullRequest.number == 42)
+        #expect(pullRequest.headBranch == "feature")
+        #expect(pullRequest.baseBranch == "main")
+        #expect(pullRequest.checkSummary == "1/2 checks green")
+        #expect(pullRequest.reviewSummary == "Approved")
+        #expect(GitHubControlService.mergeTarget(repository: "example/repo", number: 42) == "example/repo#42")
     }
 
     private func makeFixtureExecutable(_ source: String) throws -> URL {

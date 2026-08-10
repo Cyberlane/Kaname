@@ -43,6 +43,12 @@ final class DesktopConversationRuntime: ObservableObject {
         submit(runID: replacementID)
     }
 
+    func startComparison(id: String, projectID: String?) {
+        for runID in model.prepareProviderComparison(id: id, projectID: projectID) {
+            submit(runID: runID)
+        }
+    }
+
     func interrupt(threadID: String) {
         guard let run = model.providerRuns(threadID: threadID).last(where: { $0.state == .running }) else { return }
         try? serviceStore.requestInterrupt(threadID: threadID, runID: run.id)
@@ -74,14 +80,6 @@ final class DesktopConversationRuntime: ObservableObject {
               let thread = model.thread(id: threadID) else {
             return
         }
-        guard run.provider.caseInsensitiveCompare("Codex") == .orderedSame else {
-            model.stopProviderRun(
-                id: run.id,
-                interrupted: false,
-                error: "\(run.provider) does not yet support the unified streaming runtime. Choose Codex or use its bounded Coding discussion surface."
-            )
-            return
-        }
         let workspace: URL
         if let projectWorkspace = model.workspaceURL(threadID: threadID) {
             workspace = projectWorkspace
@@ -109,12 +107,12 @@ final class DesktopConversationRuntime: ObservableObject {
             threadID: threadID,
             projectID: thread.projectID ?? "standalone",
             provider: run.provider,
-            model: resolvedModel(run.model),
+            model: resolvedModel(provider: run.provider, value: run.model),
             reasoningEffort: run.reasoningEffort,
             prompt: providerPrompt(thread: thread, userMessage: message.body),
             workspacePath: workspace.path,
             providerStatePath: environment.providerStateDirectory.path,
-            resumableNativeThreadID: model.latestNativeThreadID(threadID: threadID),
+            resumableNativeThreadID: model.latestNativeThreadID(threadID: threadID, provider: run.provider),
             localCoreMachService: machService,
             localCoreRequirement: requirement,
             createdAtUnixMillis: run.startedAtUnixMillis
@@ -164,8 +162,12 @@ final class DesktopConversationRuntime: ObservableObject {
     private func consume(_ serviceEvent: KanameConversationServiceEvent) {
         if serviceEvent.kind == .serviceStarted {
             _ = model.beginProviderRun(id: serviceEvent.runID)
-            if let nativeThreadID = serviceEvent.nativeThreadID, let nativeTurnID = serviceEvent.nativeTurnID {
-                model.attachNativeProviderRun(id: serviceEvent.runID, nativeThreadID: nativeThreadID, nativeTurnID: nativeTurnID)
+            if let nativeThreadID = serviceEvent.nativeThreadID {
+                model.attachNativeProviderRun(
+                    id: serviceEvent.runID,
+                    nativeThreadID: nativeThreadID,
+                    nativeTurnID: serviceEvent.nativeTurnID
+                )
             }
         }
         if serviceEvent.kind == .serviceFailed {
@@ -199,6 +201,13 @@ final class DesktopConversationRuntime: ObservableObject {
             payload: serviceEvent.rawPayloadBase64.flatMap { Data(base64Encoded: $0) },
             payloadWasTruncated: serviceEvent.payloadWasTruncated
         )
+        if let nativeThreadID = event.threadID {
+            model.attachNativeProviderRun(
+                id: serviceEvent.runID,
+                nativeThreadID: nativeThreadID,
+                nativeTurnID: event.turnID
+            )
+        }
         let record = providerEventRecord(
             event,
             id: serviceEvent.id,
@@ -213,10 +222,28 @@ final class DesktopConversationRuntime: ObservableObject {
         if event.kind == .planUpdated, let text = event.text {
             model.addProviderPlan(threadID: serviceEvent.threadID, text: text, completed: false)
         }
+        if event.kind == .toolActivity,
+           let text = event.text,
+           ["agent", "subagent", "task", "spawn"].contains(where: {
+               text.localizedCaseInsensitiveContains($0) || event.nativeType.localizedCaseInsensitiveContains($0)
+           }), let run = model.providerRun(id: serviceEvent.runID) {
+            let terminal = event.nativeType.localizedCaseInsensitiveContains("completed")
+                || event.nativeType.localizedCaseInsensitiveContains("finished")
+            model.recordSubagentActivity(
+                threadID: serviceEvent.threadID,
+                runID: serviceEvent.runID,
+                provider: run.provider,
+                nativeID: event.approvalID ?? event.nativeType,
+                title: text,
+                detail: event.nativeType,
+                state: terminal ? .completed : .running
+            )
+        }
 
         switch event.kind {
         case .providerCompleted:
             model.completeProviderRun(id: serviceEvent.runID, tokenUsage: tokenUsage(from: event.payload))
+            registerServiceEvidence(threadID: serviceEvent.threadID, runID: serviceEvent.runID)
             scheduleTitleIfNeeded(threadID: serviceEvent.threadID)
         case .runInterrupted:
             model.stopProviderRun(id: serviceEvent.runID, interrupted: true, error: event.text ?? "The provider turn was interrupted.")
@@ -270,12 +297,12 @@ final class DesktopConversationRuntime: ObservableObject {
               let thread = model.thread(id: threadID),
               thread.titleSource == .provisional,
               let firstMessage = thread.messages.first(where: { $0.role == .user })?.body,
-              let workspace = model.workspaceURL(threadID: threadID) else { return }
+              let workspace = model.workspaceURL(threadID: threadID) ?? (try? prepareStandaloneWorkspace()) else { return }
         titleTasks[threadID] = _Concurrency.Task { [weak self] in
             guard let self else { return }
             defer { titleTasks.removeValue(forKey: threadID) }
             do {
-                let title = try await generateTitle(firstMessage: firstMessage, workspace: workspace)
+                let title = try await generateTitle(provider: thread.provider, firstMessage: firstMessage, workspace: workspace)
                 if !model.applyProviderGeneratedTitle(threadID: threadID, title: title) {
                     model.markProviderTitleFallback(threadID: threadID)
                 }
@@ -285,7 +312,28 @@ final class DesktopConversationRuntime: ObservableObject {
         }
     }
 
-    private func generateTitle(firstMessage: String, workspace: URL) async throws -> String {
+    private func generateTitle(provider: String, firstMessage: String, workspace: URL) async throws -> String {
+        let prompt = "Create a concise conversation title of at most 8 words. Return only the title, without quotes or punctuation decoration.\n\nFirst user message:\n\(firstMessage)"
+        if let driver = NativeConversationDriver(providerName: provider) {
+            let session = NativeProviderConversationSession()
+            let events = await session.events(for: NativeConversationRequest(
+                driver: driver,
+                prompt: prompt,
+                workspace: workspace,
+                model: nil,
+                reasoningEffort: "low",
+                resumableSessionID: nil
+            ))
+            var title = ""
+            for await event in events {
+                if event.kind == .messageDelta, let text = event.text { title += text }
+                if event.kind == .providerCompleted { return title }
+                if event.kind == .runFailed || event.kind == .runInterrupted {
+                    throw NSError(domain: "KanameTitle", code: 1)
+                }
+            }
+            throw NSError(domain: "KanameTitle", code: 2)
+        }
         let instance = ProviderInstance(
             id: ProviderInstanceID(rawValue: "codexLocalTitle")!,
             driver: .codex,
@@ -307,7 +355,7 @@ final class DesktopConversationRuntime: ObservableObject {
         do {
             _ = try await session.start(
                 CodexCodingRequest(
-                    prompt: "Create a concise conversation title of at most 8 words. Return only the title, without quotes or punctuation decoration.\n\nFirst user message:\n\(firstMessage)",
+                    prompt: prompt,
                     model: "gpt-5.6-terra",
                     reasoningEffort: "low",
                     sandbox: .readOnly
@@ -343,8 +391,9 @@ final class DesktopConversationRuntime: ObservableObject {
         """
     }
 
-    private func resolvedModel(_ value: String) -> String {
-        value == "Use provider default" ? "gpt-5.6-terra" : value
+    private func resolvedModel(provider: String, value: String) -> String {
+        guard value == "Use provider default" else { return value }
+        return provider.caseInsensitiveCompare("Codex") == .orderedSame ? "gpt-5.6-terra" : value
     }
 
     private func providerEventRecord(
@@ -354,7 +403,8 @@ final class DesktopConversationRuntime: ObservableObject {
         runID: String,
         createdAtUnixMillis: Int64
     ) -> DesktopProviderEventRecord {
-        let presentation = Self.presentation(for: event)
+        let provider = model.providerRun(id: runID)?.provider ?? "Provider"
+        let presentation = Self.presentation(for: event, provider: provider)
         return DesktopProviderEventRecord(
             id: id,
             threadID: threadID,
@@ -372,14 +422,14 @@ final class DesktopConversationRuntime: ObservableObject {
         )
     }
 
-    private static func presentation(for event: CodexRunEvent) -> (
+    private static func presentation(for event: CodexRunEvent, provider: String) -> (
         kind: DesktopProviderEventKind,
         title: String,
         detail: String
     ) {
         switch event.kind {
-        case .sessionStarted: (.status, "Provider connected", "A private Codex session is attached to this conversation.")
-        case .runStarted: (.status, "Turn started", "Codex is working in the selected read-only context.")
+        case .sessionStarted: (.status, "Provider connected", "A private \(provider) session is attached to this conversation.")
+        case .runStarted: (.status, "Turn started", "\(provider) is working in the selected read-only context.")
         case .providerCompleted: (.status, "Turn complete", "The provider completed; the result still awaits your review.")
         case .runInterrupted: (.error, "Turn interrupted", "Retry when you are ready.")
         case .runFailed: (.error, "Provider stopped", "Inspect the failure and retry without duplicating the message.")
@@ -390,7 +440,7 @@ final class DesktopConversationRuntime: ObservableObject {
         case .approvalRequested: (.approval, "Approval requested", "Kaname declined the provider request because this turn has no durable write grant.")
         case .approvalAccepted: (.approval, "Approval accepted", "A durable approval was applied.")
         case .approvalRejected: (.approval, "Approval declined", "No additional authority was granted.")
-        case .questionRequested: (.question, "Codex has a question", "Answer to continue this turn.")
+        case .questionRequested: (.question, "\(provider) has a question", "Answer to continue this turn.")
         case .questionAnswered: (.question, "Question answered", "The bounded answer was returned without persisting its text in the event journal.")
         case .itemStarted: (.native, "Item started", event.nativeType)
         case .itemCompleted: (.native, "Item completed", event.nativeType)
@@ -402,6 +452,21 @@ final class DesktopConversationRuntime: ObservableObject {
         guard let payload,
               let object = try? JSONSerialization.jsonObject(with: payload) else { return nil }
         return Self.findTokenUsage(in: object)
+    }
+
+    private func registerServiceEvidence(threadID: String, runID: String) {
+        guard let url = try? serviceStore.evidenceURL(threadID: threadID, runID: runID),
+              let data = try? Data(contentsOf: url), !data.isEmpty,
+              !model.snapshot.operations.artifacts.contains(where: { $0.localPath == url.path }) else { return }
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        _ = model.registerArtifact(
+            threadID: threadID,
+            name: "Provider event evidence",
+            kind: .log,
+            localPath: url.path,
+            digest: digest,
+            provenance: "Signed Kaname conversation worker"
+        )
     }
 
     private static func findTokenUsage(in value: Any) -> Int? {

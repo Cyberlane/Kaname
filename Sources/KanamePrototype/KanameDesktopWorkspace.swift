@@ -459,7 +459,12 @@ struct KanameDesktopWorkspace: View {
             case .devices:
                 DesktopDevicesView(model: model)
             case .liveCodex:
-                DesktopCodingView(model: model, integrations: personalIntegrations)
+                DesktopCodingView(
+                    model: model,
+                    integrations: personalIntegrations,
+                    runtime: conversationRuntime,
+                    openThread: openThread
+                )
             case .localCore:
                 LocalCoreWorkspace()
             case .settings:
@@ -1172,7 +1177,7 @@ private struct DesktopThreadConversation: View {
             HStack(spacing: 6) {
                 Image(systemName: runtime.isRunning(threadID: thread.id) ? "hourglass" : "lock.shield")
                 Text(runtime.isRunning(threadID: thread.id)
-                    ? "Codex is responding. New messages queue in order."
+                    ? "\(thread.provider) is responding. New messages queue in order."
                     : "\(thread.provider) · \(thread.model) · \(thread.reasoningEffort) · Read-only, network off")
             }
             .font(.caption2)
@@ -1326,8 +1331,8 @@ private struct DesktopConversationRuntimeSheet: View {
             Form {
                 Picker("Provider", selection: $provider) {
                     Text("Codex").tag("Codex")
-                    Text("Claude · limited").tag("Claude")
-                    Text("OpenCode · limited").tag("OpenCode")
+                    Text("Claude").tag("Claude")
+                    Text("OpenCode").tag("OpenCode")
                 }
                 TextField("Model", text: $model)
                 Picker("Reasoning", selection: $reasoning) {
@@ -2982,6 +2987,7 @@ private struct DesktopGitHubView: View {
     @ObservedObject var model: DesktopAppModel
     @ObservedObject var integrations: DesktopPersonalIntegrationViewModel
     @StateObject private var localReads = DesktopLocalReadViewModel()
+    @StateObject private var githubControl = DesktopGitHubControlViewModel()
     @State private var showsNewLayer = false
 
     private var accounts: [DesktopAccountRecord] {
@@ -3006,6 +3012,14 @@ private struct DesktopGitHubView: View {
                                 localReads.inspectGit(path: workspace.localPath)
                             }
                         }
+                        Button("Reconcile pull requests", systemImage: "arrow.triangle.pull") {
+                            if let workspace = model.snapshot.domains.gitWorkspaces.first {
+                                githubControl.refresh(model: model, workspace: workspace)
+                            }
+                        }
+                        .disabled(model.snapshot.domains.gitWorkspaces.first.map {
+                            githubControl.refreshingWorkspaceIDs.contains($0.id)
+                        } ?? true)
                         Button("New stack layer", systemImage: "arrow.triangle.branch") {
                             showsNewLayer = true
                         }
@@ -3074,6 +3088,49 @@ private struct DesktopGitHubView: View {
                     BoundaryCallout(title: "Local Git read unavailable", detail: error)
                 }
 
+                if let message = githubControl.message {
+                    BoundaryCallout(title: "GitHub reconciliation", detail: message)
+                }
+
+                SectionHeading(
+                    title: "Pull requests",
+                    detail: "Checks, review state, and stack dependencies are read back from GitHub. Creation and merge still require exact approvals."
+                )
+                if model.snapshot.operations.pullRequests.isEmpty {
+                    EmptyPanel(
+                        symbol: "arrow.triangle.pull",
+                        title: "No reconciled pull requests",
+                        detail: "Refresh an authenticated workspace to inspect remote pull requests without changing them."
+                    )
+                    .frame(minHeight: 160)
+                } else {
+                    ForEach(model.snapshot.operations.pullRequests.sorted { $0.lastReconciledAtUnixMillis > $1.lastReconciledAtUnixMillis }) { pullRequest in
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("#\(pullRequest.number) \(pullRequest.title)").font(.headline)
+                                Spacer()
+                                ActionStatePill(state: pullRequest.state)
+                            }
+                            Text("\(pullRequest.headBranch) → \(pullRequest.baseBranch)")
+                                .font(.system(.caption, design: .monospaced))
+                            HStack {
+                                Label(pullRequest.checkSummary, systemImage: "checkmark.circle")
+                                Label(pullRequest.reviewSummary, systemImage: "person.crop.circle.badge.checkmark")
+                                if !pullRequest.mergeAfterIDs.isEmpty {
+                                    Label("After \(pullRequest.mergeAfterIDs.joined(separator: ", "))", systemImage: "arrow.down")
+                                }
+                                Spacer()
+                                if let url = URL(string: pullRequest.url) {
+                                    Link("Open on GitHub", destination: url)
+                                }
+                                pullRequestMergeButton(pullRequest)
+                            }
+                            .font(.caption)
+                        }
+                        .panelStyle()
+                    }
+                }
+
                 SectionHeading(
                     title: "Stack graph",
                     detail: "Dependencies are local proposals until GitHub is connected and exact remote state is reconciled."
@@ -3101,6 +3158,7 @@ private struct DesktopGitHubView: View {
                                 }
                                 Spacer()
                                 ActionStatePill(state: layer.state)
+                                stackPullRequestButton(layer)
                             }
                             .panelStyle()
                         }
@@ -3118,6 +3176,51 @@ private struct DesktopGitHubView: View {
         .background(Nord.polarNight0)
         .sheet(isPresented: $showsNewLayer) {
             NewGitStackLayerSheet(model: model)
+        }
+    }
+
+    @ViewBuilder
+    private func stackPullRequestButton(_ layer: DesktopGitStackLayer) -> some View {
+        if let workspace = model.snapshot.domains.gitWorkspaces.first(where: { $0.id == layer.workspaceID }),
+           layer.pullRequestURL == nil,
+           let repository = githubControl.repositoryByWorkspaceID[workspace.id] {
+            let target = GitHubControlService.pullRequestTarget(repository: repository, head: layer.branch, base: layer.baseBranch)
+            switch githubControl.approvalState(model: model, title: "Create pull request", target: target) {
+            case .approved:
+                Button("Create approved PR") {
+                    githubControl.createPullRequest(model: model, workspace: workspace, layer: layer)
+                }
+                .buttonStyle(.borderedProminent)
+            case .awaitingApproval:
+                Text("Awaiting approval").font(.caption).foregroundStyle(Nord.auroraYellow)
+            default:
+                Button("Request PR approval") {
+                    githubControl.requestPullRequestApproval(model: model, workspace: workspace, layer: layer)
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func pullRequestMergeButton(_ pullRequest: DesktopPullRequestRecord) -> some View {
+        if pullRequest.state != .completed,
+           let workspace = model.snapshot.domains.gitWorkspaces.first(where: { $0.id == pullRequest.workspaceID }) {
+            let target = GitHubControlService.mergeTarget(repository: pullRequest.repository, number: pullRequest.number)
+            switch githubControl.approvalState(model: model, title: "Merge pull request", target: target) {
+            case .approved:
+                Button("Merge approved PR") {
+                    githubControl.merge(model: model, workspace: workspace, pullRequest: pullRequest)
+                }
+                .buttonStyle(.borderedProminent)
+            case .awaitingApproval:
+                Text("Merge awaiting approval").foregroundStyle(Nord.auroraYellow)
+            default:
+                Button("Request merge approval") {
+                    githubControl.requestMergeApproval(model: model, pullRequest: pullRequest)
+                }
+                .buttonStyle(.bordered)
+            }
         }
     }
 }
@@ -3184,23 +3287,30 @@ private struct DesktopSkillsView: View {
 private struct DesktopCodingView: View {
     @ObservedObject var model: DesktopAppModel
     @ObservedObject var integrations: DesktopPersonalIntegrationViewModel
+    @ObservedObject var runtime: DesktopConversationRuntime
+    let openThread: (String) -> Void
+    @StateObject private var control = DesktopCodingControlViewModel()
     @State private var panel = Panel.overview
     @State private var showsNewComparison = false
+    @State private var showsNewWorktree = false
+    @State private var commitMessages: [String: String] = [:]
 
     private enum Panel: String, CaseIterable, Identifiable {
         case overview
-        case codex
-        case claude
-        case openCode
+        case sessions
+        case worktrees
+        case comparisons
+        case quality
 
         var id: String { rawValue }
 
         var label: String {
             switch self {
             case .overview: "Control plane"
-            case .codex: "Codex run"
-            case .claude: "Claude"
-            case .openCode: "OpenCode"
+            case .sessions: "Sessions"
+            case .worktrees: "Worktrees"
+            case .comparisons: "Compare"
+            case .quality: "Evidence"
             }
         }
     }
@@ -3215,14 +3325,14 @@ private struct DesktopCodingView: View {
         LocalProviderDescriptor(
             name: "Claude",
             executable: "claude",
-            adapter: "Native discussion adapter",
-            capabilities: "Current CLI session · plan permission mode · bounded budget · no persisted Kaname token"
+            adapter: "Live adapter",
+            capabilities: "Streaming · native resume · plan permission mode · bounded budget · no persisted Kaname token"
         ),
         LocalProviderDescriptor(
             name: "OpenCode",
             executable: "opencode",
-            adapter: "Native discussion adapter",
-            capabilities: "Current CLI session · plan agent · auto-approval disabled · JSON event result"
+            adapter: "Live adapter",
+            capabilities: "JSON event stream · native resume · plan agent · auto-approval disabled"
         ),
     ]
 
@@ -3235,12 +3345,13 @@ private struct DesktopCodingView: View {
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(maxWidth: 360)
+                .frame(maxWidth: 520)
                 Spacer()
-                if panel == .overview {
-                    Text("Read-only inventory · no provider started")
+                if let message = control.message {
+                    Text(message)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
             }
             .padding(.horizontal, 20)
@@ -3252,12 +3363,14 @@ private struct DesktopCodingView: View {
             switch panel {
             case .overview:
                 overview
-            case .codex:
-                CodexLiveWorkspace()
-            case .claude:
-                NativeProviderDiscussionView(driver: .claude)
-            case .openCode:
-                NativeProviderDiscussionView(driver: .openCode)
+            case .sessions:
+                sessions
+            case .worktrees:
+                worktrees
+            case .comparisons:
+                comparisons
+            case .quality:
+                qualityEvidence
             }
         }
         .background(Nord.polarNight0)
@@ -3276,8 +3389,8 @@ private struct DesktopCodingView: View {
                             integrations.refreshProviders()
                         }
                         .disabled(integrations.isRefreshingProviders)
-                        Button("Open Codex run", systemImage: "arrow.right.circle.fill") {
-                            panel = .codex
+                        Button("New worktree", systemImage: "arrow.triangle.branch") {
+                            showsNewWorktree = true
                         }
                     }
                     .controlGroupStyle(.navigation)
@@ -3336,6 +3449,11 @@ private struct DesktopCodingView: View {
                     }
                     .panelStyle()
                 }
+
+                BoundaryCallout(
+                    title: "One conversation surface",
+                    detail: "Choose Codex, Claude, or OpenCode in an ordinary thread. Every provider streams into the same timeline; this control plane only reconciles sessions, isolated workspaces, comparisons, and evidence."
+                )
 
                 if !model.snapshot.operations.comparisons.isEmpty {
                     SectionHeading(
@@ -3403,6 +3521,275 @@ private struct DesktopCodingView: View {
         .sheet(isPresented: $showsNewComparison) {
             NewProviderComparisonSheet(model: model, availableProviders: providers.map(\.name))
         }
+        .sheet(isPresented: $showsNewWorktree) {
+            NewManagedWorktreeSheet(model: model)
+        }
+    }
+
+    private var sessions: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                SurfaceHeader(
+                    title: "Provider sessions",
+                    detail: "Recoverable native identities mapped to ordinary Kaname conversations",
+                    symbol: "link.circle.fill"
+                )
+                if model.snapshot.operations.providerSessions.isEmpty {
+                    EmptyPanel(
+                        symbol: "message.badge.waveform.fill",
+                        title: "No provider sessions yet",
+                        detail: "Start a normal conversation and send a message. Kaname records the provider's native session identity when it becomes available."
+                    )
+                    .frame(minHeight: 200)
+                } else {
+                    ForEach(model.snapshot.operations.providerSessions.sorted { $0.lastReconciledAtUnixMillis > $1.lastReconciledAtUnixMillis }) { session in
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack {
+                                Label(session.provider, systemImage: "cpu.fill").font(.headline)
+                                Spacer()
+                                Text(session.state.label).font(.caption.weight(.semibold))
+                            }
+                            Text(session.nativeSessionID)
+                                .font(.system(.caption, design: .monospaced))
+                                .textSelection(.enabled)
+                            Text(session.source).font(.caption).foregroundStyle(.secondary)
+                            HStack {
+                                Text(session.capabilities.joined(separator: " · "))
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                Button("Open conversation") { openThread(session.threadID) }
+                                    .buttonStyle(.bordered)
+                            }
+                            if !session.limitations.isEmpty {
+                                Text("Limits: \(session.limitations.joined(separator: " · "))")
+                                    .font(.caption2)
+                                    .foregroundStyle(Nord.auroraYellow)
+                            }
+                        }
+                        .panelStyle()
+                    }
+                }
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var worktrees: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                SurfaceHeader(
+                    title: "Isolated worktrees",
+                    detail: "Exact local targets, explicit approvals, reviewable verification, and clean-only cleanup",
+                    symbol: "arrow.triangle.branch"
+                ) {
+                    Button("New worktree", systemImage: "plus") { showsNewWorktree = true }
+                        .buttonStyle(.borderedProminent)
+                }
+                if model.snapshot.operations.worktrees.isEmpty {
+                    EmptyPanel(
+                        symbol: "arrow.triangle.branch",
+                        title: "No managed worktrees",
+                        detail: "Create an isolated branch for a project conversation. Kaname keeps it inside its private managed directory and requires an exact approval before creation."
+                    )
+                    .frame(minHeight: 200)
+                } else {
+                    ForEach(model.snapshot.operations.worktrees.sorted { $0.updatedAtUnixMillis > $1.updatedAtUnixMillis }) { worktree in
+                        worktreeCard(worktree)
+                    }
+                }
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .sheet(isPresented: $showsNewWorktree) { NewManagedWorktreeSheet(model: model) }
+    }
+
+    private func worktreeCard(_ worktree: DesktopWorktreeRecord) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(worktree.branch).font(.headline)
+                    Text(worktree.worktreePath)
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                Spacer()
+                Text(worktree.state.label).font(.caption.weight(.semibold))
+            }
+            Divider()
+            LabeledContent("Base", value: worktree.baseRevision)
+            LabeledContent("HEAD", value: worktree.headRevision.map { String($0.prefix(12)) } ?? "Not created")
+            LabeledContent("Changed files", value: "\(worktree.changedFileCount)")
+            Text(worktree.diffSummary).font(.caption).foregroundStyle(.secondary)
+            if !worktree.testCommand.isEmpty {
+                DisclosureGroup("Verification: \(worktree.testCommand)") {
+                    Text(worktree.testSummary).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                }
+            }
+            if let paths = control.changedPathsByWorktreeID[worktree.id], !paths.isEmpty {
+                Text("Exact changed paths: \(paths.joined(separator: ", "))")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                HStack {
+                    TextField("Signed commit message", text: Binding(
+                        get: { commitMessages[worktree.id] ?? "" },
+                        set: { commitMessages[worktree.id] = $0 }
+                    ))
+                    .textFieldStyle(.roundedBorder)
+                    commitButton(worktree)
+                }
+            }
+            HStack {
+                Button("Conversation") { openThread(worktree.threadID) }
+                Spacer()
+                if worktree.state == .proposed {
+                    worktreeCreationButton(worktree)
+                } else if worktree.state != .removed {
+                    Button("Refresh") { control.refresh(model: model, worktree: worktree) }
+                    Button("Run swift test") {
+                        control.runVerification(model: model, worktree: worktree, command: "swift test")
+                    }
+                    worktreeCleanupButton(worktree)
+                }
+            }
+            .buttonStyle(.bordered)
+            .disabled(control.busyWorktreeIDs.contains(worktree.id))
+        }
+        .font(.caption)
+        .panelStyle()
+    }
+
+    @ViewBuilder
+    private func commitButton(_ worktree: DesktopWorktreeRecord) -> some View {
+        let message = commitMessages[worktree.id] ?? ""
+        switch control.approvalState(model: model, worktree: worktree, action: "Create signed commit") {
+        case .approved:
+            Button("Commit approved paths") { control.commit(model: model, worktree: worktree, message: message) }
+                .buttonStyle(.borderedProminent)
+                .disabled(message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        case .awaitingApproval:
+            Text("Awaiting approval").foregroundStyle(Nord.auroraYellow)
+        default:
+            Button("Request commit approval") { control.requestCommitApproval(model: model, worktree: worktree, message: message) }
+                .disabled(message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+    }
+
+    @ViewBuilder
+    private func worktreeCreationButton(_ worktree: DesktopWorktreeRecord) -> some View {
+        switch control.approvalState(model: model, worktree: worktree, action: "Create isolated worktree") {
+        case .approved:
+            Button("Create approved worktree") { control.create(model: model, worktree: worktree) }
+                .buttonStyle(.borderedProminent)
+        case .awaitingApproval:
+            Text("Awaiting Inbox approval").foregroundStyle(Nord.auroraYellow)
+        case .rejected:
+            Text("Creation rejected").foregroundStyle(.secondary)
+        default:
+            Button("Request creation approval") { control.requestCreationApproval(model: model, worktree: worktree) }
+        }
+    }
+
+    @ViewBuilder
+    private func worktreeCleanupButton(_ worktree: DesktopWorktreeRecord) -> some View {
+        switch control.approvalState(model: model, worktree: worktree, action: "Remove clean worktree") {
+        case .approved:
+            Button("Remove approved worktree", role: .destructive) { control.cleanup(model: model, worktree: worktree) }
+        case .awaitingApproval:
+            Text("Cleanup awaiting approval").foregroundStyle(Nord.auroraYellow)
+        default:
+            Button("Request cleanup", role: .destructive) { control.requestCleanupApproval(model: model, worktree: worktree) }
+        }
+    }
+
+    private var comparisons: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                SurfaceHeader(
+                    title: "Equal-context comparisons",
+                    detail: "Separate provider histories from one frozen brief; select a result only after review",
+                    symbol: "rectangle.split.3x1.fill"
+                ) {
+                    Button("New comparison", systemImage: "plus") { showsNewComparison = true }
+                        .buttonStyle(.borderedProminent)
+                }
+                if model.snapshot.operations.comparisons.isEmpty {
+                    EmptyPanel(symbol: "rectangle.split.3x1", title: "No comparisons", detail: "Compare two or more providers without merging their hidden context or session history.")
+                        .frame(minHeight: 200)
+                }
+                ForEach(model.snapshot.operations.comparisons.sorted { $0.createdAtUnixMillis > $1.createdAtUnixMillis }) { comparison in
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack { Text(comparison.title).font(.headline); Spacer(); ActionStatePill(state: comparison.state) }
+                        Text(comparison.brief).font(.subheadline).foregroundStyle(.secondary)
+                        ForEach(model.snapshot.operations.providerRuns.filter { comparison.runIDs.contains($0.id) }) { run in
+                            HStack {
+                                Label(run.provider, systemImage: "cpu")
+                                Text(run.state.label).foregroundStyle(.secondary)
+                                Spacer()
+                                if let threadID = run.threadID { Button("Open") { openThread(threadID) } }
+                                if run.state == .completed {
+                                    Button("Use this result") {
+                                        if let threadID = model.selectProviderComparisonResult(comparisonID: comparison.id, runID: run.id) {
+                                            openThread(threadID)
+                                        }
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                }
+                            }
+                            .font(.caption)
+                        }
+                        if comparison.state == .proposed {
+                            Button("Run equal-context comparison") {
+                                runtime.startComparison(id: comparison.id, projectID: model.snapshot.projects.first { $0.archivedAtUnixMillis == nil }?.id)
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+                    }
+                    .panelStyle()
+                }
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .sheet(isPresented: $showsNewComparison) { NewProviderComparisonSheet(model: model, availableProviders: providers.map(\.name)) }
+    }
+
+    private var qualityEvidence: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                SurfaceHeader(title: "Coding evidence", detail: "Tests, diagnostics, structural review, context, artifacts, and subagent activity", symbol: "checkmark.seal.fill")
+                evidenceSummary(title: "Quality gates", count: model.snapshot.operations.qualityGates.count, empty: "No verification evidence has been recorded.") {
+                    ForEach(model.snapshot.operations.qualityGates.sorted { $0.recordedAtUnixMillis > $1.recordedAtUnixMillis }) { gate in
+                        HStack { Text(gate.kind.label).font(.headline); Text(gate.command).font(.system(.caption, design: .monospaced)); Spacer(); ActionStatePill(state: gate.state) }
+                    }
+                }
+                evidenceSummary(title: "Subagents", count: model.snapshot.operations.subagents.count, empty: "No provider has reported subagent activity.") {
+                    ForEach(model.snapshot.operations.subagents.sorted { $0.startedAtUnixMillis > $1.startedAtUnixMillis }) { agent in
+                        HStack { Label(agent.title, systemImage: "person.2.fill"); Text(agent.provider).foregroundStyle(.secondary); Spacer(); Text(agent.state.label).font(.caption.weight(.semibold)) }
+                    }
+                }
+                evidenceSummary(title: "Artifacts", count: model.snapshot.operations.artifacts.count, empty: "No local artifacts have been registered.") {
+                    ForEach(model.snapshot.operations.artifacts.sorted { $0.createdAtUnixMillis > $1.createdAtUnixMillis }.prefix(20)) { artifact in
+                        HStack { Label(artifact.name, systemImage: "doc.fill"); Spacer(); Text(artifact.provenance).font(.caption).foregroundStyle(.secondary) }
+                    }
+                }
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func evidenceSummary<Content: View>(title: String, count: Int, empty: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack { Text(title).font(.headline); Spacer(); Text("\(count)").font(.caption.weight(.bold)) }
+            if count == 0 { Text(empty).foregroundStyle(.secondary) } else { content() }
+        }
+        .font(.caption)
+        .panelStyle()
     }
 }
 
@@ -4684,6 +5071,137 @@ private struct NewProviderComparisonSheet: View {
             brief: brief,
             providers: Array(selectedProviders)
         ) != nil else { return }
+        dismiss()
+    }
+}
+
+private struct NewManagedWorktreeSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var model: DesktopAppModel
+    @State private var projectID: String?
+    @State private var threadID: String?
+    @State private var branch = "kaname/work"
+    @State private var baseRevision = "HEAD"
+
+    private let environment = KanameDesktopEnvironment.current
+
+    init(model: DesktopAppModel) {
+        self.model = model
+        let project = model.snapshot.projects.first { $0.archivedAtUnixMillis == nil && $0.path != nil }
+        _projectID = State(initialValue: project?.id)
+        _threadID = State(initialValue: project.flatMap { project in
+            model.snapshot.threads.first { $0.projectID == project.id && $0.kind == .coding }?.id
+        })
+    }
+
+    private var projects: [DesktopProject] {
+        model.snapshot.projects.filter { $0.archivedAtUnixMillis == nil && $0.path != nil }
+    }
+
+    private var threads: [DesktopThread] {
+        guard let projectID else { return [] }
+        return model.snapshot.threads.filter { $0.projectID == projectID && $0.kind == .coding }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("New isolated worktree").font(.title2.weight(.bold))
+            Text("Choose the conversation that will own the work. Kaname derives a private destination and asks for exact approval before touching Git.")
+                .foregroundStyle(.secondary)
+            worktreeFields
+            targetPreview
+            BoundaryCallout(
+                title: "Authority stays narrow",
+                detail: "Saving creates a local proposal only. Creation and later cleanup each require a separate approval in Inbox; cleanup refuses a dirty worktree."
+            )
+            Spacer()
+            footer
+        }
+        .padding(24)
+        .frame(width: 640, height: 560)
+    }
+
+    private var worktreeFields: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            projectPicker
+            threadPicker
+            TextField("Branch", text: $branch).textFieldStyle(.roundedBorder)
+            TextField("Base revision", text: $baseRevision).textFieldStyle(.roundedBorder)
+        }
+    }
+
+    private var projectPicker: some View {
+        Picker("Project", selection: $projectID) {
+            Text("Choose a project").tag(String?.none)
+            ForEach(projects) { project in
+                Text(project.name).tag(Optional(project.id))
+            }
+        }
+        .onChange(of: projectID) { selected in
+            threadID = model.snapshot.threads.first { $0.projectID == selected && $0.kind == .coding }?.id
+        }
+    }
+
+    private var threadPicker: some View {
+        Picker("Coding conversation", selection: $threadID) {
+            Text("Choose a conversation").tag(String?.none)
+            ForEach(threads) { thread in
+                Text(thread.title).tag(Optional(thread.id))
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var targetPreview: some View {
+        if let target = proposedTarget {
+            LabeledContent("Managed destination") {
+                Text(target.path)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+            .panelStyle()
+        }
+    }
+
+    private var footer: some View {
+        HStack {
+            Spacer()
+            Button("Cancel", role: .cancel) { dismiss() }
+            Button("Save proposal") { save() }
+                .buttonStyle(.borderedProminent)
+                .disabled(proposedTarget == nil)
+        }
+    }
+
+    private var proposedTarget: URL? {
+        guard let projectID, let threadID,
+              let project = model.project(id: projectID),
+              !branch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !baseRevision.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        let slug = "\(project.name)-\(branch)"
+            .lowercased()
+            .map { $0.isLetter || $0.isNumber ? String($0) : "-" }
+            .joined()
+            .split(separator: "-")
+            .filter { !$0.isEmpty }
+            .joined(separator: "-")
+        let digest = String(threadID.prefix(8))
+        return environment.worktreeDirectory.appending(path: "\(slug.prefix(80))-\(digest)", directoryHint: .isDirectory)
+    }
+
+    private func save() {
+        guard let projectID, let threadID,
+              let root = model.workspaceURL(threadID: threadID),
+              let target = proposedTarget,
+              model.proposeWorktree(
+                projectID: projectID,
+                threadID: threadID,
+                rootWorkspacePath: root.path,
+                worktreePath: target.path,
+                branch: branch,
+                baseRevision: baseRevision
+              ) != nil else { return }
         dismiss()
     }
 }
