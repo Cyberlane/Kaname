@@ -9,5 +9,8 @@
   "same_language_only": true,
   "cross_language_only": false,
   "require_coverage": true,
+  "min_file_coverage": 0.85,
+  "max_zero_fragment_files": 12,
+  "fail_on_parse_diagnostic": true,
   "exclude_generated": true
 }
