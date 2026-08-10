@@ -1,4 +1,5 @@
 import KanameDesktop
+import KanameConnectivity
 import KanamePrototypeUI
 import Foundation
 import SwiftUI
@@ -84,6 +85,7 @@ struct KanameDesktopWorkspace: View {
     @State private var showsNewThread = false
     @State private var showsNewProject = false
     @State private var showsInspector = true
+    @State private var showsSettings = false
     @State private var navigationHistory: [DesktopNavigationLocation] = []
 
     init() {
@@ -93,7 +95,8 @@ struct KanameDesktopWorkspace: View {
             ?? .home
         let requestedBackDestination = arguments.firstIndex(of: "--desktop-back-target")
             .flatMap { arguments.indices.contains($0 + 1) ? DesktopDestination(rawValue: arguments[$0 + 1]) : nil }
-        _destination = State(initialValue: requestedDestination)
+        _destination = State(initialValue: requestedDestination == .settings ? .home : requestedDestination)
+        _showsSettings = State(initialValue: requestedDestination == .settings)
         _selectedThreadID = State(
             initialValue: [.home, .threads, .inbox].contains(requestedDestination)
                 ? "thread-desktop-dogfood"
@@ -120,6 +123,9 @@ struct KanameDesktopWorkspace: View {
         }
         .sheet(isPresented: $showsNewProject) {
             NewDesktopProjectSheet(model: model)
+        }
+        .sheet(isPresented: $showsSettings) {
+            DesktopSettingsView(model: model)
         }
         .alert(
             "Local workspace was not saved",
@@ -256,7 +262,7 @@ struct KanameDesktopWorkspace: View {
 
             Divider()
             Button {
-                navigate(to: .settings)
+                showsSettings = true
             } label: {
                 HStack {
                     Label("Settings", systemImage: DesktopDestination.settings.symbol)
@@ -270,7 +276,7 @@ struct KanameDesktopWorkspace: View {
                 .padding(.vertical, 12)
             }
             .buttonStyle(.plain)
-            .background(destination == .settings ? Nord.polarNight2.opacity(0.72) : Color.clear)
+            .background(showsSettings ? Nord.polarNight2.opacity(0.72) : Color.clear)
         }
         .frame(minWidth: 230, idealWidth: 258, maxWidth: 300)
         .navigationTitle("Kaname")
@@ -1020,8 +1026,49 @@ private struct DesktopResearchView: View {
     }
 }
 
+@MainActor
+private final class DesktopLocalReadViewModel: ObservableObject {
+    @Published private(set) var obsidianPreview: ObsidianNotePreview?
+    @Published private(set) var gitInspection: LocalGitInspection?
+    @Published private(set) var obsidianError: String?
+    @Published private(set) var gitError: String?
+    @Published private(set) var isReadingObsidian = false
+    @Published private(set) var isReadingGit = false
+
+    private let service = DesktopLocalReadService()
+
+    func readObsidian(path: String) {
+        guard !isReadingObsidian else { return }
+        isReadingObsidian = true
+        obsidianError = nil
+        _Concurrency.Task {
+            do {
+                obsidianPreview = try await service.readObsidianNote(path: path)
+            } catch {
+                obsidianError = error.localizedDescription
+            }
+            isReadingObsidian = false
+        }
+    }
+
+    func inspectGit(path: String) {
+        guard !isReadingGit else { return }
+        isReadingGit = true
+        gitError = nil
+        _Concurrency.Task {
+            do {
+                gitInspection = try await service.inspectGitWorkspace(path: path)
+            } catch {
+                gitError = error.localizedDescription
+            }
+            isReadingGit = false
+        }
+    }
+}
+
 private struct DesktopKnowledgeView: View {
     @ObservedObject var model: DesktopAppModel
+    @StateObject private var localReads = DesktopLocalReadViewModel()
     @State private var showsNewProposal = false
 
     var body: some View {
@@ -1032,10 +1079,17 @@ private struct DesktopKnowledgeView: View {
                     detail: "Explicit private notes, repository knowledge, freshness, and conflicts",
                     symbol: DesktopDestination.knowledge.symbol
                 ) {
-                    Button("Propose edit", systemImage: "doc.badge.plus") {
-                        showsNewProposal = true
+                    ControlGroup {
+                        Button("Refresh overview", systemImage: "arrow.clockwise") {
+                            if let source = model.snapshot.domains.knowledgeSources.first(where: { $0.kind == .obsidian }) {
+                                localReads.readObsidian(path: source.scope)
+                            }
+                        }
+                        Button("Propose edit", systemImage: "doc.badge.plus") {
+                            showsNewProposal = true
+                        }
                     }
-                    .buttonStyle(.borderedProminent)
+                    .controlGroupStyle(.navigation)
                 }
 
                 HStack(alignment: .top, spacing: 14) {
@@ -1087,6 +1141,31 @@ private struct DesktopKnowledgeView: View {
                 }
                 .padding(.horizontal, 18)
                 .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 16))
+
+                if localReads.isReadingObsidian {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text("Reading the scoped overview through Obsidian…")
+                    }
+                    .panelStyle()
+                } else if let preview = localReads.obsidianPreview {
+                    SectionHeading(
+                        title: "Live overview preview",
+                        detail: preview.wasTruncated ? "Bounded preview · additional content omitted" : "Read locally through Obsidian"
+                    )
+                    ScrollView(.horizontal) {
+                        Text(preview.content)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 320)
+                    .panelStyle()
+                }
+
+                if let error = localReads.obsidianError {
+                    BoundaryCallout(title: "Obsidian read unavailable", detail: error)
+                }
 
                 if !model.snapshot.operations.knowledgeProposals.isEmpty {
                     SectionHeading(
@@ -1383,6 +1462,7 @@ private struct DesktopAutomationsView: View {
 
 private struct DesktopGitHubView: View {
     @ObservedObject var model: DesktopAppModel
+    @StateObject private var localReads = DesktopLocalReadViewModel()
     @State private var showsNewLayer = false
 
     private var accounts: [DesktopAccountRecord] {
@@ -1397,11 +1477,18 @@ private struct DesktopGitHubView: View {
                     detail: "Local repositories, remote state, pull requests, checks, and stack dependencies",
                     symbol: DesktopDestination.github.symbol
                 ) {
-                    Button("New stack layer", systemImage: "arrow.triangle.branch") {
-                        showsNewLayer = true
+                    ControlGroup {
+                        Button("Refresh local Git", systemImage: "arrow.clockwise") {
+                            if let workspace = model.snapshot.domains.gitWorkspaces.first {
+                                localReads.inspectGit(path: workspace.localPath)
+                            }
+                        }
+                        Button("New stack layer", systemImage: "arrow.triangle.branch") {
+                            showsNewLayer = true
+                        }
+                        .disabled(model.snapshot.domains.gitWorkspaces.isEmpty)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(model.snapshot.domains.gitWorkspaces.isEmpty)
+                    .controlGroupStyle(.navigation)
                 }
                 AccountStrip(accounts: accounts)
 
@@ -1431,6 +1518,37 @@ private struct DesktopGitHubView: View {
                         .font(.caption)
                         .panelStyle()
                     }
+                }
+
+                if localReads.isReadingGit {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text("Inspecting local Git state…")
+                    }
+                    .panelStyle()
+                } else if let inspection = localReads.gitInspection {
+                    VStack(alignment: .leading, spacing: 9) {
+                        HStack {
+                            Label("Live local state", systemImage: "checkmark.shield.fill")
+                                .font(.headline)
+                            Spacer()
+                            RecordStatusPill(state: inspection.isClean ? .ready : .needsReview)
+                        }
+                        LabeledContent("Branch", value: inspection.branch)
+                        LabeledContent("HEAD", value: inspection.head)
+                        LabeledContent("Changed paths", value: "\(inspection.changedPaths.count)")
+                        if inspection.wasTruncated {
+                            Text("The bounded Git response was truncated.")
+                                .font(.caption)
+                                .foregroundStyle(Nord.auroraYellow)
+                        }
+                    }
+                    .font(.caption)
+                    .panelStyle()
+                }
+
+                if let error = localReads.gitError {
+                    BoundaryCallout(title: "Local Git read unavailable", detail: error)
                 }
 
                 SectionHeading(
@@ -1889,6 +2007,7 @@ private struct DesktopDevicesView: View {
 }
 
 private struct DesktopSettingsView: View {
+    @Environment(\.dismiss) private var dismiss
     @ObservedObject var model: DesktopAppModel
     @State private var draft: DesktopPreferences
 
@@ -1924,6 +2043,7 @@ private struct DesktopSettingsView: View {
                 }
 
                 SettingsSection(title: "Execution authority", symbol: "lock.shield.fill") {
+                    Toggle("Safe mode (disable future write integrations)", isOn: $draft.safeMode)
                     LabeledContent("Default", value: "Local-only draft")
                     LabeledContent("Provider writes", value: "Exact approval required")
                     LabeledContent("External accounts", value: "Not connected")
@@ -1932,10 +2052,32 @@ private struct DesktopSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
+                SettingsSection(title: "Recovery & diagnostics", symbol: "lifepreserver.fill") {
+                    Stepper(
+                        "Keep audit metadata for \(draft.auditRetentionDays) days",
+                        value: $draft.auditRetentionDays,
+                        in: 7...365,
+                        step: 7
+                    )
+                    Button("Copy redacted diagnostics", systemImage: "doc.on.doc") {
+#if os(macOS)
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(model.redactedDiagnostics(), forType: .string)
+#endif
+                    }
+                    Text("Diagnostics include counts and health states only. They exclude conversation text, drafts, recipients, identities, note paths, repository paths, and credential material.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 HStack {
+                    Button("Return to Kaname", systemImage: "arrow.left") { dismiss() }
                     Spacer()
                     Button("Revert") { draft = model.snapshot.preferences }
-                    Button("Save settings") { model.updatePreferences(draft) }
+                    Button("Save settings") {
+                        model.updatePreferences(draft)
+                        dismiss()
+                    }
                         .buttonStyle(.borderedProminent)
                 }
             }
@@ -1943,6 +2085,7 @@ private struct DesktopSettingsView: View {
             .frame(maxWidth: 780, alignment: .leading)
         }
         .background(Nord.polarNight0)
+        .frame(minWidth: 700, idealWidth: 820, minHeight: 620, idealHeight: 720)
     }
 }
 
