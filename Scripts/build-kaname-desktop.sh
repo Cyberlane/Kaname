@@ -27,10 +27,23 @@ service_requirement="identifier \"$service_identifier\""
 google_oauth_config_path="${KANAME_GOOGLE_OAUTH_CONFIG:-$HOME/Library/Application Support/Kaname/Build/google-oauth-client.json}"
 google_oauth_client_id="${KANAME_GOOGLE_OAUTH_CLIENT_ID:-}"
 google_oauth_client_secret="${KANAME_GOOGLE_OAUTH_CLIENT_SECRET:-}"
+codesign_identity_path="${KANAME_CODESIGN_IDENTITY_FILE:-$HOME/Library/Application Support/Kaname/Build/codesign-identity}"
+codesign_identity="${KANAME_CODESIGN_IDENTITY:-}"
 
 if [[ -z "$google_oauth_client_id" && -f "$google_oauth_config_path" ]]; then
     google_oauth_client_id="$(plutil -extract installed.client_id raw "$google_oauth_config_path")"
     google_oauth_client_secret="$(plutil -extract installed.client_secret raw "$google_oauth_config_path" 2>/dev/null || true)"
+fi
+
+if [[ -z "$codesign_identity" && -f "$codesign_identity_path" ]]; then
+    IFS= read -r codesign_identity < "$codesign_identity_path"
+fi
+codesign_identity="${codesign_identity:--}"
+stable_code_signing=NO
+codesign_arguments=(--force --sign "$codesign_identity")
+if [[ "$codesign_identity" != "-" ]]; then
+    stable_code_signing=YES
+    codesign_arguments+=(--timestamp=none)
 fi
 
 cd "$project_dir"
@@ -78,8 +91,8 @@ plutil -replace CFBundleInfoDictionaryVersion -string 6.0 "$info_plist"
 plutil -replace CFBundleName -string Kaname "$info_plist"
 plutil -replace CFBundleDisplayName -string Kaname "$info_plist"
 plutil -replace CFBundlePackageType -string APPL "$info_plist"
-plutil -replace CFBundleShortVersionString -string 0.6.4 "$info_plist"
-plutil -replace CFBundleVersion -string 12 "$info_plist"
+plutil -replace CFBundleShortVersionString -string 0.6.5 "$info_plist"
+plutil -replace CFBundleVersion -string 13 "$info_plist"
 plutil -replace LSApplicationCategoryType -string public.app-category.developer-tools "$info_plist"
 plutil -replace LSMinimumSystemVersion -string 14.0 "$info_plist"
 plutil -replace NSPrincipalClass -string NSApplication "$info_plist"
@@ -88,6 +101,7 @@ plutil -replace NSSupportsAutomaticGraphicsSwitching -bool YES "$info_plist"
 plutil -replace NSCalendarsFullAccessUsageDescription -string "Kaname reads the calendars you select and changes events only after an exact in-app approval." "$info_plist"
 plutil -replace KanameLocalCoreMachService -string "$service_identifier" "$info_plist"
 plutil -replace KanameLocalCoreServiceRequirement -string "$service_requirement" "$info_plist"
+plutil -replace KanameStableCodeSigning -bool "$stable_code_signing" "$info_plist"
 if [[ -n "$google_oauth_client_id" ]]; then
     plutil -replace KanameGoogleOAuthClientID -string "$google_oauth_client_id" "$info_plist"
     if [[ -n "$google_oauth_client_secret" ]]; then
@@ -101,9 +115,9 @@ cp "$core_binary_path" "$resources_path/kaname-local-core"
 cp "$project_dir/LICENSE" "$resources_path/LICENSE"
 chmod 755 "$contents_path/MacOS/KanamePrototype"
 chmod 755 "$resources_path/KanameLocalControlService" "$resources_path/kaname-local-core"
-codesign --force --sign - --identifier "$service_identifier" "$resources_path/KanameLocalControlService"
-codesign --force --sign - --identifier "$core_identifier" "$resources_path/kaname-local-core"
-codesign --force --sign - --identifier "$identifier" "$app_path"
+codesign "${codesign_arguments[@]}" --identifier "$service_identifier" "$resources_path/KanameLocalControlService"
+codesign "${codesign_arguments[@]}" --identifier "$core_identifier" "$resources_path/kaname-local-core"
+codesign "${codesign_arguments[@]}" --identifier "$identifier" "$app_path"
 codesign --verify --deep --strict "$app_path"
 
 echo "$app_path"

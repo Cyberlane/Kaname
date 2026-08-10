@@ -43,9 +43,22 @@ fi
 [[ -x "$app_path/Contents/Resources/KanameLocalControlService" ]]
 [[ -x "$app_path/Contents/Resources/kaname-local-core" ]]
 [[ "$(plutil -extract CFBundleIdentifier raw "$app_path/Contents/Info.plist")" == "com.cyberlane.kaname.desktop" ]]
-[[ "$(plutil -extract CFBundleShortVersionString raw "$app_path/Contents/Info.plist")" == "0.6.4" ]]
-[[ "$(plutil -extract CFBundleVersion raw "$app_path/Contents/Info.plist")" == "12" ]]
+[[ "$(plutil -extract CFBundleShortVersionString raw "$app_path/Contents/Info.plist")" == "0.6.5" ]]
+[[ "$(plutil -extract CFBundleVersion raw "$app_path/Contents/Info.plist")" == "13" ]]
 codesign --verify --deep --strict "$app_path"
+if [[ "$(plutil -extract KanameStableCodeSigning raw "$app_path/Contents/Info.plist")" == "true" ]]; then
+    designated_requirement="$(codesign -d -r- "$app_path" 2>&1)"
+    [[ "$designated_requirement" == *'identifier "com.cyberlane.kaname.desktop"'* ]]
+    [[ "$designated_requirement" != *"cdhash "* ]]
+    app_team_identifier="$(codesign -dvv "$app_path" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+    [[ -n "$app_team_identifier" && "$app_team_identifier" != "not set" ]]
+    for signed_target in \
+        "$app_path/Contents/Resources/KanameLocalControlService" \
+        "$app_path/Contents/Resources/kaname-local-core"
+    do
+        [[ "$(codesign -dvv "$signed_target" 2>&1 | sed -n 's/^TeamIdentifier=//p')" == "$app_team_identifier" ]]
+    done
+fi
 launchctl print "gui/$(id -u)/$service_identifier" >/dev/null
 
 mkdir -p "$output_directory"
