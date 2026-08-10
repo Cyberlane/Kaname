@@ -2486,146 +2486,479 @@ private final class DesktopPersonalIntegrationViewModel: ObservableObject {
 
 private struct DesktopKnowledgeView: View {
     @ObservedObject var model: DesktopAppModel
-    @StateObject private var localReads = DesktopLocalReadViewModel()
-    @State private var showsNewProposal = false
+    @StateObject private var knowledge = DesktopKnowledgeViewModel()
+    @State private var selectedScopeID: String?
+    @State private var selectedPath: String?
+    @State private var searchText = ""
+    @State private var editing = false
+    @State private var showsScopeSheet = false
+
+    private var selectedScope: DesktopVaultScopeRecord? {
+        model.snapshot.operations.vaultScopes.first { $0.id == selectedScopeID }
+    }
+
+    private var activeWrite: DesktopKnowledgeWriteRecord? {
+        knowledge.activeWriteID.flatMap { id in model.snapshot.operations.knowledgeWrites.first { $0.id == id } }
+    }
+
+    private var activeApproval: DesktopApprovalRecord? {
+        activeWrite?.approvalID.flatMap { id in model.snapshot.operations.approvals.first { $0.id == id } }
+    }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                SurfaceHeader(
-                    title: "Obsidian & Knowledge",
-                    detail: "Explicit private notes, repository knowledge, freshness, and conflicts",
-                    symbol: DesktopDestination.knowledge.symbol
-                ) {
-                    ControlGroup {
-                        Button("Refresh overview", systemImage: "arrow.clockwise") {
-                            if let source = model.snapshot.domains.knowledgeSources.first(where: { $0.kind == .obsidian }) {
-                                localReads.readObsidian(path: source.scope)
-                            }
-                        }
-                        Button("Propose edit", systemImage: "doc.badge.plus") {
-                            showsNewProposal = true
-                        }
+        VStack(spacing: 0) {
+            SurfaceHeader(
+                title: "Obsidian & Knowledge",
+                detail: "Native notes with explicit scope, provenance, freshness, and conflict-safe writes",
+                symbol: DesktopDestination.knowledge.symbol
+            ) {
+                ControlGroup {
+                    Button("Add scope", systemImage: "folder.badge.plus") { showsScopeSheet = true }
+                    Button("Refresh", systemImage: "arrow.clockwise") {
+                        if let selectedPath { knowledge.inspect(model: model, path: selectedPath) }
                     }
-                    .controlGroupStyle(.navigation)
+                    .disabled(selectedPath == nil || knowledge.isBusy)
                 }
+                .controlGroupStyle(.navigation)
+            }
+            .padding(24)
 
-                HStack(alignment: .top, spacing: 14) {
-                    MetricCard(
-                        title: "Knowledge sources",
-                        value: "\(model.snapshot.domains.knowledgeSources.count)",
-                        detail: "Scoped references",
-                        symbol: "books.vertical.fill",
-                        tint: Nord.frost1
-                    )
-                    MetricCard(
-                        title: "Proposed edits",
-                        value: "\(model.snapshot.operations.knowledgeProposals.filter { $0.state == .proposed }.count)",
-                        detail: "Nothing writes silently",
-                        symbol: "doc.badge.ellipsis",
-                        tint: Nord.auroraYellow
-                    )
+            Divider()
+
+            HSplitView {
+                knowledgeSidebar
+                    .frame(minWidth: 250, idealWidth: 290, maxWidth: 360)
+                noteWorkspace
+                    .frame(minWidth: 480, maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .background(Nord.polarNight0)
+        .onAppear {
+            knowledge.seedDefaultScope(model: model)
+            if selectedScopeID == nil { selectedScopeID = model.snapshot.operations.vaultScopes.first?.id }
+            if selectedPath == nil, let path = selectedScope?.path, path.hasSuffix(".md") {
+                selectedPath = path
+                knowledge.inspect(model: model, path: path)
+            }
+        }
+        .sheet(isPresented: $showsScopeSheet) {
+            NewVaultScopeSheet(model: model) { id in
+                selectedScopeID = id
+            }
+        }
+    }
+
+    private var knowledgeSidebar: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("Vault scope").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Spacer()
+                if let selectedScope {
+                    Label(selectedScope.canWrite ? "Read & write" : "Read only", systemImage: selectedScope.canWrite ? "pencil.and.outline" : "eye")
+                        .font(.caption2)
+                        .foregroundStyle(selectedScope.canWrite ? Nord.auroraYellow : Nord.frost1)
                 }
+            }
+            Picker("Vault scope", selection: $selectedScopeID) {
+                Text("Choose a scope").tag(String?.none)
+                ForEach(model.snapshot.operations.vaultScopes) { scope in
+                    Text(scope.path).tag(Optional(scope.id))
+                }
+            }
+            .labelsHidden()
+            .onChange(of: selectedScopeID) { _ in
+                knowledge.clearSearch()
+                if let path = selectedScope?.path, path.hasSuffix(".md") {
+                    selectedPath = path
+                    knowledge.inspect(model: model, path: path)
+                }
+            }
 
-                SectionHeading(
-                    title: "Connected knowledge",
-                    detail: "The app stores paths and provenance, not another full copy of the vault or repository."
-                )
-                VStack(spacing: 0) {
-                    ForEach(Array(model.snapshot.domains.knowledgeSources.enumerated()), id: \.element.id) { index, source in
-                        HStack(alignment: .top, spacing: 14) {
-                            Image(systemName: source.kind.symbol)
-                                .font(.title3)
-                                .foregroundStyle(source.kind.tint)
-                                .frame(width: 28)
-                            VStack(alignment: .leading, spacing: 5) {
-                                HStack {
-                                    Text(source.name).font(.headline)
-                                    RecordStatusPill(state: source.status)
+            HStack(spacing: 8) {
+                TextField("Search this scope", text: $searchText)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { runSearch() }
+                Button("Search", systemImage: "magnifyingglass") { runSearch() }
+                    .labelStyle(.iconOnly)
+                    .disabled(selectedScope == nil || searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+
+            if knowledge.searchResults.isEmpty {
+                Text(selectedScope?.path.hasSuffix(".md") == true
+                     ? "This is an exact-note scope. Add a folder scope to search neighboring notes."
+                     : "Search results stay inside the selected scope.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 6) {
+                        ForEach(knowledge.searchResults) { result in
+                            Button {
+                                selectedPath = result.path
+                                knowledge.inspect(model: model, path: result.path)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(URL(fileURLWithPath: result.path).deletingPathExtension().lastPathComponent)
+                                        .font(.subheadline.weight(.semibold))
+                                    Text(result.path).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                                    if !result.context.isEmpty {
+                                        Text(result.context).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                                    }
                                 }
-                                Text(source.scope)
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
-                                    .textSelection(.enabled)
-                                Text(source.lastReadAtUnixMillis == nil ? "Not read yet" : "Freshness recorded locally")
-                                    .font(.caption)
-                                    .foregroundStyle(.tertiary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(9)
+                                .background(selectedPath == result.path ? Nord.polarNight2 : Color.clear, in: RoundedRectangle(cornerRadius: 9))
                             }
-                            Spacer()
+                            .buttonStyle(.plain)
                         }
-                        .padding(.vertical, 14)
-                        if index < model.snapshot.domains.knowledgeSources.count - 1 { Divider() }
                     }
                 }
-                .padding(.horizontal, 18)
-                .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 16))
+            }
 
-                if localReads.isReadingObsidian {
-                    HStack(spacing: 10) {
-                        ProgressView()
-                        Text("Reading the scoped overview through Obsidian…")
+            DisclosureGroup("Context sources") {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(model.snapshot.domains.knowledgeSources) { source in
+                        HStack(alignment: .top) {
+                            Image(systemName: source.kind.symbol).foregroundStyle(source.kind.tint)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(source.name).font(.caption.weight(.semibold))
+                                Text("\(source.kind.label) · \(source.scope)")
+                                    .font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+                            }
+                        }
                     }
-                    .panelStyle()
-                } else if let preview = localReads.obsidianPreview {
-                    SectionHeading(
-                        title: "Live overview preview",
-                        detail: preview.wasTruncated ? "Bounded preview · additional content omitted" : "Read locally through Obsidian"
-                    )
-                    ScrollView(.horizontal) {
-                        Text(preview.content)
-                            .font(.system(.caption, design: .monospaced))
+                    if !model.snapshot.domains.knowledgeSources.contains(where: { $0.kind == .lode }) {
+                        Text("Lode is not connected; no Lode content is silently assumed current.")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.top, 6)
+            }
+
+            if !model.snapshot.operations.capabilityUpdates.isEmpty {
+                DisclosureGroup("Capability updates") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(model.snapshot.operations.capabilityUpdates) { update in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(update.source).font(.caption.weight(.semibold))
+                                Text("\(update.previousRevision) → \(update.proposedRevision)").font(.caption2)
+                                Text(update.changeSummary).font(.caption2).foregroundStyle(.secondary)
+                                if update.state == .proposed {
+                                    HStack {
+                                        Button("Accept") { model.reviewCapabilityUpdate(id: update.id, accepted: true) }
+                                        Button("Reject") { model.reviewCapabilityUpdate(id: update.id, accepted: false) }
+                                    }
+                                    .controlSize(.small)
+                                } else { ActionStatePill(state: update.state) }
+                            }
+                        }
+                    }
+                    .padding(.top, 6)
+                }
+            }
+
+            Spacer(minLength: 8)
+            if let selectedScope {
+                Button("Remove scope", systemImage: "minus.circle", role: .destructive) {
+                    model.removeVaultScope(id: selectedScope.id)
+                    selectedScopeID = model.snapshot.operations.vaultScopes.first?.id
+                }
+                .font(.caption)
+            }
+        }
+        .padding(18)
+        .background(Nord.polarNight1)
+    }
+
+    @ViewBuilder
+    private var noteWorkspace: some View {
+        if knowledge.isBusy, knowledge.document == nil {
+            VStack(spacing: 12) { ProgressView(); Text("Reading selected note…").foregroundStyle(.secondary) }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if let document = knowledge.document {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    HStack(alignment: .top) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(URL(fileURLWithPath: document.path).deletingPathExtension().lastPathComponent)
+                                .font(.title2.weight(.bold))
+                            Text(document.path).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                        }
+                        Spacer()
+                        Picker("Mode", selection: $editing) {
+                            Text("Read").tag(false)
+                            Text("Edit").tag(true)
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(width: 150)
+                    }
+
+                    if editing {
+                        TextEditor(text: $knowledge.draft)
+                            .font(.system(.body, design: .monospaced))
+                            .scrollContentBackground(.hidden)
+                            .padding(10)
+                            .frame(minHeight: 440)
+                            .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
+                            .accessibilityLabel("Markdown editor for \(document.path)")
+                    } else {
+                        NativeObsidianMarkdown(content: knowledge.draft)
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(18)
+                            .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
                     }
-                    .frame(maxHeight: 320)
-                    .panelStyle()
-                }
 
-                if let error = localReads.obsidianError {
-                    BoundaryCallout(title: "Obsidian read unavailable", detail: error)
-                }
+                    knowledgeMetadata(document: document)
 
-                if !model.snapshot.operations.knowledgeProposals.isEmpty {
-                    SectionHeading(
-                        title: "Review queue",
-                        detail: "Every proposal retains its target and base revision."
-                    )
-                    ForEach(model.snapshot.operations.knowledgeProposals) { proposal in
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                Text(proposal.title).font(.headline)
-                                Spacer()
-                                ActionStatePill(state: proposal.state)
+                    if editing {
+                        HStack {
+                            Button("Review changes", systemImage: "doc.text.magnifyingglass") {
+                                knowledge.reviewDraft(model: model)
                             }
-                            Text(proposal.target)
-                                .font(.system(.caption, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                            Text(proposal.summary)
-                                .font(.subheadline)
-                            DisclosureGroup("Proposed content") {
-                                Text(proposal.proposedContent)
-                                    .font(.system(.caption, design: .monospaced))
-                                    .textSelection(.enabled)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(.top, 8)
+                            .buttonStyle(.borderedProminent)
+                            .disabled(knowledge.isBusy || selectedScope?.canWrite != true)
+                            Button("Reset draft", systemImage: "arrow.uturn.backward") { knowledge.resetDraft() }
+                            Spacer()
+                            if selectedScope?.canWrite != true {
+                                Label("This scope is read only", systemImage: "lock.fill")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+
+                    if let diff = knowledge.diff {
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack {
+                                Label(diff.summary, systemImage: "plusminus")
+                                    .font(.headline)
+                                Spacer()
+                                if let activeWrite { ActionStatePill(state: activeWrite.state) }
+                            }
+                            ScrollView(.horizontal) {
+                                Text(diff.unifiedDiff).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                            }
+                            HStack {
+                                if activeApproval == nil {
+                                    Button("Request write approval", systemImage: "checkmark.shield") {
+                                        knowledge.requestApproval(model: model)
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                } else if activeApproval?.state == .approved {
+                                    Button("Apply approved edit", systemImage: "square.and.arrow.down") {
+                                        knowledge.applyApprovedDraft(model: model)
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                } else {
+                                    Label(activeApproval?.state == .rejected ? "Write rejected" : "Waiting in Inbox", systemImage: "tray.full")
+                                        .foregroundStyle(.secondary)
+                                }
                             }
                         }
                         .panelStyle()
                     }
-                }
 
-                BoundaryCallout(
-                    title: "Reviewable knowledge changes",
-                    detail: "Obsidian and Lode edits will appear as proposed diffs with source revision and conflict state before Kaname writes them."
-                )
+                    if let message = knowledge.message {
+                        BoundaryCallout(
+                            title: activeWrite?.state == .failed ? "Conflict or write failure" : "Knowledge status",
+                            detail: message
+                        )
+                    }
+                }
+                .padding(24)
             }
+        } else {
+            EmptyPanel(
+                symbol: "note.text",
+                title: "Choose a scoped note",
+                detail: "Kaname reads only the vault paths you add. Folder scopes enable search; write access is a separate choice."
+            )
             .padding(24)
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(Nord.polarNight0)
-        .sheet(isPresented: $showsNewProposal) {
-            NewKnowledgeProposalSheet(model: model)
+    }
+
+    private func knowledgeMetadata(document: ObsidianDocumentSnapshot) -> some View {
+        let record = model.snapshot.operations.knowledgeDocuments.first { $0.path == document.path }
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label("Revision \(document.digest.prefix(12))", systemImage: "checkmark.seal")
+                Spacer()
+                if let record { RelativeTime(unixMillis: record.lastReadAtUnixMillis) }
+            }
+            .font(.caption).foregroundStyle(.secondary)
+
+            HStack {
+                Text("Use as").font(.caption.weight(.semibold))
+                Picker("Project context role", selection: Binding(
+                    get: { record?.role },
+                    set: { model.classifyKnowledgeDocument(path: document.path, projectID: "project-kaname", role: $0) }
+                )) {
+                    Text("Unclassified").tag(DesktopKnowledgeDocumentRecord.Role?.none)
+                    ForEach(DesktopKnowledgeDocumentRecord.Role.allCases, id: \.self) { role in
+                        Text(role.label).tag(Optional(role))
+                    }
+                }
+                .labelsHidden()
+                Spacer()
+                Text(record?.provenance ?? "Local Obsidian vault").font(.caption).foregroundStyle(.secondary)
+            }
+
+            DisclosureGroup("Context & provenance") {
+                VStack(alignment: .leading, spacing: 9) {
+                    MetadataTokens(title: "Properties", values: document.properties.map { "\($0.key): \($0.value)" }.sorted())
+                    MetadataTokens(title: "Wikilinks", values: document.wikilinks)
+                    MetadataTokens(title: "Backlinks", values: document.backlinks)
+                    MetadataTokens(title: "Attachments", values: document.attachments)
+                    MetadataTokens(title: "Attributed sources", values: record?.sourceURLs ?? [])
+                }
+                .padding(.top, 8)
+            }
         }
+        .panelStyle()
+    }
+
+    private func runSearch() {
+        guard let selectedScope else { return }
+        knowledge.search(model: model, query: searchText, scope: selectedScope)
+    }
+}
+
+private struct NativeObsidianMarkdown: View {
+    let content: String
+
+    private var bodyLines: [String] {
+        let lines = content.components(separatedBy: .newlines)
+        guard lines.first == "---",
+              let closing = lines.dropFirst().firstIndex(of: "---") else { return lines }
+        return Array(lines.suffix(from: lines.index(after: closing)))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            ForEach(Array(bodyLines.enumerated()), id: \.offset) { _, line in
+                rendered(line)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func rendered(_ line: String) -> some View {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty {
+            Spacer().frame(height: 5)
+        } else if trimmed.hasPrefix("#") {
+            let level = min(trimmed.prefix(while: { $0 == "#" }).count, 6)
+            Text(inline(String(trimmed.dropFirst(level)).trimmingCharacters(in: .whitespaces)))
+                .font(headingFont(level: level))
+                .padding(.top, level == 1 ? 7 : 3)
+        } else if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("•").foregroundStyle(Nord.frost1)
+                Text(inline(String(trimmed.dropFirst(2))))
+            }
+        } else if trimmed.hasPrefix("> [!") {
+            Label(calloutText(trimmed), systemImage: "info.circle.fill")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Nord.frost1)
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Nord.polarNight2, in: RoundedRectangle(cornerRadius: 9))
+        } else if trimmed.hasPrefix(">") {
+            Text(inline(String(trimmed.dropFirst()).trimmingCharacters(in: .whitespaces)))
+                .italic()
+                .padding(.leading, 12)
+                .overlay(alignment: .leading) { Rectangle().fill(Nord.frost1).frame(width: 3) }
+        } else {
+            Text(inline(trimmed)).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func inline(_ value: String) -> AttributedString {
+        let readable = readableWikilinks(in: value)
+        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        return (try? AttributedString(markdown: readable, options: options)) ?? AttributedString(readable)
+    }
+
+    private func readableWikilinks(in value: String) -> String {
+        guard let expression = try? NSRegularExpression(pattern: #"\[\[([^\]|#]+)(?:[|#]([^\]]+))?\]\]"#) else {
+            return value
+        }
+        var result = value
+        let sourceRange = NSRange(value.startIndex..., in: value)
+        for match in expression.matches(in: value, range: sourceRange).reversed() {
+            guard let whole = Range(match.range(at: 0), in: result),
+                  let targetRange = Range(match.range(at: 1), in: value) else { continue }
+            let alias = match.range(at: 2).location == NSNotFound
+                ? nil
+                : Range(match.range(at: 2), in: value).map { String(value[$0]) }
+            result.replaceSubrange(whole, with: alias ?? String(value[targetRange]))
+        }
+        return result
+    }
+
+    private func headingFont(level: Int) -> Font {
+        switch level {
+        case 1: .title2.weight(.bold)
+        case 2: .title3.weight(.bold)
+        default: .headline
+        }
+    }
+
+    private func calloutText(_ line: String) -> String {
+        guard let close = line.firstIndex(of: "]") else { return line }
+        let title = line[line.index(after: close)...].trimmingCharacters(in: .whitespaces)
+        return title.isEmpty ? "Note" : title
+    }
+}
+
+private struct MetadataTokens: View {
+    let title: String
+    let values: [String]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title).font(.caption.weight(.semibold))
+            Text(values.isEmpty ? "None" : values.joined(separator: " · "))
+                .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+        }
+    }
+}
+
+private struct NewVaultScopeSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var model: DesktopAppModel
+    let onCreate: (String) -> Void
+    @State private var path = ""
+    @State private var canWrite = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Add Obsidian scope").font(.title2.weight(.bold))
+            Text("Choose a vault-relative note or folder. Kaname never expands this boundary automatically.")
+                .foregroundStyle(.secondary)
+            TextField("Projects/Example or Projects/Example/Overview.md", text: $path)
+                .textFieldStyle(.roundedBorder)
+            Toggle("Allow proposing writes inside this scope", isOn: $canWrite)
+            if canWrite {
+                Label("Every write still needs an exact diff approval and current-revision check.", systemImage: "checkmark.shield")
+                    .font(.caption).foregroundStyle(Nord.auroraYellow)
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Add scope") {
+                    if let id = model.addVaultScope(path: path, sourceID: nil, canWrite: canWrite) {
+                        onCreate(id)
+                        dismiss()
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(24)
+        .frame(width: 520)
     }
 }
 

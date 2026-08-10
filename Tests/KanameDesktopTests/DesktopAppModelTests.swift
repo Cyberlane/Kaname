@@ -668,6 +668,76 @@ struct DesktopAppModelTests {
     }
 
     @Test
+    func knowledgeScopeClassificationAndExactWriteLifecycleAreDurable() throws {
+        let store = MemoryDesktopStateStore()
+        let model = DesktopAppModel(store: store, now: { 12_000 })
+        let scopeID = try #require(model.addVaultScope(
+            path: "Projects/Coding ADE",
+            sourceID: "knowledge-coding-ade",
+            canWrite: true
+        ))
+        var document = DesktopKnowledgeDocumentRecord(
+            path: "Projects/Coding ADE/Overview.md",
+            title: "Overview",
+            digest: String(repeating: "a", count: 64),
+            provenance: "Obsidian CLI · local vault",
+            lastReadAtUnixMillis: 12_000
+        )
+        document.replaceContext(
+            projectID: nil,
+            role: nil,
+            sourceURLs: ["https://example.com/spec"],
+            wikilinks: ["Research Index"],
+            backlinks: ["Projects/Coding ADE/Fresh Session Start.md"],
+            attachments: ["diagram.png"],
+            properties: ["status": "active"],
+            conflictDigest: nil
+        )
+        model.recordKnowledgeDocument(document)
+        model.classifyKnowledgeDocument(path: document.path, projectID: "project-kaname", role: .decision)
+        let proposalID = try #require(model.createKnowledgeProposal(
+            sourceID: "knowledge-coding-ade",
+            title: "Edit Overview",
+            target: document.path,
+            summary: "0 removed · 1 added line",
+            proposedContent: "# Overview\nUpdated",
+            baseRevision: document.digest
+        ))
+        let writeID = model.recordKnowledgeWrite(
+            proposalID: proposalID,
+            targetPath: document.path,
+            baseDigest: document.digest,
+            proposedDigest: String(repeating: "b", count: 64),
+            diffSummary: "0 removed · 1 added line",
+            unifiedDiff: "+Updated"
+        )
+        let approvalID = try #require(model.createApproval(
+            threadID: nil,
+            title: "Write Obsidian note",
+            exactTarget: "obsidian:\(document.path)#sha256=\(document.digest)",
+            consequence: "Replace only the inspected revision.",
+            dataLeavingDevice: "Nothing",
+            reversible: true,
+            expiresAtUnixMillis: nil
+        ))
+        model.attachKnowledgeApproval(writeID: writeID, approvalID: approvalID)
+        model.resolveApproval(id: approvalID, approved: true)
+        model.reconcileKnowledgeWrite(
+            id: writeID,
+            state: .reconciled,
+            currentDigest: String(repeating: "b", count: 64),
+            detail: "Re-read matched."
+        )
+
+        let restored = DesktopAppModel(store: store, now: { 13_000 })
+        #expect(restored.snapshot.operations.vaultScopes.first { $0.id == scopeID }?.canWrite == true)
+        #expect(restored.snapshot.operations.knowledgeDocuments.first { $0.path == document.path }?.role == .decision)
+        #expect(restored.snapshot.operations.knowledgeWrites.first { $0.id == writeID }?.state == .reconciled)
+        #expect(restored.snapshot.operations.knowledgeProposals.first { $0.id == proposalID }?.state == .reconciled)
+        #expect(restored.snapshot.operations.audit.last?.domain == "knowledge")
+    }
+
+    @Test
     func fileStoreUsesPrivateDirectoryAndFileModes() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("kaname-desktop-state-\(UUID().uuidString)")

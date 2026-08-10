@@ -390,7 +390,7 @@ public struct DesktopPreferences: Codable, Equatable, Sendable {
 }
 
 public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
-    public static let currentVersion = 10
+    public static let currentVersion = 11
 
     public var version: Int
     public var projects: [DesktopProject]
@@ -546,7 +546,7 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
     }
 
     func migratedToCurrent(now: Int64) throws -> DesktopAppSnapshot {
-        guard (1...9).contains(version) else { throw DesktopModelError.unsupportedVersion }
+        guard (1...10).contains(version) else { throw DesktopModelError.unsupportedVersion }
         var migrated = self
         migrated.version = Self.currentVersion
         if migrated.domains == .empty {
@@ -1504,6 +1504,148 @@ public final class DesktopAppModel: ObservableObject {
         )
         mutate { $0.operations.knowledgeProposals.append(proposal) }
         return proposal.id
+    }
+
+    @discardableResult
+    public func addVaultScope(path: String, sourceID: String?, canWrite: Bool) -> String? {
+        let cleanPath = Self.normalized(path).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let components = cleanPath.split(separator: "/", omittingEmptySubsequences: false)
+        guard !cleanPath.isEmpty, !cleanPath.hasPrefix("/"), cleanPath.utf8.count <= 2_048,
+              !components.contains("."), !components.contains(".."), !components.contains("") else { return nil }
+        if let existing = snapshot.operations.vaultScopes.first(where: { $0.path == cleanPath }) {
+            mutate { value in
+                guard let index = value.operations.vaultScopes.firstIndex(where: { $0.id == existing.id }) else { return }
+                value.operations.vaultScopes[index].canRead = true
+                value.operations.vaultScopes[index].canWrite = canWrite
+                value.operations.vaultScopes[index].sourceID = sourceID
+            }
+            return existing.id
+        }
+        let scope = DesktopVaultScopeRecord(
+            id: UUID().uuidString.lowercased(),
+            sourceID: sourceID,
+            path: cleanPath,
+            canRead: true,
+            canWrite: canWrite,
+            lastReconciledAtUnixMillis: nil
+        )
+        mutate { $0.operations.vaultScopes.append(scope) }
+        return scope.id
+    }
+
+    public func removeVaultScope(id: String) {
+        mutate { $0.operations.vaultScopes.removeAll { $0.id == id } }
+    }
+
+    public func recordKnowledgeDocument(_ document: DesktopKnowledgeDocumentRecord) {
+        mutate { snapshot in
+            if let index = snapshot.operations.knowledgeDocuments.firstIndex(where: { $0.path == document.path }) {
+                let existing = snapshot.operations.knowledgeDocuments[index]
+                var reconciled = document
+                reconciled.role = existing.role ?? document.role
+                reconciled.projectID = existing.projectID ?? document.projectID
+                snapshot.operations.knowledgeDocuments[index] = reconciled
+            } else {
+                snapshot.operations.knowledgeDocuments.append(document)
+            }
+            for index in snapshot.operations.vaultScopes.indices where
+                document.path == snapshot.operations.vaultScopes[index].path
+                    || document.path.hasPrefix(snapshot.operations.vaultScopes[index].path + "/") {
+                snapshot.operations.vaultScopes[index].lastReconciledAtUnixMillis = document.lastReadAtUnixMillis
+            }
+        }
+    }
+
+    public func classifyKnowledgeDocument(
+        path: String,
+        projectID: String?,
+        role: DesktopKnowledgeDocumentRecord.Role?
+    ) {
+        mutate { snapshot in
+            guard let index = snapshot.operations.knowledgeDocuments.firstIndex(where: { $0.path == path }) else { return }
+            snapshot.operations.knowledgeDocuments[index].projectID = projectID
+            snapshot.operations.knowledgeDocuments[index].role = role
+        }
+    }
+
+    @discardableResult
+    public func recordKnowledgeWrite(
+        proposalID: String,
+        targetPath: String,
+        baseDigest: String,
+        proposedDigest: String,
+        diffSummary: String,
+        unifiedDiff: String
+    ) -> String {
+        let record = DesktopKnowledgeWriteRecord(
+            id: UUID().uuidString.lowercased(),
+            proposalID: proposalID,
+            approvalID: nil,
+            targetPath: targetPath,
+            baseDigest: baseDigest,
+            proposedDigest: proposedDigest,
+            diffSummary: diffSummary,
+            unifiedDiff: unifiedDiff,
+            state: .proposed,
+            currentDigest: nil,
+            createdAtUnixMillis: now(),
+            reconciledAtUnixMillis: nil
+        )
+        mutate { $0.operations.knowledgeWrites.append(record) }
+        return record.id
+    }
+
+    public func attachKnowledgeApproval(writeID: String, approvalID: String) {
+        mutate { snapshot in
+            guard let index = snapshot.operations.knowledgeWrites.firstIndex(where: { $0.id == writeID }) else { return }
+            snapshot.operations.knowledgeWrites[index].approvalID = approvalID
+            snapshot.operations.knowledgeWrites[index].state = .awaitingApproval
+            if let proposalIndex = snapshot.operations.knowledgeProposals.firstIndex(where: {
+                $0.id == snapshot.operations.knowledgeWrites[index].proposalID
+            }) { snapshot.operations.knowledgeProposals[proposalIndex].state = .awaitingApproval }
+        }
+    }
+
+    public func reconcileKnowledgeWrite(
+        id: String,
+        state: DesktopActionState,
+        currentDigest: String?,
+        detail: String
+    ) {
+        let timestamp = now()
+        mutate { snapshot in
+            guard let index = snapshot.operations.knowledgeWrites.firstIndex(where: { $0.id == id }) else { return }
+            snapshot.operations.knowledgeWrites[index].state = state
+            snapshot.operations.knowledgeWrites[index].currentDigest = currentDigest
+            snapshot.operations.knowledgeWrites[index].reconciledAtUnixMillis = timestamp
+            if let proposalIndex = snapshot.operations.knowledgeProposals.firstIndex(where: {
+                $0.id == snapshot.operations.knowledgeWrites[index].proposalID
+            }) { snapshot.operations.knowledgeProposals[proposalIndex].state = state }
+            if let documentIndex = snapshot.operations.knowledgeDocuments.firstIndex(where: {
+                $0.path == snapshot.operations.knowledgeWrites[index].targetPath
+            }) { snapshot.operations.knowledgeDocuments[documentIndex].conflictDigest = state == .failed ? currentDigest : nil }
+            snapshot.operations.audit.append(DesktopAuditRecord(
+                id: UUID().uuidString.lowercased(),
+                domain: "knowledge",
+                action: "write reconciliation",
+                target: snapshot.operations.knowledgeWrites[index].targetPath,
+                state: state,
+                detail: detail,
+                recordedAtUnixMillis: timestamp
+            ))
+        }
+    }
+
+    public func reviewCapabilityUpdate(id: String, accepted: Bool) {
+        mutate { snapshot in
+            snapshot.operations.capabilityUpdates = snapshot.operations.capabilityUpdates.map { update in
+                guard update.id == id else { return update }
+                var reviewed = update
+                reviewed.state = accepted ? .approved : .rejected
+                reviewed.reviewedAtUnixMillis = now()
+                return reviewed
+            }
+        }
     }
 
     @discardableResult

@@ -1,5 +1,20 @@
 import Foundation
 
+enum VaultRelativePathValidator {
+    enum ValidationError: Error { case invalid }
+
+    static func validate(_ value: String, maximumBytes: Int) throws -> String {
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let components = normalized.split(separator: "/", omittingEmptySubsequences: false)
+        guard !normalized.isEmpty, normalized.utf8.count <= maximumBytes,
+              !normalized.hasPrefix("/"),
+              !components.contains(".."), !components.contains("."), !components.contains("") else {
+            throw ValidationError.invalid
+        }
+        return normalized
+    }
+}
+
 public struct ObsidianNotePreview: Equatable, Sendable {
     public let path: String
     public let content: String
@@ -73,14 +88,11 @@ public actor DesktopLocalReadService {
     }
 
     static func validatedVaultPath(_ path: String) throws -> String {
-        let normalized = path.trimmingCharacters(in: .whitespacesAndNewlines)
-        let components = normalized.split(separator: "/", omittingEmptySubsequences: false)
-        guard !normalized.isEmpty, normalized.utf8.count <= 1_024,
-              !normalized.hasPrefix("/"),
-              !components.contains(".."), !components.contains(".") else {
+        do {
+            return try VaultRelativePathValidator.validate(path, maximumBytes: 1_024)
+        } catch {
             throw DesktopLocalReadError.invalidScope("Obsidian reads require a vault-relative path without traversal components.")
         }
-        return normalized
     }
 
     static func branch(from statusHeader: String?) -> String {

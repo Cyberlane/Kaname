@@ -110,6 +110,105 @@ public struct DesktopKnowledgeProposal: Codable, Equatable, Identifiable, Sendab
     public var createdAtUnixMillis: Int64
 }
 
+public struct DesktopVaultScopeRecord: Codable, Equatable, Identifiable, Sendable {
+    public let id: String
+    public var sourceID: String?
+    public var path: String
+    public var canRead: Bool
+    public var canWrite: Bool
+    public var lastReconciledAtUnixMillis: Int64?
+}
+
+public struct DesktopKnowledgeDocumentRecord: Codable, Equatable, Identifiable, Sendable {
+    public enum Role: String, Codable, CaseIterable, Equatable, Sendable {
+        case projectMemory
+        case decision
+        case sourceInbox
+        case research
+
+        public var label: String {
+            switch self {
+            case .projectMemory: "Project memory"
+            case .decision: "Decision"
+            case .sourceInbox: "Source inbox"
+            case .research: "Research"
+            }
+        }
+    }
+
+    public var id: String { path }
+    public var projectID: String?
+    public var path: String
+    public var title: String
+    public var digest: String
+    public var role: Role?
+    public var provenance: String
+    public var sourceURLs: [String]
+    public var wikilinks: [String]
+    public var backlinks: [String]
+    public var attachments: [String]
+    public var properties: [String: String]
+    public var lastReadAtUnixMillis: Int64
+    public var conflictDigest: String?
+
+    public init(path: String, title: String, digest: String, provenance: String, lastReadAtUnixMillis: Int64) {
+        (self.path, self.title, self.digest) = (path, title, digest)
+        (self.provenance, self.lastReadAtUnixMillis) = (provenance, lastReadAtUnixMillis)
+        projectID = nil
+        role = nil
+        sourceURLs = []
+        wikilinks = []
+        backlinks = []
+        attachments = []
+        properties = [:]
+        conflictDigest = nil
+    }
+
+    public mutating func replaceContext(
+        projectID: String?,
+        role: Role?,
+        sourceURLs: [String],
+        wikilinks: [String],
+        backlinks: [String],
+        attachments: [String],
+        properties: [String: String],
+        conflictDigest: String?
+    ) {
+        (self.projectID, self.role, self.conflictDigest) = (projectID, role, conflictDigest)
+        self.sourceURLs = sourceURLs
+        self.wikilinks = wikilinks
+        self.backlinks = backlinks
+        self.attachments = attachments
+        self.properties = properties
+    }
+}
+
+public struct DesktopKnowledgeWriteRecord: Codable, Equatable, Identifiable, Sendable {
+    public let id: String
+    public var proposalID: String
+    public var approvalID: String?
+    public var targetPath: String
+    public var baseDigest: String
+    public var proposedDigest: String
+    public var diffSummary: String
+    public var unifiedDiff: String
+    public var state: DesktopActionState
+    public var currentDigest: String?
+    public var createdAtUnixMillis: Int64
+    public var reconciledAtUnixMillis: Int64?
+}
+
+public struct DesktopCapabilityUpdateRecord: Codable, Equatable, Identifiable, Sendable {
+    public let id: String
+    public var capabilityID: String
+    public var source: String
+    public var previousRevision: String
+    public var proposedRevision: String
+    public var changeSummary: String
+    public var state: DesktopActionState
+    public var reviewedAtUnixMillis: Int64?
+}
+
 public struct DesktopArtifactRecord: Codable, Equatable, Identifiable, Sendable {
     public enum Kind: String, Codable, CaseIterable, Equatable, Sendable {
         case file
@@ -298,6 +397,10 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
     public var comparisonDecisions: [DesktopComparisonDecisionRecord]
     public var pullRequests: [DesktopPullRequestRecord]
     public var qualityGates: [DesktopQualityGateRecord]
+    public var vaultScopes: [DesktopVaultScopeRecord]
+    public var knowledgeDocuments: [DesktopKnowledgeDocumentRecord]
+    public var knowledgeWrites: [DesktopKnowledgeWriteRecord]
+    public var capabilityUpdates: [DesktopCapabilityUpdateRecord]
     public var audit: [DesktopAuditRecord]
 
     public static let empty = DesktopOperationalSnapshot(
@@ -317,6 +420,10 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         comparisonDecisions: [],
         pullRequests: [],
         qualityGates: [],
+        vaultScopes: [],
+        knowledgeDocuments: [],
+        knowledgeWrites: [],
+        capabilityUpdates: [],
         audit: []
     )
 
@@ -337,6 +444,10 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         case comparisonDecisions
         case pullRequests
         case qualityGates
+        case vaultScopes
+        case knowledgeDocuments
+        case knowledgeWrites
+        case capabilityUpdates
         case audit
     }
 
@@ -357,6 +468,10 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         comparisonDecisions: [DesktopComparisonDecisionRecord],
         pullRequests: [DesktopPullRequestRecord],
         qualityGates: [DesktopQualityGateRecord],
+        vaultScopes: [DesktopVaultScopeRecord] = [],
+        knowledgeDocuments: [DesktopKnowledgeDocumentRecord] = [],
+        knowledgeWrites: [DesktopKnowledgeWriteRecord] = [],
+        capabilityUpdates: [DesktopCapabilityUpdateRecord] = [],
         audit: [DesktopAuditRecord]
     ) {
         self.researchSources = researchSources
@@ -375,6 +490,10 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         self.comparisonDecisions = comparisonDecisions
         self.pullRequests = pullRequests
         self.qualityGates = qualityGates
+        self.vaultScopes = vaultScopes
+        self.knowledgeDocuments = knowledgeDocuments
+        self.knowledgeWrites = knowledgeWrites
+        self.capabilityUpdates = capabilityUpdates
         self.audit = audit
     }
 
@@ -396,6 +515,10 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         comparisonDecisions = try container.decodeIfPresent([DesktopComparisonDecisionRecord].self, forKey: .comparisonDecisions) ?? []
         pullRequests = try container.decodeIfPresent([DesktopPullRequestRecord].self, forKey: .pullRequests) ?? []
         qualityGates = try container.decodeIfPresent([DesktopQualityGateRecord].self, forKey: .qualityGates) ?? []
+        vaultScopes = try container.decodeIfPresent([DesktopVaultScopeRecord].self, forKey: .vaultScopes) ?? []
+        knowledgeDocuments = try container.decodeIfPresent([DesktopKnowledgeDocumentRecord].self, forKey: .knowledgeDocuments) ?? []
+        knowledgeWrites = try container.decodeIfPresent([DesktopKnowledgeWriteRecord].self, forKey: .knowledgeWrites) ?? []
+        capabilityUpdates = try container.decodeIfPresent([DesktopCapabilityUpdateRecord].self, forKey: .capabilityUpdates) ?? []
         audit = try container.decode([DesktopAuditRecord].self, forKey: .audit)
     }
 }
