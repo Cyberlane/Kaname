@@ -46,6 +46,15 @@ public final class AppleCalendarIntegrationService {
             }
         }
         guard granted else { return [] }
+        return calendarSnapshots()
+    }
+
+    public func listCalendarsIfAuthorized() -> [AppleCalendarSourceSnapshot] {
+        guard accessState == .ready else { return [] }
+        return calendarSnapshots()
+    }
+
+    private func calendarSnapshots() -> [AppleCalendarSourceSnapshot] {
         return store.calendars(for: .event).map {
             AppleCalendarSourceSnapshot(
                 externalIdentifier: $0.calendarIdentifier,

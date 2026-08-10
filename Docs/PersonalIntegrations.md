@@ -6,7 +6,7 @@ Kaname's live integrations are designed for one person's private desktop install
 
 Kaname uses provider-native authorization boundaries for desktop integrations:
 
-- Gmail and Google Calendar use Kaname's native OAuth 2.0 desktop flow and direct Google APIs. A user imports their own Google OAuth desktop client JSON into private Application Support data, then authorizes each account in the system browser. Refresh tokens are stored as device-only Keychain items; the client file and tokens are never committed.
+- Gmail and Google Calendar use Kaname's native OAuth 2.0 desktop flow and direct Google APIs. The personal build receives its Google Desktop client registration from private build configuration. **Connect Google** then opens the system browser, asks for permission, and returns to Kaname through a local callback. Refresh tokens are stored as device-only Keychain items; the private client registration and tokens are never committed.
 - GitHub uses the identity and host currently available to `gh`.
 - Codex, Claude, and OpenCode launch their native local adapters and retain their own authentication state.
 - Apple Calendar uses EventKit. Merely opening Kaname or Settings does not request access; the user must choose **Request access** in Personal integrations.
@@ -15,9 +15,9 @@ Google authorization uses a PKCE-protected loopback callback on `127.0.0.1`, req
 
 ## Private state
 
-Account references, enabled calendars, exact draft/proposal sources, personal content, and schedule configuration are written beneath `~/Library/Application Support/Kaname/Desktop`. Native Google client configuration and non-secret account metadata live beneath `~/Library/Application Support/Kaname/Google`. These directories and files use owner-only filesystem modes. Redacted diagnostics contain counts and health states rather than identities, content, tokens, or private paths.
+Account references, enabled calendars, exact draft/proposal sources, personal content, and schedule configuration are written beneath `~/Library/Application Support/Kaname/Desktop`. Non-secret Google account metadata lives beneath `~/Library/Application Support/Kaname/Google`. Cached coding-provider health lives beneath `~/Library/Application Support/Kaname/Connectivity`. These directories and files use owner-only filesystem modes. Redacted diagnostics contain counts and health states rather than identities, content, tokens, or private paths.
 
-Opening Settings performs no external account read and does not open the browser or touch secure token storage. The user explicitly chooses **Add account**, **Refresh**, or a provider check. Apple Calendar permission remains a separate explicit action.
+Settings changes persist automatically; there is no Save or Revert step. Kaname loads cached coding-provider health immediately, refreshes it on launch and every five minutes, and checks connected integrations on launch and every fifteen minutes. A manual **Refresh all status** action is also available. Background Google checks use non-interactive Keychain access, so they fail closed instead of presenting a credential dialog. Automatic checks never open a browser or request Apple Calendar permission. **Connect Google** and **Request access** remain explicit user actions.
 
 ## Multiple accounts and calendars
 
@@ -27,9 +27,15 @@ Google and Apple calendar sources appear together in Settings. Each calendar can
 
 ## Native Google setup
 
-Create an OAuth client with the **Desktop app** application type in a Google Cloud project where the Gmail API and Google Calendar API are enabled. Download its JSON file, open **Settings → Integrations**, and choose **Import OAuth client…**. The file is copied into Kaname's private local state. Choose **Add account** once for each Google account; Google opens in the system browser and returns through a temporary loopback listener.
+Create an OAuth client with the **Desktop app** application type in a Google Cloud project where the Gmail API and Google Calendar API are enabled. Keep the downloaded JSON outside the repository at:
 
-The repository contains the reusable OAuth, API, and UI implementation, but no client JSON, account identity, access token, refresh token, mailbox result, or calendar identifier.
+```text
+~/Library/Application Support/Kaname/Build/google-oauth-client.json
+```
+
+The desktop packaging script reads that private file and embeds the registration in the personal app bundle. `KANAME_GOOGLE_OAUTH_CONFIG` can point to a different private JSON path; `KANAME_GOOGLE_OAUTH_CLIENT_ID` and `KANAME_GOOGLE_OAUTH_CLIENT_SECRET` are also supported for ephemeral private builds. None of those values is written to the repository. Once the personal build is installed, choose **Connect Google** once for each account. There is no client-file import in Settings.
+
+The repository contains the reusable OAuth, API, and UI implementation, but no client JSON, client identifier, account identity, access token, refresh token, mailbox result, or calendar identifier.
 
 ## Time-zone semantics
 

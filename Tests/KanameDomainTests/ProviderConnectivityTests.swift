@@ -59,6 +59,47 @@ struct ProviderConnectivityTests {
     }
 
     @Test
+    func providerCapabilityCacheRoundTripsWithPrivatePermissions() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "kaname-provider-cache-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProviderCapabilityCacheStore(directory: root)
+        let checkedAt = Date(timeIntervalSince1970: 1_786_317_600)
+        let instance = ProviderInstance(
+            id: ProviderInstanceID(rawValue: "codexLocal")!,
+            driver: .codex,
+            displayName: "Codex"
+        )
+        let capability = ProviderCapabilitySnapshot(
+            instance: instance,
+            state: .ready,
+            installed: true,
+            version: "1.2.3",
+            authentication: .authenticated,
+            models: [],
+            checkedAt: checkedAt,
+            detail: "Available"
+        )
+        let snapshot = ProviderCapabilityCacheSnapshot(
+            capabilities: [capability],
+            checkedAt: checkedAt
+        )
+
+        try await store.save(snapshot)
+
+        #expect(try await store.load() == snapshot)
+        let cacheFile = root.appending(path: "provider-capabilities.json")
+        let directoryMode = try #require(
+            FileManager.default.attributesOfItem(atPath: root.path)[.posixPermissions] as? NSNumber
+        )
+        let fileMode = try #require(
+            FileManager.default.attributesOfItem(atPath: cacheFile.path)[.posixPermissions] as? NSNumber
+        )
+        #expect(directoryMode.intValue & 0o777 == 0o700)
+        #expect(fileMode.intValue & 0o777 == 0o600)
+    }
+
+    @Test
     func boundedNativeProcessCaptureCollectsAReadOnlyVersionStyleCommand() async throws {
         let result = try await LocalProcess.capture(
             executable: "/usr/bin/env",

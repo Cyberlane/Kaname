@@ -6,7 +6,6 @@ import Foundation
 import SwiftUI
 #if os(macOS)
 import AppKit
-import UniformTypeIdentifiers
 #endif
 
 private enum DesktopDestination: String, CaseIterable, Identifiable {
@@ -140,6 +139,9 @@ struct KanameDesktopWorkspace: View {
             Button("Dismiss", role: .cancel) { model.clearPersistenceError() }
         } message: {
             Text(model.persistenceError ?? "The previous durable workspace remains intact.")
+        }
+        .task {
+            personalIntegrations.startMonitoring(model: model)
         }
     }
 
@@ -1084,24 +1086,71 @@ private final class DesktopPersonalIntegrationViewModel: ObservableObject {
     @Published private(set) var isRefreshingGitHub = false
     @Published private(set) var isRefreshingProviders = false
     @Published private(set) var isRequestingAppleCalendar = false
+    @Published private(set) var lastProviderRefreshAt: Date?
+    @Published private(set) var lastIntegrationRefreshAt: Date?
     @Published private(set) var message: String?
 
     private let integrations = PersonalIntegrationService()
     private let googleIntegration = NativeGoogleIntegrationService()
     private let appleCalendar = AppleCalendarIntegrationService()
+    private let providerCache = ProviderCapabilityCacheStore()
+    private var monitoringTask: _Concurrency.Task<Void, Never>?
 
     init() {
         appleAccessState = appleCalendar.accessState
         _Concurrency.Task {
             hasGoogleClientConfiguration = await googleIntegration.hasClientConfiguration
             googleAccounts = (try? await googleIntegration.accounts()) ?? []
+            if let cached = try? await providerCache.load() {
+                providerCapabilities = cached.capabilities
+                lastProviderRefreshAt = cached.checkedAt
+            }
         }
     }
 
-    func refreshGoogle(model: DesktopAppModel) {
+    func startMonitoring(model: DesktopAppModel) {
+        guard monitoringTask == nil else { return }
+        monitoringTask = _Concurrency.Task { [weak self] in
+            guard let self else { return }
+            hasGoogleClientConfiguration = await googleIntegration.hasClientConfiguration
+            googleAccounts = (try? await googleIntegration.accounts()) ?? []
+            if let cached = try? await providerCache.load() {
+                providerCapabilities = cached.capabilities
+                lastProviderRefreshAt = cached.checkedAt
+            }
+            guard !CommandLine.arguments.contains("--snapshot") else { return }
+
+            refreshProviders(announce: false)
+            refreshGitHub(model: model, announce: false)
+            if !googleAccounts.isEmpty { refreshGoogle(model: model, announce: false) }
+            refreshAppleCalendarStatus(model: model, announce: false)
+
+            var cycle = 0
+            while !_Concurrency.Task.isCancelled {
+                try? await _Concurrency.Task.sleep(for: .seconds(300))
+                guard !_Concurrency.Task.isCancelled else { return }
+                cycle += 1
+                refreshProviders(announce: false)
+                if cycle.isMultiple(of: 3) {
+                    refreshGitHub(model: model, announce: false)
+                    if !googleAccounts.isEmpty { refreshGoogle(model: model, announce: false) }
+                    refreshAppleCalendarStatus(model: model, announce: false)
+                }
+            }
+        }
+    }
+
+    func refreshAllStatus(model: DesktopAppModel) {
+        refreshProviders()
+        refreshGitHub(model: model)
+        if !googleAccounts.isEmpty { refreshGoogle(model: model) }
+        refreshAppleCalendarStatus(model: model)
+    }
+
+    func refreshGoogle(model: DesktopAppModel, announce: Bool = true) {
         guard !isRefreshingGoogle else { return }
         isRefreshingGoogle = true
-        message = nil
+        if announce { message = nil }
         _Concurrency.Task {
             do {
                 let discovered = try await googleIntegration.accounts()
@@ -1117,7 +1166,10 @@ private final class DesktopPersonalIntegrationViewModel: ObservableObject {
                 var failedAccounts: [String] = []
                 for account in discovered {
                     do {
-                        refreshedCalendars.append(contentsOf: try await googleIntegration.listCalendars(accountIDs: [account.id]))
+                        refreshedCalendars.append(contentsOf: try await googleIntegration.listCalendars(
+                            accountIDs: [account.id],
+                            allowKeychainInteraction: announce
+                        ))
                     } catch {
                         failedAccounts.append(account.identity)
                     }
@@ -1138,26 +1190,16 @@ private final class DesktopPersonalIntegrationViewModel: ObservableObject {
                 }
                 let appleSources = model.snapshot.domains.calendarSources.filter { $0.provider == .apple }
                 model.replaceCalendarSources(appleSources + googleSources)
-                message = failedAccounts.isEmpty
-                    ? "Refreshed \(discovered.count) Google account\(discovered.count == 1 ? "" : "s") and \(googleCalendars.count) calendar\(googleCalendars.count == 1 ? "" : "s")."
-                    : "Refreshed \(discovered.count - failedAccounts.count) of \(discovered.count) Google accounts. Reconnect: \(failedAccounts.joined(separator: ", "))."
+                lastIntegrationRefreshAt = .now
+                if announce {
+                    message = failedAccounts.isEmpty
+                        ? "Refreshed \(discovered.count) Google account\(discovered.count == 1 ? "" : "s") and \(googleCalendars.count) calendar\(googleCalendars.count == 1 ? "" : "s")."
+                        : "Refreshed \(discovered.count - failedAccounts.count) of \(discovered.count) Google accounts. Reconnect: \(failedAccounts.joined(separator: ", "))."
+                }
             } catch {
-                message = error.localizedDescription
+                if announce { message = error.localizedDescription }
             }
             isRefreshingGoogle = false
-        }
-    }
-
-    func importGoogleConfiguration(from url: URL) {
-        message = nil
-        _Concurrency.Task {
-            do {
-                try await googleIntegration.importClientConfiguration(from: url)
-                hasGoogleClientConfiguration = true
-                message = "Google OAuth desktop configuration imported into Kaname's private app data."
-            } catch {
-                message = error.localizedDescription
-            }
         }
     }
 
@@ -1236,10 +1278,10 @@ private final class DesktopPersonalIntegrationViewModel: ObservableObject {
         }
     }
 
-    func refreshGitHub(model: DesktopAppModel) {
+    func refreshGitHub(model: DesktopAppModel, announce: Bool = true) {
         guard !isRefreshingGitHub else { return }
         isRefreshingGitHub = true
-        message = nil
+        if announce { message = nil }
         _Concurrency.Task {
             do {
                 let access = try await integrations.inspectGitHubAccess()
@@ -1255,18 +1297,19 @@ private final class DesktopPersonalIntegrationViewModel: ObservableObject {
                         scope: "Current gh CLI host and token scope"
                     )]
                 )
-                message = "GitHub CLI access is ready for @\(access.login)."
+                lastIntegrationRefreshAt = .now
+                if announce { message = "GitHub CLI access is ready for @\(access.login)." }
             } catch {
-                message = error.localizedDescription
+                if announce { message = error.localizedDescription }
             }
             isRefreshingGitHub = false
         }
     }
 
-    func refreshProviders() {
+    func refreshProviders(announce: Bool = true) {
         guard !isRefreshingProviders else { return }
         isRefreshingProviders = true
-        message = nil
+        if announce { message = nil }
         _Concurrency.Task {
             let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             let definitions: [(String, ProviderDriverKind, String, String)] = [
@@ -1286,8 +1329,16 @@ private final class DesktopPersonalIntegrationViewModel: ObservableObject {
                 )))
             }
             providerCapabilities = results
+            let checkedAt = results.map(\.checkedAt).max() ?? .now
+            lastProviderRefreshAt = checkedAt
+            try? await providerCache.save(ProviderCapabilityCacheSnapshot(
+                capabilities: results,
+                checkedAt: checkedAt
+            ))
             let ready = results.filter { $0.state == .ready || $0.state == .degraded }.count
-            message = "Refreshed \(results.count) native provider adapter\(results.count == 1 ? "" : "s"); \(ready) available."
+            if announce {
+                message = "Refreshed \(results.count) native provider adapter\(results.count == 1 ? "" : "s"); \(ready) available."
+            }
             isRefreshingProviders = false
         }
     }
@@ -1300,33 +1351,8 @@ private final class DesktopPersonalIntegrationViewModel: ObservableObject {
             do {
                 let calendars = try await appleCalendar.requestAccessAndListCalendars()
                 appleAccessState = appleCalendar.accessState
-                let sourceNames = Array(Set(calendars.map(\.sourceName))).sorted()
-                let accounts = sourceNames.map { sourceName in
-                    DesktopAccountRecord(
-                        id: stableID(prefix: DesktopAccountRecord.Service.appleCalendar.rawValue, value: sourceName),
-                        service: .appleCalendar,
-                        displayName: sourceName,
-                        identity: sourceName,
-                        status: .ready,
-                        scope: "Calendars selected in Kaname settings"
-                    )
-                }
-                model.replaceAccounts(for: [.appleCalendar], with: accounts)
-                let googleSources = model.snapshot.domains.calendarSources.filter { $0.provider == .google }
-                let appleSources = calendars.map { calendar in
-                    DesktopCalendarSourceRecord.connected(
-                        id: stableID(prefix: "apple-calendar", value: calendar.externalIdentifier),
-                        accountID: stableID(prefix: DesktopAccountRecord.Service.appleCalendar.rawValue, value: calendar.sourceName),
-                        externalIdentifier: calendar.externalIdentifier,
-                        provider: .apple,
-                        displayName: calendar.name,
-                        ownerIdentity: calendar.sourceName,
-                        accessLevel: calendar.allowsChanges ? "read and write" : "read only",
-                        isPrimary: false,
-                        isEnabled: true
-                    )
-                }
-                model.replaceCalendarSources(googleSources + appleSources)
+                applyAppleCalendars(calendars, model: model)
+                lastIntegrationRefreshAt = .now
                 message = calendars.isEmpty
                     ? "Apple Calendar access was not granted."
                     : "Loaded \(calendars.count) Apple calendar\(calendars.count == 1 ? "" : "s")."
@@ -1336,6 +1362,50 @@ private final class DesktopPersonalIntegrationViewModel: ObservableObject {
             }
             isRequestingAppleCalendar = false
         }
+    }
+
+    func refreshAppleCalendarStatus(model: DesktopAppModel, announce: Bool = true) {
+        appleAccessState = appleCalendar.accessState
+        guard appleAccessState == .ready else { return }
+        let calendars = appleCalendar.listCalendarsIfAuthorized()
+        applyAppleCalendars(calendars, model: model)
+        lastIntegrationRefreshAt = .now
+        if announce {
+            message = "Refreshed \(calendars.count) authorized Apple calendar\(calendars.count == 1 ? "" : "s")."
+        }
+    }
+
+    private func applyAppleCalendars(
+        _ calendars: [AppleCalendarSourceSnapshot],
+        model: DesktopAppModel
+    ) {
+        let sourceNames = Array(Set(calendars.map(\.sourceName))).sorted()
+        let accounts = sourceNames.map { sourceName in
+            DesktopAccountRecord(
+                id: stableID(prefix: DesktopAccountRecord.Service.appleCalendar.rawValue, value: sourceName),
+                service: .appleCalendar,
+                displayName: sourceName,
+                identity: sourceName,
+                status: .ready,
+                scope: "Calendars selected in Kaname settings"
+            )
+        }
+        model.replaceAccounts(for: [.appleCalendar], with: accounts)
+        let googleSources = model.snapshot.domains.calendarSources.filter { $0.provider == .google }
+        let appleSources = calendars.map { calendar in
+            DesktopCalendarSourceRecord.connected(
+                id: stableID(prefix: "apple-calendar", value: calendar.externalIdentifier),
+                accountID: stableID(prefix: DesktopAccountRecord.Service.appleCalendar.rawValue, value: calendar.sourceName),
+                externalIdentifier: calendar.externalIdentifier,
+                provider: .apple,
+                displayName: calendar.name,
+                ownerIdentity: calendar.sourceName,
+                accessLevel: calendar.allowsChanges ? "read and write" : "read only",
+                isPrimary: false,
+                isEnabled: true
+            )
+        }
+        model.replaceCalendarSources(googleSources + appleSources)
     }
 
     private func accountRecord(
@@ -2460,6 +2530,13 @@ private struct DesktopSettingsView: View {
             draft: $draft,
             dismiss: { dismiss() }
         )
+        .onChange(of: draft) { updated in
+            var persisted = updated
+            if TimeZone(identifier: updated.defaultScheduleTimeZoneIdentifier) == nil {
+                persisted.defaultScheduleTimeZoneIdentifier = model.snapshot.preferences.defaultScheduleTimeZoneIdentifier
+            }
+            model.updatePreferences(persisted)
+        }
     }
 
 }
@@ -2581,12 +2658,24 @@ private struct DesktopSettingsShell: View {
 
     private var footer: some View {
         HStack {
-            Text("Changes remain local to Kaname.").font(.caption).foregroundStyle(.tertiary)
+            Label(
+                TimeZone(identifier: draft.defaultScheduleTimeZoneIdentifier) == nil
+                    ? "The time zone will save when it is valid; other changes are saved."
+                    : "Changes save automatically.",
+                systemImage: TimeZone(identifier: draft.defaultScheduleTimeZoneIdentifier) == nil
+                    ? "exclamationmark.triangle.fill"
+                    : "checkmark.circle.fill"
+            )
+            .font(.caption)
+            .foregroundStyle(
+                TimeZone(identifier: draft.defaultScheduleTimeZoneIdentifier) == nil
+                    ? Nord.auroraYellow
+                    : Color.secondary.opacity(0.65)
+            )
             Spacer()
-            Button("Revert") { draft = model.snapshot.preferences }
-            Button("Save settings") { model.updatePreferences(draft) }
-                .buttonStyle(.borderedProminent)
-                .disabled(TimeZone(identifier: draft.defaultScheduleTimeZoneIdentifier) == nil)
+            Button("Refresh all status", systemImage: "arrow.clockwise") {
+                integrations.refreshAllStatus(model: model)
+            }
         }
         .padding(.horizontal, 20)
         .frame(height: 58)
@@ -2626,6 +2715,14 @@ private struct DesktopSettingsShell: View {
 
     private var integrationsPage: some View {
         VStack(spacing: 12) {
+            HStack {
+                Label("Connection state refreshes automatically every 15 minutes.", systemImage: "clock.arrow.2.circlepath")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                if let checkedAt = integrations.lastIntegrationRefreshAt {
+                    Text(checkedAt, style: .relative).font(.caption).foregroundStyle(.tertiary)
+                }
+            }
             SettingsIntegrationCard(
                 title: "Google",
                 detail: googleDetail,
@@ -2634,15 +2731,21 @@ private struct DesktopSettingsShell: View {
                 connected: !integrations.googleAccounts.isEmpty,
                 busy: integrations.isRefreshingGoogle || integrations.isConnectingGoogle
             ) {
-                if integrations.hasGoogleClientConfiguration {
-                    Button("Add account", systemImage: "person.badge.plus") { integrations.connectGoogleAccount(model: model) }
+                Button(
+                    integrations.googleAccounts.isEmpty ? "Connect Google" : "Add account",
+                    systemImage: "person.badge.plus"
+                ) {
+                    integrations.connectGoogleAccount(model: model)
+                }
+                .disabled(!integrations.hasGoogleClientConfiguration)
+                if !integrations.googleAccounts.isEmpty {
                     Button("Refresh", systemImage: "arrow.clockwise") { integrations.refreshGoogle(model: model) }
-                } else {
-                    Button("Import OAuth client…", systemImage: "doc.badge.plus") { chooseGoogleConfiguration() }
                 }
             } details: {
                 if integrations.googleAccounts.isEmpty {
-                    Text("Kaname connects directly to Google with OAuth and the Gmail and Calendar APIs. No helper CLI or third-party account bridge is used.")
+                    Text(integrations.hasGoogleClientConfiguration
+                        ? "Connect Google opens the system browser, asks for read-only Gmail and Calendar permission, and returns directly to Kaname."
+                        : "Google is not registered in this build yet. Its private OAuth client registration belongs in Kaname's build configuration, not in Settings.")
                         .font(.caption).foregroundStyle(.secondary)
                 } else {
                     ForEach(integrations.googleAccounts) { account in
@@ -2658,10 +2761,6 @@ private struct DesktopSettingsShell: View {
                         }
                     }
                 }
-                Button("Replace OAuth client…", systemImage: "arrow.triangle.2.circlepath") {
-                    chooseGoogleConfiguration()
-                }
-                .buttonStyle(.borderless)
             }
             SettingsIntegrationCard(
                 title: "Apple Calendar",
@@ -2672,7 +2771,11 @@ private struct DesktopSettingsShell: View {
                 busy: integrations.isRequestingAppleCalendar
             ) {
                 Button(integrations.appleAccessState == .notRequested ? "Request access" : "Refresh") {
-                    integrations.requestAppleCalendarAccess(model: model)
+                    if integrations.appleAccessState == .notRequested {
+                        integrations.requestAppleCalendarAccess(model: model)
+                    } else {
+                        integrations.refreshAppleCalendarStatus(model: model)
+                    }
                 }
             } details: {
                 Text("Uses macOS EventKit and the calendar accounts already configured on this Mac.")
@@ -2697,10 +2800,20 @@ private struct DesktopSettingsShell: View {
     private var providersPage: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Text("Each adapter uses its installed CLI and existing sign-in.").font(.caption).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Each adapter uses its installed CLI and existing sign-in.").font(.caption).foregroundStyle(.secondary)
+                    HStack(spacing: 4) {
+                        Text("Cached immediately · refreshes every 5 minutes")
+                        if let checkedAt = integrations.lastProviderRefreshAt {
+                            Text("·")
+                            Text(checkedAt, style: .relative)
+                        }
+                    }
+                    .font(.caption2).foregroundStyle(.tertiary)
+                }
                 Spacer()
                 if integrations.isRefreshingProviders { ProgressView().controlSize(.small) }
-                Button("Check providers", systemImage: "arrow.clockwise") { integrations.refreshProviders() }
+                Button("Refresh now", systemImage: "arrow.clockwise") { integrations.refreshProviders() }
                     .disabled(integrations.isRefreshingProviders)
             }
             ForEach(providerDescriptors) { provider in
@@ -2800,7 +2913,7 @@ private struct DesktopSettingsShell: View {
     private var googleDetail: String {
         let count = integrations.googleAccounts.count
         let calendars = model.snapshot.domains.calendarSources.filter { $0.provider == .google }.count
-        if count == 0 { return integrations.hasGoogleClientConfiguration ? "Ready to add an account" : "Native setup required" }
+        if count == 0 { return integrations.hasGoogleClientConfiguration ? "Ready to add an account" : "Unavailable in this build" }
         return "\(count) account\(count == 1 ? "" : "s") · \(calendars) calendar\(calendars == 1 ? "" : "s")"
     }
 
@@ -2820,16 +2933,6 @@ private struct DesktopSettingsShell: View {
         }
     }
 
-    private func chooseGoogleConfiguration() {
-#if os(macOS)
-        let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        panel.allowedContentTypes = [.json]
-        panel.message = "Choose the OAuth desktop client JSON downloaded from Google Cloud."
-        if panel.runModal() == .OK, let url = panel.url { integrations.importGoogleConfiguration(from: url) }
-#endif
-    }
 }
 
 private struct SettingsProviderDescriptor: Identifiable {

@@ -24,6 +24,14 @@ identifier="com.cyberlane.kaname.desktop"
 service_identifier="com.cyberlane.kaname.desktop.localcore.service"
 core_identifier="com.cyberlane.kaname.desktop.localcore"
 service_requirement="identifier \"$service_identifier\""
+google_oauth_config_path="${KANAME_GOOGLE_OAUTH_CONFIG:-$HOME/Library/Application Support/Kaname/Build/google-oauth-client.json}"
+google_oauth_client_id="${KANAME_GOOGLE_OAUTH_CLIENT_ID:-}"
+google_oauth_client_secret="${KANAME_GOOGLE_OAUTH_CLIENT_SECRET:-}"
+
+if [[ -z "$google_oauth_client_id" && -f "$google_oauth_config_path" ]]; then
+    google_oauth_client_id="$(plutil -extract installed.client_id raw "$google_oauth_config_path")"
+    google_oauth_client_secret="$(plutil -extract installed.client_secret raw "$google_oauth_config_path" 2>/dev/null || true)"
+fi
 
 cd "$project_dir"
 swift build -c "$configuration" --product KanamePrototype
@@ -70,8 +78,8 @@ plutil -replace CFBundleInfoDictionaryVersion -string 6.0 "$info_plist"
 plutil -replace CFBundleName -string Kaname "$info_plist"
 plutil -replace CFBundleDisplayName -string Kaname "$info_plist"
 plutil -replace CFBundlePackageType -string APPL "$info_plist"
-plutil -replace CFBundleShortVersionString -string 0.6.0 "$info_plist"
-plutil -replace CFBundleVersion -string 8 "$info_plist"
+plutil -replace CFBundleShortVersionString -string 0.6.1 "$info_plist"
+plutil -replace CFBundleVersion -string 9 "$info_plist"
 plutil -replace LSApplicationCategoryType -string public.app-category.developer-tools "$info_plist"
 plutil -replace LSMinimumSystemVersion -string 14.0 "$info_plist"
 plutil -replace NSPrincipalClass -string NSApplication "$info_plist"
@@ -80,6 +88,12 @@ plutil -replace NSSupportsAutomaticGraphicsSwitching -bool YES "$info_plist"
 plutil -replace NSCalendarsFullAccessUsageDescription -string "Kaname reads the calendars you select and changes events only after an exact in-app approval." "$info_plist"
 plutil -replace KanameLocalCoreMachService -string "$service_identifier" "$info_plist"
 plutil -replace KanameLocalCoreServiceRequirement -string "$service_requirement" "$info_plist"
+if [[ -n "$google_oauth_client_id" ]]; then
+    plutil -replace KanameGoogleOAuthClientID -string "$google_oauth_client_id" "$info_plist"
+    if [[ -n "$google_oauth_client_secret" ]]; then
+        plutil -replace KanameGoogleOAuthClientSecret -string "$google_oauth_client_secret" "$info_plist"
+    fi
+fi
 
 cp "$binary_path" "$contents_path/MacOS/KanamePrototype"
 cp "$service_binary_path" "$resources_path/KanameLocalControlService"

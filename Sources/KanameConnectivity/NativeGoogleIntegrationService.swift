@@ -1,6 +1,7 @@
 @preconcurrency import Foundation
 import CryptoKit
 import Security
+@preconcurrency import LocalAuthentication
 #if os(macOS)
 import AppKit
 @preconcurrency import Network
@@ -73,9 +74,9 @@ public enum NativeGoogleIntegrationError: Error, Equatable, LocalizedError, Send
     public var errorDescription: String? {
         switch self {
         case .clientConfigurationMissing:
-            "Import a Google OAuth desktop client JSON file before adding an account."
+            "Google account connection is not configured in this Kaname build."
         case .invalidClientConfiguration:
-            "That file is not a valid Google OAuth desktop client configuration."
+            "This Kaname build has an invalid Google OAuth desktop client configuration."
         case .authorizationUnavailable:
             "Kaname could not start the private local Google authorization callback."
         case .authorizationCancelled:
@@ -198,15 +199,8 @@ public actor NativeGoogleIntegrationService {
     }
 
     public var hasClientConfiguration: Bool {
-        FileManager.default.fileExists(atPath: clientConfigurationURL.path)
-    }
-
-    public func importClientConfiguration(from sourceURL: URL) throws {
-        let data = try Data(contentsOf: sourceURL)
-        _ = try GoogleOAuthClientConfiguration.decode(downloadedJSON: data)
-        try ensurePrivateDirectory()
-        try data.write(to: clientConfigurationURL, options: [.atomic, .completeFileProtection])
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: clientConfigurationURL.path)
+        bundledClientConfiguration() != nil
+            || FileManager.default.fileExists(atPath: clientConfigurationURL.path)
     }
 
     public func accounts() throws -> [NativeGoogleAccountSnapshot] {
@@ -263,11 +257,17 @@ public actor NativeGoogleIntegrationService {
     }
 #endif
 
-    public func listCalendars(accountIDs: [String]? = nil) async throws -> [PersonalCalendarSourceSnapshot] {
+    public func listCalendars(
+        accountIDs: [String]? = nil,
+        allowKeychainInteraction: Bool = true
+    ) async throws -> [PersonalCalendarSourceSnapshot] {
         let selected = try selectedAccounts(accountIDs)
         var snapshots: [PersonalCalendarSourceSnapshot] = []
         for account in selected {
-            let accessToken = try await validAccessToken(for: account)
+            let accessToken = try await validAccessToken(
+                for: account,
+                allowKeychainInteraction: allowKeychainInteraction
+            )
             var pageToken: String?
             for _ in 0..<20 {
                 var components = URLComponents(string: "https://www.googleapis.com/calendar/v3/users/me/calendarList")!
@@ -328,10 +328,26 @@ public actor NativeGoogleIntegrationService {
     }
 
     private func loadClientConfiguration() throws -> GoogleOAuthClientConfiguration {
+        if let bundled = bundledClientConfiguration() { return bundled }
         guard let data = try? Data(contentsOf: clientConfigurationURL) else {
             throw NativeGoogleIntegrationError.clientConfigurationMissing
         }
         return try GoogleOAuthClientConfiguration.decode(downloadedJSON: data)
+    }
+
+    private func bundledClientConfiguration() -> GoogleOAuthClientConfiguration? {
+        guard let clientID = Bundle.main.object(forInfoDictionaryKey: "KanameGoogleOAuthClientID") as? String,
+              !clientID.isEmpty else {
+            return nil
+        }
+        let clientSecret = (Bundle.main.object(forInfoDictionaryKey: "KanameGoogleOAuthClientSecret") as? String)
+            .flatMap { $0.isEmpty ? nil : $0 }
+        return GoogleOAuthClientConfiguration(
+            clientID: clientID,
+            clientSecret: clientSecret,
+            authorizationEndpoint: URL(string: "https://accounts.google.com/o/oauth2/v2/auth")!,
+            tokenEndpoint: URL(string: "https://oauth2.googleapis.com/token")!
+        )
     }
 
     private func exchangeCode(
@@ -409,8 +425,15 @@ public actor NativeGoogleIntegrationService {
         }
     }
 
-    private func validAccessToken(for account: NativeGoogleAccountSnapshot) async throws -> String {
-        var record = try loadToken(accountID: account.id, identity: account.identity)
+    private func validAccessToken(
+        for account: NativeGoogleAccountSnapshot,
+        allowKeychainInteraction: Bool = true
+    ) async throws -> String {
+        var record = try loadToken(
+            accountID: account.id,
+            identity: account.identity,
+            allowInteraction: allowKeychainInteraction
+        )
         if record.expiresAt.timeIntervalSinceNow < 60 {
             record = try await refreshToken(record, configuration: loadClientConfiguration())
             try storeToken(record, accountID: account.id)
@@ -455,10 +478,19 @@ public actor NativeGoogleIntegrationService {
         }
     }
 
-    private func loadToken(accountID: String, identity: String) throws -> GoogleTokenRecord {
+    private func loadToken(
+        accountID: String,
+        identity: String,
+        allowInteraction: Bool
+    ) throws -> GoogleTokenRecord {
         var query = keychainLookup(accountID: accountID)
         query[kSecReturnData] = true
         query[kSecMatchLimit] = kSecMatchLimitOne
+        if !allowInteraction {
+            let context = LAContext()
+            context.interactionNotAllowed = true
+            query[kSecUseAuthenticationContext] = context
+        }
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         guard status == errSecSuccess,
