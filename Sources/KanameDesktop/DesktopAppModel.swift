@@ -368,7 +368,7 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
                         DesktopPlanItem(title: "Packaging and interactive QA", state: .complete),
                     ],
                     evidence: [
-                        DesktopEvidence(label: "Swift tests", detail: "74 tests passed", state: .passed),
+                        DesktopEvidence(label: "Swift tests", detail: "Full desktop suite passed", state: .passed),
                         DesktopEvidence(label: "Rust tests", detail: "26 tests passed", state: .passed),
                         DesktopEvidence(label: "Packaged app", detail: "Signed, installed, and visually qualified", state: .passed),
                         DesktopEvidence(label: "Local core", detail: "F-01 through F-14 replayed through Mach XPC", state: .passed),
@@ -453,7 +453,7 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
                 DesktopPlanItem(title: "Packaging and interactive QA", state: .complete),
             ]
             migrated.threads[index].evidence = [
-                        DesktopEvidence(label: "Swift tests", detail: "74 tests passed", state: .passed),
+                        DesktopEvidence(label: "Swift tests", detail: "Full desktop suite passed", state: .passed),
                 DesktopEvidence(label: "Rust tests", detail: "26 tests passed", state: .passed),
                 DesktopEvidence(label: "Packaged app", detail: "Signed, installed, and visually qualified", state: .passed),
                 DesktopEvidence(label: "Local core", detail: "F-01 through F-14 replayed through Mach XPC", state: .passed),

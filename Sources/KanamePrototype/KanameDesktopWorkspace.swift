@@ -2013,14 +2013,14 @@ private struct DesktopCodingView: View {
         LocalProviderDescriptor(
             name: "Claude",
             executable: "claude",
-            adapter: "Capability adapter",
-            capabilities: "Install and version discovery · isolated authentication state"
+            adapter: "Native discussion adapter",
+            capabilities: "Current CLI session · plan permission mode · bounded budget · no persisted Kaname token"
         ),
         LocalProviderDescriptor(
             name: "OpenCode",
             executable: "opencode",
-            adapter: "Capability adapter",
-            capabilities: "Local server inventory · models · agents · degraded operation"
+            adapter: "Native discussion adapter",
+            capabilities: "Current CLI session · plan agent · auto-approval disabled · JSON event result"
         ),
     ]
 
@@ -2407,7 +2407,9 @@ private struct DesktopSettingsView: View {
                     }
                     integrationRow(
                         title: "GitHub",
-                        detail: model.snapshot.domains.accounts.first(where: { $0.service == .github })
+                        detail: model.snapshot.domains.accounts.first(where: {
+                            $0.service == .github && $0.status == .ready
+                        })
                             .map { "Current gh account: @\($0.identity)" } ?? "Uses the account and host available to gh today",
                         busy: integrations.isRefreshingGitHub,
                         action: "Refresh gh access"
@@ -2488,7 +2490,7 @@ private struct DesktopSettingsView: View {
                     Toggle("Safe mode (disable future write integrations)", isOn: $draft.safeMode)
                     LabeledContent("Default", value: "Local-only draft")
                     LabeledContent("Provider writes", value: "Exact approval required")
-                    LabeledContent("External accounts", value: "Not connected")
+                    LabeledContent("External accounts", value: readyAccountSummary)
                     Text("Changing display settings never grants provider, repository, account, device, or network authority.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -2532,11 +2534,18 @@ private struct DesktopSettingsView: View {
     }
 
     private var googleIntegrationDetail: String {
-        let gmailCount = model.snapshot.domains.accounts.filter { $0.service == .gmail }.count
+        let gmailCount = model.snapshot.domains.accounts.filter {
+            $0.service == .gmail && $0.status == .ready
+        }.count
         let calendarCount = model.snapshot.domains.calendarSources.filter { $0.provider == .google }.count
         return gmailCount == 0
             ? "Uses every account already available to zele"
             : "\(gmailCount) Gmail account\(gmailCount == 1 ? "" : "s") · \(calendarCount) Google calendar\(calendarCount == 1 ? "" : "s")"
+    }
+
+    private var readyAccountSummary: String {
+        let count = model.snapshot.domains.accounts.filter { $0.status == .ready }.count
+        return count == 0 ? "Not connected" : "\(count) ready"
     }
 
     private var providerIntegrationDetail: String {

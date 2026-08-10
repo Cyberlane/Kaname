@@ -15,6 +15,8 @@ output_directory="$(cd "$(dirname "$0")/.." && pwd)/.build/desktop-qa"
 [[ -x "$app_path/Contents/Resources/KanameLocalControlService" ]]
 [[ -x "$app_path/Contents/Resources/kaname-local-core" ]]
 [[ "$(plutil -extract CFBundleIdentifier raw "$app_path/Contents/Info.plist")" == "com.cyberlane.kaname.desktop" ]]
+[[ "$(plutil -extract CFBundleShortVersionString raw "$app_path/Contents/Info.plist")" == "0.5.0" ]]
+[[ "$(plutil -extract CFBundleVersion raw "$app_path/Contents/Info.plist")" == "7" ]]
 codesign --verify --deep --strict "$app_path"
 launchctl print "gui/$(id -u)/$service_identifier" >/dev/null
 
@@ -28,6 +30,10 @@ mkdir -p "$output_directory"
     --desktop-window-size 1080x700 \
     --snapshot "$output_directory/home-compact.png"
 "$executable" --desktop-destination localCore --load-local-core --snapshot "$output_directory/local-core.png"
+"$executable" --desktop-destination email --snapshot "$output_directory/email.png"
+"$executable" --desktop-destination calendar --snapshot "$output_directory/calendar.png"
+"$executable" --desktop-destination liveCodex --snapshot "$output_directory/coding.png"
+"$executable" --desktop-destination settings --snapshot "$output_directory/settings.png"
 "$executable" \
     --desktop-destination settings \
     --desktop-back-target home \
@@ -38,6 +44,10 @@ for snapshot in \
     "$output_directory/home-wide.png" \
     "$output_directory/home-compact.png" \
     "$output_directory/local-core.png" \
+    "$output_directory/email.png" \
+    "$output_directory/calendar.png" \
+    "$output_directory/coding.png" \
+    "$output_directory/settings.png" \
     "$output_directory/mouse-back.png"
 do
     [[ -s "$snapshot" ]]
