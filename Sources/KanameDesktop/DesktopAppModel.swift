@@ -245,6 +245,29 @@ public struct DesktopPreferences: Codable, Equatable, Sendable {
     public var compactRows = false
     public var previewPrivacy: PreviewPrivacy = .hidden
     public var confirmBeforeArchiving = true
+    public var safeMode = false
+    public var auditRetentionDays = 90
+
+    private enum CodingKeys: String, CodingKey {
+        case showTechnicalDetails
+        case compactRows
+        case previewPrivacy
+        case confirmBeforeArchiving
+        case safeMode
+        case auditRetentionDays
+    }
+
+    public init() {}
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        showTechnicalDetails = try container.decodeIfPresent(Bool.self, forKey: .showTechnicalDetails) ?? false
+        compactRows = try container.decodeIfPresent(Bool.self, forKey: .compactRows) ?? false
+        previewPrivacy = try container.decodeIfPresent(PreviewPrivacy.self, forKey: .previewPrivacy) ?? .hidden
+        confirmBeforeArchiving = try container.decodeIfPresent(Bool.self, forKey: .confirmBeforeArchiving) ?? true
+        safeMode = try container.decodeIfPresent(Bool.self, forKey: .safeMode) ?? false
+        auditRetentionDays = try container.decodeIfPresent(Int.self, forKey: .auditRetentionDays) ?? 90
+    }
 }
 
 public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
@@ -1044,6 +1067,32 @@ public final class DesktopAppModel: ObservableObject {
 
     public func clearPersistenceError() {
         persistenceError = nil
+    }
+
+    public func redactedDiagnostics() -> String {
+        let report = DesktopDiagnosticsReport(
+            schemaVersion: snapshot.version,
+            generatedAtUnixMillis: now(),
+            projectCount: snapshot.projects.count,
+            activeThreadCount: activeThreads.count,
+            archivedThreadCount: archivedThreads.count,
+            unreadThreadCount: snapshot.threads.filter(\.unread).count,
+            pendingApprovalCount: snapshot.operations.approvals.filter { $0.state == .awaitingApproval }.count,
+            researchCount: snapshot.domains.research.count,
+            emailDraftCount: snapshot.domains.emailDrafts.count,
+            calendarProposalCount: snapshot.domains.calendarProposals.count,
+            automationCount: snapshot.domains.automations.count,
+            artifactCount: snapshot.operations.artifacts.count,
+            auditRecordCount: snapshot.operations.audit.count,
+            safeMode: snapshot.preferences.safeMode,
+            persistenceHealthy: persistenceError == nil,
+            relayState: snapshot.remote.relayStatus,
+            queueState: snapshot.remote.queueStatus
+        )
+        let diagnosticsEncoder = JSONEncoder()
+        diagnosticsEncoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? diagnosticsEncoder.encode(report) else { return "{}" }
+        return String(decoding: data, as: UTF8.self)
     }
 
     private func mutate(_ change: (inout DesktopAppSnapshot) -> Void) {

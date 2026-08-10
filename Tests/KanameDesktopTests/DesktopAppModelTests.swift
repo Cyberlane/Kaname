@@ -148,10 +148,34 @@ struct DesktopAppModelTests {
         var preferences = model.snapshot.preferences
         preferences.previewPrivacy = .safeSummary
         preferences.showTechnicalDetails = true
+        preferences.safeMode = true
+        preferences.auditRetentionDays = 30
         model.updatePreferences(preferences)
 
         let restored = DesktopAppModel(store: store, now: { 2_000 })
         #expect(restored.snapshot.preferences == preferences)
+    }
+
+    @Test
+    func redactedDiagnosticsContainCountsButNoPrivateContent() throws {
+        let store = MemoryDesktopStateStore()
+        let model = DesktopAppModel(store: store, now: { 7_000 })
+        let sentinel = "PRIVATE-SENTINEL-7E67E7"
+        let threadID = try #require(model.createThread(title: sentinel, kind: .personal, projectID: nil))
+        model.appendUserMessage(threadID: threadID, body: "message-\(sentinel)")
+        _ = model.saveEmailDraft(
+            accountID: nil,
+            recipients: "recipient-\(sentinel)",
+            subject: "subject-\(sentinel)",
+            body: "body-\(sentinel)"
+        )
+
+        let diagnostics = model.redactedDiagnostics()
+
+        #expect(diagnostics.contains("\"schemaVersion\""))
+        #expect(diagnostics.contains("\"emailDraftCount\" : 1"))
+        #expect(!diagnostics.contains(sentinel))
+        #expect(!diagnostics.contains("/Users/"))
     }
 
     @Test

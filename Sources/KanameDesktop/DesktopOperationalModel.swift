@@ -163,3 +163,23 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         audit: []
     )
 }
+
+public struct DesktopDiagnosticsReport: Codable, Equatable, Sendable {
+    public let schemaVersion: Int
+    public let generatedAtUnixMillis: Int64
+    public let projectCount: Int
+    public let activeThreadCount: Int
+    public let archivedThreadCount: Int
+    public let unreadThreadCount: Int
+    public let pendingApprovalCount: Int
+    public let researchCount: Int
+    public let emailDraftCount: Int
+    public let calendarProposalCount: Int
+    public let automationCount: Int
+    public let artifactCount: Int
+    public let auditRecordCount: Int
+    public let safeMode: Bool
+    public let persistenceHealthy: Bool
+    public let relayState: String
+    public let queueState: String
+}
