@@ -1,5 +1,6 @@
 import KanameDesktop
 import KanamePrototypeUI
+import Foundation
 import SwiftUI
 #if os(macOS)
 import AppKit
@@ -10,6 +11,13 @@ private enum DesktopDestination: String, CaseIterable, Identifiable {
     case threads
     case inbox
     case projects
+    case research
+    case knowledge
+    case email
+    case calendar
+    case automations
+    case github
+    case skills
     case devices
     case liveCodex
     case localCore
@@ -23,8 +31,15 @@ private enum DesktopDestination: String, CaseIterable, Identifiable {
         case .threads: "Threads"
         case .inbox: "Inbox"
         case .projects: "Projects"
+        case .research: "Research"
+        case .knowledge: "Obsidian"
+        case .email: "Email"
+        case .calendar: "Calendar"
+        case .automations: "Automations"
+        case .github: "GitHub"
+        case .skills: "Skills & Tools"
         case .devices: "Devices & Remote"
-        case .liveCodex: "Codex Workspace"
+        case .liveCodex: "Coding"
         case .localCore: "Local Core"
         case .settings: "Settings"
         }
@@ -36,6 +51,13 @@ private enum DesktopDestination: String, CaseIterable, Identifiable {
         case .threads: "bubble.left.and.bubble.right.fill"
         case .inbox: "tray.full.fill"
         case .projects: "folder.fill"
+        case .research: "text.magnifyingglass"
+        case .knowledge: "diamond.inset.filled"
+        case .email: "envelope.fill"
+        case .calendar: "calendar"
+        case .automations: "clock.arrow.2.circlepath"
+        case .github: "point.3.connected.trianglepath.dotted"
+        case .skills: "hammer.fill"
         case .devices: "iphone.and.arrow.forward"
         case .liveCodex: "chevron.left.forwardslash.chevron.right"
         case .localCore: "internaldrive.fill"
@@ -166,8 +188,13 @@ struct KanameDesktopWorkspace: View {
                 Menu {
                     Button("New project") { showsNewProject = true }
                     Divider()
+                    Button("Start research") { navigate(to: .research) }
+                    Button("Draft email") { navigate(to: .email) }
+                    Button("Propose calendar event") { navigate(to: .calendar) }
+                    Button("Create automation") { navigate(to: .automations) }
+                    Divider()
                     Button("Open Devices & Remote") { navigate(to: .devices) }
-                    Button("Open Codex Workspace") { navigate(to: .liveCodex) }
+                    Button("Open Coding") { navigate(to: .liveCodex) }
                 } label: {
                     Label("More", systemImage: "ellipsis.circle")
                 }
@@ -202,12 +229,25 @@ struct KanameDesktopWorkspace: View {
 
                 Section("Organize") {
                     destinationButton(.projects, count: model.snapshot.projects.count)
-                    destinationButton(.devices)
+                    destinationButton(.research, count: model.snapshot.domains.research.count)
+                    destinationButton(.knowledge, count: model.snapshot.domains.knowledgeSources.count)
+                }
+
+                Section("Services") {
+                    destinationButton(.email, count: model.snapshot.domains.emailDrafts.count)
+                    destinationButton(.calendar, count: model.snapshot.domains.calendarProposals.count)
+                    destinationButton(.automations, count: model.snapshot.domains.automations.count)
+                    destinationButton(.github, count: model.snapshot.domains.gitWorkspaces.count)
                 }
 
                 Section("Build") {
+                    destinationButton(.skills, count: model.snapshot.domains.skills.filter(\.enabled).count)
                     destinationButton(.liveCodex)
                     destinationButton(.localCore)
+                }
+
+                Section("System") {
+                    destinationButton(.devices)
                 }
             }
             .scrollContentBackground(.hidden)
@@ -290,10 +330,24 @@ struct KanameDesktopWorkspace: View {
                 )
             case .projects:
                 DesktopProjectsView(model: model, createProject: { showsNewProject = true }, openThread: openThread)
+            case .research:
+                DesktopResearchView(model: model, openThread: openThread)
+            case .knowledge:
+                DesktopKnowledgeView(model: model)
+            case .email:
+                DesktopEmailView(model: model)
+            case .calendar:
+                DesktopCalendarView(model: model)
+            case .automations:
+                DesktopAutomationsView(model: model)
+            case .github:
+                DesktopGitHubView(model: model)
+            case .skills:
+                DesktopSkillsView(model: model)
             case .devices:
                 DesktopDevicesView(model: model)
             case .liveCodex:
-                CodexLiveWorkspace()
+                DesktopCodingView()
             case .localCore:
                 LocalCoreWorkspace()
             case .settings:
@@ -537,10 +591,24 @@ private struct DesktopHomeView: View {
                         tint: Nord.frost2
                     )
                     MetricCard(
-                        title: "Remote loop",
-                        value: "Ready",
-                        detail: "Simulator-qualified",
-                        symbol: "lock.shield.fill",
+                        title: "Local drafts",
+                        value: "\(model.snapshot.domains.emailDrafts.count + model.snapshot.domains.calendarProposals.count)",
+                        detail: "Email and calendar proposals",
+                        symbol: "doc.text.fill",
+                        tint: Nord.auroraPurple
+                    )
+                    MetricCard(
+                        title: "Research",
+                        value: "\(model.snapshot.domains.research.count)",
+                        detail: "Durable questions",
+                        symbol: DesktopDestination.research.symbol,
+                        tint: Nord.frost1
+                    )
+                    MetricCard(
+                        title: "Automations",
+                        value: "\(model.snapshot.domains.automations.count)",
+                        detail: "Draft and paused rules",
+                        symbol: DesktopDestination.automations.symbol,
                         tint: Nord.auroraPurple
                     )
                 }
@@ -574,19 +642,31 @@ private struct DesktopHomeView: View {
                     .frame(maxWidth: .infinity, alignment: .topLeading)
 
                     VStack(alignment: .leading, spacing: 12) {
-                        SectionHeading(title: "Continue building", detail: "Validated development surfaces.")
+                        SectionHeading(title: "Start or continue", detail: "Domain-specific local workspaces.")
                         QuickActionCard(
-                            title: "Codex Workspace",
-                            detail: "Inspect an isolated worktree, request a plan, approve exact scope, and review evidence.",
+                            title: "Coding",
+                            detail: "Inspect providers, use an isolated worktree, and review evidence before acceptance.",
                             symbol: DesktopDestination.liveCodex.symbol,
                             tint: Nord.frost1
                         ) { openDestination(.liveCodex) }
                         QuickActionCard(
-                            title: "Devices & Remote",
-                            detail: "Review encrypted relay, recovery, privacy, and deferred live gates.",
-                            symbol: DesktopDestination.devices.symbol,
+                            title: "Research",
+                            detail: "Start from a question and explicit source boundary.",
+                            symbol: DesktopDestination.research.symbol,
+                            tint: Nord.frost0
+                        ) { openDestination(.research) }
+                        QuickActionCard(
+                            title: "Calendar",
+                            detail: "Draft a source-aware event proposal without changing a calendar.",
+                            symbol: DesktopDestination.calendar.symbol,
                             tint: Nord.auroraPurple
-                        ) { openDestination(.devices) }
+                        ) { openDestination(.calendar) }
+                        QuickActionCard(
+                            title: "Automations",
+                            detail: "Define a disabled schedule with safe missed-run policy.",
+                            symbol: DesktopDestination.automations.symbol,
+                            tint: Nord.auroraYellow
+                        ) { openDestination(.automations) }
                     }
                     .frame(width: 360, alignment: .topLeading)
                 }
@@ -843,6 +923,704 @@ private struct DesktopProjectsView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Nord.polarNight0)
+    }
+}
+
+private struct DesktopResearchView: View {
+    @ObservedObject var model: DesktopAppModel
+    let openThread: (String) -> Void
+    @State private var showsNewResearch = false
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                SurfaceHeader(
+                    title: "Research",
+                    detail: "Questions, source boundaries, citations, and reusable findings",
+                    symbol: DesktopDestination.research.symbol
+                ) {
+                    Button("New research", systemImage: "plus.magnifyingglass") {
+                        showsNewResearch = true
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+
+                BoundaryCallout(
+                    title: "Research starts with an explicit boundary",
+                    detail: "Kaname keeps the question and sensitivity boundary local. A provider or remote search receives content only after that execution surface is deliberately selected."
+                )
+
+                if model.snapshot.domains.research.isEmpty {
+                    EmptyPanel(
+                        symbol: "text.magnifyingglass",
+                        title: "No research work yet",
+                        detail: "Start a durable research thread without attaching it to a coding project."
+                    )
+                    .frame(minHeight: 260)
+                } else {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 320), spacing: 14)], spacing: 14) {
+                        ForEach(model.snapshot.domains.research.sorted { $0.updatedAtUnixMillis > $1.updatedAtUnixMillis }) { record in
+                            VStack(alignment: .leading, spacing: 12) {
+                                HStack(alignment: .top) {
+                                    Image(systemName: "doc.text.magnifyingglass")
+                                        .font(.title2)
+                                        .foregroundStyle(Nord.frost1)
+                                    Spacer()
+                                    RecordStatusPill(state: record.status)
+                                }
+                                Text(record.title)
+                                    .font(.headline)
+                                Text(record.question)
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(4)
+                                Divider()
+                                LabeledContent("Sources", value: "\(record.sourceCount)")
+                                    .font(.caption)
+                                RelativeTime(unixMillis: record.updatedAtUnixMillis)
+                            }
+                            .panelStyle()
+                        }
+                    }
+                }
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .background(Nord.polarNight0)
+        .sheet(isPresented: $showsNewResearch) {
+            NewResearchSheet(model: model) { threadID in
+                openThread(threadID)
+            }
+        }
+    }
+}
+
+private struct DesktopKnowledgeView: View {
+    @ObservedObject var model: DesktopAppModel
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                SurfaceHeader(
+                    title: "Obsidian & Knowledge",
+                    detail: "Explicit private notes, repository knowledge, freshness, and conflicts",
+                    symbol: DesktopDestination.knowledge.symbol
+                )
+
+                HStack(alignment: .top, spacing: 14) {
+                    MetricCard(
+                        title: "Knowledge sources",
+                        value: "\(model.snapshot.domains.knowledgeSources.count)",
+                        detail: "Scoped references",
+                        symbol: "books.vertical.fill",
+                        tint: Nord.frost1
+                    )
+                    MetricCard(
+                        title: "Proposed edits",
+                        value: "0",
+                        detail: "Nothing writes silently",
+                        symbol: "doc.badge.ellipsis",
+                        tint: Nord.auroraYellow
+                    )
+                }
+
+                SectionHeading(
+                    title: "Connected knowledge",
+                    detail: "The app stores paths and provenance, not another full copy of the vault or repository."
+                )
+                VStack(spacing: 0) {
+                    ForEach(Array(model.snapshot.domains.knowledgeSources.enumerated()), id: \.element.id) { index, source in
+                        HStack(alignment: .top, spacing: 14) {
+                            Image(systemName: source.kind.symbol)
+                                .font(.title3)
+                                .foregroundStyle(source.kind.tint)
+                                .frame(width: 28)
+                            VStack(alignment: .leading, spacing: 5) {
+                                HStack {
+                                    Text(source.name).font(.headline)
+                                    RecordStatusPill(state: source.status)
+                                }
+                                Text(source.scope)
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                                Text(source.lastReadAtUnixMillis == nil ? "Not read yet" : "Freshness recorded locally")
+                                    .font(.caption)
+                                    .foregroundStyle(.tertiary)
+                            }
+                            Spacer()
+                        }
+                        .padding(.vertical, 14)
+                        if index < model.snapshot.domains.knowledgeSources.count - 1 { Divider() }
+                    }
+                }
+                .padding(.horizontal, 18)
+                .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 16))
+
+                BoundaryCallout(
+                    title: "Reviewable knowledge changes",
+                    detail: "Obsidian and Lode edits will appear as proposed diffs with source revision and conflict state before Kaname writes them."
+                )
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .background(Nord.polarNight0)
+    }
+}
+
+private struct DesktopEmailView: View {
+    @ObservedObject var model: DesktopAppModel
+    @State private var showsComposer = false
+
+    private var accounts: [DesktopAccountRecord] {
+        model.snapshot.domains.accounts.filter { $0.service == .gmail }
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                SurfaceHeader(
+                    title: "Email",
+                    detail: "Account-isolated drafts, approvals, and reconciled delivery",
+                    symbol: DesktopDestination.email.symbol
+                ) {
+                    Button("New draft", systemImage: "square.and.pencil") { showsComposer = true }
+                        .buttonStyle(.borderedProminent)
+                }
+
+                AccountStrip(accounts: accounts)
+
+                SectionHeading(
+                    title: "Local drafts",
+                    detail: "Saving here cannot send mail or grant mailbox access."
+                )
+                if model.snapshot.domains.emailDrafts.isEmpty {
+                    EmptyPanel(
+                        symbol: "envelope.badge",
+                        title: "No email drafts",
+                        detail: "Draft locally now; select and authorize an exact account before any future send."
+                    )
+                    .frame(minHeight: 240)
+                } else {
+                    VStack(spacing: 12) {
+                        ForEach(model.snapshot.domains.emailDrafts.sorted { $0.updatedAtUnixMillis > $1.updatedAtUnixMillis }) { draft in
+                            HStack(alignment: .top, spacing: 14) {
+                                Image(systemName: "doc.text.fill")
+                                    .font(.title2)
+                                    .foregroundStyle(Nord.frost0)
+                                VStack(alignment: .leading, spacing: 5) {
+                                    HStack {
+                                        Text(draft.subject.isEmpty ? "Untitled draft" : draft.subject)
+                                            .font(.headline)
+                                        RecordStatusPill(state: draft.status)
+                                    }
+                                    Text(draft.recipients.isEmpty ? "No recipients selected" : draft.recipients)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    Text(draft.body)
+                                        .font(.subheadline)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(3)
+                                }
+                                Spacer()
+                            }
+                            .panelStyle()
+                        }
+                    }
+                }
+
+                BoundaryCallout(
+                    title: "Sending is a consequential action",
+                    detail: "Every send will identify the exact account, recipients, attachments, resolved content, approval, and external reconciliation result."
+                )
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .background(Nord.polarNight0)
+        .sheet(isPresented: $showsComposer) {
+            NewEmailDraftSheet(model: model)
+        }
+    }
+}
+
+private struct DesktopCalendarView: View {
+    @ObservedObject var model: DesktopAppModel
+    @State private var showsProposal = false
+
+    private var accounts: [DesktopAccountRecord] {
+        model.snapshot.domains.accounts.filter {
+            $0.service == .googleCalendar || $0.service == .appleCalendar
+        }
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                SurfaceHeader(
+                    title: "Calendar",
+                    detail: "Source-aware event proposals, time zones, conflicts, and reconciliation",
+                    symbol: DesktopDestination.calendar.symbol
+                ) {
+                    Button("Propose event", systemImage: "calendar.badge.plus") { showsProposal = true }
+                        .buttonStyle(.borderedProminent)
+                }
+
+                AccountStrip(accounts: accounts)
+
+                SectionHeading(
+                    title: "Event proposals",
+                    detail: "Proposals remain local until an exact calendar and consequence are approved."
+                )
+                if model.snapshot.domains.calendarProposals.isEmpty {
+                    EmptyPanel(
+                        symbol: "calendar.badge.clock",
+                        title: "No calendar proposals",
+                        detail: "Create a local event proposal with explicit time zone, duration, and recurrence."
+                    )
+                    .frame(minHeight: 240)
+                } else {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 320), spacing: 14)], spacing: 14) {
+                        ForEach(model.snapshot.domains.calendarProposals.sorted { $0.startAtUnixMillis < $1.startAtUnixMillis }) { proposal in
+                            VStack(alignment: .leading, spacing: 11) {
+                                HStack {
+                                    Image(systemName: "calendar")
+                                        .font(.title2)
+                                        .foregroundStyle(Nord.auroraPurple)
+                                    Spacer()
+                                    RecordStatusPill(state: proposal.status)
+                                }
+                                Text(proposal.title).font(.headline)
+                                Text(Date(timeIntervalSince1970: Double(proposal.startAtUnixMillis) / 1_000), style: .date)
+                                Text(Date(timeIntervalSince1970: Double(proposal.startAtUnixMillis) / 1_000), style: .time)
+                                    .font(.title3.weight(.semibold))
+                                Divider()
+                                LabeledContent("Duration", value: "\(proposal.durationMinutes) minutes")
+                                LabeledContent("Time zone", value: proposal.timeZoneIdentifier)
+                                LabeledContent("Recurrence", value: proposal.recurrence)
+                            }
+                            .font(.caption)
+                            .panelStyle()
+                        }
+                    }
+                }
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .background(Nord.polarNight0)
+        .sheet(isPresented: $showsProposal) {
+            NewCalendarProposalSheet(model: model)
+        }
+    }
+}
+
+private struct DesktopAutomationsView: View {
+    @ObservedObject var model: DesktopAppModel
+    @State private var showsNewAutomation = false
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                SurfaceHeader(
+                    title: "Automations",
+                    detail: "Inspectable schedules, dry runs, missed-run policy, and durable history",
+                    symbol: DesktopDestination.automations.symbol
+                ) {
+                    Button("New automation", systemImage: "plus.circle") { showsNewAutomation = true }
+                        .buttonStyle(.borderedProminent)
+                }
+
+                BoundaryCallout(
+                    title: "Safe default: skip missed runs",
+                    detail: "Kaname never surprise-runs a backlog. New rules stay as local drafts until tools, data, budget, notifications, and authority are reviewed."
+                )
+
+                if model.snapshot.domains.automations.isEmpty {
+                    EmptyPanel(
+                        symbol: "clock.badge.questionmark",
+                        title: "No automations",
+                        detail: "Describe a schedule and local action. It will remain disabled until its policy is complete."
+                    )
+                    .frame(minHeight: 260)
+                } else {
+                    VStack(spacing: 12) {
+                        ForEach(model.snapshot.domains.automations) { rule in
+                            HStack(alignment: .top, spacing: 14) {
+                                Image(systemName: rule.status == .paused ? "pause.circle.fill" : "clock.arrow.2.circlepath")
+                                    .font(.title2)
+                                    .foregroundStyle(rule.status == .paused ? Nord.auroraYellow : Nord.frost1)
+                                VStack(alignment: .leading, spacing: 6) {
+                                    HStack {
+                                        Text(rule.name).font(.headline)
+                                        RecordStatusPill(state: rule.status)
+                                    }
+                                    Text(rule.schedule)
+                                        .font(.subheadline.weight(.medium))
+                                    Text(rule.actionSummary)
+                                        .font(.subheadline)
+                                        .foregroundStyle(.secondary)
+                                    HStack(spacing: 14) {
+                                        Label(rule.timeZoneIdentifier, systemImage: "globe")
+                                        Label(rule.missedRunPolicy.label, systemImage: "forward.end")
+                                        Label(rule.lastResult, systemImage: "list.bullet.clipboard")
+                                    }
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Button(rule.status == .paused ? "Resume draft" : "Pause") {
+                                    model.setAutomationPaused(id: rule.id, paused: rule.status != .paused)
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                            .panelStyle()
+                        }
+                    }
+                }
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .background(Nord.polarNight0)
+        .sheet(isPresented: $showsNewAutomation) {
+            NewAutomationSheet(model: model)
+        }
+    }
+}
+
+private struct DesktopGitHubView: View {
+    @ObservedObject var model: DesktopAppModel
+
+    private var accounts: [DesktopAccountRecord] {
+        model.snapshot.domains.accounts.filter { $0.service == .github }
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                SurfaceHeader(
+                    title: "GitHub",
+                    detail: "Local repositories, remote state, pull requests, checks, and stack dependencies",
+                    symbol: DesktopDestination.github.symbol
+                )
+                AccountStrip(accounts: accounts)
+
+                SectionHeading(
+                    title: "Local workspaces",
+                    detail: "Local inspection does not imply push, pull-request, review, merge, or release authority."
+                )
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 340), spacing: 14)], spacing: 14) {
+                    ForEach(model.snapshot.domains.gitWorkspaces) { workspace in
+                        VStack(alignment: .leading, spacing: 11) {
+                            HStack {
+                                Image(systemName: "point.3.connected.trianglepath.dotted")
+                                    .font(.title2)
+                                    .foregroundStyle(Nord.frost0)
+                                Spacer()
+                                RecordStatusPill(state: workspace.status)
+                            }
+                            Text(workspace.name).font(.headline)
+                            Text(workspace.localPath)
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                            Divider()
+                            LabeledContent("Branch", value: workspace.branch)
+                            LabeledContent("Remote", value: workspace.remoteSummary)
+                        }
+                        .font(.caption)
+                        .panelStyle()
+                    }
+                }
+
+                BoundaryCallout(
+                    title: "Publishing remains explicit",
+                    detail: "Push, pull-request creation, review replies, merges, releases, and other remote mutations require an exact proposal, approval, and independently reconciled result."
+                )
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .background(Nord.polarNight0)
+    }
+}
+
+private struct DesktopSkillsView: View {
+    @ObservedObject var model: DesktopAppModel
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                SurfaceHeader(
+                    title: "Skills & Tools",
+                    detail: "Progressive disclosure, provenance, scope, permissions, and update review",
+                    symbol: DesktopDestination.skills.symbol
+                )
+
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 340), spacing: 14)], spacing: 14) {
+                    ForEach(model.snapshot.domains.skills) { skill in
+                        VStack(alignment: .leading, spacing: 11) {
+                            HStack {
+                                Image(systemName: skill.kind.symbol)
+                                    .font(.title2)
+                                    .foregroundStyle(skill.enabled ? Nord.frost1 : .secondary)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(skill.name).font(.headline)
+                                    Text(skill.kind.label)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Toggle("Enabled", isOn: Binding(
+                                    get: { skill.enabled },
+                                    set: { model.setSkillEnabled(id: skill.id, enabled: $0) }
+                                ))
+                                .labelsHidden()
+                            }
+                            Divider()
+                            LabeledContent("Scope", value: skill.scope)
+                            LabeledContent("Source", value: skill.source)
+                            LabeledContent("Revision", value: skill.revision)
+                            HStack {
+                                Text("Trust")
+                                Spacer()
+                                RecordStatusPill(state: skill.status)
+                            }
+                        }
+                        .font(.caption)
+                        .panelStyle()
+                    }
+                }
+
+                BoundaryCallout(
+                    title: "Updates are reviewable",
+                    detail: "Behavioral instructions and executables are pinned with source, revision, licence, requested capabilities, and a diff before installation or activation."
+                )
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .background(Nord.polarNight0)
+    }
+}
+
+private struct DesktopCodingView: View {
+    @State private var panel = Panel.overview
+
+    private enum Panel: String, CaseIterable, Identifiable {
+        case overview
+        case codex
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .overview: "Control plane"
+            case .codex: "Codex run"
+            }
+        }
+    }
+
+    private let providers = [
+        LocalProviderDescriptor(
+            name: "Codex",
+            executable: "codex",
+            adapter: "Live adapter",
+            capabilities: "Plan · approve writes · interrupt · evidence · accept"
+        ),
+        LocalProviderDescriptor(
+            name: "Claude",
+            executable: "claude",
+            adapter: "Capability adapter",
+            capabilities: "Install and version discovery · isolated authentication state"
+        ),
+        LocalProviderDescriptor(
+            name: "OpenCode",
+            executable: "opencode",
+            adapter: "Capability adapter",
+            capabilities: "Local server inventory · models · agents · degraded operation"
+        ),
+    ]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Picker("Coding panel", selection: $panel) {
+                    ForEach(Panel.allCases) { panel in
+                        Text(panel.label).tag(panel)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 360)
+                Spacer()
+                if panel == .overview {
+                    Text("Read-only inventory · no provider started")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
+            .background(Nord.polarNight1)
+
+            Divider()
+
+            switch panel {
+            case .overview:
+                overview
+            case .codex:
+                CodexLiveWorkspace()
+            }
+        }
+        .background(Nord.polarNight0)
+    }
+
+    private var overview: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                SurfaceHeader(
+                    title: "Coding control plane",
+                    detail: "Native provider semantics, isolated workspaces, explicit comparisons, and verified acceptance",
+                    symbol: DesktopDestination.liveCodex.symbol
+                ) {
+                    Button("Open Codex run", systemImage: "arrow.right.circle.fill") {
+                        panel = .codex
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+
+                SectionHeading(
+                    title: "Provider inventory",
+                    detail: "Availability is discovered from local executable paths only. Authentication is not opened or inferred."
+                )
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 270), spacing: 14)], spacing: 14) {
+                    ForEach(providers) { provider in
+                        ProviderCapabilityCard(provider: provider)
+                    }
+                }
+
+                HStack(alignment: .top, spacing: 14) {
+                    VStack(alignment: .leading, spacing: 11) {
+                        Label("Explicit comparison", systemImage: "rectangle.split.3x1.fill")
+                            .font(.headline)
+                        Text("A comparison creates separate provider runs from the same approved brief. Results stay side by side; histories and contexts are never silently merged.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                        HStack {
+                            RecordStatusPill(state: .needsReview)
+                            Text("Select providers and cost limits before execution")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .panelStyle()
+
+                    VStack(alignment: .leading, spacing: 11) {
+                        Label("Context & usage", systemImage: "gauge.with.dots.needle.33percent")
+                            .font(.headline)
+                        Text("Each run records selected files, notes, skills, result pages, provider model, compaction, and any available token or cost evidence.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                        HStack {
+                            Text("No run selected")
+                                .font(.caption.weight(.semibold))
+                            Spacer()
+                            Text("0 context references")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .panelStyle()
+                }
+
+                SectionHeading(
+                    title: "Quality loop",
+                    detail: "Provider completion and accepted completion remain different states."
+                )
+                HStack(spacing: 0) {
+                    ForEach(Array(["Discuss", "Plan", "Approve", "Implement", "Review evidence", "Accept", "Update knowledge"].enumerated()), id: \.offset) { index, step in
+                        VStack(spacing: 7) {
+                            ZStack {
+                                Circle()
+                                    .fill(index == 0 ? Nord.frost1 : Nord.polarNight2)
+                                    .frame(width: 28, height: 28)
+                                Text("\(index + 1)")
+                                    .font(.caption2.weight(.bold))
+                                    .foregroundStyle(index == 0 ? Nord.polarNight0 : .secondary)
+                            }
+                            Text(step)
+                                .font(.caption2)
+                                .multilineTextAlignment(.center)
+                                .frame(maxWidth: .infinity)
+                        }
+                        if index < 6 {
+                            Rectangle()
+                                .fill(Nord.polarNight3)
+                                .frame(height: 1)
+                                .offset(y: -11)
+                        }
+                    }
+                }
+                .padding(18)
+                .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 16))
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+private struct LocalProviderDescriptor: Identifiable {
+    let name: String
+    let executable: String
+    let adapter: String
+    let capabilities: String
+
+    var id: String { executable }
+
+    var executableURL: URL? {
+        let environmentPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        let candidates = environmentPath.split(separator: ":").map(String.init) + [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin").path,
+        ]
+        return candidates.lazy
+            .map { URL(fileURLWithPath: $0, isDirectory: true).appendingPathComponent(executable) }
+            .first { FileManager.default.isExecutableFile(atPath: $0.path) }
+    }
+}
+
+private struct ProviderCapabilityCard: View {
+    let provider: LocalProviderDescriptor
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Image(systemName: "cpu.fill")
+                    .foregroundStyle(provider.executableURL == nil ? .secondary : Nord.frost1)
+                Text(provider.name).font(.headline)
+                Spacer()
+                RecordStatusPill(state: provider.executableURL == nil ? .disconnected : .ready)
+            }
+            Text(provider.adapter)
+                .font(.subheadline.weight(.semibold))
+            Text(provider.capabilities)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Divider()
+            Text(provider.executableURL?.path ?? "Executable not found")
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .help(provider.executableURL?.path ?? "Executable not found")
+        }
+        .panelStyle()
     }
 }
 
@@ -1129,6 +1907,220 @@ private struct DesktopInspectorSearchField: View {
     }
 }
 
+private struct NewResearchSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var model: DesktopAppModel
+    let created: (String) -> Void
+    @State private var title = ""
+    @State private var question = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("New research")
+                .font(.title2.weight(.bold))
+            Text("Create a local research record and durable thread. No provider or search service starts from this form.")
+                .foregroundStyle(.secondary)
+            TextField("Short title", text: $title)
+                .textFieldStyle(.roundedBorder)
+            TextField("Question, decision, or desired output", text: $question, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(4...10)
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                Button("Create research") { save() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!isValid)
+            }
+        }
+        .padding(24)
+        .frame(width: 540)
+    }
+
+    private var isValid: Bool {
+        !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func save() {
+        guard model.createResearch(title: title, question: question) != nil,
+              let threadID = model.createThread(title: title, kind: .research, projectID: nil) else { return }
+        model.appendUserMessage(threadID: threadID, body: question)
+        dismiss()
+        created(threadID)
+    }
+}
+
+private struct NewEmailDraftSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var model: DesktopAppModel
+    @State private var recipients = ""
+    @State private var subject = ""
+    @State private var draftBody = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("New local email draft")
+                .font(.title2.weight(.bold))
+            HStack(spacing: 8) {
+                Image(systemName: "person.crop.circle.badge.questionmark")
+                Text("No account selected · sending unavailable")
+            }
+            .font(.subheadline)
+            .foregroundStyle(Nord.auroraYellow)
+            TextField("Recipients (optional while drafting)", text: $recipients)
+                .textFieldStyle(.roundedBorder)
+            TextField("Subject", text: $subject)
+                .textFieldStyle(.roundedBorder)
+            TextEditor(text: $draftBody)
+                .font(.body)
+                .scrollContentBackground(.hidden)
+                .padding(8)
+                .frame(minHeight: 220)
+                .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 10))
+            HStack {
+                Text("Save draft only")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                Button("Save draft") { save() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(subject.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        && draftBody.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(24)
+        .frame(width: 620, height: 500)
+    }
+
+    private func save() {
+        guard model.saveEmailDraft(
+            accountID: nil,
+            recipients: recipients,
+            subject: subject,
+            body: draftBody
+        ) != nil else { return }
+        dismiss()
+    }
+}
+
+private struct NewCalendarProposalSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var model: DesktopAppModel
+    @State private var title = ""
+    @State private var start = Date().addingTimeInterval(3_600)
+    @State private var durationMinutes = 30
+    @State private var timeZoneIdentifier = TimeZone.current.identifier
+    @State private var recurrence = "Does not repeat"
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Propose calendar event")
+                .font(.title2.weight(.bold))
+            Text("This creates a local proposal. It does not request Calendar access or create an event.")
+                .foregroundStyle(.secondary)
+            Form {
+                TextField("Title", text: $title)
+                DatePicker("Start", selection: $start)
+                Stepper("Duration: \(durationMinutes) minutes", value: $durationMinutes, in: 5...1_440, step: 5)
+                TextField("IANA time zone", text: $timeZoneIdentifier)
+                Picker("Recurrence", selection: $recurrence) {
+                    Text("Does not repeat").tag("Does not repeat")
+                    Text("Daily").tag("Daily")
+                    Text("Weekly").tag("Weekly")
+                    Text("Monthly").tag("Monthly")
+                }
+            }
+            .formStyle(.grouped)
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                Button("Save proposal") { save() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!isValid)
+            }
+        }
+        .padding(24)
+        .frame(width: 540, height: 430)
+    }
+
+    private var isValid: Bool {
+        !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && TimeZone(identifier: timeZoneIdentifier) != nil
+    }
+
+    private func save() {
+        guard model.createCalendarProposal(
+            title: title,
+            startAtUnixMillis: Int64(start.timeIntervalSince1970 * 1_000),
+            durationMinutes: durationMinutes,
+            timeZoneIdentifier: timeZoneIdentifier,
+            recurrence: recurrence
+        ) != nil else { return }
+        dismiss()
+    }
+}
+
+private struct NewAutomationSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var model: DesktopAppModel
+    @State private var name = ""
+    @State private var schedule = "Every Monday at 09:00"
+    @State private var timeZoneIdentifier = TimeZone.current.identifier
+    @State private var actionSummary = ""
+    @State private var missedRunPolicy = DesktopAutomationRule.MissedRunPolicy.skip
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("New automation draft")
+                .font(.title2.weight(.bold))
+            Text("Define intent and timing now. The rule stays disabled until its exact tools, data, budget, notifications, and authority are reviewed.")
+                .foregroundStyle(.secondary)
+            Form {
+                TextField("Name", text: $name)
+                TextField("Human schedule or cron expression", text: $schedule)
+                TextField("IANA time zone", text: $timeZoneIdentifier)
+                TextField("What should happen?", text: $actionSummary, axis: .vertical)
+                    .lineLimit(3...7)
+                Picker("Missed run", selection: $missedRunPolicy) {
+                    ForEach(DesktopAutomationRule.MissedRunPolicy.allCases, id: \.self) { policy in
+                        Text(policy.label).tag(policy)
+                    }
+                }
+            }
+            .formStyle(.grouped)
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                Button("Save disabled draft") { save() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!isValid)
+            }
+        }
+        .padding(24)
+        .frame(width: 580, height: 480)
+    }
+
+    private var isValid: Bool {
+        !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !schedule.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !actionSummary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && TimeZone(identifier: timeZoneIdentifier) != nil
+    }
+
+    private func save() {
+        guard model.createAutomation(
+            name: name,
+            schedule: schedule,
+            timeZoneIdentifier: timeZoneIdentifier,
+            actionSummary: actionSummary,
+            missedRunPolicy: missedRunPolicy
+        ) != nil else { return }
+        dismiss()
+    }
+}
+
 private struct NewDesktopThreadSheet: View {
     @ObservedObject var model: DesktopAppModel
     let created: (String) -> Void
@@ -1244,6 +2236,51 @@ private struct NewDesktopProjectSheet: View {
             }
         }
 #endif
+    }
+}
+
+private struct AccountStrip: View {
+    let accounts: [DesktopAccountRecord]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Accounts & scope")
+                .font(.headline)
+            ForEach(accounts) { account in
+                HStack(spacing: 12) {
+                    Image(systemName: account.service.symbol)
+                        .foregroundStyle(account.status == .ready ? Nord.auroraGreen : .secondary)
+                        .frame(width: 24)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(account.displayName)
+                            .font(.subheadline.weight(.semibold))
+                        Text(account.identity)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Text(account.scope)
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                    RecordStatusPill(state: account.status)
+                }
+            }
+        }
+        .panelStyle()
+    }
+}
+
+private struct RecordStatusPill: View {
+    let state: DesktopRecordState
+
+    var body: some View {
+        Text(state.label)
+            .font(.caption2.weight(.bold))
+            .foregroundStyle(state.foreground)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(state.tint.opacity(0.18), in: Capsule())
     }
 }
 
@@ -1917,10 +2954,74 @@ private extension DesktopDestination {
         case .threads: "Conversation continuity over durable local records."
         case .inbox: "Rule-based attention projection over those same threads."
         case .projects: "Deliberate repository, instruction, skill, and knowledge boundaries."
+        case .research: "Questions, source boundaries, citations, and reusable findings."
+        case .knowledge: "Private Obsidian context and repository knowledge with visible provenance."
+        case .email: "Account-isolated drafts and externally reconciled communication."
+        case .calendar: "Source-aware event proposals with time zones and consequence review."
+        case .automations: "Inspectable schedules, missed-run rules, and durable run history."
+        case .github: "Local and remote repository state, checks, reviews, and stack relationships."
+        case .skills: "Capability provenance, scope, permissions, compatibility, and updates."
         case .devices: "Encrypted reachability and recovery without silently widening authority."
         case .liveCodex: "Isolated worktree inspection, planning, explicit write approval, and evidence review."
         case .localCore: "Provider-free replay, failure, and recovery evidence from the durable authority."
         case .settings: "Presentation and privacy defaults that never grant external authority."
+        }
+    }
+}
+
+private extension DesktopRecordState {
+    var tint: Color {
+        switch self {
+        case .ready: Nord.auroraGreen
+        case .draft: Nord.frost1
+        case .proposed: Nord.auroraPurple
+        case .paused: Nord.auroraYellow
+        case .disconnected: Nord.polarNight3
+        case .needsReview: Nord.auroraOrange
+        }
+    }
+
+    var foreground: Color {
+        self == .disconnected ? .secondary : tint
+    }
+}
+
+private extension DesktopKnowledgeSource.Kind {
+    var symbol: String {
+        switch self {
+        case .obsidian: "diamond.fill"
+        case .lode: "shippingbox.fill"
+        case .repository: "folder.fill.badge.gearshape"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .obsidian: Nord.auroraPurple
+        case .lode: Nord.frost0
+        case .repository: Nord.frost1
+        }
+    }
+}
+
+private extension DesktopSkillRecord.Kind {
+    var symbol: String {
+        switch self {
+        case .skill: "wand.and.stars"
+        case .tool: "hammer.fill"
+        case .connector: "cable.connector"
+        case .hook: "point.topleft.down.to.point.bottomright.curvepath"
+        }
+    }
+}
+
+private extension DesktopAccountRecord.Service {
+    var symbol: String {
+        switch self {
+        case .github: "point.3.connected.trianglepath.dotted"
+        case .gmail: "envelope.fill"
+        case .googleCalendar: "calendar.badge.clock"
+        case .appleCalendar: "calendar"
         }
     }
 }
