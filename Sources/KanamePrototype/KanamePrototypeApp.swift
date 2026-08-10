@@ -119,33 +119,36 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
         guard let flagIndex = CommandLine.arguments.firstIndex(of: "--snapshot"),
               CommandLine.arguments.indices.contains(flagIndex + 1) else { return }
         let outputURL = URL(fileURLWithPath: CommandLine.arguments[flagIndex + 1])
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-            if let capture = CGWindowListCreateImage(
-                .null,
-                .optionIncludingWindow,
-                CGWindowID(window.windowNumber),
-                [.boundsIgnoreFraming, .bestResolution]
-            ),
-            let png = NSBitmapImageRep(cgImage: capture)
-                .representation(using: .png, properties: [:]) {
-                try? png.write(to: outputURL, options: .atomic)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            self?.applyRequestedWindowSize(to: window)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                if let capture = CGWindowListCreateImage(
+                    .null,
+                    .optionIncludingWindow,
+                    CGWindowID(window.windowNumber),
+                    [.boundsIgnoreFraming, .bestResolution]
+                ),
+                let png = NSBitmapImageRep(cgImage: capture)
+                    .representation(using: .png, properties: [:]) {
+                    try? png.write(to: outputURL, options: .atomic)
+                    NSApplication.shared.terminate(nil)
+                    return
+                }
+                guard let contentView = window.contentView else {
+                    NSApplication.shared.terminate(nil)
+                    return
+                }
+                contentView.layoutSubtreeIfNeeded()
+                guard let bitmap = contentView.bitmapImageRepForCachingDisplay(in: contentView.bounds) else {
+                    NSApplication.shared.terminate(nil)
+                    return
+                }
+                contentView.cacheDisplay(in: contentView.bounds, to: bitmap)
+                if let png = bitmap.representation(using: .png, properties: [:]) {
+                    try? png.write(to: outputURL, options: .atomic)
+                }
                 NSApplication.shared.terminate(nil)
-                return
             }
-            guard let contentView = window.contentView else {
-                NSApplication.shared.terminate(nil)
-                return
-            }
-            contentView.layoutSubtreeIfNeeded()
-            guard let bitmap = contentView.bitmapImageRepForCachingDisplay(in: contentView.bounds) else {
-                NSApplication.shared.terminate(nil)
-                return
-            }
-            contentView.cacheDisplay(in: contentView.bounds, to: bitmap)
-            if let png = bitmap.representation(using: .png, properties: [:]) {
-                try? png.write(to: outputURL, options: .atomic)
-            }
-            NSApplication.shared.terminate(nil)
         }
     }
 }

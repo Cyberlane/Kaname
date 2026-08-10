@@ -61,6 +61,7 @@ struct KanameDesktopWorkspace: View {
     @State private var inboxFilter: DesktopAttention? = nil
     @State private var showsNewThread = false
     @State private var showsNewProject = false
+    @State private var showsInspector = true
     @State private var navigationHistory: [DesktopNavigationLocation] = []
 
     init() {
@@ -87,16 +88,7 @@ struct KanameDesktopWorkspace: View {
     }
 
     var body: some View {
-        NavigationSplitView {
-            sidebar
-        } content: {
-            content
-                .navigationTitle(destination.title)
-                .toolbar { toolbar }
-        } detail: {
-            inspectorColumn
-        }
-        .navigationSplitViewStyle(.balanced)
+        navigationLayout
         .background(Nord.polarNight0)
         .background(MouseBackButtonHandler(action: goBack))
         .sheet(isPresented: $showsNewThread) {
@@ -118,6 +110,37 @@ struct KanameDesktopWorkspace: View {
         } message: {
             Text(model.persistenceError ?? "The previous durable workspace remains intact.")
         }
+    }
+
+    @ViewBuilder
+    private var navigationLayout: some View {
+        if #available(macOS 14.0, *) {
+            NavigationSplitView {
+                sidebar
+            } detail: {
+                centerColumn
+            }
+            .navigationSplitViewStyle(.balanced)
+            .inspector(isPresented: $showsInspector) {
+                inspectorColumn
+                    .inspectorColumnWidth(min: 280, ideal: 340, max: 440)
+            }
+        } else {
+            NavigationSplitView {
+                sidebar
+            } content: {
+                centerColumn
+            } detail: {
+                inspectorColumn
+            }
+            .navigationSplitViewStyle(.balanced)
+        }
+    }
+
+    private var centerColumn: some View {
+        content
+            .navigationTitle(destination.title)
+            .toolbar { toolbar }
     }
 
     private var sidebar: some View {
@@ -264,7 +287,6 @@ struct KanameDesktopWorkspace: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Nord.polarNight1)
-        .navigationSplitViewColumnWidth(min: 280, ideal: 340, max: 440)
     }
 
     @ToolbarContentBuilder
