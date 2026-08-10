@@ -77,6 +77,11 @@ private struct DesktopNavigationLocation: Equatable {
     let selectedThreadID: String?
 }
 
+private struct NewConversationRequest: Identifiable {
+    let id = UUID()
+    let projectID: String?
+}
+
 struct KanameDesktopWorkspace: View {
     @StateObject private var model = DesktopAppModel()
     @StateObject private var personalIntegrations = DesktopPersonalIntegrationViewModel()
@@ -84,7 +89,7 @@ struct KanameDesktopWorkspace: View {
     @State private var selectedThreadID: String?
     @State private var searchText = ""
     @State private var inboxFilter: DesktopAttention? = nil
-    @State private var showsNewThread = false
+    @State private var newConversationRequest: NewConversationRequest?
     @State private var showsNewProject = false
     @State private var showsInspector = true
     @State private var showsSettings = false
@@ -131,8 +136,8 @@ struct KanameDesktopWorkspace: View {
                 .zIndex(1)
             }
         }
-        .sheet(isPresented: $showsNewThread) {
-            NewDesktopThreadSheet(model: model) { threadID in
+        .sheet(item: $newConversationRequest) { request in
+            NewDesktopThreadSheet(model: model, projectID: request.projectID) { threadID in
                 openThread(threadID)
             }
         }
@@ -206,12 +211,12 @@ struct KanameDesktopWorkspace: View {
 
             ControlGroup {
                 Button {
-                    showsNewThread = true
+                    beginConversation(projectID: inheritedProjectID)
                 } label: {
-                    Label("New thread", systemImage: "square.and.pencil")
+                    Label("New conversation", systemImage: "square.and.pencil")
                 }
                 .keyboardShortcut("n", modifiers: .command)
-                .help("New thread")
+                .help("New conversation")
 
                 Menu {
                     Button("New project") { showsNewProject = true }
@@ -357,7 +362,12 @@ struct KanameDesktopWorkspace: View {
                     selectedThreadID: threadSelection
                 )
             case .projects:
-                DesktopProjectsView(model: model, createProject: { showsNewProject = true }, openThread: openThread)
+                DesktopProjectsView(
+                    model: model,
+                    createProject: { showsNewProject = true },
+                    startConversation: { beginConversation(projectID: $0) },
+                    openThread: openThread
+                )
             case .research:
                 DesktopResearchView(model: model, openThread: openThread)
             case .knowledge:
@@ -439,6 +449,15 @@ struct KanameDesktopWorkspace: View {
     private func openThread(_ threadID: String) {
         visit(DesktopNavigationLocation(destination: .threads, selectedThreadID: threadID))
         model.markRead(threadID: threadID)
+    }
+
+    private var inheritedProjectID: String? {
+        guard destination.keepsThreadSelection else { return nil }
+        return model.thread(id: selectedThreadID)?.projectID
+    }
+
+    private func beginConversation(projectID: String?) {
+        newConversationRequest = NewConversationRequest(projectID: projectID)
     }
 
     private var currentLocation: DesktopNavigationLocation {
@@ -525,8 +544,8 @@ struct KanameDesktopWorkspace: View {
             showsSettings = false
             return true
         }
-        if showsNewThread {
-            showsNewThread = false
+        if newConversationRequest != nil {
+            newConversationRequest = nil
             return true
         }
         if showsNewProject {
@@ -947,6 +966,7 @@ private struct DesktopThreadConversation: View {
 private struct DesktopProjectsView: View {
     @ObservedObject var model: DesktopAppModel
     let createProject: () -> Void
+    let startConversation: (String) -> Void
     let openThread: (String) -> Void
 
     var body: some View {
@@ -966,6 +986,7 @@ private struct DesktopProjectsView: View {
                         ProjectCard(
                             project: project,
                             threads: model.activeThreads.filter { $0.projectID == project.id },
+                            startConversation: { startConversation(project.id) },
                             openThread: openThread
                         )
                     }
@@ -3778,52 +3799,68 @@ private struct NewAutomationSheet: View {
 
 private struct NewDesktopThreadSheet: View {
     @ObservedObject var model: DesktopAppModel
+    let projectID: String?
     let created: (String) -> Void
     @Environment(\.dismiss) private var dismiss
-    @State private var title = ""
     @State private var kind: DesktopWorkKind = .coding
-    @State private var projectID: String? = "project-kaname"
+
+    private var project: DesktopProject? {
+        model.project(id: projectID)
+    }
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("Conversation") {
-                    TextField("What should this thread be about?", text: $title)
+                Section("Context") {
+                    LabeledContent {
+                        Text(project?.name ?? "Standalone")
+                            .fontWeight(.medium)
+                    } label: {
+                        Label(
+                            project == nil ? "Conversation" : "Project",
+                            systemImage: project == nil ? "bubble.left" : "folder.fill"
+                        )
+                    }
+                    Text(
+                        project == nil
+                            ? "Start without attaching a project. You can connect deliberate context later."
+                            : "This conversation stays attached to the selected project."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+                Section("Kind") {
                     Picker("Kind", selection: $kind) {
                         ForEach(DesktopWorkKind.allCases, id: \.self) { kind in
                             Text(kind.label).tag(kind)
                         }
                     }
-                    Picker("Project", selection: $projectID) {
-                        Text("Standalone").tag(nil as String?)
-                        ForEach(model.snapshot.projects) { project in
-                            Text(project.name).tag(project.id as String?)
-                        }
-                    }
+                    .pickerStyle(.segmented)
+                    Text(kind.startDetail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-                Section("Authority") {
-                    Label("Creates a local durable draft only", systemImage: "internaldrive")
-                    Text("No provider, repository, account, device, or external service starts from this sheet.")
+                Section {
+                    Label("No subject required", systemImage: "sparkles")
+                    Text("Kaname opens a blank conversation and names it automatically from your first message.")
                         .foregroundStyle(.secondary)
                 }
             }
             .formStyle(.grouped)
             .padding(12)
-            .frame(width: 520, height: 340)
-            .navigationTitle("New thread")
+            .frame(width: 540, height: 390)
+            .navigationTitle("New conversation")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Create") {
-                        if let id = model.createThread(title: title, kind: kind, projectID: projectID) {
-                            created(id)
-                            dismiss()
-                        }
+                    Button("Start conversation") {
+                        let id = model.createConversation(kind: kind, projectID: projectID)
+                        created(id)
+                        dismiss()
                     }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
         }
@@ -4254,6 +4291,7 @@ private struct QuickActionCard: View {
 private struct ProjectCard: View {
     let project: DesktopProject
     let threads: [DesktopThread]
+    let startConversation: () -> Void
     let openThread: (String) -> Void
 
     var body: some View {
@@ -4269,6 +4307,15 @@ private struct ProjectCard: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
+                Button(action: startConversation) {
+                    Image(systemName: "square.and.pencil")
+                        .font(.body.weight(.semibold))
+                        .frame(width: 30, height: 30)
+                        .background(Nord.polarNight2, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .help("New conversation in \(project.name)")
+                .accessibilityLabel("New conversation in \(project.name)")
             }
             Text(project.summary.isEmpty ? "No purpose recorded yet." : project.summary)
                 .font(.subheadline)
@@ -4795,6 +4842,15 @@ private extension DesktopWorkKind {
         case .research: "text.magnifyingglass"
         case .planning: "list.bullet.clipboard"
         case .personal: "person.fill"
+        }
+    }
+
+    var startDetail: String {
+        switch self {
+        case .coding: "Discuss, plan, implement, and review work for a repository or workspace."
+        case .research: "Investigate a question with explicit source and sensitivity boundaries."
+        case .planning: "Shape a decision or implementation plan before granting write authority."
+        case .personal: "Start non-coding work while keeping unrelated contexts separate."
         }
     }
 }

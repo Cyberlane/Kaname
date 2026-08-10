@@ -31,6 +31,10 @@ public enum DesktopWorkKind: String, Codable, CaseIterable, Equatable, Sendable 
     case personal
 
     public var label: String { rawValue.capitalized }
+
+    public var newConversationTitle: String {
+        "New \(rawValue) conversation"
+    }
 }
 
 public enum DesktopMessageRole: String, Codable, Equatable, Sendable {
@@ -649,15 +653,34 @@ public final class DesktopAppModel: ObservableObject {
         return thread.id
     }
 
+    public func createConversation(kind: DesktopWorkKind, projectID: String?) -> String {
+        let timestamp = now()
+        let thread = DesktopThread(
+            projectID: projectID,
+            title: kind.newConversationTitle,
+            summary: "Ready for your first message.",
+            kind: kind,
+            attention: .queued,
+            updatedAtUnixMillis: timestamp
+        )
+        mutate { $0.threads.append(thread) }
+        return thread.id
+    }
+
     public func appendUserMessage(threadID: String, body: String) {
         let cleanBody = body.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanBody.isEmpty, cleanBody.utf8.count <= 32_000 else { return }
         let timestamp = now()
         mutate { snapshot in
             guard let index = snapshot.threads.firstIndex(where: { $0.id == threadID }) else { return }
+            let shouldProjectTitle = snapshot.threads[index].title == snapshot.threads[index].kind.newConversationTitle
+                && !snapshot.threads[index].messages.contains { $0.role == .user }
             snapshot.threads[index].messages.append(
                 DesktopMessage(role: .user, body: cleanBody, createdAtUnixMillis: timestamp)
             )
+            if shouldProjectTitle {
+                snapshot.threads[index].title = Self.provisionalConversationTitle(from: cleanBody)
+            }
             snapshot.threads[index].summary = cleanBody
             snapshot.threads[index].attention = .queued
             snapshot.threads[index].updatedAtUnixMillis = timestamp
@@ -1170,6 +1193,13 @@ public final class DesktopAppModel: ObservableObject {
 
     private static func normalized(_ value: String) -> String {
         value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func provisionalConversationTitle(from firstMessage: String) -> String {
+        let collapsed = firstMessage.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        let maximumCharacters = 72
+        guard collapsed.count > maximumCharacters else { return collapsed }
+        return "\(String(collapsed.prefix(maximumCharacters)).trimmingCharacters(in: .whitespacesAndNewlines))…"
     }
 
     private static func sortedRecords<Record>(

@@ -43,8 +43,8 @@ fi
 [[ -x "$app_path/Contents/Resources/KanameLocalControlService" ]]
 [[ -x "$app_path/Contents/Resources/kaname-local-core" ]]
 [[ "$(plutil -extract CFBundleIdentifier raw "$app_path/Contents/Info.plist")" == "com.cyberlane.kaname.desktop" ]]
-[[ "$(plutil -extract CFBundleShortVersionString raw "$app_path/Contents/Info.plist")" == "0.6.6" ]]
-[[ "$(plutil -extract CFBundleVersion raw "$app_path/Contents/Info.plist")" == "14" ]]
+[[ "$(plutil -extract CFBundleShortVersionString raw "$app_path/Contents/Info.plist")" == "0.6.7" ]]
+[[ "$(plutil -extract CFBundleVersion raw "$app_path/Contents/Info.plist")" == "15" ]]
 codesign --verify --deep --strict "$app_path"
 if [[ "$(plutil -extract KanameStableCodeSigning raw "$app_path/Contents/Info.plist")" == "true" ]]; then
     designated_requirement="$(codesign -d -r- "$app_path" 2>&1)"
@@ -73,6 +73,7 @@ mkdir -p "$output_directory"
 "$executable" --desktop-destination localCore --load-local-core --snapshot "$output_directory/local-core.png"
 "$executable" --desktop-destination email --snapshot "$output_directory/email.png"
 "$executable" --desktop-destination calendar --snapshot "$output_directory/calendar.png"
+"$executable" --desktop-destination projects --snapshot "$output_directory/projects.png"
 "$executable" --desktop-destination liveCodex --snapshot "$output_directory/coding.png"
 "$executable" --desktop-destination settings --snapshot "$output_directory/settings.png"
 "$executable" \
@@ -96,6 +97,7 @@ for snapshot in \
     "$output_directory/local-core.png" \
     "$output_directory/email.png" \
     "$output_directory/calendar.png" \
+    "$output_directory/projects.png" \
     "$output_directory/coding.png" \
     "$output_directory/settings.png" \
     "$output_directory/settings-integrations.png" \

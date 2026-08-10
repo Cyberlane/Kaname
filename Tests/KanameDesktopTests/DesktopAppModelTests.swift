@@ -55,6 +55,54 @@ struct DesktopAppModelTests {
     }
 
     @Test
+    func newConversationNeedsOnlyKindAndUsesItsFirstMessageAsAProvisionalTitle() throws {
+        let store = MemoryDesktopStateStore()
+        var clock: Int64 = 1_000
+        let model = DesktopAppModel(store: store, now: { clock })
+        let projectID = try #require(model.snapshot.projects.first?.id)
+
+        let threadID = model.createConversation(kind: .planning, projectID: projectID)
+        let emptyConversation = try #require(model.thread(id: threadID))
+
+        #expect(emptyConversation.projectID == projectID)
+        #expect(emptyConversation.kind == .planning)
+        #expect(emptyConversation.title == "New planning conversation")
+        #expect(emptyConversation.messages.isEmpty)
+
+        clock += 1
+        model.appendUserMessage(
+            threadID: threadID,
+            body: "  Plan how Kaname can rebuild itself   while a stable copy remains open.  "
+        )
+        let titledConversation = try #require(model.thread(id: threadID))
+
+        #expect(titledConversation.title == "Plan how Kaname can rebuild itself while a stable copy remains open.")
+        #expect(titledConversation.messages.count == 1)
+        #expect(titledConversation.messages.first?.role == .user)
+
+        clock += 1
+        model.appendUserMessage(threadID: threadID, body: "Do not replace the title with this follow-up.")
+        let restored = DesktopAppModel(store: store, now: { 2_000 })
+        #expect(restored.thread(id: threadID)?.title == titledConversation.title)
+    }
+
+    @Test
+    func provisionalConversationTitleIsSingleLineAndBounded() throws {
+        let model = DesktopAppModel(store: MemoryDesktopStateStore(), now: { 1_000 })
+        let threadID = model.createConversation(kind: .coding, projectID: nil)
+
+        model.appendUserMessage(
+            threadID: threadID,
+            body: "Build a clean project conversation flow\nthat preserves context and continues well beyond seventy-two characters without asking for a separate title."
+        )
+
+        let title = try #require(model.thread(id: threadID)?.title)
+        #expect(!title.contains("\n"))
+        #expect(title.count == 73)
+        #expect(title.hasSuffix("…"))
+    }
+
+    @Test
     func invalidStateFallsBackWithoutOverwritingTheLastDurableBytes() {
         let invalid = Data("not-json".utf8)
         let store = MemoryDesktopStateStore(data: invalid)
