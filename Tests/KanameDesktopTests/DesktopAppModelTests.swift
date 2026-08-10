@@ -132,6 +132,27 @@ struct DesktopAppModelTests {
     }
 
     @Test
+    func versionFourWorkspaceAddsCalendarSourcesAndScheduleZoneDefaults() throws {
+        var versionFour = DesktopAppSnapshot.starter(now: 1_000)
+        versionFour.version = 4
+        let data = try JSONEncoder().encode(versionFour)
+        var json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        var domains = try #require(json["domains"] as? [String: Any])
+        domains.removeValue(forKey: "calendarSources")
+        json["domains"] = domains
+        var preferences = try #require(json["preferences"] as? [String: Any])
+        preferences.removeValue(forKey: "defaultScheduleTimeZoneIdentifier")
+        json["preferences"] = preferences
+        let store = MemoryDesktopStateStore(data: try JSONSerialization.data(withJSONObject: json))
+
+        let model = DesktopAppModel(store: store, now: { 2_000 })
+
+        #expect(model.snapshot.version == DesktopAppSnapshot.currentVersion)
+        #expect(model.snapshot.domains.calendarSources.isEmpty)
+        #expect(TimeZone(identifier: model.snapshot.preferences.defaultScheduleTimeZoneIdentifier) != nil)
+    }
+
+    @Test
     func searchArchiveAndPrivacyPreferencesRemainCoherent() throws {
         let store = MemoryDesktopStateStore()
         let model = DesktopAppModel(store: store, now: { 1_000 })
@@ -217,6 +238,72 @@ struct DesktopAppModelTests {
         #expect(restored.snapshot.domains.emailDrafts.contains { $0.id == emailID && $0.status == .draft })
         #expect(restored.snapshot.domains.calendarProposals.contains { $0.id == calendarID && $0.status == .proposed })
         #expect(restored.snapshot.domains.automations.contains { $0.id == automationID && $0.status == .paused })
+    }
+
+    @Test
+    func personalAccountsAndCalendarSelectionRemainMultiAccountAndLocal() throws {
+        let store = MemoryDesktopStateStore()
+        let model = DesktopAppModel(store: store, now: { 5_000 })
+        let gmailAccounts = (1...4).map { number in
+            DesktopAccountRecord(
+                id: "gmail-\(number)",
+                service: .gmail,
+                displayName: "Gmail \(number)",
+                identity: "account\(number)@example.test",
+                status: .ready,
+                scope: "Existing zele session"
+            )
+        }
+        model.replaceAccounts(for: [.gmail], with: gmailAccounts)
+        model.replaceCalendarSources([
+            DesktopCalendarSourceRecord(
+                id: "google-calendar-1",
+                accountID: "gmail-1",
+                externalIdentifier: "primary",
+                provider: .google,
+                displayName: "Primary",
+                ownerIdentity: "account1@example.test",
+                accessLevel: "owner",
+                isPrimary: true,
+                isEnabled: true
+            ),
+            DesktopCalendarSourceRecord(
+                id: "apple-calendar-1",
+                accountID: "apple-calendar-local",
+                externalIdentifier: "eventkit-1",
+                provider: .apple,
+                displayName: "Personal",
+                ownerIdentity: "On My Mac",
+                accessLevel: "write",
+                isPrimary: false,
+                isEnabled: false
+            ),
+        ])
+        model.setCalendarSourceEnabled(id: "apple-calendar-1", enabled: true)
+
+        let restored = DesktopAppModel(store: store, now: { 6_000 })
+        #expect(restored.snapshot.domains.accounts.filter { $0.service == .gmail }.count == 4)
+        #expect(restored.snapshot.domains.calendarSources.count == 2)
+        #expect(restored.snapshot.domains.calendarSources.allSatisfy { $0.isEnabled })
+    }
+
+    @Test
+    func anchoredScheduleTimeStaysInSetupZoneWhileViewerZoneChanges() throws {
+        let instant = Date(timeIntervalSince1970: 1_767_225_600)
+        let berlin = try #require(TimeZone(identifier: "Europe/Berlin"))
+        let presentation = try #require(
+            DesktopTimeZonePresenter.presentation(
+                for: instant,
+                anchoredTimeZoneIdentifier: "Asia/Tokyo",
+                viewerTimeZone: berlin,
+                locale: Locale(identifier: "en_US_POSIX")
+            )
+        )
+
+        #expect(presentation.anchoredTimeZoneIdentifier == "Asia/Tokyo")
+        #expect(presentation.viewerTimeZoneIdentifier == "Europe/Berlin")
+        #expect(presentation.differsFromViewer)
+        #expect(presentation.anchored != presentation.viewerLocal)
     }
 
     @Test

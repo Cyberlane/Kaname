@@ -247,6 +247,7 @@ public struct DesktopPreferences: Codable, Equatable, Sendable {
     public var confirmBeforeArchiving = true
     public var safeMode = false
     public var auditRetentionDays = 90
+    public var defaultScheduleTimeZoneIdentifier = TimeZone.autoupdatingCurrent.identifier
 
     private enum CodingKeys: String, CodingKey {
         case showTechnicalDetails
@@ -255,6 +256,7 @@ public struct DesktopPreferences: Codable, Equatable, Sendable {
         case confirmBeforeArchiving
         case safeMode
         case auditRetentionDays
+        case defaultScheduleTimeZoneIdentifier
     }
 
     public init() {}
@@ -267,11 +269,14 @@ public struct DesktopPreferences: Codable, Equatable, Sendable {
         confirmBeforeArchiving = try container.decodeIfPresent(Bool.self, forKey: .confirmBeforeArchiving) ?? true
         safeMode = try container.decodeIfPresent(Bool.self, forKey: .safeMode) ?? false
         auditRetentionDays = try container.decodeIfPresent(Int.self, forKey: .auditRetentionDays) ?? 90
+        let storedTimeZone = try container.decodeIfPresent(String.self, forKey: .defaultScheduleTimeZoneIdentifier)
+        defaultScheduleTimeZoneIdentifier = storedTimeZone.flatMap(TimeZone.init(identifier:))?.identifier
+            ?? TimeZone.autoupdatingCurrent.identifier
     }
 }
 
 public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
-    public static let currentVersion = 4
+    public static let currentVersion = 5
 
     public var version: Int
     public var projects: [DesktopProject]
@@ -363,7 +368,7 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
                         DesktopPlanItem(title: "Packaging and interactive QA", state: .complete),
                     ],
                     evidence: [
-                        DesktopEvidence(label: "Swift tests", detail: "66 tests passed", state: .passed),
+                        DesktopEvidence(label: "Swift tests", detail: "74 tests passed", state: .passed),
                         DesktopEvidence(label: "Rust tests", detail: "26 tests passed", state: .passed),
                         DesktopEvidence(label: "Packaged app", detail: "Signed, installed, and visually qualified", state: .passed),
                         DesktopEvidence(label: "Local core", detail: "F-01 through F-14 replayed through Mach XPC", state: .passed),
@@ -419,7 +424,7 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
     }
 
     func migratedToCurrent(now: Int64) throws -> DesktopAppSnapshot {
-        guard (1...3).contains(version) else { throw DesktopModelError.unsupportedVersion }
+        guard (1...4).contains(version) else { throw DesktopModelError.unsupportedVersion }
         var migrated = self
         migrated.version = Self.currentVersion
         if migrated.domains == .empty {
@@ -448,7 +453,7 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
                 DesktopPlanItem(title: "Packaging and interactive QA", state: .complete),
             ]
             migrated.threads[index].evidence = [
-                DesktopEvidence(label: "Swift tests", detail: "66 tests passed", state: .passed),
+                        DesktopEvidence(label: "Swift tests", detail: "74 tests passed", state: .passed),
                 DesktopEvidence(label: "Rust tests", detail: "26 tests passed", state: .passed),
                 DesktopEvidence(label: "Packaged app", detail: "Signed, installed, and visually qualified", state: .passed),
                 DesktopEvidence(label: "Local core", detail: "F-01 through F-14 replayed through Mach XPC", state: .passed),
@@ -697,6 +702,42 @@ public final class DesktopAppModel: ObservableObject {
         mutate { $0.preferences = preferences }
     }
 
+    public func replaceAccounts(
+        for services: Set<DesktopAccountRecord.Service>,
+        with accounts: [DesktopAccountRecord]
+    ) {
+        guard accounts.allSatisfy({ services.contains($0.service) }) else { return }
+        mutate { snapshot in
+            snapshot.domains.accounts.removeAll { services.contains($0.service) }
+            snapshot.domains.accounts.append(contentsOf: accounts)
+            snapshot.domains.accounts = Self.sortedRecords(snapshot.domains.accounts) {
+                "\($0.service.rawValue)|\($0.identity)"
+            }
+        }
+    }
+
+    public func replaceCalendarSources(_ sources: [DesktopCalendarSourceRecord]) {
+        let priorEnablement = Dictionary(
+            uniqueKeysWithValues: snapshot.domains.calendarSources.map { ($0.id, $0.isEnabled) }
+        )
+        mutate { snapshot in
+            let merged = sources.map { source in
+                var updated = source
+                updated.isEnabled = priorEnablement[source.id] ?? source.isEnabled
+                return updated
+            }
+            snapshot.domains.calendarSources = Self.sortedRecords(merged) {
+                "\($0.provider.rawValue)|\($0.displayName)"
+            }
+        }
+    }
+
+    public func setCalendarSourceEnabled(id: String, enabled: Bool) {
+        mutateDomainRecord(at: \.calendarSources, id: id) { source in
+            source.isEnabled = enabled
+        }
+    }
+
     @discardableResult
     public func createResearch(title: String, question: String) -> String? {
         let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -748,6 +789,7 @@ public final class DesktopAppModel: ObservableObject {
 
     @discardableResult
     public func createCalendarProposal(
+        accountID: String? = nil,
         title: String,
         startAtUnixMillis: Int64,
         durationMinutes: Int,
@@ -760,7 +802,7 @@ public final class DesktopAppModel: ObservableObject {
               TimeZone(identifier: timeZoneIdentifier) != nil else { return nil }
         let proposal = DesktopCalendarProposal(
             id: UUID().uuidString.lowercased(),
-            accountID: nil,
+            accountID: accountID,
             title: cleanTitle,
             startAtUnixMillis: startAtUnixMillis,
             durationMinutes: durationMinutes,
@@ -792,7 +834,8 @@ public final class DesktopAppModel: ObservableObject {
             missedRunPolicy: missedRunPolicy,
             status: .draft,
             nextRunAtUnixMillis: nil,
-            lastResult: "Not run"
+            lastResult: "Not run",
+            createdAtUnixMillis: now()
         )
         mutate { $0.domains.automations.append(rule) }
         return rule.id
@@ -1125,6 +1168,15 @@ public final class DesktopAppModel: ObservableObject {
 
     private static func normalized(_ value: String) -> String {
         value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func sortedRecords<Record>(
+        _ records: [Record],
+        key: (Record) -> String
+    ) -> [Record] {
+        records.sorted {
+            key($0).localizedCaseInsensitiveCompare(key($1)) == .orderedAscending
+        }
     }
 
     private static func currentSnapshot(

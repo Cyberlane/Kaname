@@ -67,7 +67,7 @@ public struct DesktopSkillRecord: Codable, Equatable, Identifiable, Sendable {
 }
 
 public struct DesktopAccountRecord: Codable, Equatable, Identifiable, Sendable {
-    public enum Service: String, Codable, CaseIterable, Equatable, Sendable {
+    public enum Service: String, Codable, CaseIterable, Equatable, Hashable, Sendable {
         case github
         case gmail
         case googleCalendar
@@ -89,6 +89,25 @@ public struct DesktopAccountRecord: Codable, Equatable, Identifiable, Sendable {
     public var identity: String
     public var status: DesktopRecordState
     public var scope: String
+}
+
+public struct DesktopCalendarSourceRecord: Codable, Equatable, Identifiable, Sendable {
+    public enum Provider: String, Codable, CaseIterable, Equatable, Sendable {
+        case google
+        case apple
+
+        public var label: String { rawValue.capitalized }
+    }
+
+    public let id: String
+    public var accountID: String
+    public var externalIdentifier: String
+    public var provider: Provider
+    public var displayName: String
+    public var ownerIdentity: String
+    public var accessLevel: String
+    public var isPrimary: Bool
+    public var isEnabled: Bool
 }
 
 public struct DesktopEmailDraft: Codable, Equatable, Identifiable, Sendable {
@@ -134,6 +153,7 @@ public struct DesktopAutomationRule: Codable, Equatable, Identifiable, Sendable 
     public var status: DesktopRecordState
     public var nextRunAtUnixMillis: Int64?
     public var lastResult: String
+    public var createdAtUnixMillis: Int64?
 }
 
 public struct DesktopGitWorkspace: Codable, Equatable, Identifiable, Sendable {
@@ -151,16 +171,34 @@ public struct DesktopDomainSnapshot: Codable, Equatable, Sendable {
     public var knowledgeSources: [DesktopKnowledgeSource]
     public var skills: [DesktopSkillRecord]
     public var accounts: [DesktopAccountRecord]
+    public var calendarSources: [DesktopCalendarSourceRecord]
     public var emailDrafts: [DesktopEmailDraft]
     public var calendarProposals: [DesktopCalendarProposal]
     public var automations: [DesktopAutomationRule]
     public var gitWorkspaces: [DesktopGitWorkspace]
+
+    public init(
+        research: [DesktopResearchRecord],
+        knowledgeSources: [DesktopKnowledgeSource],
+        skills: [DesktopSkillRecord],
+        accounts: [DesktopAccountRecord],
+        calendarSources: [DesktopCalendarSourceRecord],
+        emailDrafts: [DesktopEmailDraft],
+        calendarProposals: [DesktopCalendarProposal],
+        automations: [DesktopAutomationRule],
+        gitWorkspaces: [DesktopGitWorkspace]
+    ) {
+        (self.research, self.knowledgeSources, self.skills) = (research, knowledgeSources, skills)
+        (self.accounts, self.calendarSources, self.emailDrafts) = (accounts, calendarSources, emailDrafts)
+        (self.calendarProposals, self.automations, self.gitWorkspaces) = (calendarProposals, automations, gitWorkspaces)
+    }
 
     public static let empty = DesktopDomainSnapshot(
         research: [],
         knowledgeSources: [],
         skills: [],
         accounts: [],
+        calendarSources: [],
         emailDrafts: [],
         calendarProposals: [],
         automations: [],
@@ -244,6 +282,7 @@ public struct DesktopDomainSnapshot: Codable, Equatable, Sendable {
                     scope: "EventKit permission not requested"
                 ),
             ],
+            calendarSources: [],
             emailDrafts: [],
             calendarProposals: [],
             automations: [],
@@ -259,5 +298,67 @@ public struct DesktopDomainSnapshot: Codable, Equatable, Sendable {
                 ),
             ]
         )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case research
+        case knowledgeSources
+        case skills
+        case accounts
+        case calendarSources
+        case emailDrafts
+        case calendarProposals
+        case automations
+        case gitWorkspaces
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            research: try container.decode([DesktopResearchRecord].self, forKey: .research),
+            knowledgeSources: try container.decode([DesktopKnowledgeSource].self, forKey: .knowledgeSources),
+            skills: try container.decode([DesktopSkillRecord].self, forKey: .skills),
+            accounts: try container.decode([DesktopAccountRecord].self, forKey: .accounts),
+            calendarSources: try container.decodeIfPresent([DesktopCalendarSourceRecord].self, forKey: .calendarSources) ?? [],
+            emailDrafts: try container.decode([DesktopEmailDraft].self, forKey: .emailDrafts),
+            calendarProposals: try container.decode([DesktopCalendarProposal].self, forKey: .calendarProposals),
+            automations: try container.decode([DesktopAutomationRule].self, forKey: .automations),
+            gitWorkspaces: try container.decode([DesktopGitWorkspace].self, forKey: .gitWorkspaces)
+        )
+    }
+}
+
+public struct DesktopTimeZonePresentation: Equatable, Sendable {
+    public let anchored: String
+    public let viewerLocal: String
+    public let anchoredTimeZoneIdentifier: String
+    public let viewerTimeZoneIdentifier: String
+    public let differsFromViewer: Bool
+}
+
+public enum DesktopTimeZonePresenter {
+    public static func presentation(
+        for date: Date,
+        anchoredTimeZoneIdentifier: String,
+        viewerTimeZone: TimeZone = .autoupdatingCurrent,
+        locale: Locale = .autoupdatingCurrent
+    ) -> DesktopTimeZonePresentation? {
+        guard let anchoredTimeZone = TimeZone(identifier: anchoredTimeZoneIdentifier) else { return nil }
+        return DesktopTimeZonePresentation(
+            anchored: formatted(date, timeZone: anchoredTimeZone, locale: locale),
+            viewerLocal: formatted(date, timeZone: viewerTimeZone, locale: locale),
+            anchoredTimeZoneIdentifier: anchoredTimeZone.identifier,
+            viewerTimeZoneIdentifier: viewerTimeZone.identifier,
+            differsFromViewer: anchoredTimeZone.identifier != viewerTimeZone.identifier
+        )
+    }
+
+    private static func formatted(_ date: Date, timeZone: TimeZone, locale: Locale) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = locale
+        formatter.timeZone = timeZone
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
     }
 }
