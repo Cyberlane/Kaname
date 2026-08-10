@@ -15,8 +15,8 @@ output_directory="$(cd "$(dirname "$0")/.." && pwd)/.build/desktop-qa"
 [[ -x "$app_path/Contents/Resources/KanameLocalControlService" ]]
 [[ -x "$app_path/Contents/Resources/kaname-local-core" ]]
 [[ "$(plutil -extract CFBundleIdentifier raw "$app_path/Contents/Info.plist")" == "com.cyberlane.kaname.desktop" ]]
-[[ "$(plutil -extract CFBundleShortVersionString raw "$app_path/Contents/Info.plist")" == "0.5.0" ]]
-[[ "$(plutil -extract CFBundleVersion raw "$app_path/Contents/Info.plist")" == "7" ]]
+[[ "$(plutil -extract CFBundleShortVersionString raw "$app_path/Contents/Info.plist")" == "0.6.0" ]]
+[[ "$(plutil -extract CFBundleVersion raw "$app_path/Contents/Info.plist")" == "8" ]]
 codesign --verify --deep --strict "$app_path"
 launchctl print "gui/$(id -u)/$service_identifier" >/dev/null
 
@@ -36,6 +36,14 @@ mkdir -p "$output_directory"
 "$executable" --desktop-destination settings --snapshot "$output_directory/settings.png"
 "$executable" \
     --desktop-destination settings \
+    --desktop-settings-category integrations \
+    --snapshot "$output_directory/settings-integrations.png"
+"$executable" \
+    --desktop-destination settings \
+    --desktop-settings-category providers \
+    --snapshot "$output_directory/settings-providers.png"
+"$executable" \
+    --desktop-destination settings \
     --desktop-back-target home \
     --post-mouse-back \
     --snapshot "$output_directory/mouse-back.png"
@@ -48,6 +56,8 @@ for snapshot in \
     "$output_directory/calendar.png" \
     "$output_directory/coding.png" \
     "$output_directory/settings.png" \
+    "$output_directory/settings-integrations.png" \
+    "$output_directory/settings-providers.png" \
     "$output_directory/mouse-back.png"
 do
     [[ -s "$snapshot" ]]

@@ -6,6 +6,7 @@ import Foundation
 import SwiftUI
 #if os(macOS)
 import AppKit
+import UniformTypeIdentifiers
 #endif
 
 private enum DesktopDestination: String, CaseIterable, Identifiable {
@@ -1070,13 +1071,15 @@ private final class DesktopLocalReadViewModel: ObservableObject {
 
 @MainActor
 private final class DesktopPersonalIntegrationViewModel: ObservableObject {
-    @Published private(set) var googleAccounts: [ExistingCLIAccountSnapshot] = []
+    @Published private(set) var googleAccounts: [NativeGoogleAccountSnapshot] = []
     @Published private(set) var googleCalendars: [PersonalCalendarSourceSnapshot] = []
     @Published private(set) var mailThreads: [PersonalMailThreadSnapshot] = []
     @Published private(set) var githubAccess: GitHubCLIAccessSnapshot?
     @Published private(set) var providerCapabilities: [ProviderCapabilitySnapshot] = []
     @Published private(set) var appleAccessState: AppleCalendarAccessState
     @Published private(set) var isRefreshingGoogle = false
+    @Published private(set) var isConnectingGoogle = false
+    @Published private(set) var hasGoogleClientConfiguration = false
     @Published private(set) var isRefreshingInbox = false
     @Published private(set) var isRefreshingGitHub = false
     @Published private(set) var isRefreshingProviders = false
@@ -1084,10 +1087,15 @@ private final class DesktopPersonalIntegrationViewModel: ObservableObject {
     @Published private(set) var message: String?
 
     private let integrations = PersonalIntegrationService()
+    private let googleIntegration = NativeGoogleIntegrationService()
     private let appleCalendar = AppleCalendarIntegrationService()
 
     init() {
         appleAccessState = appleCalendar.accessState
+        _Concurrency.Task {
+            hasGoogleClientConfiguration = await googleIntegration.hasClientConfiguration
+            googleAccounts = (try? await googleIntegration.accounts()) ?? []
+        }
     }
 
     func refreshGoogle(model: DesktopAppModel) {
@@ -1096,7 +1104,7 @@ private final class DesktopPersonalIntegrationViewModel: ObservableObject {
         message = nil
         _Concurrency.Task {
             do {
-                let discovered = try await integrations.discoverGoogleAccounts()
+                let discovered = try await googleIntegration.accounts()
                 googleAccounts = discovered
                 let gmailAccounts = discovered.map { accountRecord(for: $0, service: .gmail) }
                 let calendarAccounts = discovered.map { accountRecord(for: $0, service: .googleCalendar) }
@@ -1105,8 +1113,16 @@ private final class DesktopPersonalIntegrationViewModel: ObservableObject {
                     with: gmailAccounts + calendarAccounts
                 )
 
-                let identities = discovered.map(\.identity)
-                googleCalendars = try await integrations.listGoogleCalendars(accounts: identities)
+                var refreshedCalendars: [PersonalCalendarSourceSnapshot] = []
+                var failedAccounts: [String] = []
+                for account in discovered {
+                    do {
+                        refreshedCalendars.append(contentsOf: try await googleIntegration.listCalendars(accountIDs: [account.id]))
+                    } catch {
+                        failedAccounts.append(account.identity)
+                    }
+                }
+                googleCalendars = refreshedCalendars
                 let googleSources = googleCalendars.map { calendar in
                     DesktopCalendarSourceRecord.connected(
                         id: stableID(prefix: "google-calendar", value: "\(calendar.accountIdentity)|\(calendar.externalIdentifier)"),
@@ -1122,11 +1138,72 @@ private final class DesktopPersonalIntegrationViewModel: ObservableObject {
                 }
                 let appleSources = model.snapshot.domains.calendarSources.filter { $0.provider == .apple }
                 model.replaceCalendarSources(appleSources + googleSources)
-                message = "Refreshed \(discovered.count) Google account\(discovered.count == 1 ? "" : "s") and \(googleCalendars.count) calendar\(googleCalendars.count == 1 ? "" : "s")."
+                message = failedAccounts.isEmpty
+                    ? "Refreshed \(discovered.count) Google account\(discovered.count == 1 ? "" : "s") and \(googleCalendars.count) calendar\(googleCalendars.count == 1 ? "" : "s")."
+                    : "Refreshed \(discovered.count - failedAccounts.count) of \(discovered.count) Google accounts. Reconnect: \(failedAccounts.joined(separator: ", "))."
             } catch {
                 message = error.localizedDescription
             }
             isRefreshingGoogle = false
+        }
+    }
+
+    func importGoogleConfiguration(from url: URL) {
+        message = nil
+        _Concurrency.Task {
+            do {
+                try await googleIntegration.importClientConfiguration(from: url)
+                hasGoogleClientConfiguration = true
+                message = "Google OAuth desktop configuration imported into Kaname's private app data."
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+    }
+
+    func connectGoogleAccount(model: DesktopAppModel) {
+        guard !isConnectingGoogle else { return }
+        isConnectingGoogle = true
+        message = nil
+        _Concurrency.Task {
+            do {
+#if os(macOS)
+                let account = try await googleIntegration.connectAccount()
+                message = "Connected \(account.identity). Refreshing its calendars…"
+                isConnectingGoogle = false
+                refreshGoogle(model: model)
+#else
+                message = "Google account connection is available in the desktop app."
+                isConnectingGoogle = false
+#endif
+            } catch {
+                message = error.localizedDescription
+                isConnectingGoogle = false
+            }
+        }
+    }
+
+    func disconnectGoogleAccount(id: String, model: DesktopAppModel) {
+        message = nil
+        _Concurrency.Task {
+            do {
+                try await googleIntegration.disconnect(accountID: id)
+                googleAccounts = try await googleIntegration.accounts()
+                googleCalendars.removeAll { calendar in
+                    !googleAccounts.contains { $0.identity == calendar.accountIdentity }
+                }
+                let gmailAccounts = googleAccounts.map { accountRecord(for: $0, service: .gmail) }
+                let calendarAccounts = googleAccounts.map { accountRecord(for: $0, service: .googleCalendar) }
+                model.replaceAccounts(for: [.gmail, .googleCalendar], with: gmailAccounts + calendarAccounts)
+                let appleSources = model.snapshot.domains.calendarSources.filter { $0.provider == .apple }
+                let googleSources = model.snapshot.domains.calendarSources.filter { source in
+                    source.provider == .google && googleAccounts.contains { $0.identity == source.ownerIdentity }
+                }
+                model.replaceCalendarSources(appleSources + googleSources)
+                message = "Google account disconnected from Kaname."
+            } catch {
+                message = error.localizedDescription
+            }
         }
     }
 
@@ -1142,12 +1219,19 @@ private final class DesktopPersonalIntegrationViewModel: ObservableObject {
         isRefreshingInbox = true
         message = nil
         _Concurrency.Task {
-            do {
-                mailThreads = try await integrations.listGoogleInbox(accounts: identities)
-                message = "Read \(mailThreads.count) inbox thread\(mailThreads.count == 1 ? "" : "s") across \(identities.count) account\(identities.count == 1 ? "" : "s")."
-            } catch {
-                message = error.localizedDescription
+            var refreshedThreads: [PersonalMailThreadSnapshot] = []
+            var failedAccounts: [String] = []
+            for account in googleAccounts where identities.contains(account.identity) {
+                do {
+                    refreshedThreads.append(contentsOf: try await googleIntegration.listInbox(accountIDs: [account.id]))
+                } catch {
+                    failedAccounts.append(account.identity)
+                }
             }
+            mailThreads = refreshedThreads
+            message = failedAccounts.isEmpty
+                ? "Read \(mailThreads.count) inbox thread\(mailThreads.count == 1 ? "" : "s") across \(identities.count) account\(identities.count == 1 ? "" : "s")."
+                : "Read \(mailThreads.count) inbox threads; reconnect \(failedAccounts.joined(separator: ", "))."
             isRefreshingInbox = false
         }
     }
@@ -1255,16 +1339,16 @@ private final class DesktopPersonalIntegrationViewModel: ObservableObject {
     }
 
     private func accountRecord(
-        for account: ExistingCLIAccountSnapshot,
+        for account: NativeGoogleAccountSnapshot,
         service: DesktopAccountRecord.Service
     ) -> DesktopAccountRecord {
         DesktopAccountRecord(
             id: stableID(prefix: service.rawValue, value: account.identity),
             service: service,
-            displayName: account.identity,
+            displayName: account.displayName,
             identity: account.identity,
             status: .ready,
-            scope: account.capabilities.isEmpty ? "Existing zele session" : account.capabilities.joined(separator: ", ")
+            scope: account.capabilities.joined(separator: ", ")
         )
     }
 
@@ -2370,177 +2454,354 @@ private struct DesktopSettingsView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                SurfaceHeader(
-                    title: "Settings",
-                    detail: "Local presentation, privacy, and review defaults",
-                    symbol: DesktopDestination.settings.symbol
-                )
-
-                SettingsSection(title: "Workspace", symbol: "macwindow") {
-                    Toggle("Show technical details by default", isOn: $draft.showTechnicalDetails)
-                    Toggle("Use compact thread rows", isOn: $draft.compactRows)
-                    Toggle("Confirm before archiving", isOn: $draft.confirmBeforeArchiving)
-                }
-
-                SettingsSection(title: "Personal integrations", symbol: "person.crop.circle.badge.checkmark") {
-                    Text("Kaname reuses sessions owned by zele, gh, Codex, Claude, and OpenCode. Tokens stay with those tools; account references and selections stay in Kaname's private Application Support data.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    integrationRow(
-                        title: "Gmail & Google Calendar",
-                        detail: googleIntegrationDetail,
-                        busy: integrations.isRefreshingGoogle,
-                        action: "Refresh zele accounts"
-                    ) {
-                        integrations.refreshGoogle(model: model)
-                    }
-                    integrationRow(
-                        title: "Apple Calendar",
-                        detail: "Permission: \(appleCalendarAccessLabel)",
-                        busy: integrations.isRequestingAppleCalendar,
-                        action: integrations.appleAccessState == .notRequested ? "Request access" : "Refresh calendars"
-                    ) {
-                        integrations.requestAppleCalendarAccess(model: model)
-                    }
-                    integrationRow(
-                        title: "GitHub",
-                        detail: model.snapshot.domains.accounts.first(where: {
-                            $0.service == .github && $0.status == .ready
-                        })
-                            .map { "Current gh account: @\($0.identity)" } ?? "Uses the account and host available to gh today",
-                        busy: integrations.isRefreshingGitHub,
-                        action: "Refresh gh access"
-                    ) {
-                        integrations.refreshGitHub(model: model)
-                    }
-                    integrationRow(
-                        title: "Coding providers",
-                        detail: providerIntegrationDetail,
-                        busy: integrations.isRefreshingProviders,
-                        action: "Refresh local sessions"
-                    ) {
-                        integrations.refreshProviders()
-                    }
-
-                    if let message = integrations.message {
-                        Text(message)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                    }
-                }
-
-                if !model.snapshot.domains.calendarSources.isEmpty {
-                    SettingsSection(title: "Calendar selection", symbol: "calendar.badge.checkmark") {
-                        Text("These choices affect Kaname only; they do not hide or delete calendars in Google or Apple Calendar.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        ForEach(model.snapshot.domains.calendarSources) { source in
-                            Toggle(isOn: Binding(
-                                get: { source.isEnabled },
-                                set: { model.setCalendarSourceEnabled(id: source.id, enabled: $0) }
-                            )) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(source.displayName)
-                                    Text("\(source.provider.label) · \(source.ownerIdentity)")
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                        }
-                    }
-                }
-
-                SettingsSection(title: "Scheduling", symbol: "clock.badge.checkmark") {
-                    TextField("Default IANA time zone", text: $draft.defaultScheduleTimeZoneIdentifier)
-                    HStack {
-                        Button("Use current zone") {
-                            draft.defaultScheduleTimeZoneIdentifier = TimeZone.autoupdatingCurrent.identifier
-                        }
-                        Spacer()
-                        Text("Viewer zone: \(TimeZone.autoupdatingCurrent.identifier)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Text("Recurring schedules stay pinned to this zone's wall clock after travel, including daylight-saving changes. Kaname also shows the equivalent time in your current viewing zone.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    if TimeZone(identifier: draft.defaultScheduleTimeZoneIdentifier) == nil {
-                        Label("Enter a valid IANA identifier such as Asia/Tokyo.", systemImage: "exclamationmark.triangle.fill")
-                            .font(.caption)
-                            .foregroundStyle(Nord.auroraYellow)
-                    }
-                }
-
-                SettingsSection(title: "Notification privacy", symbol: "hand.raised.fill") {
-                    Picker("Preview content", selection: $draft.previewPrivacy) {
-                        ForEach(DesktopPreferences.PreviewPrivacy.allCases, id: \.self) { privacy in
-                            Text(privacy.label).tag(privacy)
-                        }
-                    }
-                    Text("Safe summary never includes private task content. Hidden is the default.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                SettingsSection(title: "Execution authority", symbol: "lock.shield.fill") {
-                    Toggle("Safe mode (disable future write integrations)", isOn: $draft.safeMode)
-                    LabeledContent("Default", value: "Local-only draft")
-                    LabeledContent("Provider writes", value: "Exact approval required")
-                    LabeledContent("External accounts", value: readyAccountSummary)
-                    Text("Changing display settings never grants provider, repository, account, device, or network authority.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                SettingsSection(title: "Recovery & diagnostics", symbol: "lifepreserver.fill") {
-                    Stepper(
-                        "Keep audit metadata for \(draft.auditRetentionDays) days",
-                        value: $draft.auditRetentionDays,
-                        in: 7...365,
-                        step: 7
-                    )
-                    Button("Copy redacted diagnostics", systemImage: "doc.on.doc") {
-#if os(macOS)
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(model.redactedDiagnostics(), forType: .string)
-#endif
-                    }
-                    Text("Diagnostics include counts and health states only. They exclude conversation text, drafts, recipients, identities, note paths, repository paths, and credential material.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                HStack {
-                    Button("Return to Kaname", systemImage: "arrow.left") { dismiss() }
-                    Spacer()
-                    Button("Revert") { draft = model.snapshot.preferences }
-                    Button("Save settings") {
-                        model.updatePreferences(draft)
-                        dismiss()
-                    }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(TimeZone(identifier: draft.defaultScheduleTimeZoneIdentifier) == nil)
-                }
-            }
-            .padding(24)
-            .frame(maxWidth: 780, alignment: .leading)
-        }
-        .background(Nord.polarNight0)
-        .frame(minWidth: 700, idealWidth: 820, minHeight: 620, idealHeight: 720)
+        DesktopSettingsShell(
+            model: model,
+            integrations: integrations,
+            draft: $draft,
+            dismiss: { dismiss() }
+        )
     }
 
-    private var googleIntegrationDetail: String {
-        let gmailCount = model.snapshot.domains.accounts.filter {
-            $0.service == .gmail && $0.status == .ready
-        }.count
-        let calendarCount = model.snapshot.domains.calendarSources.filter { $0.provider == .google }.count
-        return gmailCount == 0
-            ? "Uses every account already available to zele"
-            : "\(gmailCount) Gmail account\(gmailCount == 1 ? "" : "s") · \(calendarCount) Google calendar\(calendarCount == 1 ? "" : "s")"
+}
+
+private struct DesktopSettingsShell: View {
+    private enum Category: String, CaseIterable, Identifiable {
+        case general, integrations, providers, calendars, scheduling, privacy, diagnostics
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .general: "General"
+            case .integrations: "Integrations"
+            case .providers: "Coding providers"
+            case .calendars: "Calendars"
+            case .scheduling: "Scheduling"
+            case .privacy: "Privacy & Safety"
+            case .diagnostics: "Diagnostics"
+            }
+        }
+        var symbol: String {
+            switch self {
+            case .general: "gearshape.fill"
+            case .integrations: "link"
+            case .providers: "chevron.left.forwardslash.chevron.right"
+            case .calendars: "calendar"
+            case .scheduling: "clock.fill"
+            case .privacy: "lock.shield.fill"
+            case .diagnostics: "lifepreserver.fill"
+            }
+        }
+    }
+
+    @ObservedObject var model: DesktopAppModel
+    @ObservedObject var integrations: DesktopPersonalIntegrationViewModel
+    @Binding var draft: DesktopPreferences
+    let dismiss: () -> Void
+    @State private var category: Category = .general
+
+    init(
+        model: DesktopAppModel,
+        integrations: DesktopPersonalIntegrationViewModel,
+        draft: Binding<DesktopPreferences>,
+        dismiss: @escaping () -> Void
+    ) {
+        self.model = model
+        self.integrations = integrations
+        _draft = draft
+        self.dismiss = dismiss
+        let arguments = CommandLine.arguments
+        let requested = arguments.firstIndex(of: "--desktop-settings-category")
+            .flatMap { arguments.indices.contains($0 + 1) ? Category(rawValue: arguments[$0 + 1]) : nil }
+        _category = State(initialValue: requested ?? .general)
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            categoryRail
+            Divider()
+            VStack(spacing: 0) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(category.label).font(.title2.weight(.bold))
+                            Text(pageDetail).font(.subheadline).foregroundStyle(.secondary)
+                        }
+                        categoryPage
+                        if let message = integrations.message {
+                            Label(message, systemImage: "info.circle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                                .padding(12)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(Nord.polarNight2.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+                        }
+                    }
+                    .padding(24)
+                    .frame(maxWidth: 760, alignment: .leading)
+                }
+                Divider()
+                footer
+            }
+        }
+        .background(Nord.polarNight0)
+        .frame(minWidth: 820, idealWidth: 940, minHeight: 640, idealHeight: 740)
+    }
+
+    private var categoryRail: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Label("Settings", systemImage: "gearshape.fill")
+                .font(.title3.weight(.bold))
+                .padding(.horizontal, 12)
+                .padding(.bottom, 10)
+            ForEach(Category.allCases) { item in
+                Button { category = item } label: {
+                    Label(item.label, systemImage: item.symbol)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 8)
+                        .background(
+                            category == item ? Nord.frost2.opacity(0.22) : .clear,
+                            in: RoundedRectangle(cornerRadius: 8)
+                        )
+                        .foregroundStyle(category == item ? Nord.snowStorm0 : .secondary)
+                }
+                .buttonStyle(.plain)
+            }
+            Spacer()
+            Button("Return to Kaname", systemImage: "arrow.left", action: dismiss)
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .padding(12)
+        }
+        .padding(.top, 18)
+        .padding(.horizontal, 10)
+        .frame(width: 205)
+        .background(Nord.polarNight1)
+    }
+
+    private var footer: some View {
+        HStack {
+            Text("Changes remain local to Kaname.").font(.caption).foregroundStyle(.tertiary)
+            Spacer()
+            Button("Revert") { draft = model.snapshot.preferences }
+            Button("Save settings") { model.updatePreferences(draft) }
+                .buttonStyle(.borderedProminent)
+                .disabled(TimeZone(identifier: draft.defaultScheduleTimeZoneIdentifier) == nil)
+        }
+        .padding(.horizontal, 20)
+        .frame(height: 58)
+    }
+
+    private var pageDetail: String {
+        switch category {
+        case .general: "Workspace presentation and review defaults"
+        case .integrations: "Personal services, account health, and explicit authorization"
+        case .providers: "Local coding agents available to Kaname"
+        case .calendars: "Choose which connected calendars Kaname may show"
+        case .scheduling: "Stable wall-clock behavior when you travel"
+        case .privacy: "Notification content and execution authority"
+        case .diagnostics: "Retention and privacy-safe support information"
+        }
+    }
+
+    @ViewBuilder private var categoryPage: some View {
+        switch category {
+        case .general: generalPage
+        case .integrations: integrationsPage
+        case .providers: providersPage
+        case .calendars: calendarsPage
+        case .scheduling: schedulingPage
+        case .privacy: privacyPage
+        case .diagnostics: diagnosticsPage
+        }
+    }
+
+    private var generalPage: some View {
+        SettingsSection(title: "Workspace", symbol: "macwindow") {
+            Toggle("Show technical details by default", isOn: $draft.showTechnicalDetails)
+            Toggle("Use compact thread rows", isOn: $draft.compactRows)
+            Toggle("Confirm before archiving", isOn: $draft.confirmBeforeArchiving)
+        }
+    }
+
+    private var integrationsPage: some View {
+        VStack(spacing: 12) {
+            SettingsIntegrationCard(
+                title: "Google",
+                detail: googleDetail,
+                symbol: "g.circle.fill",
+                tint: .blue,
+                connected: !integrations.googleAccounts.isEmpty,
+                busy: integrations.isRefreshingGoogle || integrations.isConnectingGoogle
+            ) {
+                if integrations.hasGoogleClientConfiguration {
+                    Button("Add account", systemImage: "person.badge.plus") { integrations.connectGoogleAccount(model: model) }
+                    Button("Refresh", systemImage: "arrow.clockwise") { integrations.refreshGoogle(model: model) }
+                } else {
+                    Button("Import OAuth client…", systemImage: "doc.badge.plus") { chooseGoogleConfiguration() }
+                }
+            } details: {
+                if integrations.googleAccounts.isEmpty {
+                    Text("Kaname connects directly to Google with OAuth and the Gmail and Calendar APIs. No helper CLI or third-party account bridge is used.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    ForEach(integrations.googleAccounts) { account in
+                        HStack {
+                            Circle().fill(Nord.auroraGreen).frame(width: 7, height: 7)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(account.displayName).font(.subheadline.weight(.semibold))
+                                Text(account.identity).font(.caption).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button("Disconnect") { integrations.disconnectGoogleAccount(id: account.id, model: model) }
+                                .buttonStyle(.borderless).foregroundStyle(Nord.auroraRed)
+                        }
+                    }
+                }
+                Button("Replace OAuth client…", systemImage: "arrow.triangle.2.circlepath") {
+                    chooseGoogleConfiguration()
+                }
+                .buttonStyle(.borderless)
+            }
+            SettingsIntegrationCard(
+                title: "Apple Calendar",
+                detail: "Permission: \(appleAccessLabel)",
+                symbol: "calendar.circle.fill",
+                tint: .red,
+                connected: integrations.appleAccessState == .ready,
+                busy: integrations.isRequestingAppleCalendar
+            ) {
+                Button(integrations.appleAccessState == .notRequested ? "Request access" : "Refresh") {
+                    integrations.requestAppleCalendarAccess(model: model)
+                }
+            } details: {
+                Text("Uses macOS EventKit and the calendar accounts already configured on this Mac.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            SettingsIntegrationCard(
+                title: "GitHub",
+                detail: integrations.githubAccess.map { "Connected as @\($0.login)" } ?? "Uses your current gh CLI session",
+                symbol: "point.3.connected.trianglepath.dotted",
+                tint: .purple,
+                connected: integrations.githubAccess != nil,
+                busy: integrations.isRefreshingGitHub
+            ) {
+                Button("Refresh gh access", systemImage: "arrow.clockwise") { integrations.refreshGitHub(model: model) }
+            } details: {
+                Text("Kaname asks gh for the current host and account; it never copies the gh token.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var providersPage: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("Each adapter uses its installed CLI and existing sign-in.").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                if integrations.isRefreshingProviders { ProgressView().controlSize(.small) }
+                Button("Check providers", systemImage: "arrow.clockwise") { integrations.refreshProviders() }
+                    .disabled(integrations.isRefreshingProviders)
+            }
+            ForEach(providerDescriptors) { provider in
+                SettingsProviderRow(
+                    provider: provider,
+                    snapshot: integrations.providerCapabilities.first { $0.instance.driver == provider.driver }
+                )
+            }
+        }
+    }
+
+    private var calendarsPage: some View {
+        SettingsSection(title: "Visible in Kaname", symbol: "calendar.badge.checkmark") {
+            Text("These choices affect Kaname only; they never hide or delete calendars at the provider.")
+                .font(.caption).foregroundStyle(.secondary)
+            if model.snapshot.domains.calendarSources.isEmpty {
+                Label("Connect Google or Apple Calendar from Integrations first.", systemImage: "calendar.badge.exclamationmark")
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(model.snapshot.domains.calendarSources) { source in
+                Toggle(isOn: Binding(
+                    get: { source.isEnabled },
+                    set: { model.setCalendarSourceEnabled(id: source.id, enabled: $0) }
+                )) {
+                    Label {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(source.displayName)
+                            Text("\(source.provider.label) · \(source.ownerIdentity)")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                    } icon: {
+                        Image(systemName: source.provider == .google ? "g.circle.fill" : "apple.logo")
+                            .foregroundStyle(source.provider == .google ? .blue : .red)
+                    }
+                }
+            }
+        }
+    }
+
+    private var schedulingPage: some View {
+        SettingsSection(title: "Default schedule zone", symbol: "clock.badge.checkmark") {
+            TextField("IANA time zone", text: $draft.defaultScheduleTimeZoneIdentifier)
+            HStack {
+                Button("Use current zone") { draft.defaultScheduleTimeZoneIdentifier = TimeZone.autoupdatingCurrent.identifier }
+                Spacer()
+                Text("Viewer: \(TimeZone.autoupdatingCurrent.identifier)").font(.caption).foregroundStyle(.secondary)
+            }
+            Text("Recurring schedules stay pinned to this zone's wall clock. Kaname also shows the equivalent in your current viewing zone.")
+                .font(.caption).foregroundStyle(.secondary)
+            if TimeZone(identifier: draft.defaultScheduleTimeZoneIdentifier) == nil {
+                Label("Enter a valid IANA identifier such as Asia/Tokyo.", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(Nord.auroraYellow)
+            }
+        }
+    }
+
+    private var privacyPage: some View {
+        VStack(spacing: 14) {
+            SettingsSection(title: "Notification privacy", symbol: "hand.raised.fill") {
+                Picker("Preview content", selection: $draft.previewPrivacy) {
+                    ForEach(DesktopPreferences.PreviewPrivacy.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                Text("Safe summary never includes private task content. Hidden is the default.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            SettingsSection(title: "Execution authority", symbol: "lock.shield.fill") {
+                Toggle("Safe mode (disable future write integrations)", isOn: $draft.safeMode)
+                LabeledContent("Default", value: "Local-only draft")
+                LabeledContent("Provider writes", value: "Exact approval required")
+                LabeledContent("External accounts", value: readyAccountSummary)
+            }
+        }
+    }
+
+    private var diagnosticsPage: some View {
+        SettingsSection(title: "Recovery & diagnostics", symbol: "lifepreserver.fill") {
+            Stepper("Keep audit metadata for \(draft.auditRetentionDays) days", value: $draft.auditRetentionDays, in: 7...365, step: 7)
+            Button("Copy redacted diagnostics", systemImage: "doc.on.doc") {
+#if os(macOS)
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(model.redactedDiagnostics(), forType: .string)
+#endif
+            }
+            Text("Diagnostics include counts and health only. They exclude content, identities, paths, and credentials.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private var providerDescriptors: [SettingsProviderDescriptor] {
+        [
+            .init(name: "Codex", driver: .codex, symbol: "terminal.fill", tint: Nord.frost1, detail: "OpenAI coding sessions, models, and skills"),
+            .init(name: "Claude", driver: .claudeAgent, symbol: "sparkles", tint: .orange, detail: "Claude Code sessions and models"),
+            .init(name: "OpenCode", driver: .openCode, symbol: "chevron.left.forwardslash.chevron.right", tint: .purple, detail: "OpenCode sessions and upstream providers"),
+        ]
+    }
+
+    private var googleDetail: String {
+        let count = integrations.googleAccounts.count
+        let calendars = model.snapshot.domains.calendarSources.filter { $0.provider == .google }.count
+        if count == 0 { return integrations.hasGoogleClientConfiguration ? "Ready to add an account" : "Native setup required" }
+        return "\(count) account\(count == 1 ? "" : "s") · \(calendars) calendar\(calendars == 1 ? "" : "s")"
     }
 
     private var readyAccountSummary: String {
@@ -2548,17 +2809,7 @@ private struct DesktopSettingsView: View {
         return count == 0 ? "Not connected" : "\(count) ready"
     }
 
-    private var providerIntegrationDetail: String {
-        guard !integrations.providerCapabilities.isEmpty else {
-            return "Reuses the current Codex, Claude, and OpenCode installations"
-        }
-        let available = integrations.providerCapabilities.filter {
-            $0.state == .ready || $0.state == .degraded
-        }.count
-        return "\(available) of \(integrations.providerCapabilities.count) native adapters available"
-    }
-
-    private var appleCalendarAccessLabel: String {
+    private var appleAccessLabel: String {
         switch integrations.appleAccessState {
         case .notRequested: "Not requested"
         case .denied: "Denied"
@@ -2569,24 +2820,127 @@ private struct DesktopSettingsView: View {
         }
     }
 
-    @ViewBuilder
-    private func integrationRow(
+    private func chooseGoogleConfiguration() {
+#if os(macOS)
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [.json]
+        panel.message = "Choose the OAuth desktop client JSON downloaded from Google Cloud."
+        if panel.runModal() == .OK, let url = panel.url { integrations.importGoogleConfiguration(from: url) }
+#endif
+    }
+}
+
+private struct SettingsProviderDescriptor: Identifiable {
+    let name: String
+    let driver: ProviderDriverKind
+    let symbol: String
+    let tint: Color
+    let detail: String
+    var id: String { driver.rawValue }
+}
+
+private struct SettingsProviderRow: View {
+    let provider: SettingsProviderDescriptor
+    let snapshot: ProviderCapabilitySnapshot?
+
+    private var connected: Bool { snapshot?.state == .ready || snapshot?.state == .degraded }
+    private var needsAttention: Bool { snapshot?.state == .authenticationRequired }
+    private var summary: String {
+        guard let snapshot else { return "Not checked" }
+        let version = snapshot.version.map { "v\($0) · " } ?? ""
+        switch snapshot.state {
+        case .ready: return "\(version)Authenticated"
+        case .degraded: return "\(version)Available with limited capabilities"
+        case .authenticationRequired: return "\(version)Sign in with the provider CLI"
+        case .unavailable: return "Executable not found"
+        case .unsupported: return "Installed version is unsupported"
+        }
+    }
+
+    var body: some View {
+        DisclosureGroup {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(provider.detail).font(.caption).foregroundStyle(.secondary)
+                if let snapshot {
+                    LabeledContent("Authentication", value: snapshot.authentication.rawValue.capitalized)
+                    LabeledContent("Models", value: snapshot.models.isEmpty ? "Reported on first session" : "\(snapshot.models.count) available")
+                    LabeledContent("Skills", value: snapshot.skills.isEmpty ? "None reported" : "\(snapshot.skills.count) available")
+                    if let detail = snapshot.detail { Text(detail).font(.caption2).foregroundStyle(.tertiary) }
+                }
+            }
+            .padding(.top, 10)
+        } label: {
+            HStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 9).fill(provider.tint.opacity(0.18)).frame(width: 38, height: 38)
+                    Image(systemName: provider.symbol).foregroundStyle(provider.tint)
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(provider.name).font(.headline)
+                    Text(summary).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Circle().fill(connected ? Nord.auroraGreen : needsAttention ? Nord.auroraYellow : .secondary).frame(width: 8, height: 8)
+            }
+        }
+        .panelStyle()
+    }
+}
+
+private struct SettingsIntegrationCard<Actions: View, Details: View>: View {
+    let title: String
+    let detail: String
+    let symbol: String
+    let tint: Color
+    let connected: Bool
+    let busy: Bool
+    let actions: Actions
+    let details: Details
+
+    init(
         title: String,
         detail: String,
+        symbol: String,
+        tint: Color,
+        connected: Bool,
         busy: Bool,
-        action: String,
-        perform: @escaping () -> Void
-    ) -> some View {
-        HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(.subheadline.weight(.semibold))
-                Text(detail).font(.caption).foregroundStyle(.secondary)
+        @ViewBuilder actions: () -> Actions,
+        @ViewBuilder details: () -> Details
+    ) {
+        self.title = title
+        self.detail = detail
+        self.symbol = symbol
+        self.tint = tint
+        self.connected = connected
+        self.busy = busy
+        self.actions = actions()
+        self.details = details()
+    }
+
+    var body: some View {
+        DisclosureGroup {
+            VStack(alignment: .leading, spacing: 10) { details }.padding(.top, 10)
+        } label: {
+            HStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10).fill(tint.opacity(0.18)).frame(width: 42, height: 42)
+                    Image(systemName: symbol).font(.title3).foregroundStyle(tint)
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title).font(.headline)
+                    HStack(spacing: 6) {
+                        Circle().fill(connected ? Nord.auroraGreen : .secondary).frame(width: 7, height: 7)
+                        Text(detail).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
+                if busy { ProgressView().controlSize(.small) }
+                HStack(spacing: 7) { actions }.buttonStyle(.bordered).disabled(busy)
             }
-            Spacer()
-            if busy { ProgressView().controlSize(.small) }
-            Button(action, action: perform)
-                .disabled(busy)
         }
+        .panelStyle()
     }
 }
 

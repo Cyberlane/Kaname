@@ -1,11 +1,5 @@
 @preconcurrency import Foundation
 
-public struct ExistingCLIAccountSnapshot: Equatable, Sendable {
-    public let identity: String
-    public let accountType: String
-    public let capabilities: [String]
-}
-
 public struct PersonalCalendarSourceSnapshot: Equatable, Sendable {
     public let accountIdentity: String
     public let externalIdentifier: String
@@ -62,70 +56,6 @@ public actor PersonalIntegrationService {
         self.timeout = timeout
     }
 
-    public func discoverGoogleAccounts(
-        executable: String = "zele"
-    ) async throws -> [ExistingCLIAccountSnapshot] {
-        let output = try await capture(executable: executable, arguments: ["whoami"], connector: "zele")
-        return try FlatYAMLListParser.parse(output).compactMap { item in
-            guard let identity = item["email"], !identity.isEmpty else { return nil }
-            return ExistingCLIAccountSnapshot(
-                identity: identity,
-                accountType: item["type"] ?? "google",
-                capabilities: (item["capabilities"] ?? "")
-                    .split(separator: ",")
-                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                    .filter { !$0.isEmpty }
-            )
-        }
-    }
-
-    public func listGoogleCalendars(
-        accounts: [String] = [],
-        executable: String = "zele"
-    ) async throws -> [PersonalCalendarSourceSnapshot] {
-        let output = try await capture(
-            executable: executable,
-            arguments: accountArguments(accounts) + ["cal", "list"],
-            connector: "zele"
-        )
-        return try FlatYAMLListParser.parse(output).compactMap { item in
-            guard let identifier = item["id"], let name = item["name"] else { return nil }
-            return PersonalCalendarSourceSnapshot(
-                accountIdentity: item["account"] ?? accounts.first ?? "Google",
-                externalIdentifier: identifier,
-                name: name,
-                role: item["role"] ?? "reader",
-                isPrimary: item["primary"] == "true"
-            )
-        }
-    }
-
-    public func listGoogleInbox(
-        accounts: [String] = [],
-        limit: Int = 40,
-        executable: String = "zele"
-    ) async throws -> [PersonalMailThreadSnapshot] {
-        let boundedLimit = min(max(limit, 1), 100)
-        let output = try await capture(
-            executable: executable,
-            arguments: accountArguments(accounts) + ["mail", "list", "--folder", "inbox", "--limit", "\(boundedLimit)"],
-            connector: "zele"
-        )
-        return try FlatYAMLListParser.parse(output).compactMap { item in
-            guard let identifier = item["id"], let subject = item["subject"] else { return nil }
-            return PersonalMailThreadSnapshot(
-                accountIdentity: item["account"] ?? accounts.first ?? "Gmail",
-                externalIdentifier: identifier,
-                flags: item["flags"] ?? "",
-                sender: item["from"] ?? "Unknown sender",
-                subject: subject,
-                snippet: item["snippet"] ?? "",
-                dateDescription: item["date"] ?? "",
-                messageCount: Int(item["messages"] ?? "") ?? 1
-            )
-        }
-    }
-
     public func inspectGitHubAccess(
         executable: String = "gh"
     ) async throws -> GitHubCLIAccessSnapshot {
@@ -173,57 +103,5 @@ public actor PersonalIntegrationService {
             throw PersonalIntegrationError.outputTooLarge(connector)
         }
         return result.standardOutput
-    }
-
-    private func accountArguments(_ accounts: [String]) -> [String] {
-        accounts
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-            .flatMap { ["--account", $0] }
-    }
-}
-
-enum FlatYAMLListParser {
-    static func parse(_ document: String) throws -> [[String: String]] {
-        var items: [[String: String]] = []
-        var current: [String: String]?
-        var insideItems = false
-
-        for rawLine in document.split(separator: "\n", omittingEmptySubsequences: false) {
-            let line = String(rawLine)
-            if line == "items: []" { return [] }
-            if line == "items:" {
-                insideItems = true
-                continue
-            }
-            guard insideItems else { continue }
-            if !line.hasPrefix(" ") { break }
-
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("- ") {
-                if let current { items.append(current) }
-                current = [:]
-                try assign(String(trimmed.dropFirst(2)), to: &current)
-            } else if current != nil {
-                try assign(trimmed, to: &current)
-            }
-        }
-        if let current { items.append(current) }
-        return items
-    }
-
-    private static func assign(_ field: String, to item: inout [String: String]?) throws {
-        guard let separator = field.firstIndex(of: ":") else {
-            throw PersonalIntegrationError.malformedOutput("zele")
-        }
-        let key = String(field[..<separator])
-        let rawValue = String(field[field.index(after: separator)...])
-            .trimmingCharacters(in: .whitespaces)
-        item?[key] = scalar(rawValue)
-    }
-
-    private static func scalar(_ value: String) -> String {
-        guard value.count >= 2, value.first == "'", value.last == "'" else { return value }
-        return String(value.dropFirst().dropLast()).replacingOccurrences(of: "''", with: "'")
     }
 }

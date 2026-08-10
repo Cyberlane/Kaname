@@ -145,64 +145,66 @@ struct ProviderConnectivityTests {
     }
 
     @Test
-    func flatZeleOutputPreservesAccountScopedMailAndCalendarFields() throws {
-        let parsed = try FlatYAMLListParser.parse(
+    func googleDesktopClientConfigurationAndPKCERequestAreNativeAndBounded() throws {
+        let configuration = try GoogleOAuthClientConfiguration.decode(downloadedJSON: Data(
             """
-            summary: 2 threads (inbox)
-            items:
-              - account: first@example.test
-                id: thread-1
-                subject: 'It''s ready: review'
-                messages: 3
-              - account: second@example.test
-                id: thread-2
-                subject: Another account
-                messages: 1
-            """
+            {"installed":{"client_id":"desktop.apps.googleusercontent.com","client_secret":"local-only","auth_uri":"https://accounts.google.com/o/oauth2/v2/auth","token_uri":"https://oauth2.googleapis.com/token"}}
+            """.utf8
+        ))
+        let request = try GoogleOAuthRequestBuilder.make(
+            configuration: configuration,
+            redirectURI: URL(string: "http://127.0.0.1:43123/oauth/callback")!,
+            verifier: String(repeating: "v", count: 48),
+            state: String(repeating: "s", count: 32)
         )
+        let items = URLComponents(url: request.url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let query = Dictionary(uniqueKeysWithValues: items.compactMap { item in
+            item.value.map { (item.name, $0) }
+        })
 
-        #expect(parsed.count == 2)
-        #expect(parsed[0]["account"] == "first@example.test")
-        #expect(parsed[0]["subject"] == "It's ready: review")
-        #expect(parsed[1]["id"] == "thread-2")
+        #expect(configuration.clientID == "desktop.apps.googleusercontent.com")
+        #expect(query["redirect_uri"] == "http://127.0.0.1:43123/oauth/callback")
+        #expect(query["code_challenge_method"] == "S256")
+        #expect(query["access_type"] == "offline")
+        #expect(query["scope"]?.contains("gmail.readonly") == true)
+        #expect(query["scope"]?.contains("calendar.readonly") == true)
     }
 
     @Test
-    func personalIntegrationDiscoversEveryExistingCLIAccountWithoutTokens() async throws {
-        let executable = try makeFixtureExecutable(
-            """
-            #!/bin/sh
-            printf '%s\n' \\
-              'summary: 4 account(s)' \\
-              'items:' \\
-              '  - email: one@example.test' \\
-              '    type: google' \\
-              "    capabilities: 'gmail, calendar'" \\
-              '    status: Authenticated' \\
-              '  - email: two@example.test' \\
-              '    type: google' \\
-              "    capabilities: 'gmail, calendar'" \\
-              '    status: Authenticated' \\
-              '  - email: three@example.test' \\
-              '    type: google' \\
-              "    capabilities: 'gmail, calendar'" \\
-              '    status: Authenticated' \\
-              '  - email: four@example.test' \\
-              '    type: google' \\
-              "    capabilities: 'gmail, calendar'" \\
-              '    status: Authenticated'
-            """
+    func nativeGoogleResponsesPreserveAccountScopedCalendarAndMailFields() throws {
+        let account = NativeGoogleAccountSnapshot(
+            id: "google-subject-1",
+            identity: "one@example.test",
+            displayName: "One",
+            capabilities: ["Gmail", "Google Calendar"]
         )
-        defer { try? FileManager.default.removeItem(at: executable.deletingLastPathComponent()) }
+        let calendarPage = try GoogleAPIResponseParser.calendarPage(
+            data: Data(
+                """
+                {"items":[{"id":"primary","summary":"Personal","accessRole":"owner","primary":true},{"id":"shared","summary":"Team","accessRole":"reader"}],"nextPageToken":"page-2"}
+                """.utf8
+            ),
+            account: account
+        )
+        let calendars = calendarPage.calendars
+        let thread = try GoogleAPIResponseParser.thread(
+            data: Data(
+                """
+                {"id":"thread-1","snippet":"Review it","messages":[{"labelIds":["INBOX","UNREAD"],"payload":{"headers":[{"name":"From","value":"Team <team@example.test>"},{"name":"Subject","value":"It's ready: review"},{"name":"Date","value":"Sun, 10 Aug 2026 09:00:00 +0900"}]}},{"labelIds":["INBOX"],"payload":{"headers":[{"name":"From","value":"Team <team@example.test>"},{"name":"Subject","value":"Re: It's ready: review"},{"name":"Date","value":"Sun, 10 Aug 2026 10:00:00 +0900"}]}}]}
+                """.utf8
+            ),
+            account: account
+        )
 
-        let accounts = try await PersonalIntegrationService(timeout: .seconds(2))
-            .discoverGoogleAccounts(executable: executable.path)
-
-        #expect(accounts.count == 4)
-        #expect(accounts.map(\.identity) == [
-            "one@example.test", "two@example.test", "three@example.test", "four@example.test",
-        ])
-        #expect(accounts.allSatisfy { $0.capabilities == ["gmail", "calendar"] })
+        #expect(calendars.count == 2)
+        #expect(calendars[0].accountIdentity == "one@example.test")
+        #expect(calendars[0].isPrimary)
+        #expect(calendars[1].role == "reader")
+        #expect(calendarPage.nextPageToken == "page-2")
+        #expect(thread.accountIdentity == "one@example.test")
+        #expect(thread.subject == "Re: It's ready: review")
+        #expect(thread.messageCount == 2)
+        #expect(thread.flags == "INBOX, UNREAD")
     }
 
 #if canImport(EventKit)

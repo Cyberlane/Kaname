@@ -287,7 +287,7 @@ struct DesktopAppModelTests {
                 displayName: "Gmail \(number)",
                 identity: "account\(number)@example.test",
                 status: .ready,
-                scope: "Existing zele session"
+                scope: "Native Google OAuth session"
             )
         }
         model.replaceAccounts(for: [.gmail], with: gmailAccounts)
