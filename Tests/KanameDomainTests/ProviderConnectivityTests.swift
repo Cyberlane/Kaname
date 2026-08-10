@@ -222,7 +222,8 @@ struct ProviderConnectivityTests {
         #expect(query["access_type"] == "offline")
         #expect(query["scope"]?.contains("gmail.modify") == true)
         #expect(query["scope"]?.contains("gmail.compose") == true)
-        #expect(query["scope"]?.contains("calendar.readonly") == true)
+        #expect(query["scope"]?.contains("calendar.calendarlist.readonly") == true)
+        #expect(query["scope"]?.contains("calendar.events") == true)
     }
 
 #if os(macOS)

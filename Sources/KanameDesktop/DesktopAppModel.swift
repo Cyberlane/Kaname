@@ -390,7 +390,7 @@ public struct DesktopPreferences: Codable, Equatable, Sendable {
 }
 
 public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
-    public static let currentVersion = 12
+    public static let currentVersion = 13
 
     public var version: Int
     public var projects: [DesktopProject]
@@ -546,7 +546,7 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
     }
 
     func migratedToCurrent(now: Int64) throws -> DesktopAppSnapshot {
-        guard (1...11).contains(version) else { throw DesktopModelError.unsupportedVersion }
+        guard (1...12).contains(version) else { throw DesktopModelError.unsupportedVersion }
         var migrated = self
         migrated.version = Self.currentVersion
         if migrated.domains == .empty {
@@ -945,12 +945,17 @@ public final class DesktopAppModel: ObservableObject {
     }
 
     @discardableResult
-    public func enqueueProviderRun(threadID: String, sourceMessageID: String) -> String? {
+    public func enqueueProviderRun(
+        threadID: String,
+        sourceMessageID: String,
+        usesProjectContext: Bool = true,
+        workspacePathOverride: String? = nil
+    ) -> String? {
         guard let thread = thread(id: threadID),
               let message = thread.messages.first(where: { $0.id == sourceMessageID && $0.role == .user }) else {
             return nil
         }
-        let run = DesktopProviderRunRecord(
+        var run = DesktopProviderRunRecord(
             id: UUID().uuidString.lowercased(),
             threadID: threadID,
             sourceMessageID: sourceMessageID,
@@ -965,7 +970,9 @@ public final class DesktopAppModel: ObservableObject {
             startedAtUnixMillis: now(),
             completedAtUnixMillis: nil
         )
-        mutate { snapshot in
+        run.usesProjectContext = usesProjectContext
+        run.workspacePathOverride = workspacePathOverride
+        let persisted = mutate { snapshot in
             snapshot.operations.providerRuns.append(run)
             guard let index = snapshot.threads.firstIndex(where: { $0.id == threadID }) else { return }
             if !snapshot.operations.providerRuns.contains(where: {
@@ -975,7 +982,7 @@ public final class DesktopAppModel: ObservableObject {
             }
             snapshot.threads[index].updatedAtUnixMillis = now()
         }
-        return run.id
+        return persisted ? run.id : nil
     }
 
     public func nextQueuedProviderRun(threadID: String) -> DesktopProviderRunRecord? {
@@ -1316,7 +1323,10 @@ public final class DesktopAppModel: ObservableObject {
                 updated.isEnabled = priorEnablement[source.id] ?? source.isEnabled
                 return updated
             }
-            snapshot.domains.calendarSources = Self.sortedRecords(merged) {
+            let deduplicated = Dictionary(grouping: merged) {
+                "\($0.provider.rawValue)|\($0.accountID)|\($0.externalIdentifier)".lowercased()
+            }.compactMap { $0.value.last }
+            snapshot.domains.calendarSources = Self.sortedRecords(deduplicated) {
                 "\($0.provider.rawValue)|\($0.displayName)"
             }
         }
@@ -1507,13 +1517,28 @@ public final class DesktopAppModel: ObservableObject {
         startAtUnixMillis: Int64,
         durationMinutes: Int,
         timeZoneIdentifier: String,
-        recurrence: String
+        recurrence: String,
+        isAllDay: Bool = false,
+        mutationKind: DesktopCalendarProposal.MutationKind = .create,
+        eventExternalID: String? = nil,
+        seriesMasterExternalID: String? = nil,
+        eventRevision: String? = nil,
+        originalTitle: String? = nil,
+        originalStartAtUnixMillis: Int64? = nil,
+        originalEndAtUnixMillis: Int64? = nil,
+        originalTimeZoneIdentifier: String? = nil,
+        originalRecurrence: [String]? = nil,
+        originalIsAllDay: Bool? = nil,
+        seriesMasterRevision: String? = nil,
+        seriesMasterRecurrence: [String]? = nil,
+        seriesMasterStartAtUnixMillis: Int64? = nil,
+        recurrenceScope: String? = nil
     ) -> String? {
         let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanTitle.isEmpty, cleanTitle.utf8.count <= 200,
               (1...10_080).contains(durationMinutes),
               TimeZone(identifier: timeZoneIdentifier) != nil else { return nil }
-        let proposal = DesktopCalendarProposal(
+        var proposal = DesktopCalendarProposal(
             id: UUID().uuidString.lowercased(),
             accountID: accountID,
             calendarSourceID: calendarSourceID,
@@ -1524,8 +1549,100 @@ public final class DesktopAppModel: ObservableObject {
             recurrence: recurrence.trimmingCharacters(in: .whitespacesAndNewlines),
             status: .proposed
         )
+        proposal.mutationKind = mutationKind
+        proposal.isAllDay = isAllDay
+        proposal.eventExternalID = eventExternalID
+        proposal.seriesMasterExternalID = seriesMasterExternalID
+        proposal.eventRevision = eventRevision
+        proposal.originalTitle = originalTitle
+        proposal.originalStartAtUnixMillis = originalStartAtUnixMillis
+        proposal.originalEndAtUnixMillis = originalEndAtUnixMillis
+        proposal.originalTimeZoneIdentifier = originalTimeZoneIdentifier
+        proposal.originalRecurrence = originalRecurrence
+        proposal.originalIsAllDay = originalIsAllDay
+        proposal.seriesMasterRevision = seriesMasterRevision
+        proposal.seriesMasterRecurrence = seriesMasterRecurrence
+        proposal.seriesMasterStartAtUnixMillis = seriesMasterStartAtUnixMillis
+        proposal.recurrenceScope = recurrenceScope
+        proposal.mutationPhase = "prepared"
         mutate { $0.domains.calendarProposals.append(proposal) }
         return proposal.id
+    }
+
+    public func prepareCalendarProposal(id: String, exactTarget: String) {
+        mutateRecord(at: \.domains.calendarProposals, id: id) { proposal in
+            proposal.exactTarget = String(exactTarget.prefix(2_048))
+            proposal.approvalID = nil
+            proposal.remoteReceipt = nil
+            proposal.reconciledAtUnixMillis = nil
+            proposal.mutationPhase = "prepared"
+            proposal.status = .needsReview
+        }
+    }
+
+    public func attachCalendarApproval(proposalID: String, approvalID: String) {
+        mutateRecord(at: \.domains.calendarProposals, id: proposalID) { proposal in
+            proposal.approvalID = approvalID
+            proposal.status = .waiting
+        }
+    }
+
+    public func beginCalendarProposalExecution(id: String) -> Bool {
+        guard !snapshot.preferences.safeMode,
+              let proposal = snapshot.domains.calendarProposals.first(where: { $0.id == id }),
+              proposal.status == .waiting || proposal.status == .running,
+              let approvalID = proposal.approvalID,
+              let exactTarget = proposal.exactTarget,
+              isApprovalGranted(id: approvalID, exactTarget: exactTarget) else { return false }
+        mutateRecord(at: \.domains.calendarProposals, id: id) { $0.status = .running }
+        return true
+    }
+
+    public func recordCalendarMutationPhase(id: String, phase: String) {
+        mutateRecord(at: \.domains.calendarProposals, id: id) {
+            $0.mutationPhase = String(phase.prefix(80))
+            $0.status = .running
+        }
+    }
+
+    public func recordCalendarMutationUncertain(id: String, detail: String) {
+        let timestamp = now()
+        mutate { snapshot in
+            guard let index = snapshot.domains.calendarProposals.firstIndex(where: { $0.id == id }) else { return }
+            snapshot.domains.calendarProposals[index].status = .running
+            snapshot.domains.calendarProposals[index].remoteReceipt = "Outcome unknown. Reconcile before retrying: \(String(detail.prefix(8_000)))"
+            snapshot.operations.audit.append(DesktopAuditRecord(
+                id: UUID().uuidString.lowercased(),
+                domain: "calendar",
+                action: "reconcile-required",
+                target: snapshot.domains.calendarProposals[index].exactTarget ?? "calendar proposal \(id)",
+                state: .running,
+                detail: "A calendar request may have reached the provider. Kaname retained the operation identity and stopped until its remote postconditions are reconciled.",
+                recordedAtUnixMillis: timestamp
+            ))
+        }
+    }
+
+    public func reconcileCalendarProposal(id: String, state: DesktopActionState, receipt: String) {
+        let timestamp = now()
+        mutate { snapshot in
+            guard let index = snapshot.domains.calendarProposals.firstIndex(where: { $0.id == id }) else { return }
+            snapshot.domains.calendarProposals[index].status = state == .reconciled ? .ready : .failed
+            if state == .reconciled {
+                snapshot.domains.calendarProposals[index].mutationPhase = "complete"
+            }
+            snapshot.domains.calendarProposals[index].remoteReceipt = String(receipt.prefix(8_192))
+            snapshot.domains.calendarProposals[index].reconciledAtUnixMillis = timestamp
+            snapshot.operations.audit.append(DesktopAuditRecord(
+                id: UUID().uuidString.lowercased(),
+                domain: "calendar",
+                action: snapshot.domains.calendarProposals[index].mutationKind?.rawValue ?? "create",
+                target: snapshot.domains.calendarProposals[index].exactTarget ?? "calendar proposal \(id)",
+                state: state,
+                detail: String(receipt.prefix(8_192)),
+                recordedAtUnixMillis: timestamp
+            ))
+        }
     }
 
     @discardableResult
@@ -1534,12 +1651,19 @@ public final class DesktopAppModel: ObservableObject {
         schedule: String,
         timeZoneIdentifier: String,
         actionSummary: String,
-        missedRunPolicy: DesktopAutomationRule.MissedRunPolicy
+        missedRunPolicy: DesktopAutomationRule.MissedRunPolicy,
+        scheduleSpec: DesktopScheduleSpec? = nil,
+        actionKind: DesktopAutomationActionKind? = nil,
+        authority: DesktopAutomationAuthority? = nil,
+        projectID: String? = nil,
+        skillIDs: [String] = [],
+        toolNames: [String] = [],
+        notificationEnabled: Bool = true
     ) -> String? {
         let fields = [name, schedule, actionSummary].map(Self.normalized)
         guard fields.allSatisfy({ !$0.isEmpty }),
               TimeZone(identifier: timeZoneIdentifier) != nil else { return nil }
-        let rule = DesktopAutomationRule(
+        var rule = DesktopAutomationRule(
             id: UUID().uuidString.lowercased(),
             name: fields[0],
             schedule: fields[1],
@@ -1551,14 +1675,214 @@ public final class DesktopAppModel: ObservableObject {
             lastResult: "Not run",
             createdAtUnixMillis: now()
         )
+        rule.scheduleSpec = scheduleSpec
+        rule.actionKind = actionKind
+        rule.authority = authority
+        rule.projectID = projectID
+        rule.skillIDs = Array(Set(skillIDs)).sorted()
+        rule.toolNames = Array(Set(toolNames.map(Self.normalized).filter { !$0.isEmpty })).sorted()
+        rule.notificationEnabled = notificationEnabled
         mutate { $0.domains.automations.append(rule) }
         return rule.id
+    }
+
+    public func activateAutomation(id: String, approvalID: String?) -> Bool {
+        guard let rule = snapshot.domains.automations.first(where: { $0.id == id }),
+              let spec = rule.scheduleSpec,
+              rule.actionKind != nil,
+              rule.authority != nil,
+              !(rule.actionKind != .notification && rule.authority == .localOnly),
+              (rule.toolNames ?? []).isEmpty,
+              (rule.actionKind != .skill || !(rule.skillIDs ?? []).isEmpty),
+              (rule.skillIDs ?? []).allSatisfy({ skillID in
+                  snapshot.domains.skills.contains { $0.id == skillID && $0.enabled }
+              }) else { return false }
+        if rule.authority != .localOnly {
+            guard let approvalID, let target = automationAuthorityTarget(for: rule),
+                  isApprovalGranted(id: approvalID, exactTarget: target) else { return false }
+        }
+        let timestamp = now()
+        guard let next = try? DesktopScheduleEngine.nextOccurrence(
+            spec: spec,
+            timeZoneIdentifier: rule.timeZoneIdentifier,
+            after: timestamp - 1
+        ) else { return false }
+        mutateRecord(at: \.domains.automations, id: id) { automation in
+            automation.status = .ready
+            automation.nextRunAtUnixMillis = next
+            automation.lastResult = "Scheduled"
+            if automation.authority == .standing {
+                automation.standingAuthorityApprovedAtUnixMillis = timestamp
+                automation.standingAuthorityApprovalID = approvalID
+            }
+        }
+        return true
+    }
+
+    public func automationAuthorityTarget(for rule: DesktopAutomationRule) -> String? {
+        struct Capability: Encodable {
+            let id: String
+            let name: String
+            let kind: String
+            let revision: String
+            let source: String
+            let scope: String
+        }
+        struct Contract: Encodable {
+            let id: String
+            let name: String
+            let schedule: DesktopScheduleSpec
+            let timeZoneIdentifier: String
+            let actionSummary: String
+            let missedRunPolicy: String
+            let actionKind: String
+            let authority: String
+            let projectID: String?
+            let workspacePath: String?
+            let capabilities: [Capability]
+            let notificationEnabled: Bool
+        }
+        guard let schedule = rule.scheduleSpec,
+              let actionKind = rule.actionKind,
+              let authority = rule.authority else { return nil }
+        var selected: [Capability] = []
+        for id in rule.skillIDs ?? [] {
+            guard let skill = snapshot.domains.skills.first(where: { $0.id == id }) else { continue }
+            selected.append(Capability(
+                id: skill.id,
+                name: skill.name,
+                kind: skill.kind.rawValue,
+                revision: skill.revision,
+                source: skill.source,
+                scope: skill.scope
+            ))
+        }
+        selected.sort { $0.id < $1.id }
+        guard selected.count == (rule.skillIDs ?? []).count else { return nil }
+        let contract = Contract(
+            id: rule.id,
+            name: rule.name,
+            schedule: schedule,
+            timeZoneIdentifier: rule.timeZoneIdentifier,
+            actionSummary: rule.actionSummary,
+            missedRunPolicy: rule.missedRunPolicy.rawValue,
+            actionKind: actionKind.rawValue,
+            authority: authority.rawValue,
+            projectID: rule.projectID,
+            workspacePath: automationWorkspacePath(for: rule),
+            capabilities: selected,
+            notificationEnabled: rule.notificationEnabled ?? false
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        guard let data = try? encoder.encode(contract) else { return nil }
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        return "automation:\(rule.id):contract:sha256=\(digest)"
+    }
+
+    public func automationWorkspacePath(for rule: DesktopAutomationRule) -> String? {
+        guard let projectID = rule.projectID else { return nil }
+        if let path = snapshot.projects.first(where: { $0.id == projectID })?.path, !path.isEmpty {
+            return URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL.path
+        }
+        return snapshot.domains.gitWorkspaces.first(where: { $0.projectID == projectID && $0.status == .ready })
+            .map { URL(fileURLWithPath: $0.localPath, isDirectory: true).standardizedFileURL.path }
+    }
+
+    public func isApprovalGranted(id: String, exactTarget: String, atUnixMillis timestamp: Int64? = nil) -> Bool {
+        let checkedAt = timestamp ?? now()
+        guard let approval = snapshot.operations.approvals.first(where: { $0.id == id }),
+              approval.state == .approved,
+              approval.exactTarget == exactTarget else { return false }
+        return approval.expiresAtUnixMillis.map { $0 >= checkedAt } ?? true
     }
 
     public func setAutomationPaused(id: String, paused: Bool) {
         mutateRecord(at: \.domains.automations, id: id) { rule in
             rule.status = paused ? .paused : .draft
         }
+    }
+
+    public func updateAutomation(
+        id: String,
+        name: String,
+        schedule: String,
+        timeZoneIdentifier: String,
+        actionSummary: String,
+        missedRunPolicy: DesktopAutomationRule.MissedRunPolicy,
+        scheduleSpec: DesktopScheduleSpec,
+        actionKind: DesktopAutomationActionKind,
+        authority: DesktopAutomationAuthority,
+        projectID: String?,
+        skillIDs: [String],
+        notificationEnabled: Bool
+    ) -> Bool {
+        let fields = [name, schedule, actionSummary].map(Self.normalized)
+        let selected = Array(Set(skillIDs)).sorted()
+        guard fields.allSatisfy({ !$0.isEmpty }),
+              TimeZone(identifier: timeZoneIdentifier) != nil,
+              (actionKind == .notification || authority != .localOnly),
+              (actionKind != .skill || !selected.isEmpty),
+              selected.allSatisfy({ skillID in
+                  snapshot.domains.skills.contains { $0.id == skillID && $0.enabled }
+              }),
+              snapshot.domains.automations.contains(where: { $0.id == id }),
+              !snapshot.operations.automationRuns.contains(where: { $0.automationID == id && $0.state == .running }) else { return false }
+        let timestamp = now()
+        mutate { snapshot in
+            guard let index = snapshot.domains.automations.firstIndex(where: { $0.id == id }) else { return }
+            snapshot.domains.automations[index].name = fields[0]
+            snapshot.domains.automations[index].schedule = fields[1]
+            snapshot.domains.automations[index].timeZoneIdentifier = timeZoneIdentifier
+            snapshot.domains.automations[index].actionSummary = fields[2]
+            snapshot.domains.automations[index].missedRunPolicy = missedRunPolicy
+            snapshot.domains.automations[index].scheduleSpec = scheduleSpec
+            snapshot.domains.automations[index].actionKind = actionKind
+            snapshot.domains.automations[index].authority = authority
+            snapshot.domains.automations[index].projectID = projectID
+            snapshot.domains.automations[index].skillIDs = selected
+            snapshot.domains.automations[index].toolNames = []
+            snapshot.domains.automations[index].notificationEnabled = notificationEnabled
+            snapshot.domains.automations[index].status = .draft
+            snapshot.domains.automations[index].nextRunAtUnixMillis = nil
+            snapshot.domains.automations[index].lastResult = "Edited · review required"
+            snapshot.domains.automations[index].standingAuthorityApprovedAtUnixMillis = nil
+            snapshot.domains.automations[index].standingAuthorityApprovalID = nil
+            for runIndex in snapshot.operations.automationRuns.indices
+                where snapshot.operations.automationRuns[runIndex].automationID == id
+                    && [.proposed, .awaitingApproval, .approved].contains(snapshot.operations.automationRuns[runIndex].state) {
+                snapshot.operations.automationRuns[runIndex].state = .cancelled
+                snapshot.operations.automationRuns[runIndex].completedAtUnixMillis = timestamp
+                snapshot.operations.automationRuns[runIndex].detail = "The rule changed before this occurrence ran; review the edited contract."
+            }
+        }
+        return true
+    }
+
+    public func deleteAutomation(id: String) -> Bool {
+        guard snapshot.domains.automations.contains(where: { $0.id == id }),
+              !snapshot.operations.automationRuns.contains(where: { $0.automationID == id && $0.state == .running }) else { return false }
+        let timestamp = now()
+        mutate { snapshot in
+            snapshot.domains.automations.removeAll { $0.id == id }
+            for index in snapshot.operations.automationRuns.indices
+                where snapshot.operations.automationRuns[index].automationID == id
+                    && ![DesktopActionState.completed, .failed, .cancelled, .interrupted].contains(snapshot.operations.automationRuns[index].state) {
+                snapshot.operations.automationRuns[index].state = .cancelled
+                snapshot.operations.automationRuns[index].completedAtUnixMillis = timestamp
+                snapshot.operations.automationRuns[index].detail = "The automation was deleted before this occurrence completed."
+            }
+            snapshot.operations.audit.append(DesktopAuditRecord(
+                id: UUID().uuidString.lowercased(),
+                domain: "automation",
+                action: "deleted",
+                target: "automation:\(id)",
+                state: .completed,
+                detail: "Removed the local rule and cancelled its unfinished occurrences. Historical receipts remain available.",
+                recordedAtUnixMillis: timestamp
+            ))
+        }
+        return true
     }
 
     public func setSkillEnabled(id: String, enabled: Bool) {
@@ -1820,6 +2144,19 @@ public final class DesktopAppModel: ObservableObject {
         mutate { snapshot in
             guard let index = snapshot.operations.approvals.firstIndex(where: { $0.id == id }),
                   snapshot.operations.approvals[index].state == .awaitingApproval else { return }
+            if snapshot.operations.approvals[index].expiresAtUnixMillis.map({ $0 < timestamp }) ?? false {
+                snapshot.operations.approvals[index].state = .cancelled
+                snapshot.operations.audit.append(DesktopAuditRecord(
+                    id: UUID().uuidString.lowercased(),
+                    domain: "approval",
+                    action: "expired",
+                    target: snapshot.operations.approvals[index].exactTarget,
+                    state: .cancelled,
+                    detail: "The approval expired before a decision; no action was dispatched.",
+                    recordedAtUnixMillis: timestamp
+                ))
+                return
+            }
             let state: DesktopActionState = approved ? .approved : .rejected
             snapshot.operations.approvals[index].state = state
             snapshot.operations.audit.append(
@@ -2192,7 +2529,7 @@ public final class DesktopAppModel: ObservableObject {
             detail: "Dry run validated local schedule metadata. No tools, accounts, providers, or external effects were invoked.",
             evidenceArtifactIDs: []
         )
-        mutate { snapshot in
+        let persisted = mutate { snapshot in
             snapshot.operations.automationRuns.append(run)
             snapshot.domains.automations = snapshot.domains.automations.map { automation in
                 var updated = automation
@@ -2200,7 +2537,184 @@ public final class DesktopAppModel: ObservableObject {
                 return updated
             }
         }
-        return run.id
+        return persisted ? run.id : nil
+    }
+
+    public func dueAutomationIDs(atUnixMillis timestamp: Int64) -> [String] {
+        snapshot.domains.automations.filter {
+            $0.status == .ready && ($0.nextRunAtUnixMillis ?? Int64.max) <= timestamp
+        }.sorted {
+            ($0.nextRunAtUnixMillis ?? Int64.max) < ($1.nextRunAtUnixMillis ?? Int64.max)
+        }.map(\.id)
+    }
+
+    @discardableResult
+    public func claimAutomationRun(id: String, ownerID: String, nowUnixMillis timestamp: Int64) -> String? {
+        guard let rule = snapshot.domains.automations.first(where: { $0.id == id && $0.status == .ready }),
+              let scheduled = rule.nextRunAtUnixMillis,
+              scheduled <= timestamp,
+              let spec = rule.scheduleSpec else { return nil }
+        guard (rule.skillIDs ?? []).allSatisfy({ skillID in
+            snapshot.domains.skills.contains { $0.id == skillID && $0.enabled }
+        }) else {
+            mutateRecord(at: \.domains.automations, id: id) {
+                $0.status = .paused
+                $0.lastResult = "Paused · selected capability unavailable"
+            }
+            return nil
+        }
+        let key = DesktopScheduleEngine.deduplicationKey(automationID: id, scheduledAtUnixMillis: scheduled)
+        guard !snapshot.operations.automationRuns.contains(where: { $0.deduplicationKey == key }) else {
+            advanceAutomation(id: id, spec: spec, after: scheduled)
+            return nil
+        }
+        guard let contractTarget = automationAuthorityTarget(for: rule) else { return nil }
+        let exactTarget = "\(contractTarget):occurrence=\(scheduled)"
+        let missed = timestamp - scheduled > 120_000
+        let state: DesktopActionState
+        let detail: String
+        if missed, rule.missedRunPolicy == .skip {
+            state = .completed
+            detail = "Skipped a missed occurrence by policy; no action ran."
+        } else if rule.authority == .askEveryRun
+                    || (missed && rule.missedRunPolicy == .ask)
+                    || (rule.authority == .standing && !(rule.standingAuthorityApprovalID.map {
+                        isApprovalGranted(id: $0, exactTarget: contractTarget, atUnixMillis: timestamp)
+                    } ?? false)) {
+            state = .awaitingApproval
+            detail = missed ? "A missed occurrence needs catch-up approval." : "This occurrence needs exact run approval."
+        } else {
+            state = .approved
+            detail = "Claimed by the single desktop scheduler owner and ready to execute."
+        }
+        var run = DesktopAutomationRunRecord(
+            id: UUID().uuidString.lowercased(),
+            automationID: id,
+            scheduledAtUnixMillis: scheduled,
+            startedAtUnixMillis: state == .approved ? timestamp : nil,
+            completedAtUnixMillis: state == .completed ? timestamp : nil,
+            state: state,
+            detail: detail,
+            evidenceArtifactIDs: []
+        )
+        run.deduplicationKey = key
+        run.ownerID = ownerID
+        run.wasMissed = missed
+        run.contractTarget = contractTarget
+        run.exactTarget = exactTarget
+        run.workspacePath = automationWorkspacePath(for: rule)
+        let next = try? DesktopScheduleEngine.nextOccurrence(
+            spec: spec,
+            timeZoneIdentifier: rule.timeZoneIdentifier,
+            after: missed ? timestamp : scheduled
+        )
+        let persisted = mutate { snapshot in
+            snapshot.operations.automationRuns.append(run)
+            snapshot.operations.audit.append(DesktopAuditRecord(
+                id: UUID().uuidString.lowercased(),
+                domain: "automation",
+                action: state == .completed ? "missed-skip" : "claimed",
+                target: key,
+                state: state,
+                detail: detail,
+                recordedAtUnixMillis: timestamp
+            ))
+            guard let index = snapshot.domains.automations.firstIndex(where: { $0.id == id }) else { return }
+            snapshot.domains.automations[index].nextRunAtUnixMillis = next ?? nil
+            if next == nil { snapshot.domains.automations[index].status = .paused }
+        }
+        return persisted ? run.id : nil
+    }
+
+    public func attachAutomationApproval(runID: String, approvalID: String) {
+        mutateRecord(at: \.operations.automationRuns, id: runID) { run in
+            run.approvalID = approvalID
+        }
+    }
+
+    public func automationRun(id: String) -> DesktopAutomationRunRecord? {
+        snapshot.operations.automationRuns.first { $0.id == id }
+    }
+
+    public func automationRunContractIsCurrent(id: String) -> Bool {
+        guard let run = automationRun(id: id),
+              let rule = snapshot.domains.automations.first(where: { $0.id == run.automationID }),
+              automationAuthorityTarget(for: rule) == run.contractTarget,
+              automationWorkspacePath(for: rule) == run.workspacePath else { return false }
+        return true
+    }
+
+    @discardableResult
+    public func attachAutomationDispatch(runID: String, threadID: String, providerRunID: String) -> Bool {
+        mutateRecord(at: \.operations.automationRuns, id: runID) { run in
+            run.threadID = threadID
+            run.providerRunID = providerRunID
+            run.detail = "Dispatched one durable read-only provider run; Kaname is tracking its terminal result."
+        }
+    }
+
+    public func updateAutomationNotificationState(runID: String, state: String) {
+        mutateRecord(at: \.operations.automationRuns, id: runID) { $0.notificationState = String(state.prefix(160)) }
+    }
+
+    public func beginApprovedAutomationRun(id: String) -> DesktopAutomationRunRecord? {
+        guard let run = automationRun(id: id), run.state == .approved || run.state == .awaitingApproval else { return nil }
+        if run.state == .awaitingApproval {
+            guard let approvalID = run.approvalID,
+                  let exactTarget = run.exactTarget,
+                  isApprovalGranted(id: approvalID, exactTarget: exactTarget) else { return nil }
+        }
+        let timestamp = now()
+        guard mutateRecord(at: \.operations.automationRuns, id: id, change: { value in
+            value.state = .running
+            value.startedAtUnixMillis = timestamp
+            value.detail = "Executing the resolved automation contract."
+        }) else { return nil }
+        return automationRun(id: id)
+    }
+
+    public func completeAutomationRun(
+        id: String,
+        state: DesktopActionState,
+        detail: String,
+        threadID: String? = nil,
+        notificationState: String? = nil
+    ) {
+        let timestamp = now()
+        mutate { snapshot in
+            guard let index = snapshot.operations.automationRuns.firstIndex(where: { $0.id == id }) else { return }
+            snapshot.operations.automationRuns[index].state = state
+            snapshot.operations.automationRuns[index].detail = String(detail.prefix(8_192))
+            snapshot.operations.automationRuns[index].completedAtUnixMillis = timestamp
+            snapshot.operations.automationRuns[index].threadID = threadID
+            snapshot.operations.automationRuns[index].notificationState = notificationState
+            if let ruleIndex = snapshot.domains.automations.firstIndex(where: {
+                $0.id == snapshot.operations.automationRuns[index].automationID
+            }) {
+                snapshot.domains.automations[ruleIndex].lastResult = state == .completed ? "Completed" : "Failed"
+            }
+            snapshot.operations.audit.append(DesktopAuditRecord(
+                id: UUID().uuidString.lowercased(),
+                domain: "automation",
+                action: "execute",
+                target: snapshot.operations.automationRuns[index].deduplicationKey ?? id,
+                state: state,
+                detail: String(detail.prefix(8_192)),
+                recordedAtUnixMillis: timestamp
+            ))
+        }
+    }
+
+    private func advanceAutomation(id: String, spec: DesktopScheduleSpec, after scheduled: Int64) {
+        let next = try? DesktopScheduleEngine.nextOccurrence(
+            spec: spec,
+            timeZoneIdentifier: snapshot.domains.automations.first(where: { $0.id == id })?.timeZoneIdentifier ?? "UTC",
+            after: scheduled
+        )
+        mutateRecord(at: \.domains.automations, id: id) { automation in
+            automation.nextRunAtUnixMillis = next ?? nil
+            if next == nil { automation.status = .paused }
+        }
     }
 
     public func clearPersistenceError() {
@@ -2233,7 +2747,8 @@ public final class DesktopAppModel: ObservableObject {
         return String(decoding: data, as: UTF8.self)
     }
 
-    private func mutate(_ change: (inout DesktopAppSnapshot) -> Void) {
+    @discardableResult
+    private func mutate(_ change: (inout DesktopAppSnapshot) -> Void) -> Bool {
         var changed = snapshot
         change(&changed)
         changed.lastSavedAtUnixMillis = now()
@@ -2241,32 +2756,38 @@ public final class DesktopAppModel: ObservableObject {
             try store.save(try encoder.encode(changed))
             snapshot = changed
             persistenceError = nil
+            return true
         } catch {
             persistenceError = "Kaname could not save this local change. The previous durable workspace remains intact."
+            return false
         }
     }
 
     @discardableResult
     private func mutateThread(id: String, change: (inout DesktopThread) -> Void) -> Bool {
         var didFindThread = false
-        mutate { workspace in
+        let persisted = mutate { workspace in
             let matches = workspace.threads.indices.filter { workspace.threads[$0].id == id }
             guard let index = matches.first else { return }
             change(&workspace.threads[index])
             didFindThread = true
         }
-        return didFindThread
+        return didFindThread && persisted
     }
 
+    @discardableResult
     private func mutateRecord<Record: Identifiable>(
         at keyPath: WritableKeyPath<DesktopAppSnapshot, [Record]>,
         id: String,
         change: (inout Record) -> Void
-    ) where Record.ID == String {
-        mutate { snapshot in
+    ) -> Bool where Record.ID == String {
+        var didFindRecord = false
+        let persisted = mutate { snapshot in
             guard let index = snapshot[keyPath: keyPath].firstIndex(where: { $0.id == id }) else { return }
             change(&snapshot[keyPath: keyPath][index])
+            didFindRecord = true
         }
+        return didFindRecord && persisted
     }
 
     private static func stableLocalDigest(_ value: String) -> String {

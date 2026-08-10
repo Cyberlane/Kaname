@@ -116,6 +116,7 @@ struct KanameDesktopWorkspace: View {
     private let uiRestoreStore: DesktopUIRestoreStore
     @StateObject private var model: DesktopAppModel
     @StateObject private var conversationRuntime: DesktopConversationRuntime
+    @StateObject private var automationScheduler: DesktopAutomationSchedulerViewModel
     @StateObject private var personalIntegrations: DesktopPersonalIntegrationViewModel
     @StateObject private var updates: DesktopUpdateViewModel
     @State private var destination: DesktopDestination
@@ -135,8 +136,10 @@ struct KanameDesktopWorkspace: View {
         let restoredUI = restoreStore.load()
         uiRestoreStore = restoreStore
         let desktopModel = DesktopAppModel(store: FileDesktopStateStore(fileURL: environment.workspaceFileURL))
+        let runtime = DesktopConversationRuntime(model: desktopModel, environment: environment)
         _model = StateObject(wrappedValue: desktopModel)
-        _conversationRuntime = StateObject(wrappedValue: DesktopConversationRuntime(model: desktopModel, environment: environment))
+        _conversationRuntime = StateObject(wrappedValue: runtime)
+        _automationScheduler = StateObject(wrappedValue: DesktopAutomationSchedulerViewModel(model: desktopModel, runtime: runtime, environment: environment))
         _personalIntegrations = StateObject(wrappedValue: DesktopPersonalIntegrationViewModel(environment: environment))
         _updates = StateObject(wrappedValue: DesktopUpdateViewModel(environment: environment))
         let arguments = CommandLine.arguments
@@ -451,7 +454,7 @@ struct KanameDesktopWorkspace: View {
             case .calendar:
                 DesktopCalendarView(model: model, integrations: personalIntegrations)
             case .automations:
-                DesktopAutomationsView(model: model)
+                DesktopAutomationsView(model: model, scheduler: automationScheduler)
             case .github:
                 DesktopGitHubView(model: model, integrations: personalIntegrations)
             case .skills:
@@ -2236,7 +2239,9 @@ private final class DesktopPersonalIntegrationViewModel: ObservableObject {
                         provider: .google,
                         displayName: calendar.name,
                         ownerIdentity: calendar.accountIdentity,
-                        accessLevel: calendar.role,
+                        accessLevel: discovered.first(where: { $0.identity == calendar.accountIdentity })?.supportsCalendarEventWrites == true
+                            ? calendar.role
+                            : "\(calendar.role) · reconnect for event changes",
                         isPrimary: calendar.isPrimary,
                         isEnabled: true
                     )
@@ -3450,7 +3455,9 @@ private struct NewMailRuleSheet: View {
 private struct DesktopCalendarView: View {
     @ObservedObject var model: DesktopAppModel
     @ObservedObject var integrations: DesktopPersonalIntegrationViewModel
+    @StateObject private var calendar = DesktopCalendarViewModel()
     @State private var showsProposal = false
+    @State private var eventEditRequest: CalendarEventEditRequest?
 
     private var accounts: [DesktopAccountRecord] {
         model.snapshot.domains.accounts.filter {
@@ -3466,17 +3473,26 @@ private struct DesktopCalendarView: View {
                     detail: "Google and Apple calendars with pinned scheduling zones and local-time transparency",
                     symbol: DesktopDestination.calendar.symbol
                 ) {
-                    ControlGroup {
-                        Button("Refresh Google", systemImage: "arrow.clockwise") {
-                            integrations.refreshGoogle(model: model)
+                    HStack(spacing: 8) {
+                        Button("Refresh events", systemImage: "arrow.clockwise") {
+                            calendar.refresh(
+                                sources: model.snapshot.domains.calendarSources,
+                                googleAccounts: integrations.googleAccounts
+                            )
                         }
-                        .disabled(integrations.isRefreshingGoogle)
+                        .buttonStyle(.bordered)
+                        .disabled(calendar.isBusy || model.snapshot.domains.calendarSources.filter(\.isEnabled).isEmpty)
                         Button("Propose event", systemImage: "calendar.badge.plus") { showsProposal = true }
+                            .buttonStyle(.borderedProminent)
                     }
-                    .controlGroupStyle(.navigation)
                 }
 
                 AccountStrip(accounts: accounts)
+
+                BoundaryCallout(
+                    title: "Exact calendar authority",
+                    detail: "Refresh is read-only. Create, change, and delete bind the exact account, calendar, event revision, recurrence scope, and resolved event fields before approval."
+                )
 
                 if !model.snapshot.domains.calendarSources.isEmpty {
                     SectionHeading(
@@ -3501,6 +3517,48 @@ private struct DesktopCalendarView: View {
                                     set: { model.setCalendarSourceEnabled(id: source.id, enabled: $0) }
                                 ))
                                 .labelsHidden()
+                            }
+                            .panelStyle()
+                        }
+                    }
+                }
+
+                SectionHeading(
+                    title: "Upcoming events",
+                    detail: "Read the next 90 days across enabled sources. Duplicate provider identities collapse before display."
+                )
+                if calendar.isBusy, calendar.events.isEmpty {
+                    ProgressView("Reading enabled calendars…").frame(maxWidth: .infinity, minHeight: 180)
+                } else if calendar.events.isEmpty {
+                    EmptyPanel(symbol: "calendar", title: "Agenda not loaded", detail: "Refresh events when you want Kaname to read the enabled Google and Apple calendars.")
+                } else {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 340), spacing: 14)], spacing: 14) {
+                        ForEach(calendar.events) { event in
+                            VStack(alignment: .leading, spacing: 10) {
+                                HStack {
+                                    Image(systemName: event.provider == .apple ? "apple.logo" : "g.circle.fill")
+                                        .foregroundStyle(Nord.frost1)
+                                    Text(event.title).font(.headline).lineLimit(2)
+                                    Spacer()
+                                    if event.recurringEventID != nil { Image(systemName: "repeat").foregroundStyle(.secondary) }
+                                }
+                                Text(Date(timeIntervalSince1970: Double(event.startAtUnixMillis) / 1_000).formatted(date: .abbreviated, time: .shortened))
+                                    .font(.title3.weight(.semibold))
+                                Text("\(event.accountIdentity) · \(event.timeZoneIdentifier)")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                if event.sourceProvenance.count > 1 {
+                                    Label("Shown once from \(event.sourceProvenance.count) linked sources", systemImage: "link")
+                                        .font(.caption2).foregroundStyle(.secondary)
+                                }
+                                if event.provider == .google, !event.canEdit {
+                                    Label("Reconnect this Google account in Settings to enable approved event changes.", systemImage: "person.crop.circle.badge.exclamationmark")
+                                        .font(.caption).foregroundStyle(Nord.auroraYellow)
+                                }
+                                HStack {
+                                    Button("Change") { eventEditRequest = CalendarEventEditRequest(event: event, kind: .update) }
+                                    Button("Delete", role: .destructive) { eventEditRequest = CalendarEventEditRequest(event: event, kind: .delete) }
+                                }
+                                .disabled(!event.canEdit || source(for: event)?.accessLevel.lowercased().contains("reader") == true)
                             }
                             .panelStyle()
                         }
@@ -3547,15 +3605,34 @@ private struct DesktopCalendarView: View {
                                    let source = model.snapshot.domains.calendarSources.first(where: { $0.id == sourceID }) {
                                     LabeledContent("Calendar", value: "\(source.displayName) · \(source.ownerIdentity)")
                                 }
-                                LabeledContent("Duration", value: "\(proposal.durationMinutes) minutes")
+                                LabeledContent(
+                                    proposal.isAllDay == true ? "All-day span" : "Duration",
+                                    value: proposal.isAllDay == true
+                                        ? "\(max(1, proposal.durationMinutes / 1_440)) day(s)"
+                                        : "\(proposal.durationMinutes) minutes"
+                                )
                                 LabeledContent("Pinned zone", value: proposal.timeZoneIdentifier)
                                 LabeledContent("Recurrence", value: proposal.recurrence)
+                                if let scope = proposal.recurrenceScope.flatMap(CalendarRecurrenceScope.init(rawValue:)) {
+                                    LabeledContent("Scope", value: scope.label)
+                                }
+                                if proposal.status == .running, let phase = proposal.mutationPhase {
+                                    LabeledContent("Recovery phase", value: phase.replacingOccurrences(of: "Applied", with: " applied").capitalized)
+                                }
+                                if let receipt = proposal.remoteReceipt {
+                                    Text(receipt).foregroundStyle(proposal.status == .failed ? Nord.auroraRed : Nord.auroraGreen)
+                                }
+                                calendarProposalAction(proposal)
                             }
                             .font(.caption)
                             .panelStyle()
                         }
                     }
                 }
+                if !calendar.failedSources.isEmpty {
+                    BoundaryCallout(title: "Partial calendar refresh", detail: "Other sources remain usable. Retry: \(calendar.failedSources.joined(separator: ", ")).")
+                }
+                if let message = calendar.message { BoundaryCallout(title: "Calendar status", detail: message) }
             }
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -3564,12 +3641,198 @@ private struct DesktopCalendarView: View {
         .sheet(isPresented: $showsProposal) {
             NewCalendarProposalSheet(model: model)
         }
+        .sheet(item: $eventEditRequest) { request in
+            CalendarEventMutationSheet(
+                request: request,
+                source: source(for: request.event),
+                model: model,
+                calendar: calendar,
+                googleAccounts: integrations.googleAccounts
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func calendarProposalAction(_ proposal: DesktopCalendarProposal) -> some View {
+        let approval = proposal.approvalID.flatMap { id in model.snapshot.operations.approvals.first { $0.id == id } }
+        if proposal.status == .proposed,
+           let source = model.snapshot.domains.calendarSources.first(where: { $0.id == proposal.calendarSourceID }) {
+            Button("Review create") {
+                calendar.proposeCreate(model: model, proposal: proposal, source: source, googleAccounts: integrations.googleAccounts)
+            }
+            .buttonStyle(.borderedProminent)
+        } else if proposal.status == .needsReview {
+            Button("Request approval") {
+                calendar.selectProposal(proposal.id)
+                calendar.requestApproval(model: model)
+            }
+            .buttonStyle(.borderedProminent)
+        } else if proposal.status == .running, approval?.state == .approved {
+            Button("Reconcile action") {
+                calendar.selectProposal(proposal.id)
+                calendar.execute(
+                    model: model,
+                    sources: model.snapshot.domains.calendarSources,
+                    googleAccounts: integrations.googleAccounts
+                )
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(calendar.isBusy)
+        } else if approval?.state == .approved {
+            Button("Apply approved action") {
+                calendar.selectProposal(proposal.id)
+                calendar.execute(
+                    model: model,
+                    sources: model.snapshot.domains.calendarSources,
+                    googleAccounts: integrations.googleAccounts
+                )
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(calendar.isBusy)
+        } else if proposal.status == .waiting {
+            Label("Waiting in Inbox", systemImage: "tray.full").foregroundStyle(Nord.auroraYellow)
+        } else if proposal.status == .failed,
+                  let source = model.snapshot.domains.calendarSources.first(where: { $0.id == proposal.calendarSourceID }) {
+            Button("Review again") {
+                calendar.selectProposal(proposal.id)
+                calendar.prepareAgain(model: model, proposal: proposal, source: source, googleAccounts: integrations.googleAccounts)
+            }
+            .buttonStyle(.bordered)
+        }
+    }
+
+    private func source(for event: CalendarEventSnapshot) -> DesktopCalendarSourceRecord? {
+        model.snapshot.domains.calendarSources.first {
+            $0.externalIdentifier == event.calendarID
+                && $0.provider.rawValue == event.provider.rawValue
+                && $0.ownerIdentity == event.accountIdentity
+        }
+    }
+}
+
+private struct CalendarEventEditRequest: Identifiable {
+    let id = UUID()
+    let event: CalendarEventSnapshot
+    let kind: DesktopCalendarProposal.MutationKind
+}
+
+private struct CalendarEventMutationSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let request: CalendarEventEditRequest
+    let source: DesktopCalendarSourceRecord?
+    @ObservedObject var model: DesktopAppModel
+    @ObservedObject var calendar: DesktopCalendarViewModel
+    let googleAccounts: [NativeGoogleAccountSnapshot]
+    @State private var title: String
+    @State private var start: Date
+    @State private var durationMinutes: Int
+    @State private var scope: CalendarRecurrenceScope
+
+    init(
+        request: CalendarEventEditRequest,
+        source: DesktopCalendarSourceRecord?,
+        model: DesktopAppModel,
+        calendar: DesktopCalendarViewModel,
+        googleAccounts: [NativeGoogleAccountSnapshot]
+    ) {
+        self.request = request
+        self.source = source
+        self.model = model
+        self.calendar = calendar
+        self.googleAccounts = googleAccounts
+        _title = State(initialValue: request.event.title)
+        _start = State(initialValue: Date(timeIntervalSince1970: Double(request.event.startAtUnixMillis) / 1_000))
+        _durationMinutes = State(initialValue: max(1, Int((request.event.endAtUnixMillis - request.event.startAtUnixMillis) / 60_000)))
+        _scope = State(initialValue: request.event.recurringEventID == nil ? .thisEvent : .thisEvent)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text(request.kind == .delete ? "Review event deletion" : "Propose event change").font(.title2.weight(.bold))
+            Text("Nothing changes yet. Kaname binds the current event revision and recurrence scope before approval.")
+                .foregroundStyle(.secondary)
+            Form {
+                LabeledContent("Calendar", value: source.map { "\($0.displayName) · \($0.ownerIdentity)" } ?? "Source unavailable")
+                if request.kind == .update {
+                    TextField("Title", text: $title)
+                    DatePicker(
+                        request.event.isAllDay ? "Date" : "Start",
+                        selection: $start,
+                        displayedComponents: request.event.isAllDay ? [.date] : [.date, .hourAndMinute]
+                    )
+                    if request.event.isAllDay {
+                        Stepper("Span: \(max(1, durationMinutes / 1_440)) day(s)", value: $durationMinutes, in: 1_440...10_080, step: 1_440)
+                    } else {
+                        Stepper("Duration: \(durationMinutes) minutes", value: $durationMinutes, in: 5...10_080, step: 5)
+                    }
+                } else {
+                    LabeledContent("Event", value: request.event.title)
+                    LabeledContent("Starts", value: start.formatted())
+                }
+                if request.event.recurringEventID != nil {
+                    Picker("Recurrence scope", selection: $scope) {
+                        ForEach(CalendarRecurrenceScope.allCases.filter {
+                            source?.provider != .apple || $0 != .entireSeries
+                        }, id: \.self) { Text($0.label).tag($0) }
+                    }
+                } else {
+                    LabeledContent("Recurrence scope", value: CalendarRecurrenceScope.thisEvent.label)
+                }
+                if scope == .thisAndFuture {
+                    Label("Kaname validates the provider's recurrence before approval. Unsupported finite Google series are refused; Apple uses its native future-events span.", systemImage: "scissors")
+                        .font(.caption).foregroundStyle(Nord.auroraYellow)
+                }
+                if source?.provider == .apple, request.event.recurringEventID != nil {
+                    Text("EventKit does not expose a safe whole-series operation, so Apple Calendar offers only this event or this and future events.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .formStyle(.grouped)
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button(request.kind == .delete ? "Review deletion" : "Review change") { save() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(source == nil || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(24)
+        .frame(width: 600, height: 470)
+    }
+
+    private func save() {
+        guard let source else { return }
+        var pinnedCalendar = Calendar(identifier: .gregorian)
+        pinnedCalendar.timeZone = TimeZone(identifier: request.event.timeZoneIdentifier) ?? .autoupdatingCurrent
+        let normalizedStart = request.event.isAllDay ? pinnedCalendar.startOfDay(for: start) : start
+        let startMillis = Int64(normalizedStart.timeIntervalSince1970 * 1_000)
+        let factory = request.event.isAllDay ? CalendarEventDraft.allDay : CalendarEventDraft.timed
+        let draft = factory(
+            title,
+            startMillis,
+            startMillis + Int64(durationMinutes) * 60_000,
+            request.event.timeZoneIdentifier,
+            request.event.recurrence.first ?? (request.event.recurringEventID == nil ? "Does not repeat" : "Recurring")
+        )
+        calendar.proposeChange(
+            model: model,
+            event: request.event,
+            source: source,
+            kind: request.kind,
+            scope: request.event.recurringEventID == nil ? .thisEvent : scope,
+            draft: draft,
+            googleAccounts: googleAccounts
+        )
+        dismiss()
     }
 }
 
 private struct DesktopAutomationsView: View {
     @ObservedObject var model: DesktopAppModel
+    @ObservedObject var scheduler: DesktopAutomationSchedulerViewModel
     @State private var showsNewAutomation = false
+    @State private var editingAutomation: DesktopAutomationRule?
+    @State private var automationPendingDeletion: DesktopAutomationRule?
 
     var body: some View {
         ScrollView {
@@ -3585,8 +3848,19 @@ private struct DesktopAutomationsView: View {
 
                 BoundaryCallout(
                     title: "Safe default: skip missed runs",
-                    detail: "Kaname never surprise-runs a backlog. New rules stay as local drafts until tools, data, budget, notifications, and authority are reviewed."
+                    detail: model.snapshot.preferences.safeMode
+                        ? "Safe mode is on. Schedules remain inspectable, but only local notification rules can execute."
+                        : "Kaname never surprise-runs a backlog. A delay under two minutes is grace; older occurrences collapse to one skip receipt or one catch-up approval. New rules stay disabled until context, notifications, and authority are reviewed."
                 )
+
+                HStack {
+                    Label(scheduler.ownerState, systemImage: "lock.shield")
+                    Spacer()
+                    Button("Enable notifications") { scheduler.requestNotificationAccess() }
+                    Button("Check schedules now") { scheduler.evaluateNow() }
+                }
+                .font(.caption)
+                .panelStyle()
 
                 if model.snapshot.domains.automations.isEmpty {
                     EmptyPanel(
@@ -3598,6 +3872,9 @@ private struct DesktopAutomationsView: View {
                 } else {
                     VStack(spacing: 12) {
                         ForEach(model.snapshot.domains.automations) { rule in
+                            let hasRunningOccurrence = model.snapshot.operations.automationRuns.contains {
+                                $0.automationID == rule.id && $0.state == .running
+                            }
                             let referenceDate = rule.nextRunAtUnixMillis.map {
                                 Date(timeIntervalSince1970: Double($0) / 1_000)
                             } ?? Date(timeIntervalSince1970: Double(rule.createdAtUnixMillis ?? 0) / 1_000)
@@ -3619,6 +3896,16 @@ private struct DesktopAutomationsView: View {
                                     Text(rule.actionSummary)
                                         .font(.subheadline)
                                         .foregroundStyle(.secondary)
+                                    HStack(spacing: 12) {
+                                        Label(rule.actionKind?.label ?? "Action incomplete", systemImage: "bolt")
+                                        Label(rule.authority?.label ?? "Authority incomplete", systemImage: "checkmark.shield")
+                                    }
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    if !(rule.skillIDs ?? []).isEmpty || !(rule.toolNames ?? []).isEmpty {
+                                        Text("Skills: \((rule.skillIDs ?? []).compactMap { id in model.snapshot.domains.skills.first { $0.id == id }?.name }.joined(separator: ", ")) · Tools: \((rule.toolNames ?? []).joined(separator: ", "))")
+                                            .font(.caption2).foregroundStyle(.tertiary)
+                                    }
                                     HStack(spacing: 14) {
                                         Label("Pinned: \(rule.timeZoneIdentifier)", systemImage: "globe")
                                         Label(rule.missedRunPolicy.label, systemImage: "forward.end")
@@ -3638,10 +3925,17 @@ private struct DesktopAutomationsView: View {
                                         _ = model.recordAutomationDryRun(id: rule.id)
                                     }
                                     .buttonStyle(.borderedProminent)
-                                    Button(rule.status == .paused ? "Resume draft" : "Pause") {
-                                        model.setAutomationPaused(id: rule.id, paused: rule.status != .paused)
+                                    automationAuthorityAction(rule)
+                                    if rule.status == .ready {
+                                        Button("Pause") { model.setAutomationPaused(id: rule.id, paused: true) }
+                                            .buttonStyle(.bordered)
                                     }
-                                    .buttonStyle(.bordered)
+                                    Button("Edit") { editingAutomation = rule }
+                                        .buttonStyle(.bordered)
+                                        .disabled(hasRunningOccurrence)
+                                    Button("Delete", role: .destructive) { automationPendingDeletion = rule }
+                                        .buttonStyle(.borderless)
+                                        .disabled(hasRunningOccurrence)
                                 }
                             }
                             .panelStyle()
@@ -3662,6 +3956,11 @@ private struct DesktopAutomationsView: View {
                                 }
                                 Spacer()
                                 ActionStatePill(state: run.state)
+                                if run.state == .awaitingApproval,
+                                   let approvalID = run.approvalID,
+                                   model.snapshot.operations.approvals.first(where: { $0.id == approvalID })?.state == .approved {
+                                    Button("Run approved occurrence") { scheduler.executeApproved(runID: run.id) }
+                                }
                             }
                             .padding(.vertical, 12)
                             if index < model.snapshot.operations.automationRuns.count - 1 { Divider() }
@@ -3669,6 +3968,9 @@ private struct DesktopAutomationsView: View {
                     }
                     .padding(.horizontal, 16)
                     .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 15))
+                }
+                if let schedulerMessage = scheduler.message {
+                    BoundaryCallout(title: "Scheduler status", detail: schedulerMessage)
                 }
             }
             .padding(24)
@@ -3678,7 +3980,58 @@ private struct DesktopAutomationsView: View {
         .sheet(isPresented: $showsNewAutomation) {
             NewAutomationSheet(model: model)
         }
+        .sheet(item: $editingAutomation) { rule in
+            NewAutomationSheet(model: model, editing: rule)
+        }
+        .confirmationDialog(
+            "Delete this automation?",
+            isPresented: Binding(
+                get: { automationPendingDeletion != nil },
+                set: { if !$0 { automationPendingDeletion = nil } }
+            ),
+            presenting: automationPendingDeletion
+        ) { rule in
+            Button("Delete “\(rule.name)”", role: .destructive) {
+                _ = model.deleteAutomation(id: rule.id)
+                automationPendingDeletion = nil
+            }
+        } message: { _ in
+            Text("The local rule and unfinished occurrences are removed. Historical run and audit receipts remain.")
+        }
     }
+
+    @ViewBuilder
+    private func automationAuthorityAction(_ rule: DesktopAutomationRule) -> some View {
+        if rule.status == .draft || rule.status == .paused {
+            if rule.authority == .localOnly, rule.actionKind == .notification {
+                Button("Activate") { _ = model.activateAutomation(id: rule.id, approvalID: nil) }
+                    .buttonStyle(.bordered)
+            } else {
+                let target = model.automationAuthorityTarget(for: rule) ?? "automation:\(rule.id):invalid-contract"
+                let approval = model.snapshot.operations.approvals.last { $0.exactTarget == target }
+                if approval?.state == .approved {
+                    Button("Activate approved rule") { _ = model.activateAutomation(id: rule.id, approvalID: approval?.id) }
+                        .buttonStyle(.bordered)
+                } else if approval == nil || approval?.state == .rejected {
+                    Button("Review authority") {
+                        _ = model.createApproval(
+                            threadID: nil,
+                            title: "Activate automation: \(rule.name)",
+                            exactTarget: target,
+                            consequence: "Schedule \(rule.actionSummary) under \(rule.authority?.label ?? "explicit authority").",
+                            dataLeavingDevice: rule.actionKind == .notification ? "Nothing" : "Resolved project, prompt, skill, and tool references on each authorized run",
+                            reversible: true,
+                            expiresAtUnixMillis: nil
+                        )
+                    }
+                    .buttonStyle(.bordered)
+                } else {
+                    Label("Authority in Inbox", systemImage: "tray.full").font(.caption)
+                }
+            }
+        }
+    }
+
 }
 
 private struct DesktopGitHubView: View {
@@ -4917,7 +5270,7 @@ private struct DesktopSettingsShell: View {
             } details: {
                 if integrations.googleAccounts.isEmpty {
                     Text(integrations.hasGoogleClientConfiguration
-                        ? "Connect Google opens the system browser, asks for Gmail read/manage/compose and read-only Calendar permission, and returns directly to Kaname. Existing read-only Gmail accounts must reconnect once before mail actions can run."
+                        ? "Connect Google opens the system browser, asks for Gmail read/manage/compose plus Calendar list and event access, and returns directly to Kaname. Existing Google accounts must reconnect once before newer mail or approved Calendar changes can run."
                         : "Google is not registered in this build yet. Its private OAuth client registration belongs in Kaname's build configuration, not in Settings.")
                         .font(.caption).foregroundStyle(.secondary)
                 } else {
@@ -5982,12 +6335,27 @@ private struct NewCalendarProposalSheet: View {
     @State private var title = ""
     @State private var start = Date().addingTimeInterval(3_600)
     @State private var durationMinutes = 30
+    @State private var isAllDay = false
+    @State private var allDaySpanDays = 1
     @State private var timeZoneIdentifier: String
     @State private var recurrence = "Does not repeat"
 
+    private var writableSources: [DesktopCalendarSourceRecord] {
+        model.snapshot.domains.calendarSources.filter { source in
+            let access = source.accessLevel.lowercased()
+            return source.isEnabled
+                && !access.contains("read only")
+                && !access.contains("reader")
+                && !access.contains("reconnect")
+        }
+    }
+
     init(model: DesktopAppModel) {
         self.model = model
-        let sources = model.snapshot.domains.calendarSources.filter(\.isEnabled)
+        let sources = model.snapshot.domains.calendarSources.filter { source in
+            let access = source.accessLevel.lowercased()
+            return source.isEnabled && !access.contains("read only") && !access.contains("reader") && !access.contains("reconnect")
+        }
         _selectedCalendarSourceID = State(initialValue: sources.first?.id)
         _timeZoneIdentifier = State(initialValue: model.snapshot.preferences.defaultScheduleTimeZoneIdentifier)
     }
@@ -6001,14 +6369,27 @@ private struct NewCalendarProposalSheet: View {
             Form {
                 TextField("Title", text: $title)
                 Picker("Calendar", selection: $selectedCalendarSourceID) {
-                    Text("Choose later").tag(nil as String?)
-                    ForEach(model.snapshot.domains.calendarSources.filter(\.isEnabled)) { source in
+                    Text("Select a calendar").tag(nil as String?)
+                    ForEach(writableSources) { source in
                         Text("\(source.displayName) · \(source.ownerIdentity)").tag(source.id as String?)
                     }
                 }
-                DatePicker("Start", selection: $start)
+                if writableSources.isEmpty {
+                    Text("Enable a writable calendar in Settings, or reconnect Google to grant Calendar event changes.")
+                        .font(.caption).foregroundStyle(Nord.auroraYellow)
+                }
+                Toggle("All-day event", isOn: $isAllDay)
+                DatePicker(
+                    isAllDay ? "Date" : "Start",
+                    selection: $start,
+                    displayedComponents: isAllDay ? [.date] : [.date, .hourAndMinute]
+                )
                     .environment(\.timeZone, TimeZone(identifier: timeZoneIdentifier) ?? .autoupdatingCurrent)
-                Stepper("Duration: \(durationMinutes) minutes", value: $durationMinutes, in: 5...1_440, step: 5)
+                if isAllDay {
+                    Stepper("Span: \(allDaySpanDays) day(s)", value: $allDaySpanDays, in: 1...7)
+                } else {
+                    Stepper("Duration: \(durationMinutes) minutes", value: $durationMinutes, in: 5...1_440, step: 5)
+                }
                 TextField("IANA time zone", text: $timeZoneIdentifier)
                 Text("The wall-clock time stays pinned to this zone after travel. Kaname shows the local equivalent elsewhere.")
                     .font(.caption)
@@ -6030,26 +6411,31 @@ private struct NewCalendarProposalSheet: View {
             }
         }
         .padding(24)
-        .frame(width: 540, height: 430)
+        .frame(width: 540, height: 470)
     }
 
     private var isValid: Bool {
         !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && TimeZone(identifier: timeZoneIdentifier) != nil
+            && selectedCalendarSourceID != nil
     }
 
     private func save() {
         let source = selectedCalendarSourceID.flatMap { selectedID in
             model.snapshot.domains.calendarSources.first { $0.id == selectedID }
         }
+        var pinnedCalendar = Calendar(identifier: .gregorian)
+        pinnedCalendar.timeZone = TimeZone(identifier: timeZoneIdentifier) ?? .autoupdatingCurrent
+        let normalizedStart = isAllDay ? pinnedCalendar.startOfDay(for: start) : start
         guard model.createCalendarProposal(
             accountID: source?.accountID,
             calendarSourceID: source?.id,
             title: title,
-            startAtUnixMillis: Int64(start.timeIntervalSince1970 * 1_000),
-            durationMinutes: durationMinutes,
+            startAtUnixMillis: Int64(normalizedStart.timeIntervalSince1970 * 1_000),
+            durationMinutes: isAllDay ? allDaySpanDays * 1_440 : durationMinutes,
             timeZoneIdentifier: timeZoneIdentifier,
-            recurrence: recurrence
+            recurrence: recurrence,
+            isAllDay: isAllDay
         ) != nil else { return }
         dismiss()
     }
@@ -6058,66 +6444,178 @@ private struct NewCalendarProposalSheet: View {
 private struct NewAutomationSheet: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var model: DesktopAppModel
+    let editingID: String?
     @State private var name = ""
-    @State private var schedule = "Every Monday at 09:00"
     @State private var timeZoneIdentifier: String
     @State private var actionSummary = ""
     @State private var missedRunPolicy = DesktopAutomationRule.MissedRunPolicy.skip
+    @State private var frequency = DesktopScheduleSpec.Frequency.weekly
+    @State private var scheduledTime = Calendar.current.date(from: DateComponents(hour: 9, minute: 0)) ?? .now
+    @State private var onceDate = Date().addingTimeInterval(3_600)
+    @State private var weekday = 2
+    @State private var actionKind = DesktopAutomationActionKind.notification
+    @State private var authority = DesktopAutomationAuthority.localOnly
+    @State private var projectID: String?
+    @State private var selectedSkillIDs: Set<String> = []
+    @State private var notificationEnabled = true
 
-    init(model: DesktopAppModel) {
+    init(model: DesktopAppModel, editing rule: DesktopAutomationRule? = nil) {
         self.model = model
-        _timeZoneIdentifier = State(initialValue: model.snapshot.preferences.defaultScheduleTimeZoneIdentifier)
+        editingID = rule?.id
+        let spec = rule?.scheduleSpec
+        _name = State(initialValue: rule?.name ?? "")
+        _timeZoneIdentifier = State(initialValue: rule?.timeZoneIdentifier ?? model.snapshot.preferences.defaultScheduleTimeZoneIdentifier)
+        _actionSummary = State(initialValue: rule?.actionSummary ?? "")
+        _missedRunPolicy = State(initialValue: rule?.missedRunPolicy ?? .skip)
+        _frequency = State(initialValue: spec?.frequency ?? .weekly)
+        var components = DateComponents(hour: spec?.hour ?? 9, minute: spec?.minute ?? 0)
+        components.timeZone = TimeZone(identifier: rule?.timeZoneIdentifier ?? model.snapshot.preferences.defaultScheduleTimeZoneIdentifier)
+        _scheduledTime = State(initialValue: Calendar.current.date(from: components) ?? .now)
+        _onceDate = State(initialValue: spec?.onceAtUnixMillis.map { Date(timeIntervalSince1970: Double($0) / 1_000) } ?? Date().addingTimeInterval(3_600))
+        _weekday = State(initialValue: spec?.weekday ?? 2)
+        _actionKind = State(initialValue: rule?.actionKind ?? .notification)
+        _authority = State(initialValue: rule?.authority ?? .localOnly)
+        _projectID = State(initialValue: rule?.projectID)
+        _selectedSkillIDs = State(initialValue: Set(rule?.skillIDs ?? []))
+        _notificationEnabled = State(initialValue: rule?.notificationEnabled ?? true)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text("New automation draft")
+            Text(editingID == nil ? "New automation draft" : "Edit automation")
                 .font(.title2.weight(.bold))
-            Text("Define intent and timing now. The rule stays disabled until its exact tools, data, budget, notifications, and authority are reviewed.")
+            Text("Choose a deterministic trigger, one domain-aware action, and its exact authority. The rule remains disabled until review is complete.")
                 .foregroundStyle(.secondary)
             Form {
-                TextField("Name", text: $name)
-                TextField("Human schedule or cron expression", text: $schedule)
-                TextField("IANA time zone", text: $timeZoneIdentifier)
-                Text("Pinned wall-clock zone. Travel changes the displayed local equivalent, not when the rule runs in this zone.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                TextField("What should happen?", text: $actionSummary, axis: .vertical)
-                    .lineLimit(3...7)
-                Picker("Missed run", selection: $missedRunPolicy) {
-                    ForEach(DesktopAutomationRule.MissedRunPolicy.allCases, id: \.self) { policy in
-                        Text(policy.label).tag(policy)
+                Section("Trigger") {
+                    TextField("Name", text: $name)
+                    Picker("Frequency", selection: $frequency) {
+                        ForEach(DesktopScheduleSpec.Frequency.allCases, id: \.self) { Text($0.label).tag($0) }
                     }
+                    if frequency == .once {
+                        DatePicker("Run at", selection: $onceDate)
+                    } else {
+                        DatePicker("Time", selection: $scheduledTime, displayedComponents: .hourAndMinute)
+                        if frequency == .weekly {
+                            Picker("Weekday", selection: $weekday) {
+                                ForEach(Array(Calendar.current.weekdaySymbols.enumerated()), id: \.offset) { index, day in
+                                    Text(day).tag(index + 1)
+                                }
+                            }
+                        }
+                    }
+                    TextField("IANA time zone", text: $timeZoneIdentifier)
+                    Picker("Missed run", selection: $missedRunPolicy) {
+                        ForEach(DesktopAutomationRule.MissedRunPolicy.allCases, id: \.self) { Text($0.label).tag($0) }
+                    }
+                }
+                Section("Action") {
+                    Picker("Kind", selection: $actionKind) {
+                        ForEach(DesktopAutomationActionKind.allCases, id: \.self) { Text($0.label).tag($0) }
+                    }
+                    Picker("Project", selection: $projectID) {
+                        Text("No project").tag(String?.none)
+                        ForEach(model.snapshot.projects.filter { $0.archivedAtUnixMillis == nil }) { Text($0.name).tag(Optional($0.id)) }
+                    }
+                    TextField("What should happen?", text: $actionSummary, axis: .vertical).lineLimit(2...5)
+                    if actionKind == .skill || actionKind == .conversation {
+                        Text(actionKind == .skill
+                            ? "Choose the registered capability context this read-only run must use."
+                            : "Optional registered capability context")
+                            .font(.caption).foregroundStyle(.secondary)
+                        ForEach(model.snapshot.domains.skills.filter(\.enabled)) { skill in
+                            Toggle(skill.name, isOn: Binding(
+                                get: { selectedSkillIDs.contains(skill.id) },
+                                set: { enabled in
+                                    if enabled { selectedSkillIDs.insert(skill.id) } else { selectedSkillIDs.remove(skill.id) }
+                                }
+                            ))
+                        }
+                    }
+                    if actionKind != .notification {
+                        Text("Scheduled provider turns run in Kaname's read-only, network-disabled conversation boundary. Selecting a capability supplies frozen, revision-bound context; it does not grant an external tool action.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Section("Authority & attention") {
+                    Picker("Authority", selection: $authority) {
+                        ForEach(DesktopAutomationAuthority.allCases, id: \.self) { option in
+                            if option != .localOnly || actionKind == .notification { Text(option.label).tag(option) }
+                        }
+                    }
+                    Toggle("Notify when this rule completes or needs attention", isOn: $notificationEnabled)
+                    Text("Agent conversations and skill runs require either exact approval for every occurrence or a separately approved visible standing rule.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
             .formStyle(.grouped)
             HStack {
                 Spacer()
                 Button("Cancel", role: .cancel) { dismiss() }
-                Button("Save disabled draft") { save() }
+                Button(editingID == nil ? "Save disabled draft" : "Save changes for review") { save() }
                     .buttonStyle(.borderedProminent)
                     .disabled(!isValid)
             }
         }
         .padding(24)
-        .frame(width: 580, height: 480)
+        .frame(width: 650, height: 700)
+        .onChange(of: actionKind) { newValue in
+            if newValue != .notification, authority == .localOnly { authority = .askEveryRun }
+            if newValue == .notification { selectedSkillIDs.removeAll() }
+        }
     }
 
     private var isValid: Bool {
         !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !schedule.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !actionSummary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && TimeZone(identifier: timeZoneIdentifier) != nil
+            && (actionKind != .skill || !selectedSkillIDs.isEmpty)
+            && (actionKind == .notification || authority != .localOnly)
     }
 
     private func save() {
-        guard model.createAutomation(
-            name: name,
-            schedule: schedule,
-            timeZoneIdentifier: timeZoneIdentifier,
-            actionSummary: actionSummary,
-            missedRunPolicy: missedRunPolicy
-        ) != nil else { return }
+        let components = Calendar.current.dateComponents([.hour, .minute], from: scheduledTime)
+        let spec = DesktopScheduleSpec.anchored(
+            frequency: frequency,
+            hour: components.hour ?? 9,
+            minute: components.minute ?? 0,
+            weekday: frequency == .weekly ? weekday : nil,
+            onceAtUnixMillis: frequency == .once ? Int64(onceDate.timeIntervalSince1970 * 1_000) : nil
+        )
+        let schedule = DesktopScheduleEngine.humanSchedule(spec: spec, timeZoneIdentifier: timeZoneIdentifier)
+        let saved: Bool
+        if let editingID {
+            saved = model.updateAutomation(
+                id: editingID,
+                name: name,
+                schedule: schedule,
+                timeZoneIdentifier: timeZoneIdentifier,
+                actionSummary: actionSummary,
+                missedRunPolicy: missedRunPolicy,
+                scheduleSpec: spec,
+                actionKind: actionKind,
+                authority: authority,
+                projectID: projectID,
+                skillIDs: Array(selectedSkillIDs),
+                notificationEnabled: notificationEnabled
+            )
+        } else {
+            saved = model.createAutomation(
+                name: name,
+                schedule: schedule,
+                timeZoneIdentifier: timeZoneIdentifier,
+                actionSummary: actionSummary,
+                missedRunPolicy: missedRunPolicy,
+                scheduleSpec: spec,
+                actionKind: actionKind,
+                authority: authority,
+                projectID: projectID,
+                skillIDs: Array(selectedSkillIDs),
+                toolNames: [],
+                notificationEnabled: notificationEnabled
+            ) != nil
+        }
+        guard saved else { return }
         dismiss()
     }
 }
@@ -7108,6 +7606,9 @@ private extension DesktopRecordState {
         case .paused: Nord.auroraYellow
         case .disconnected: Nord.polarNight3
         case .needsReview: Nord.auroraOrange
+        case .waiting: Nord.auroraYellow
+        case .running: Nord.frost1
+        case .failed: Nord.auroraRed
         }
     }
 

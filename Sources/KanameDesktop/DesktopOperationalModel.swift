@@ -329,6 +329,8 @@ private struct DesktopProviderRunPayload: Decodable {
     let state: DesktopActionState
     let startedAtUnixMillis: Int64
     let completedAtUnixMillis: Int64?
+    let usesProjectContext: Bool?
+    let workspacePathOverride: String?
 }
 
 public struct DesktopProviderRunRecord: Codable, Equatable, Identifiable, Sendable {
@@ -348,6 +350,8 @@ public struct DesktopProviderRunRecord: Codable, Equatable, Identifiable, Sendab
     public var state: DesktopActionState
     public var startedAtUnixMillis: Int64
     public var completedAtUnixMillis: Int64?
+    public var usesProjectContext: Bool? = nil
+    public var workspacePathOverride: String? = nil
 
     public init(
         id: String,
@@ -365,7 +369,9 @@ public struct DesktopProviderRunRecord: Codable, Equatable, Identifiable, Sendab
         errorSummary: String? = nil,
         state: DesktopActionState,
         startedAtUnixMillis: Int64,
-        completedAtUnixMillis: Int64?
+        completedAtUnixMillis: Int64?,
+        usesProjectContext: Bool? = nil,
+        workspacePathOverride: String? = nil
     ) {
         self.id = id
         self.threadID = threadID
@@ -383,6 +389,8 @@ public struct DesktopProviderRunRecord: Codable, Equatable, Identifiable, Sendab
         self.state = state
         self.startedAtUnixMillis = startedAtUnixMillis
         self.completedAtUnixMillis = completedAtUnixMillis
+        self.usesProjectContext = usesProjectContext
+        self.workspacePathOverride = workspacePathOverride
     }
 
     public init(from decoder: any Decoder) throws {
@@ -403,6 +411,8 @@ public struct DesktopProviderRunRecord: Codable, Equatable, Identifiable, Sendab
         state = payload.state
         startedAtUnixMillis = payload.startedAtUnixMillis
         completedAtUnixMillis = payload.completedAtUnixMillis
+        usesProjectContext = payload.usesProjectContext
+        workspacePathOverride = payload.workspacePathOverride
     }
 }
 
@@ -424,6 +434,16 @@ public struct DesktopAutomationRunRecord: Codable, Equatable, Identifiable, Send
     public var state: DesktopActionState
     public var detail: String
     public var evidenceArtifactIDs: [String]
+    public var deduplicationKey: String? = nil
+    public var ownerID: String? = nil
+    public var wasMissed: Bool? = nil
+    public var approvalID: String? = nil
+    public var threadID: String? = nil
+    public var providerRunID: String? = nil
+    public var notificationState: String? = nil
+    public var contractTarget: String? = nil
+    public var exactTarget: String? = nil
+    public var workspacePath: String? = nil
 }
 
 public struct DesktopAuditRecord: Codable, Equatable, Identifiable, Sendable {

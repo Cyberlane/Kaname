@@ -8,11 +8,17 @@ import AppKit
 #endif
 
 public struct NativeGoogleAccountSnapshot: Codable, Equatable, Identifiable, Sendable {
+    public static let currentAuthorizationVersion = 2
+
     public let id: String
     public let identity: String
     public let displayName: String
     public let capabilities: [String]
+    public var authorizationVersion: Int? = nil
 
+    public var supportsCalendarEventWrites: Bool {
+        authorizationVersion.map { $0 >= Self.currentAuthorizationVersion } ?? false
+    }
 }
 
 public struct GoogleOAuthClientConfiguration: Equatable, Sendable {
@@ -70,6 +76,7 @@ public enum NativeGoogleIntegrationError: Error, Equatable, LocalizedError, Send
     case keychainFailure(Int32)
     case invalidResponse(String)
     case requestFailed(String)
+    case httpStatus(String, Int)
 
     public var errorDescription: String? {
         switch self {
@@ -91,6 +98,8 @@ public enum NativeGoogleIntegrationError: Error, Equatable, LocalizedError, Send
             "\(service) returned an unsupported response."
         case let .requestFailed(service):
             "\(service) could not complete the request."
+        case let .httpStatus(service, status):
+            "\(service) returned HTTP \(status)."
         }
     }
 }
@@ -109,7 +118,8 @@ public enum GoogleOAuthRequestBuilder {
         "profile",
         "https://www.googleapis.com/auth/gmail.modify",
         "https://www.googleapis.com/auth/gmail.compose",
-        "https://www.googleapis.com/auth/calendar.readonly",
+        "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+        "https://www.googleapis.com/auth/calendar.events",
     ]
 
     public static func make(
@@ -153,6 +163,7 @@ private struct GoogleTokenRecord: Codable, Sendable {
     var accessToken: String
     let refreshToken: String
     var expiresAt: Date
+    var grantedScopes: [String]?
 }
 
 private struct GoogleAccountIndex: Codable {
@@ -346,12 +357,14 @@ public actor NativeGoogleIntegrationService {
                 id: user.subject,
                 identity: user.email,
                 displayName: user.name ?? user.email,
-                capabilities: ["Gmail", "Google Calendar"]
+                capabilities: ["Gmail manage and compose", "Google Calendar events"],
+                authorizationVersion: NativeGoogleAccountSnapshot.currentAuthorizationVersion
             )
             let tokenRecord = GoogleTokenRecord(
                 accessToken: token.accessToken,
                 refreshToken: refreshToken,
-                expiresAt: Date().addingTimeInterval(token.expiresIn)
+                expiresAt: Date().addingTimeInterval(token.expiresIn),
+                grantedScopes: GoogleOAuthRequestBuilder.scopes
             )
             try tokenStore.store(try JSONEncoder().encode(tokenRecord), accountID: account.id)
             try upsertAccount(account)
@@ -484,7 +497,8 @@ public actor NativeGoogleIntegrationService {
         return GoogleTokenRecord(
             accessToken: response.accessToken,
             refreshToken: response.refreshToken ?? record.refreshToken,
-            expiresAt: Date().addingTimeInterval(response.expiresIn)
+            expiresAt: Date().addingTimeInterval(response.expiresIn),
+            grantedScopes: record.grantedScopes
         )
     }
 
@@ -526,9 +540,8 @@ public actor NativeGoogleIntegrationService {
     func responseData(for request: URLRequest, service: String) async throws -> Data {
         do {
             let (data, response) = try await session.data(for: request)
-            guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
-                throw NativeGoogleIntegrationError.requestFailed(service)
-            }
+            guard let http = response as? HTTPURLResponse else { throw NativeGoogleIntegrationError.requestFailed(service) }
+            guard 200..<300 ~= http.statusCode else { throw NativeGoogleIntegrationError.httpStatus(service, http.statusCode) }
             return data
         } catch let error as NativeGoogleIntegrationError {
             throw error
@@ -597,6 +610,11 @@ public actor NativeGoogleIntegrationService {
 }
 
 public enum GoogleAPIResponseParser {
+    public static func decode<T: Decodable>(_ type: T.Type, from data: Data, service: String) throws -> T {
+        do { return try JSONDecoder().decode(type, from: data) }
+        catch { throw NativeGoogleIntegrationError.invalidResponse(service) }
+    }
+
     public struct CalendarPage: Equatable, Sendable {
         public let calendars: [PersonalCalendarSourceSnapshot]
         public let nextPageToken: String?

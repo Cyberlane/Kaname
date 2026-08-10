@@ -32,10 +32,43 @@ final class DesktopConversationRuntime: ObservableObject {
 
     @discardableResult
     func send(threadID: String, body: String) -> Bool {
+        enqueue(threadID: threadID, body: body) != nil
+    }
+
+    @discardableResult
+    func enqueue(threadID: String, body: String) -> String? {
+        guard let runID = prepareEnqueue(threadID: threadID, body: body) else { return nil }
+        resumePrepared(runID: runID)
+        return runID
+    }
+
+    func prepareEnqueue(
+        threadID: String,
+        body: String,
+        usesProjectContext: Bool = true,
+        workspacePathOverride: String? = nil
+    ) -> String? {
         guard let messageID = model.appendUserMessage(threadID: threadID, body: body),
-              let runID = model.enqueueProviderRun(threadID: threadID, sourceMessageID: messageID) else { return false }
+              let runID = model.enqueueProviderRun(
+                threadID: threadID,
+                sourceMessageID: messageID,
+                usesProjectContext: usesProjectContext,
+                workspacePathOverride: workspacePathOverride
+              ) else { return nil }
+        return runID
+    }
+
+    func resumePrepared(runID: String) {
+        guard let run = model.providerRun(id: runID), let threadID = run.threadID else { return }
+        let events = (try? serviceStore.events(threadID: threadID).filter { $0.runID == runID }) ?? []
+        if !events.isEmpty { return }
+        let pending = (try? serviceStore.pendingRequests(threadID: threadID).contains { $0.1.runID == runID }) ?? false
+        if pending {
+            launchWorkerIfAvailable(threadID: threadID)
+            return
+        }
+        guard run.state == .proposed else { return }
         submit(runID: runID)
-        return true
     }
 
     func retry(runID: String) {
@@ -81,7 +114,9 @@ final class DesktopConversationRuntime: ObservableObject {
             return
         }
         let workspace: URL
-        if let projectWorkspace = model.workspaceURL(threadID: threadID) {
+        if let override = run.workspacePathOverride {
+            workspace = URL(fileURLWithPath: override, isDirectory: true).standardizedFileURL
+        } else if let projectWorkspace = model.workspaceURL(threadID: threadID) {
             workspace = projectWorkspace
         } else if thread.projectID == nil, let standaloneWorkspace = try? prepareStandaloneWorkspace() {
             workspace = standaloneWorkspace
@@ -109,7 +144,11 @@ final class DesktopConversationRuntime: ObservableObject {
             provider: run.provider,
             model: resolvedModel(provider: run.provider, value: run.model),
             reasoningEffort: run.reasoningEffort,
-            prompt: providerPrompt(thread: thread, userMessage: message.body),
+            prompt: providerPrompt(
+                thread: thread,
+                userMessage: message.body,
+                includeProjectContext: run.usesProjectContext ?? true
+            ),
             workspacePath: workspace.path,
             providerStatePath: environment.providerStateDirectory.path,
             resumableNativeThreadID: model.latestNativeThreadID(threadID: threadID, provider: run.provider),
@@ -371,7 +410,17 @@ final class DesktopConversationRuntime: ObservableObject {
         }
     }
 
-    private func providerPrompt(thread: DesktopThread, userMessage: String) -> String {
+    private func providerPrompt(thread: DesktopThread, userMessage: String, includeProjectContext: Bool) -> String {
+        guard includeProjectContext else {
+            return """
+            Respond inside Kaname's unified \(thread.kind.label.lowercased()) conversation.
+
+            Authority boundary: this scheduled turn uses only its frozen prompt and workspace. It is read-only with network disabled. Do not modify files, commit, push, access accounts, or request broader authority.
+
+            User message:
+            \(userMessage)
+            """
+        }
         let project = model.project(id: thread.projectID)
         let context = project?.context
         let instructions = context?.instructionReferences.joined(separator: ", ") ?? "None selected"

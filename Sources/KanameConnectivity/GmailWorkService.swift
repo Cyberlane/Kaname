@@ -321,8 +321,11 @@ public extension NativeGoogleIntegrationService {
         message: GmailOutboundMessage
     ) throws -> String {
         let raw = try GmailAPIParser.rawMessage(message)
-        let digest = SHA256.hash(data: Data(raw.utf8)).map { String(format: "%02x", $0) }.joined()
-        return "gmail:\(accountID):\(operation):sha256=\(digest)"
+        return try ProviderActionTarget.sha256(
+            scheme: "gmail",
+            components: [accountID, operation],
+            payload: Data(raw.utf8)
+        )
     }
 
     private func gmailAccount(id: String) throws -> NativeGoogleAccountSnapshot {
@@ -392,11 +395,8 @@ public enum GmailAPIParser {
             let threads: [Reference]?
             let nextPageToken: String?
         }
-        do {
-            let response = try JSONDecoder().decode(Response.self, from: data)
-            return ThreadPage(ids: try (response.threads ?? []).map { try validatedID($0.id) }, nextPageToken: response.nextPageToken)
-        } catch let error as GmailWorkError { throw error }
-        catch { throw NativeGoogleIntegrationError.invalidResponse("Gmail search") }
+        let response = try GoogleAPIResponseParser.decode(Response.self, from: data, service: "Gmail search")
+        return ThreadPage(ids: try (response.threads ?? []).map { try validatedID($0.id) }, nextPageToken: response.nextPageToken)
     }
 
     public static func thread(data: Data, account: NativeGoogleAccountSnapshot) throws -> GmailThreadDetailSnapshot {
@@ -491,8 +491,7 @@ public enum GmailAPIParser {
     }
 
     fileprivate static func outboundReceipt(data: Data, service: String) throws -> GmailWireOutboundReceipt {
-        do { return try JSONDecoder().decode(GmailWireOutboundReceipt.self, from: data) }
-        catch { throw NativeGoogleIntegrationError.invalidResponse(service) }
+        try GoogleAPIResponseParser.decode(GmailWireOutboundReceipt.self, from: data, service: service)
     }
 
     private static func bodyAndAttachments(

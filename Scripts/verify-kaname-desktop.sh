@@ -49,8 +49,8 @@ fi
 [[ -x "$app_path/Contents/Resources/KanameConversationWorker" ]]
 [[ -x "$app_path/Contents/Resources/kaname-local-core" ]]
 [[ "$(plutil -extract CFBundleIdentifier raw "$app_path/Contents/Info.plist")" == "com.cyberlane.kaname.desktop" ]]
-[[ "$(plutil -extract CFBundleShortVersionString raw "$app_path/Contents/Info.plist")" == "0.12.0" ]]
-[[ "$(plutil -extract CFBundleVersion raw "$app_path/Contents/Info.plist")" == "21" ]]
+[[ "$(plutil -extract CFBundleShortVersionString raw "$app_path/Contents/Info.plist")" == "0.13.0" ]]
+[[ "$(plutil -extract CFBundleVersion raw "$app_path/Contents/Info.plist")" == "22" ]]
 codesign --verify --deep --strict "$app_path"
 if [[ "$(plutil -extract KanameStableCodeSigning raw "$app_path/Contents/Info.plist")" == "true" ]]; then
     designated_requirement="$(codesign -d -r- "$app_path" 2>&1)"
@@ -81,6 +81,7 @@ mkdir -p "$output_directory"
 "$executable" --desktop-destination localCore --load-local-core --snapshot "$output_directory/local-core.png"
 "$executable" --desktop-destination email --snapshot "$output_directory/email.png"
 "$executable" --desktop-destination calendar --snapshot "$output_directory/calendar.png"
+"$executable" --desktop-destination automations --snapshot "$output_directory/automations.png"
 "$executable" --desktop-destination projects --snapshot "$output_directory/projects.png"
 "$executable" --desktop-destination projects --desktop-project-id project-kaname --snapshot "$output_directory/project-overview.png"
 "$executable" --desktop-destination knowledge --snapshot "$output_directory/knowledge.png"
@@ -107,6 +108,7 @@ for snapshot in \
     "$output_directory/local-core.png" \
     "$output_directory/email.png" \
     "$output_directory/calendar.png" \
+    "$output_directory/automations.png" \
     "$output_directory/projects.png" \
     "$output_directory/project-overview.png" \
     "$output_directory/coding.png" \

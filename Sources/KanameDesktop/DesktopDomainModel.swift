@@ -7,6 +7,9 @@ public enum DesktopRecordState: String, Codable, CaseIterable, Equatable, Sendab
     case paused
     case disconnected
     case needsReview
+    case waiting
+    case running
+    case failed
 
     public var label: String {
         switch self {
@@ -16,6 +19,9 @@ public enum DesktopRecordState: String, Codable, CaseIterable, Equatable, Sendab
         case .paused: "Paused"
         case .disconnected: "Disconnected"
         case .needsReview: "Needs review"
+        case .waiting: "Waiting"
+        case .running: "Running"
+        case .failed: "Failed"
         }
     }
 }
@@ -157,6 +163,14 @@ public struct DesktopEmailDraft: Codable, Equatable, Identifiable, Sendable {
 }
 
 public struct DesktopCalendarProposal: Codable, Equatable, Identifiable, Sendable {
+    public enum MutationKind: String, Codable, CaseIterable, Equatable, Sendable {
+        case create
+        case update
+        case delete
+
+        public var label: String { rawValue.capitalized }
+    }
+
     public let id: String
     public var accountID: String?
     public var calendarSourceID: String?
@@ -165,8 +179,81 @@ public struct DesktopCalendarProposal: Codable, Equatable, Identifiable, Sendabl
     public var durationMinutes: Int
     public var timeZoneIdentifier: String
     public var recurrence: String
+    public var isAllDay: Bool? = nil
     public var status: DesktopRecordState
+    public var mutationKind: MutationKind? = nil
+    public var eventExternalID: String? = nil
+    public var seriesMasterExternalID: String? = nil
+    public var eventRevision: String? = nil
+    public var originalTitle: String? = nil
+    public var originalStartAtUnixMillis: Int64? = nil
+    public var originalEndAtUnixMillis: Int64? = nil
+    public var originalTimeZoneIdentifier: String? = nil
+    public var originalRecurrence: [String]? = nil
+    public var originalIsAllDay: Bool? = nil
+    public var seriesMasterRevision: String? = nil
+    public var seriesMasterRecurrence: [String]? = nil
+    public var seriesMasterStartAtUnixMillis: Int64? = nil
+    public var recurrenceScope: String? = nil
+    public var approvalID: String? = nil
+    public var exactTarget: String? = nil
+    public var remoteReceipt: String? = nil
+    public var reconciledAtUnixMillis: Int64? = nil
+    public var mutationPhase: String? = nil
+}
 
+public enum DesktopAutomationActionKind: String, Codable, CaseIterable, Equatable, Sendable {
+    case notification
+    case conversation
+    case skill
+
+    public var label: String {
+        switch self {
+        case .notification: "Local notification"
+        case .conversation: "Start agent conversation"
+        case .skill: "Skill-guided read-only conversation"
+        }
+    }
+}
+
+public enum DesktopAutomationAuthority: String, Codable, CaseIterable, Equatable, Sendable {
+    case localOnly
+    case askEveryRun
+    case standing
+
+    public var label: String {
+        switch self {
+        case .localOnly: "Local-only action"
+        case .askEveryRun: "Ask before every run"
+        case .standing: "Visible standing authority"
+        }
+    }
+}
+
+public struct DesktopScheduleSpec: Codable, Equatable, Sendable {
+    public enum Frequency: String, Codable, CaseIterable, Equatable, Sendable {
+        case once
+        case daily
+        case weekly
+
+        public var label: String { rawValue.capitalized }
+    }
+
+    public var frequency: Frequency
+    public var hour: Int
+    public var minute: Int
+    public var weekday: Int?
+    public var onceAtUnixMillis: Int64?
+
+    public static func anchored(
+        frequency: Frequency,
+        hour: Int,
+        minute: Int,
+        weekday: Int? = nil,
+        onceAtUnixMillis: Int64? = nil
+    ) -> Self {
+        Self(frequency: frequency, hour: hour, minute: minute, weekday: weekday, onceAtUnixMillis: onceAtUnixMillis)
+    }
 }
 
 public struct DesktopAutomationRule: Codable, Equatable, Identifiable, Sendable {
@@ -192,6 +279,15 @@ public struct DesktopAutomationRule: Codable, Equatable, Identifiable, Sendable 
     public var nextRunAtUnixMillis: Int64?
     public var lastResult: String
     public var createdAtUnixMillis: Int64?
+    public var scheduleSpec: DesktopScheduleSpec? = nil
+    public var actionKind: DesktopAutomationActionKind? = nil
+    public var authority: DesktopAutomationAuthority? = nil
+    public var projectID: String? = nil
+    public var skillIDs: [String]? = nil
+    public var toolNames: [String]? = nil
+    public var notificationEnabled: Bool? = nil
+    public var standingAuthorityApprovedAtUnixMillis: Int64? = nil
+    public var standingAuthorityApprovalID: String? = nil
 }
 
 public struct DesktopGitWorkspace: Codable, Equatable, Identifiable, Sendable {

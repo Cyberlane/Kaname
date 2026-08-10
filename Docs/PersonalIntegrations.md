@@ -11,7 +11,7 @@ Kaname uses provider-native authorization boundaries for desktop integrations:
 - Codex, Claude, and OpenCode launch their native local adapters and retain their own authentication state.
 - Apple Calendar uses EventKit. Merely opening Kaname or Settings does not request access; the user must choose **Request access** in Personal integrations. Personal builds signed by the same privately configured identity retain a stable macOS designated requirement, allowing that grant to survive ordinary Kaname rebuilds. An ad-hoc build has a version-specific identity and therefore requires authorization again after its code changes.
 
-Google authorization uses a PKCE-protected loopback callback on `127.0.0.1`, requests offline access, and grants identity, Gmail modify/compose, and Calendar read-only scopes. Gmail mutations still require an exact in-app approval or a visible narrow standing rule, and every result is re-read from Gmail. Existing Gmail read-only connections must reconnect once before those actions can run. The browser receives a success response only after Kaname has exchanged the code, loaded the Google identity, saved the refresh token, and updated its private account index. Kaname never asks for a Google password. If another native tool's session is missing or expired, Kaname reports that state and asks the user to repair it in that tool.
+Google authorization uses a PKCE-protected loopback callback on `127.0.0.1`, requests offline access, and grants identity, Gmail modify/compose, Google Calendar list-read, and Google Calendar event scopes. Gmail and Calendar mutations still require an exact in-app approval or a visible narrow standing rule, and every result is re-read from Google. Existing Google connections must reconnect once before either the newer Gmail actions or Calendar event changes can run. The browser receives a success response only after Kaname has exchanged the code, loaded the Google identity, saved the refresh token, and updated its private account index. Kaname never asks for a Google password. If another native tool's session is missing or expired, Kaname reports that state and asks the user to repair it in that tool.
 
 ## Private state
 
@@ -24,6 +24,8 @@ Settings changes persist automatically; there is no Save or Revert step. Kaname 
 Each Google authorization adds another account to Kaname's local account index, so four Gmail accounts can be active simultaneously. A refresh addresses every selected account directly, mail results retain their source identity, and email drafts retain an exact account reference.
 
 Google and Apple calendar sources appear together in Settings. Each calendar can be enabled independently. Event proposals retain both the owning account and the exact calendar source, preventing an approval from drifting to a different calendar.
+
+Opening Calendar does not enumerate or change events. **Refresh events** performs the bounded read for enabled sources. Create, change, and delete flows first save a local proposal, then show the exact account, calendar, event revision, and recurrence scope in Inbox; only an approval for that exact target can be applied. Kaname re-reads the result before it records the action as reconciled. If the event changed after review, the action fails closed and asks for a fresh proposal.
 
 ## Native Google setup
 
@@ -42,6 +44,8 @@ The repository contains the reusable OAuth, API, and UI implementation, but no c
 New schedule and event forms default to the IANA time zone saved in Settings, initially the Mac's zone at setup. Kaname persists the recurrence intent with that anchor zone and derives execution instants from it. It does not treat the current travel zone as a replacement schedule.
 
 For example, a weekly 09:00 schedule anchored to `Asia/Tokyo` remains 09:00 in Japan after the Mac travels to Germany. The UI displays the pinned Japan time and, when different, the equivalent time in the viewer's current zone. Using an IANA zone rather than a fixed UTC offset preserves the anchor zone's daylight-saving rules.
+
+Only one Kaname process may claim a schedule occurrence in a desktop workspace. Each occurrence has a durable key derived from the rule and its scheduled instant, so restart and clock changes cannot create a second run for the same occurrence. Missed occurrences follow the rule's visible policy: skip, or wait for explicit catch-up approval. Notification permission is requested only from the dedicated button. Agent and skill actions require per-run approval or a separately approved, visible standing authority.
 
 ## Consequential actions
 
