@@ -247,14 +247,50 @@ public struct DesktopPreferences: Codable, Equatable, Sendable {
 }
 
 public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
-    public static let currentVersion = 2
+    public static let currentVersion = 3
 
     public var version: Int
     public var projects: [DesktopProject]
     public var threads: [DesktopThread]
     public var remote: DesktopRemoteStatus
     public var preferences: DesktopPreferences
+    public var domains: DesktopDomainSnapshot
     public var lastSavedAtUnixMillis: Int64
+
+    public init(
+        version: Int,
+        projects: [DesktopProject],
+        threads: [DesktopThread],
+        remote: DesktopRemoteStatus,
+        preferences: DesktopPreferences,
+        domains: DesktopDomainSnapshot,
+        lastSavedAtUnixMillis: Int64
+    ) {
+        (self.version, self.projects, self.threads) = (version, projects, threads)
+        (self.remote, self.preferences, self.domains) = (remote, preferences, domains)
+        self.lastSavedAtUnixMillis = lastSavedAtUnixMillis
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case version
+        case projects
+        case threads
+        case remote
+        case preferences
+        case domains
+        case lastSavedAtUnixMillis
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decode(Int.self, forKey: .version)
+        projects = try container.decode([DesktopProject].self, forKey: .projects)
+        threads = try container.decode([DesktopThread].self, forKey: .threads)
+        remote = try container.decode(DesktopRemoteStatus.self, forKey: .remote)
+        preferences = try container.decode(DesktopPreferences.self, forKey: .preferences)
+        domains = try container.decodeIfPresent(DesktopDomainSnapshot.self, forKey: .domains) ?? .empty
+        lastSavedAtUnixMillis = try container.decode(Int64.self, forKey: .lastSavedAtUnixMillis)
+    }
 
     public static func starter(now: Int64) -> DesktopAppSnapshot {
         let project = DesktopProject(
@@ -347,14 +383,18 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
             ],
             remote: .currentCheckpoint(now: now),
             preferences: DesktopPreferences(),
+            domains: .starter(now: now),
             lastSavedAtUnixMillis: now
         )
     }
 
     func migratedToCurrent(now: Int64) throws -> DesktopAppSnapshot {
-        guard version == 1 else { throw DesktopModelError.unsupportedVersion }
+        guard version == 1 || version == 2 else { throw DesktopModelError.unsupportedVersion }
         var migrated = self
         migrated.version = Self.currentVersion
+        if migrated.domains == .empty {
+            migrated.domains = .starter(now: now)
+        }
         migrated.lastSavedAtUnixMillis = now
 
         if let index = migrated.threads.firstIndex(where: { $0.id == "thread-desktop-dogfood" }) {
@@ -589,6 +629,121 @@ public final class DesktopAppModel: ObservableObject {
         mutate { $0.preferences = preferences }
     }
 
+    @discardableResult
+    public func createResearch(title: String, question: String) -> String? {
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanQuestion = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanTitle.isEmpty, !cleanQuestion.isEmpty,
+              cleanTitle.utf8.count <= 160, cleanQuestion.utf8.count <= 4_000 else { return nil }
+        let record = DesktopResearchRecord(
+            id: UUID().uuidString.lowercased(),
+            title: cleanTitle,
+            question: cleanQuestion,
+            status: .draft,
+            sourceCount: 0,
+            updatedAtUnixMillis: now()
+        )
+        mutate { $0.domains.research.append(record) }
+        return record.id
+    }
+
+    @discardableResult
+    public func saveEmailDraft(
+        id: String? = nil,
+        accountID: String?,
+        recipients: String,
+        subject: String,
+        body: String
+    ) -> String? {
+        let cleanSubject = subject.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanBody = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanSubject.isEmpty || !cleanBody.isEmpty,
+              cleanSubject.utf8.count <= 998, cleanBody.utf8.count <= 100_000 else { return nil }
+        let draft = DesktopEmailDraft(
+            id: id ?? UUID().uuidString.lowercased(),
+            accountID: accountID,
+            recipients: recipients.trimmingCharacters(in: .whitespacesAndNewlines),
+            subject: cleanSubject,
+            body: cleanBody,
+            status: .draft,
+            updatedAtUnixMillis: now()
+        )
+        mutate { snapshot in
+            if let index = snapshot.domains.emailDrafts.firstIndex(where: { $0.id == draft.id }) {
+                snapshot.domains.emailDrafts[index] = draft
+            } else {
+                snapshot.domains.emailDrafts.append(draft)
+            }
+        }
+        return draft.id
+    }
+
+    @discardableResult
+    public func createCalendarProposal(
+        title: String,
+        startAtUnixMillis: Int64,
+        durationMinutes: Int,
+        timeZoneIdentifier: String,
+        recurrence: String
+    ) -> String? {
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanTitle.isEmpty, cleanTitle.utf8.count <= 200,
+              (1...10_080).contains(durationMinutes),
+              TimeZone(identifier: timeZoneIdentifier) != nil else { return nil }
+        let proposal = DesktopCalendarProposal(
+            id: UUID().uuidString.lowercased(),
+            accountID: nil,
+            title: cleanTitle,
+            startAtUnixMillis: startAtUnixMillis,
+            durationMinutes: durationMinutes,
+            timeZoneIdentifier: timeZoneIdentifier,
+            recurrence: recurrence.trimmingCharacters(in: .whitespacesAndNewlines),
+            status: .proposed
+        )
+        mutate { $0.domains.calendarProposals.append(proposal) }
+        return proposal.id
+    }
+
+    @discardableResult
+    public func createAutomation(
+        name: String,
+        schedule: String,
+        timeZoneIdentifier: String,
+        actionSummary: String,
+        missedRunPolicy: DesktopAutomationRule.MissedRunPolicy
+    ) -> String? {
+        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanSchedule = schedule.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanAction = actionSummary.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanName.isEmpty, !cleanSchedule.isEmpty, !cleanAction.isEmpty,
+              TimeZone(identifier: timeZoneIdentifier) != nil else { return nil }
+        let rule = DesktopAutomationRule(
+            id: UUID().uuidString.lowercased(),
+            name: cleanName,
+            schedule: cleanSchedule,
+            timeZoneIdentifier: timeZoneIdentifier,
+            actionSummary: cleanAction,
+            missedRunPolicy: missedRunPolicy,
+            status: .draft,
+            nextRunAtUnixMillis: nil,
+            lastResult: "Not run"
+        )
+        mutate { $0.domains.automations.append(rule) }
+        return rule.id
+    }
+
+    public func setAutomationPaused(id: String, paused: Bool) {
+        mutateDomainRecord(at: \.automations, id: id) { rule in
+            rule.status = paused ? .paused : .draft
+        }
+    }
+
+    public func setSkillEnabled(id: String, enabled: Bool) {
+        mutateDomainRecord(at: \.skills, id: id) { skill in
+            skill.enabled = enabled
+        }
+    }
+
     public func clearPersistenceError() {
         persistenceError = nil
     }
@@ -603,6 +758,17 @@ public final class DesktopAppModel: ObservableObject {
             persistenceError = nil
         } catch {
             persistenceError = "Kaname could not save this local change. The previous durable workspace remains intact."
+        }
+    }
+
+    private func mutateDomainRecord<Record: Identifiable>(
+        at keyPath: WritableKeyPath<DesktopDomainSnapshot, [Record]>,
+        id: String,
+        change: (inout Record) -> Void
+    ) where Record.ID == String {
+        mutate { snapshot in
+            guard let index = snapshot.domains[keyPath: keyPath].firstIndex(where: { $0.id == id }) else { return }
+            change(&snapshot.domains[keyPath: keyPath][index])
         }
     }
 }

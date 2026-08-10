@@ -73,7 +73,35 @@ struct DesktopAppModelTests {
         #expect(model.snapshot.threads.contains { $0.title == "Preserved thread" })
         #expect(model.thread(id: "thread-desktop-dogfood")?.plan.allSatisfy { $0.state == .complete } == true)
         #expect(model.thread(id: "thread-desktop-dogfood")?.evidence.allSatisfy { $0.state == .passed } == true)
+        #expect(!model.snapshot.domains.knowledgeSources.isEmpty)
         #expect(store.data != nil)
+    }
+
+    @Test
+    func versionTwoWorkspaceAddsDomainStateWithoutDroppingUserContent() throws {
+        var versionTwo = DesktopAppSnapshot.starter(now: 1_000)
+        versionTwo.version = 2
+        versionTwo.domains = .empty
+        versionTwo.threads.append(
+            DesktopThread(
+                title: "Preserved version two thread",
+                summary: "Must survive",
+                kind: .personal,
+                attention: .queued,
+                updatedAtUnixMillis: 1_001
+            )
+        )
+        let data = try JSONEncoder().encode(versionTwo)
+        var json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        json.removeValue(forKey: "domains")
+        let store = MemoryDesktopStateStore(data: try JSONSerialization.data(withJSONObject: json))
+
+        let model = DesktopAppModel(store: store, now: { 2_000 })
+
+        #expect(model.snapshot.version == DesktopAppSnapshot.currentVersion)
+        #expect(model.snapshot.threads.contains { $0.title == "Preserved version two thread" })
+        #expect(model.snapshot.domains.knowledgeSources.contains { $0.id == "knowledge-coding-ade" })
+        #expect(model.snapshot.domains.accounts.count == 4)
     }
 
     @Test
@@ -97,6 +125,47 @@ struct DesktopAppModelTests {
 
         let restored = DesktopAppModel(store: store, now: { 2_000 })
         #expect(restored.snapshot.preferences == preferences)
+    }
+
+    @Test
+    func domainDraftsAndRulesPersistWithoutExternalEffects() throws {
+        let store = MemoryDesktopStateStore()
+        let model = DesktopAppModel(store: store, now: { 5_000 })
+
+        let researchID = try #require(model.createResearch(title: "Provider recovery", question: "Which events can replay?"))
+        let emailID = try #require(
+            model.saveEmailDraft(
+                accountID: nil,
+                recipients: "",
+                subject: "Draft only",
+                body: "This must not send."
+            )
+        )
+        let calendarID = try #require(
+            model.createCalendarProposal(
+                title: "Review Kaname",
+                startAtUnixMillis: 10_000,
+                durationMinutes: 30,
+                timeZoneIdentifier: "Asia/Tokyo",
+                recurrence: "Does not repeat"
+            )
+        )
+        let automationID = try #require(
+            model.createAutomation(
+                name: "Weekly review",
+                schedule: "Every Monday at 09:00",
+                timeZoneIdentifier: "Asia/Tokyo",
+                actionSummary: "Prepare a local review draft",
+                missedRunPolicy: .skip
+            )
+        )
+        model.setAutomationPaused(id: automationID, paused: true)
+
+        let restored = DesktopAppModel(store: store, now: { 6_000 })
+        #expect(restored.snapshot.domains.research.contains { $0.id == researchID })
+        #expect(restored.snapshot.domains.emailDrafts.contains { $0.id == emailID && $0.status == .draft })
+        #expect(restored.snapshot.domains.calendarProposals.contains { $0.id == calendarID && $0.status == .proposed })
+        #expect(restored.snapshot.domains.automations.contains { $0.id == automationID && $0.status == .paused })
     }
 
     @Test
