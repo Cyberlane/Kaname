@@ -17,26 +17,18 @@ if [[ "$installed_version" != "$required_version" ]]; then
   exit 1
 fi
 
-staged_sources=()
-while IFS= read -r -d '' path; do
-  case "$path" in
-    *.go|*.js|*.jsx|*.ts|*.tsx|*.py|*.rs|*.swift|*.sql|*.sh|*.bash|*.zsh)
-      staged_sources+=("$path")
-      ;;
-  esac
-done < <(git diff --cached --name-only --diff-filter=ACMR -z)
-
-if (( ${#staged_sources[@]} == 0 )); then
-  exit 0
-fi
-
 report=$(mktemp "${TMPDIR:-/tmp}/kaname-mori.XXXXXX")
 trap 'rm -f "$report"' EXIT
 
-arguments=(scan --format text --max-groups 25 --fail-on-focused-match)
-for path in "${staged_sources[@]}"; do
-  arguments+=(--focus-path "$path")
-done
+arguments=(
+  scan
+  --staged
+  --format text
+  --max-groups 25
+  --include-focused
+  --require-focused-coverage
+  --fail-on-focused-match
+)
 
 set +e
 mori "${arguments[@]}" . >"$report" 2>&1
@@ -44,7 +36,7 @@ status=$?
 set -e
 
 if (( status == 0 )); then
-  echo "Mori pre-commit review passed for ${#staged_sources[@]} staged source file(s)."
+  echo "Mori pre-commit staged-index review passed."
   exit 0
 fi
 
