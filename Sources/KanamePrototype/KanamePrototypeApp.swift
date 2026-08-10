@@ -5,6 +5,7 @@ import KanameFixtures
 import KanamePrototypeUI
 #if os(macOS)
 import AppKit
+import Darwin
 #endif
 
 @main
@@ -130,26 +131,36 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
                 ),
                 let png = NSBitmapImageRep(cgImage: capture)
                     .representation(using: .png, properties: [:]) {
-                    try? png.write(to: outputURL, options: .atomic)
-                    NSApplication.shared.terminate(nil)
-                    return
+                    finishSnapshotCapture(png, at: outputURL)
                 }
                 guard let contentView = window.contentView else {
-                    NSApplication.shared.terminate(nil)
-                    return
+                    finishSnapshotCapture(nil, at: outputURL)
                 }
                 contentView.layoutSubtreeIfNeeded()
                 guard let bitmap = contentView.bitmapImageRepForCachingDisplay(in: contentView.bounds) else {
-                    NSApplication.shared.terminate(nil)
-                    return
+                    finishSnapshotCapture(nil, at: outputURL)
                 }
                 contentView.cacheDisplay(in: contentView.bounds, to: bitmap)
-                if let png = bitmap.representation(using: .png, properties: [:]) {
-                    try? png.write(to: outputURL, options: .atomic)
-                }
-                NSApplication.shared.terminate(nil)
+                finishSnapshotCapture(
+                    bitmap.representation(using: .png, properties: [:]),
+                    at: outputURL
+                )
             }
         }
+    }
+}
+
+private func finishSnapshotCapture(_ png: Data?, at outputURL: URL) -> Never {
+    guard let png else {
+        fputs("Kaname could not capture the requested snapshot.\n", stderr)
+        Darwin.exit(EXIT_FAILURE)
+    }
+    do {
+        try png.write(to: outputURL, options: .atomic)
+        Darwin.exit(EXIT_SUCCESS)
+    } catch {
+        fputs("Kaname could not write the requested snapshot.\n", stderr)
+        Darwin.exit(EXIT_FAILURE)
     }
 }
 #endif
