@@ -102,6 +102,33 @@ struct DesktopAppModelTests {
         #expect(model.snapshot.threads.contains { $0.title == "Preserved version two thread" })
         #expect(model.snapshot.domains.knowledgeSources.contains { $0.id == "knowledge-coding-ade" })
         #expect(model.snapshot.domains.accounts.count == 4)
+        #expect(model.snapshot.operations == .empty)
+    }
+
+    @Test
+    func versionThreeWorkspaceAddsOperationalStateWithoutDroppingDomainContent() throws {
+        var versionThree = DesktopAppSnapshot.starter(now: 1_000)
+        versionThree.version = 3
+        versionThree.domains.research.append(
+            DesktopResearchRecord(
+                id: "research-preserved",
+                title: "Preserved",
+                question: "Still here?",
+                status: .draft,
+                sourceCount: 0,
+                updatedAtUnixMillis: 1_001
+            )
+        )
+        let data = try JSONEncoder().encode(versionThree)
+        var json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        json.removeValue(forKey: "operations")
+        let store = MemoryDesktopStateStore(data: try JSONSerialization.data(withJSONObject: json))
+
+        let model = DesktopAppModel(store: store, now: { 2_000 })
+
+        #expect(model.snapshot.version == DesktopAppSnapshot.currentVersion)
+        #expect(model.snapshot.domains.research.contains { $0.id == "research-preserved" })
+        #expect(model.snapshot.operations == .empty)
     }
 
     @Test
@@ -166,6 +193,50 @@ struct DesktopAppModelTests {
         #expect(restored.snapshot.domains.emailDrafts.contains { $0.id == emailID && $0.status == .draft })
         #expect(restored.snapshot.domains.calendarProposals.contains { $0.id == calendarID && $0.status == .proposed })
         #expect(restored.snapshot.domains.automations.contains { $0.id == automationID && $0.status == .paused })
+    }
+
+    @Test
+    func operationalRecordsRemainLocalDurableAndLinked() throws {
+        let store = MemoryDesktopStateStore()
+        let model = DesktopAppModel(store: store, now: { 9_000 })
+        let researchID = try #require(model.createResearch(title: "Recovery", question: "What is durable?"))
+        let sourceID = try #require(
+            model.addResearchSource(
+                researchID: researchID,
+                title: "Primary specification",
+                location: "https://example.com/spec",
+                publisher: "Example",
+                isPrimary: true,
+                note: "Contract evidence"
+            )
+        )
+        let approvalID = try #require(
+            model.createApproval(
+                threadID: nil,
+                title: "Publish report",
+                exactTarget: "example/repository",
+                consequence: "Creates public state",
+                dataLeavingDevice: "Report content",
+                reversible: true,
+                expiresAtUnixMillis: 10_000
+            )
+        )
+        model.resolveApproval(id: approvalID, approved: false)
+        let comparisonID = try #require(
+            model.createProviderComparison(
+                title: "Compare plans",
+                brief: "Produce a bounded plan",
+                providers: ["Codex", "Claude"]
+            )
+        )
+
+        let restored = DesktopAppModel(store: store, now: { 10_000 })
+        #expect(restored.snapshot.operations.researchSources.contains { $0.id == sourceID })
+        #expect(restored.snapshot.domains.research.first { $0.id == researchID }?.sourceCount == 1)
+        #expect(restored.snapshot.operations.approvals.first { $0.id == approvalID }?.state == .rejected)
+        #expect(restored.snapshot.operations.audit.count == 2)
+        #expect(restored.snapshot.operations.comparisons.first { $0.id == comparisonID }?.runIDs.count == 2)
+        #expect(restored.snapshot.operations.providerRuns.allSatisfy { $0.state == .proposed })
     }
 
     @Test

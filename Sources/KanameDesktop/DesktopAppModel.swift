@@ -1,4 +1,5 @@
 import Combine
+import CryptoKit
 import Foundation
 
 public enum DesktopAttention: String, Codable, CaseIterable, Equatable, Sendable {
@@ -247,7 +248,7 @@ public struct DesktopPreferences: Codable, Equatable, Sendable {
 }
 
 public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
-    public static let currentVersion = 3
+    public static let currentVersion = 4
 
     public var version: Int
     public var projects: [DesktopProject]
@@ -255,6 +256,7 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
     public var remote: DesktopRemoteStatus
     public var preferences: DesktopPreferences
     public var domains: DesktopDomainSnapshot
+    public var operations: DesktopOperationalSnapshot
     public var lastSavedAtUnixMillis: Int64
 
     public init(
@@ -264,10 +266,12 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
         remote: DesktopRemoteStatus,
         preferences: DesktopPreferences,
         domains: DesktopDomainSnapshot,
+        operations: DesktopOperationalSnapshot,
         lastSavedAtUnixMillis: Int64
     ) {
         (self.version, self.projects, self.threads) = (version, projects, threads)
         (self.remote, self.preferences, self.domains) = (remote, preferences, domains)
+        self.operations = operations
         self.lastSavedAtUnixMillis = lastSavedAtUnixMillis
     }
 
@@ -278,6 +282,7 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
         case remote
         case preferences
         case domains
+        case operations
         case lastSavedAtUnixMillis
     }
 
@@ -289,6 +294,7 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
         remote = try container.decode(DesktopRemoteStatus.self, forKey: .remote)
         preferences = try container.decode(DesktopPreferences.self, forKey: .preferences)
         domains = try container.decodeIfPresent(DesktopDomainSnapshot.self, forKey: .domains) ?? .empty
+        operations = try container.decodeIfPresent(DesktopOperationalSnapshot.self, forKey: .operations) ?? .empty
         lastSavedAtUnixMillis = try container.decode(Int64.self, forKey: .lastSavedAtUnixMillis)
     }
 
@@ -384,12 +390,13 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
             remote: .currentCheckpoint(now: now),
             preferences: DesktopPreferences(),
             domains: .starter(now: now),
+            operations: .empty,
             lastSavedAtUnixMillis: now
         )
     }
 
     func migratedToCurrent(now: Int64) throws -> DesktopAppSnapshot {
-        guard version == 1 || version == 2 else { throw DesktopModelError.unsupportedVersion }
+        guard (1...3).contains(version) else { throw DesktopModelError.unsupportedVersion }
         var migrated = self
         migrated.version = Self.currentVersion
         if migrated.domains == .empty {
@@ -712,17 +719,15 @@ public final class DesktopAppModel: ObservableObject {
         actionSummary: String,
         missedRunPolicy: DesktopAutomationRule.MissedRunPolicy
     ) -> String? {
-        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let cleanSchedule = schedule.trimmingCharacters(in: .whitespacesAndNewlines)
-        let cleanAction = actionSummary.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanName.isEmpty, !cleanSchedule.isEmpty, !cleanAction.isEmpty,
+        let fields = [name, schedule, actionSummary].map(Self.normalized)
+        guard fields.allSatisfy({ !$0.isEmpty }),
               TimeZone(identifier: timeZoneIdentifier) != nil else { return nil }
         let rule = DesktopAutomationRule(
             id: UUID().uuidString.lowercased(),
-            name: cleanName,
-            schedule: cleanSchedule,
+            name: fields[0],
+            schedule: fields[1],
             timeZoneIdentifier: timeZoneIdentifier,
-            actionSummary: cleanAction,
+            actionSummary: fields[2],
             missedRunPolicy: missedRunPolicy,
             status: .draft,
             nextRunAtUnixMillis: nil,
@@ -742,6 +747,261 @@ public final class DesktopAppModel: ObservableObject {
         mutateDomainRecord(at: \.skills, id: id) { skill in
             skill.enabled = enabled
         }
+    }
+
+    @discardableResult
+    public func addResearchSource(
+        researchID: String,
+        title: String,
+        location: String,
+        publisher: String,
+        isPrimary: Bool,
+        note: String
+    ) -> String? {
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanLocation = location.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard snapshot.domains.research.contains(where: { $0.id == researchID }),
+              !cleanTitle.isEmpty, !cleanLocation.isEmpty,
+              cleanTitle.utf8.count <= 300, cleanLocation.utf8.count <= 4_096 else { return nil }
+        let source = DesktopResearchSource(
+            id: UUID().uuidString.lowercased(),
+            researchID: researchID,
+            title: cleanTitle,
+            location: cleanLocation,
+            publisher: publisher.trimmingCharacters(in: .whitespacesAndNewlines),
+            isPrimary: isPrimary,
+            retrievedAtUnixMillis: now(),
+            note: note.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+        mutate { snapshot in
+            snapshot.operations.researchSources.append(source)
+            if let index = snapshot.domains.research.firstIndex(where: { $0.id == researchID }) {
+                snapshot.domains.research[index].sourceCount += 1
+                snapshot.domains.research[index].updatedAtUnixMillis = source.retrievedAtUnixMillis
+            }
+        }
+        return source.id
+    }
+
+    @discardableResult
+    public func createKnowledgeProposal(
+        sourceID: String?,
+        title: String,
+        target: String,
+        summary: String,
+        proposedContent: String,
+        baseRevision: String
+    ) -> String? {
+        guard !Self.normalized(title).isEmpty,
+              !Self.normalized(target).isEmpty,
+              !Self.normalized(proposedContent).isEmpty else { return nil }
+        let proposal = DesktopKnowledgeProposal(
+            id: UUID().uuidString.lowercased(),
+            knowledgeSourceID: sourceID,
+            title: Self.normalized(title),
+            target: Self.normalized(target),
+            summary: Self.normalized(summary),
+            proposedContent: proposedContent,
+            baseRevision: Self.normalized(baseRevision),
+            state: .proposed,
+            createdAtUnixMillis: now()
+        )
+        mutate { $0.operations.knowledgeProposals.append(proposal) }
+        return proposal.id
+    }
+
+    @discardableResult
+    public func createApproval(
+        threadID: String?,
+        title: String,
+        exactTarget: String,
+        consequence: String,
+        dataLeavingDevice: String,
+        reversible: Bool,
+        expiresAtUnixMillis: Int64?
+    ) -> String? {
+        let required = (
+            title: Self.normalized(title),
+            target: Self.normalized(exactTarget),
+            consequence: Self.normalized(consequence)
+        )
+        guard !required.title.isEmpty, !required.target.isEmpty, !required.consequence.isEmpty else { return nil }
+        let approval = DesktopApprovalRecord(
+            id: UUID().uuidString.lowercased(),
+            threadID: threadID,
+            title: required.title,
+            exactTarget: required.target,
+            consequence: required.consequence,
+            dataLeavingDevice: Self.normalized(dataLeavingDevice),
+            reversible: reversible,
+            state: .awaitingApproval,
+            requestedAtUnixMillis: now(),
+            expiresAtUnixMillis: expiresAtUnixMillis
+        )
+        mutate { snapshot in
+            snapshot.operations.approvals.append(approval)
+            snapshot.operations.audit.append(
+                DesktopAuditRecord(
+                    id: UUID().uuidString.lowercased(),
+                    domain: "approval",
+                    action: "requested",
+                    target: approval.exactTarget,
+                    state: .awaitingApproval,
+                    detail: approval.consequence,
+                    recordedAtUnixMillis: approval.requestedAtUnixMillis
+                )
+            )
+        }
+        return approval.id
+    }
+
+    public func resolveApproval(id: String, approved: Bool) {
+        let timestamp = now()
+        mutate { snapshot in
+            guard let index = snapshot.operations.approvals.firstIndex(where: { $0.id == id }),
+                  snapshot.operations.approvals[index].state == .awaitingApproval else { return }
+            let state: DesktopActionState = approved ? .approved : .rejected
+            snapshot.operations.approvals[index].state = state
+            snapshot.operations.audit.append(
+                DesktopAuditRecord(
+                    id: UUID().uuidString.lowercased(),
+                    domain: "approval",
+                    action: approved ? "approved" : "rejected",
+                    target: snapshot.operations.approvals[index].exactTarget,
+                    state: state,
+                    detail: "Local approval decision recorded; no external action was dispatched.",
+                    recordedAtUnixMillis: timestamp
+                )
+            )
+        }
+    }
+
+    @discardableResult
+    public func createProviderComparison(title: String, brief: String, providers: [String]) -> String? {
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanBrief = brief.trimmingCharacters(in: .whitespacesAndNewlines)
+        let uniqueProviders = Array(Set(providers.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }))
+            .filter { !$0.isEmpty }
+            .sorted()
+        guard !cleanTitle.isEmpty, !cleanBrief.isEmpty, uniqueProviders.count >= 2 else { return nil }
+        let timestamp = now()
+        let runs = uniqueProviders.map { provider in
+            DesktopProviderRunRecord(
+                id: UUID().uuidString.lowercased(),
+                threadID: nil,
+                provider: provider,
+                model: "Not selected",
+                briefDigest: Self.stableLocalDigest(cleanBrief),
+                contextReferenceCount: 0,
+                tokenUsage: nil,
+                costSummary: "Not run",
+                state: .proposed,
+                startedAtUnixMillis: timestamp,
+                completedAtUnixMillis: nil
+            )
+        }
+        let comparison = DesktopComparisonRecord(
+            id: UUID().uuidString.lowercased(),
+            title: cleanTitle,
+            brief: cleanBrief,
+            runIDs: runs.map(\.id),
+            state: .proposed,
+            createdAtUnixMillis: timestamp
+        )
+        mutate { snapshot in
+            snapshot.operations.providerRuns.append(contentsOf: runs)
+            snapshot.operations.comparisons.append(comparison)
+        }
+        return comparison.id
+    }
+
+    @discardableResult
+    public func addGitStackLayer(
+        workspaceID: String,
+        title: String,
+        branch: String,
+        baseBranch: String,
+        dependsOnLayerID: String?
+    ) -> String? {
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanBranch = branch.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanBase = baseBranch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard snapshot.domains.gitWorkspaces.contains(where: { $0.id == workspaceID }),
+              !cleanTitle.isEmpty, !cleanBranch.isEmpty, !cleanBase.isEmpty else { return nil }
+        if let dependsOnLayerID,
+           !snapshot.operations.gitStackLayers.contains(where: { $0.id == dependsOnLayerID }) {
+            return nil
+        }
+        let layer = DesktopGitStackLayer(
+            id: UUID().uuidString.lowercased(),
+            workspaceID: workspaceID,
+            title: cleanTitle,
+            branch: cleanBranch,
+            baseBranch: cleanBase,
+            pullRequestURL: nil,
+            checkSummary: "Not checked",
+            reviewSummary: "No remote review",
+            state: .proposed,
+            dependsOnLayerID: dependsOnLayerID
+        )
+        mutate { $0.operations.gitStackLayers.append(layer) }
+        return layer.id
+    }
+
+    @discardableResult
+    public func registerArtifact(
+        threadID: String?,
+        name: String,
+        kind: DesktopArtifactRecord.Kind,
+        localPath: String,
+        digest: String,
+        provenance: String
+    ) -> String? {
+        let identity = (name: Self.normalized(name), path: Self.normalized(localPath))
+        guard !identity.name.isEmpty, !identity.path.isEmpty else { return nil }
+        switch threadID {
+        case .some(let value) where !snapshot.threads.contains(where: { $0.id == value }):
+            return nil
+        default:
+            break
+        }
+        let artifact = DesktopArtifactRecord(
+            id: UUID().uuidString.lowercased(),
+            threadID: threadID,
+            name: identity.name,
+            kind: kind,
+            localPath: identity.path,
+            digest: Self.normalized(digest),
+            provenance: Self.normalized(provenance),
+            createdAtUnixMillis: now()
+        )
+        mutate { $0.operations.artifacts.append(artifact) }
+        return artifact.id
+    }
+
+    @discardableResult
+    public func recordAutomationDryRun(id: String) -> String? {
+        guard snapshot.domains.automations.contains(where: { $0.id == id }) else { return nil }
+        let timestamp = now()
+        let run = DesktopAutomationRunRecord(
+            id: UUID().uuidString.lowercased(),
+            automationID: id,
+            scheduledAtUnixMillis: timestamp,
+            startedAtUnixMillis: timestamp,
+            completedAtUnixMillis: timestamp,
+            state: .completed,
+            detail: "Dry run validated local schedule metadata. No tools, accounts, providers, or external effects were invoked.",
+            evidenceArtifactIDs: []
+        )
+        mutate { snapshot in
+            snapshot.operations.automationRuns.append(run)
+            snapshot.domains.automations = snapshot.domains.automations.map { automation in
+                var updated = automation
+                if updated.id == id { updated.lastResult = "Dry run passed" }
+                return updated
+            }
+        }
+        return run.id
     }
 
     public func clearPersistenceError() {
@@ -770,6 +1030,14 @@ public final class DesktopAppModel: ObservableObject {
             guard let index = snapshot.domains[keyPath: keyPath].firstIndex(where: { $0.id == id }) else { return }
             change(&snapshot.domains[keyPath: keyPath][index])
         }
+    }
+
+    private static func stableLocalDigest(_ value: String) -> String {
+        SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func normalized(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
