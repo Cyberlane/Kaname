@@ -10,13 +10,41 @@ state_file="$state_directory/workspace.json"
 journal_directory="$HOME/Library/Application Support/Kaname/LocalCore/journal"
 error_log="$HOME/Library/LaunchAgents/kaname-local-control-service.stderr.log"
 output_directory="$(cd "$(dirname "$0")/.." && pwd)/.build/desktop-qa"
+instance_lock="$HOME/Library/Application Support/Kaname/Runtime/desktop-instance.lock"
+restore_running_app=false
+qualification_pid=""
+
+restore_desktop_app() {
+    if [[ -n "$qualification_pid" ]] && kill -0 "$qualification_pid" 2>/dev/null; then
+        kill -TERM "$qualification_pid"
+        wait "$qualification_pid" 2>/dev/null || true
+    fi
+    if [[ "$restore_running_app" == true ]]; then
+        open "$app_path"
+    fi
+}
+
+trap restore_desktop_app EXIT
+
+if pgrep -x KanamePrototype >/dev/null; then
+    restore_running_app=true
+    pkill -TERM -x KanamePrototype
+    for _ in {1..40}; do
+        if ! pgrep -x KanamePrototype >/dev/null; then break; fi
+        sleep 0.05
+    done
+    if pgrep -x KanamePrototype >/dev/null; then
+        echo "Kaname did not stop before desktop qualification." >&2
+        exit 1
+    fi
+fi
 
 [[ -x "$executable" ]]
 [[ -x "$app_path/Contents/Resources/KanameLocalControlService" ]]
 [[ -x "$app_path/Contents/Resources/kaname-local-core" ]]
 [[ "$(plutil -extract CFBundleIdentifier raw "$app_path/Contents/Info.plist")" == "com.cyberlane.kaname.desktop" ]]
-[[ "$(plutil -extract CFBundleShortVersionString raw "$app_path/Contents/Info.plist")" == "0.6.3" ]]
-[[ "$(plutil -extract CFBundleVersion raw "$app_path/Contents/Info.plist")" == "11" ]]
+[[ "$(plutil -extract CFBundleShortVersionString raw "$app_path/Contents/Info.plist")" == "0.6.4" ]]
+[[ "$(plutil -extract CFBundleVersion raw "$app_path/Contents/Info.plist")" == "12" ]]
 codesign --verify --deep --strict "$app_path"
 launchctl print "gui/$(id -u)/$service_identifier" >/dev/null
 
@@ -63,6 +91,36 @@ do
     [[ -s "$snapshot" ]]
     [[ "$(stat -f %z "$snapshot")" -gt 100000 ]]
 done
+
+"$executable" --desktop-destination home >/dev/null 2>&1 &
+qualification_pid=$!
+for _ in {1..100}; do
+    if lsof -a -p "$qualification_pid" "$instance_lock" >/dev/null 2>&1; then break; fi
+    if ! kill -0 "$qualification_pid" 2>/dev/null; then
+        echo "The primary Kaname qualification instance exited early." >&2
+        exit 1
+    fi
+    sleep 0.05
+done
+if ! lsof -a -p "$qualification_pid" "$instance_lock" >/dev/null 2>&1; then
+    echo "The primary Kaname qualification instance did not acquire its lock." >&2
+    exit 1
+fi
+
+"$executable" --desktop-destination settings >/dev/null 2>&1 &
+second_instance_pid=$!
+if ! wait "$second_instance_pid"; then
+    echo "The second Kaname launch did not exit cleanly." >&2
+    exit 1
+fi
+[[ "$(pgrep -x KanamePrototype | wc -l | tr -d ' ')" == "1" ]]
+kill -0 "$qualification_pid"
+kill -TERM "$qualification_pid"
+wait "$qualification_pid" 2>/dev/null || true
+qualification_pid=""
+
+[[ "$(stat -f %Lp "$(dirname "$instance_lock")")" == "700" ]]
+[[ "$(stat -f %Lp "$instance_lock")" == "600" ]]
 
 [[ "$(stat -f %Lp "$state_directory")" == "700" ]]
 [[ "$(stat -f %Lp "$state_file")" == "600" ]]

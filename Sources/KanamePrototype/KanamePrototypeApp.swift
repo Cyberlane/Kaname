@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import KanameConnectivity
 import KanameDomain
 import KanameFixtures
 import KanamePrototypeUI
@@ -12,6 +13,7 @@ import Darwin
 struct KanamePrototypeApp: App {
 #if os(macOS)
     @NSApplicationDelegateAdaptor(KanameDesktopAppDelegate.self) private var appDelegate
+    private let singleInstance = KanameDesktopSingleInstanceCoordinator.acquireOrExit()
 #endif
 
     var body: some Scene {
@@ -22,6 +24,9 @@ struct KanamePrototypeApp: App {
                 .preferredColorScheme(.dark)
         }
         .defaultSize(width: 1_520, height: 940)
+        .commands {
+            CommandGroup(replacing: .newItem) {}
+        }
 #else
         WindowGroup {
             IPhoneControlSurface()
@@ -37,31 +42,50 @@ struct KanamePrototypeApp: App {
 final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
     private var fallbackWindow: NSWindow?
     private var postedMouseBackEvent = false
+    private var activationObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        DispatchQueue.main.async { [weak self] in
-            self?.ensureVisibleWindow()
+        activationObserver = NotificationCenter.default.addObserver(
+            forName: .kanameActivateExistingInstance,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                _ = self?.ensureVisibleWindow(allowCreation: true)
+            }
         }
+        configureInitialWindow(remainingAttempts: 20)
     }
 
     func applicationShouldHandleReopen(
         _ sender: NSApplication,
         hasVisibleWindows flag: Bool
     ) -> Bool {
-        if !flag { ensureVisibleWindow() }
+        ensureVisibleWindow(allowCreation: !flag)
         return true
     }
 
-    private func ensureVisibleWindow() {
-        if let existing = NSApplication.shared.windows.first(where: { $0.isVisible }) {
+    private func configureInitialWindow(remainingAttempts: Int) {
+        if ensureVisibleWindow(allowCreation: false) { return }
+        guard remainingAttempts > 0 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.configureInitialWindow(remainingAttempts: remainingAttempts - 1)
+        }
+    }
+
+    @discardableResult
+    private func ensureVisibleWindow(allowCreation: Bool) -> Bool {
+        if let existing = NSApplication.shared.windows.first(where: { $0.canBecomeMain }) {
             existing.sharingType = .readOnly
             applyRequestedWindowSize(to: existing)
+            if existing.isMiniaturized { existing.deminiaturize(nil) }
             existing.makeKeyAndOrderFront(nil)
             NSApplication.shared.activate(ignoringOtherApps: true)
             postMouseBackEventIfRequested(to: existing)
             captureSnapshotIfRequested(window: existing)
-            return
+            return true
         }
+        guard allowCreation else { return false }
         let controller = NSHostingController(
             rootView: KanameDesktopWorkspace()
                 .tint(Nord.frost2)
@@ -79,6 +103,7 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
         NSApplication.shared.activate(ignoringOtherApps: true)
         postMouseBackEventIfRequested(to: window)
         captureSnapshotIfRequested(window: window)
+        return true
     }
 
     private var requestedWindowSize: NSSize? {
@@ -149,6 +174,57 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
             }
         }
     }
+}
+
+private final class KanameDesktopSingleInstanceCoordinator: @unchecked Sendable {
+    private static let activationNotification = Notification.Name(
+        "com.cyberlane.kaname.desktop.activate-existing-instance"
+    )
+
+    private let instanceLock: KanameDesktopInstanceLock
+    private var distributedObserver: NSObjectProtocol?
+
+    static func acquireOrExit() -> KanameDesktopSingleInstanceCoordinator {
+        do {
+            return try KanameDesktopSingleInstanceCoordinator()
+        } catch KanameDesktopInstanceLockError.alreadyRunning {
+            DistributedNotificationCenter.default().postNotificationName(
+                activationNotification,
+                object: nil,
+                deliverImmediately: true
+            )
+            Darwin.exit(EXIT_SUCCESS)
+        } catch {
+            fputs("Kaname could not establish its single-instance lock.\n", stderr)
+            Darwin.exit(EXIT_FAILURE)
+        }
+    }
+
+    private init() throws {
+        instanceLock = try KanameDesktopInstanceLock()
+        distributedObserver = DistributedNotificationCenter.default().addObserver(
+            forName: Self.activationNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            MainActor.assumeIsolated {
+                NSApplication.shared.activate(ignoringOtherApps: true)
+                NotificationCenter.default.post(name: .kanameActivateExistingInstance, object: nil)
+            }
+        }
+    }
+
+    deinit {
+        if let distributedObserver {
+            DistributedNotificationCenter.default().removeObserver(distributedObserver)
+        }
+    }
+}
+
+private extension Notification.Name {
+    static let kanameActivateExistingInstance = Notification.Name(
+        "com.cyberlane.kaname.desktop.activate-existing-instance.local"
+    )
 }
 
 private func finishSnapshotCapture(_ png: Data?, at outputURL: URL) -> Never {

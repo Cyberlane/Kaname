@@ -213,6 +213,29 @@ struct ProviderConnectivityTests {
 
 #if os(macOS)
     @Test
+    func desktopInstanceLockRejectsASecondDevelopmentOrInstalledProcess() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "kaname-instance-lock-test-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let lockFile = directory.appending(path: "desktop-instance.lock", directoryHint: .notDirectory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        do {
+            let primary = try KanameDesktopInstanceLock(lockFileURL: lockFile)
+            #expect(throws: KanameDesktopInstanceLockError.alreadyRunning) {
+                try KanameDesktopInstanceLock(lockFileURL: lockFile)
+            }
+            withExtendedLifetime(primary) {}
+        }
+        let directoryMode = try FileManager.default.attributesOfItem(atPath: directory.path)[.posixPermissions] as? Int
+        let lockFileMode = try FileManager.default.attributesOfItem(atPath: lockFile.path)[.posixPermissions] as? Int
+        #expect(directoryMode == 0o700)
+        #expect(lockFileMode == 0o600)
+
+        let replacement = try KanameDesktopInstanceLock(lockFileURL: lockFile)
+        _ = replacement
+    }
+
+    @Test
     func googleLoopbackReceiverBindsBeforeCompletingCallback() async throws {
         let receiver = try await GoogleLoopbackReceiver.start()
         let expectedState = "state-\(UUID().uuidString)"
