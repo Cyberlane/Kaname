@@ -30,6 +30,20 @@ arguments=(
   --fail-on-focused-match
 )
 
+receipt_mode=${MORI_STAGED_REVIEW_RECEIPT:-}
+if [[ -n "$receipt_mode" ]]; then
+  if [[ "$receipt_mode" != "1" ]]; then
+    echo "MORI_STAGED_REVIEW_RECEIPT must be exactly 1 when explicitly authorized." >&2
+    exit 2
+  fi
+  receipt_path=$(git rev-parse --git-path mori/staged-review.json)
+  if [[ ! -f "$receipt_path" ]]; then
+    echo "No local staged review receipt exists. Inspect the report, then run 'mori review acknowledge --staged --accept-focused .' only with explicit owner authorization." >&2
+    exit 1
+  fi
+  arguments+=(--review-receipt "$receipt_path")
+fi
+
 set +e
 mori "${arguments[@]}" . >"$report" 2>&1
 status=$?
@@ -43,5 +57,6 @@ fi
 cat "$report" >&2
 if (( status == 3 )); then
   echo "Mori found focused structural matches. Inspect both locations and reuse, refactor, or document why the similarity is intentional." >&2
+  echo "For an explicitly authorized one-commit exception, create an exact staged receipt and run the commit with MORI_STAGED_REVIEW_RECEIPT=1; findings remain visible." >&2
 fi
 exit "$status"

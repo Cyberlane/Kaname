@@ -132,8 +132,10 @@ mori scan \
 
 Confirm `configuration.input.mode` is `git-index`, retain its HEAD and index
 digest, and require both working-tree inclusion flags to be false. Staged mode
-reads tracked source, ignore rules, and `.mori.json` from that same snapshot;
-it must never be described as including unstaged or untracked content.
+reads tracked source, ignore rules, `.mori.json`, and any baseline from that
+same snapshot; a baseline must be a tracked regular file inside the worktree.
+It must never be described as including unstaged, external, or untracked
+content.
 `--include-focused` bypasses ordinary ignore rules for focused files but not
 explicit excludes, generated policy, unsupported syntax, or resource limits.
 
@@ -286,7 +288,7 @@ requires it.
 
 ## Validate the report
 
-Require `schema_version` to equal `18`. Validate the mandatory `tool` object,
+Require `schema_version` to equal `19`. Validate the mandatory `tool` object,
 including version, revision, source date, modified flag, platform, Go version,
 and normalization version. Official release binaries provide a full revision
 and source date. A version-pinned source build can report its version while
@@ -322,13 +324,14 @@ revision or date from the version string. Inspect:
   to be `analyzed` in strict review, and report generated, resource,
   unsupported, or undiscovered statuses instead of collapsing them;
 - `configuration.input`: for staged scans, verify the Git-index digest, HEAD,
-  and false working-tree and untracked inclusion flags;
+  and false working-tree and untracked inclusion flags; the index digest also
+  binds any loaded baseline blob;
 - `configuration.scope` and `scope_roots`: verify the selected named project
   surface and remember that these fields participate in baseline compatibility;
 - `configuration.profile`: record the selected named defaults and verify the
   neighboring effective fields rather than assuming the profile was unmodified;
 - `configuration.scan_profile_digest`, `baseline_profile_digest`, and
-  `baseline_profile_status`: require exact schema-3 profile compatibility when
+  `baseline_profile_status`: require exact schema-4 profile compatibility when
   a baseline suppresses findings;
 - `configuration.ignore_file_evidence`: confirm that each loaded ignore source
   has exact SHA-256 content evidence included in the scan-profile digest;
@@ -405,9 +408,19 @@ revoke acceptance. `baseline update` is preview-only unless `--accept-all` is
 explicit. Mutations use complete internal reports and reject warnings unless
 each reviewed kind is repeated with `--allow-warning`.
 
-Schema-3 baselines bind acceptance to the effective scan-profile digest.
+When the owner explicitly accepts focused findings for exactly one staged
+commit and durable suppression would be misleading, use `mori review
+acknowledge --staged --accept-focused`. The default local receipt lives under
+private Git metadata and uses owner-only permissions on POSIX filesystems.
+Pass it to the hook with `--review-receipt`; require a
+compatible receipt in schema-19 evidence. It changes only the focused-match
+policy exit status, never hides findings, and any HEAD, index, profile, tool,
+normalization, or focused-identity change invalidates it.
+
+Schema-4 baselines bind acceptance to the effective scan-profile digest and
+support `false-positive` as a precise durable classification.
 Require `configuration.baseline_profile_status` to be `compatible` in strict
-gates. Schema-1 and schema-2 baselines remain readable with a warning, but use
+gates. Schema-1 through schema-3 baselines remain readable with a warning, but use
 `baseline migrate --accept-profile` before mutation. Content scope is the
 default: one accepted normalized content-pair identity can suppress identical
 copies in new locations. Use path scope when copied code in a new file must
