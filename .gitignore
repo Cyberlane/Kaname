@@ -10,6 +10,10 @@
 /.build/
 /iOS/KanameIPhonePrototype.xcodeproj/project.xcworkspace/
 
+# Python script caches
+**/__pycache__/
+**/*.pyc
+
 # Rust build output
 **/target/
 

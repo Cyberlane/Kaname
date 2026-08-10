@@ -1,6 +1,11 @@
 import Combine
 import CryptoKit
 import Foundation
+import KanameDomain
+import KanameLocalCore
+#if os(macOS)
+import Darwin
+#endif
 
 public enum DesktopAttention: String, Codable, CaseIterable, Equatable, Sendable {
     case needsResponse
@@ -390,7 +395,7 @@ public struct DesktopPreferences: Codable, Equatable, Sendable {
 }
 
 public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
-    public static let currentVersion = 13
+    public static let currentVersion = KanameDesktopStateSchema.currentVersion
 
     public var version: Int
     public var projects: [DesktopProject]
@@ -548,46 +553,31 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
     func migratedToCurrent(now: Int64) throws -> DesktopAppSnapshot {
         guard (1...12).contains(version) else { throw DesktopModelError.unsupportedVersion }
         var migrated = self
-        migrated.version = Self.currentVersion
-        if migrated.domains == .empty {
-            migrated.domains = .starter(now: now)
-        }
-        if let index = migrated.projects.firstIndex(where: { $0.id == "project-kaname" }),
-           migrated.projects[index].context == .empty {
-            migrated.projects[index].context = DesktopProjectContext(
-                instructionReferences: ["AGENTS.md"],
-                knowledgeSourceIDs: ["knowledge-coding-ade", "knowledge-kaname-repository"],
-                skillIDs: ["skill-mori-review", "skill-obsidian"]
-            )
-        }
-        migrated.lastSavedAtUnixMillis = now
-
-        if let index = migrated.threads.firstIndex(where: { $0.id == "thread-desktop-dogfood" }) {
-            migrated.threads[index].summary = "The polished desktop workspace is installed and ready for dogfooding."
-            migrated.threads[index].attention = .needsResponse
-            migrated.threads[index].unread = true
-            migrated.threads[index].updatedAtUnixMillis = now
-            if !migrated.threads[index].messages.contains(where: { $0.id == "message-desktop-ready" }) {
-                migrated.threads[index].messages.append(
-                    DesktopMessage(
-                        id: "message-desktop-ready",
-                        role: .assistant,
-                        body: "The persistent workspace, integrated safety surfaces, private local core, release packaging, and visual qualification are ready.",
-                        createdAtUnixMillis: now
+        while migrated.version < Self.currentVersion {
+            switch migrated.version {
+            case 1:
+                break
+            case 2:
+                if migrated.domains == .empty {
+                    migrated.domains = .starter(now: now)
+                }
+            case 3, 4, 5:
+                break
+            case 6:
+                if let index = migrated.projects.firstIndex(where: { $0.id == "project-kaname" }),
+                   migrated.projects[index].context == .empty {
+                    migrated.projects[index].context = DesktopProjectContext(
+                        instructionReferences: ["AGENTS.md"],
+                        knowledgeSourceIDs: ["knowledge-coding-ade", "knowledge-kaname-repository"],
+                        skillIDs: ["skill-mori-review", "skill-obsidian"]
                     )
-                )
+                }
+            case 7, 8, 9, 10, 11, 12:
+                break
+            default:
+                throw DesktopModelError.unsupportedVersion
             }
-            migrated.threads[index].plan = [
-                DesktopPlanItem(title: "Persistent desktop workspace", state: .complete),
-                DesktopPlanItem(title: "Integrated devices and remote health", state: .complete),
-                DesktopPlanItem(title: "Packaging and interactive QA", state: .complete),
-            ]
-            migrated.threads[index].evidence = [
-                        DesktopEvidence(label: "Swift tests", detail: "Full desktop suite passed", state: .passed),
-                DesktopEvidence(label: "Rust tests", detail: "26 tests passed", state: .passed),
-                DesktopEvidence(label: "Packaged app", detail: "Signed, installed, and visually qualified", state: .passed),
-                DesktopEvidence(label: "Local core", detail: "F-01 through F-14 replayed through Mach XPC", state: .passed),
-            ]
+            migrated.version += 1
         }
         return migrated
     }
@@ -603,15 +593,131 @@ public protocol DesktopRecoveryStateStoring: DesktopStateStoring {
     func saveRecovered(_ data: Data) throws
 }
 
+public enum DesktopRecoveryReason: String, Codable, Equatable, Sendable {
+    case unreadableState
+    case unsupportedStateVersion
+    case migrationFailed
+    case initialPersistenceFailed
+    case runtimeRollbackUnverified
+}
+
+public struct DesktopRecoveryStatus: Equatable, Sendable {
+    public let reason: DesktopRecoveryReason
+    public let detectedStateSchemaVersion: Int?
+    public let quarantineCreated: Bool
+    public let previousWorkspaceAvailable: Bool
+
+    public init(
+        reason: DesktopRecoveryReason,
+        detectedStateSchemaVersion: Int?,
+        quarantineCreated: Bool,
+        previousWorkspaceAvailable: Bool
+    ) {
+        self.reason = reason
+        self.detectedStateSchemaVersion = detectedStateSchemaVersion
+        self.quarantineCreated = quarantineCreated
+        self.previousWorkspaceAvailable = previousWorkspaceAvailable
+    }
+}
+
+public enum DesktopModelRecoveryError: Error, Equatable, LocalizedError {
+    case recoveryNotRequired
+    case recoveryUnavailable
+    case previousWorkspaceUnavailable
+    case restoreArtifactInvalid
+    case persistenceVerificationFailed
+    case activeRuntimeWork
+    case recoveryRollbackFailed
+
+    public var errorDescription: String? {
+        switch self {
+        case .recoveryNotRequired: "The workspace is not in recovery mode."
+        case .recoveryUnavailable: "Managed desktop recovery is unavailable for this state store."
+        case .previousWorkspaceUnavailable: "No previous private workspace is available to restore."
+        case .restoreArtifactInvalid: "The verified recovery artifact is not a supported workspace state."
+        case .persistenceVerificationFailed: "Kaname could not verify the persisted recovery state."
+        case .activeRuntimeWork: "Wait for the active provider worker to stop before resetting or restoring Kaname."
+        case .recoveryRollbackFailed: "Kaname could not prove that workspace and runtime recovery rolled back together. It remains locked in read-only recovery."
+        }
+    }
+}
+
+private struct DesktopRecoveryWorkerState: Decodable {
+    let processIdentifier: Int32
+}
+
+public struct DesktopRuntimeArchiveMove: Equatable, Sendable {
+    public let source: URL
+    public let archive: URL
+
+    public init(source: URL, archive: URL) {
+        self.source = source
+        self.archive = archive
+    }
+}
+
+public struct DesktopRuntimeRestoreTransaction: Sendable {
+    public let originalMoves: [DesktopRuntimeArchiveMove]
+    public let activatedRoots: [URL]
+    public let failedRestoreDirectory: URL
+}
+
 public final class FileDesktopStateStore: DesktopRecoveryStateStoring {
     public let fileURL: URL
+    private let runtimeMoveItem: (URL, URL) throws -> Void
 
     public var recoveryFileURL: URL {
         fileURL.deletingLastPathComponent().appendingPathComponent("workspace.previous.json")
     }
 
-    public init(fileURL: URL) {
+    public var managedRecoveryDirectoryURL: URL {
+        fileURL.deletingLastPathComponent().appendingPathComponent("Recovery", isDirectory: true)
+    }
+
+    public var backupHistoryDirectoryURL: URL {
+        managedRecoveryDirectoryURL.appendingPathComponent("Backups", isDirectory: true)
+    }
+
+    public var quarantineDirectoryURL: URL {
+        managedRecoveryDirectoryURL.appendingPathComponent("Quarantine", isDirectory: true)
+    }
+
+    public var receiptDirectoryURL: URL {
+        managedRecoveryDirectoryURL.appendingPathComponent("Receipts", isDirectory: true)
+    }
+
+    public var recoveryLockMarkerURL: URL {
+        managedRecoveryDirectoryURL.appendingPathComponent("runtime-recovery-lock.json")
+    }
+
+    public var applicationSupportRootURL: URL {
+        fileURL.deletingLastPathComponent().deletingLastPathComponent()
+    }
+
+    public var localCoreDirectoryURL: URL {
+        applicationSupportRootURL.appendingPathComponent("LocalCore", isDirectory: true)
+    }
+
+    public var conversationServiceDirectoryURL: URL {
+        applicationSupportRootURL.appendingPathComponent("ConversationService", isDirectory: true)
+    }
+
+    public var resetArchiveDirectoryURL: URL {
+        managedRecoveryDirectoryURL.appendingPathComponent("ResetArchives", isDirectory: true)
+    }
+
+    public convenience init(fileURL: URL) {
+        self.init(fileURL: fileURL) { source, destination in
+            try FileManager.default.moveItem(at: source, to: destination)
+        }
+    }
+
+    init(
+        fileURL: URL,
+        runtimeMoveItem: @escaping (URL, URL) throws -> Void
+    ) {
         self.fileURL = fileURL
+        self.runtimeMoveItem = runtimeMoveItem
     }
 
     public static func applicationSupport(rootDirectoryName: String = "Kaname") -> FileDesktopStateStore {
@@ -628,13 +734,13 @@ public final class FileDesktopStateStore: DesktopRecoveryStateStoring {
     }
 
     public func load() throws -> Data? {
-        guard FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
-        return try Data(contentsOf: fileURL)
+        try readPrivateIfPresent(at: fileURL)
     }
 
     public func save(_ data: Data) throws {
         try prepareDirectory()
         if FileManager.default.fileExists(atPath: fileURL.path) {
+            guard try DesktopRecoveryService.isRegularNonSymlink(fileURL) else { throw DesktopRecoveryError.unsafeSource }
             let previous = try Data(contentsOf: fileURL)
             try writePrivate(previous, to: recoveryFileURL)
         }
@@ -642,34 +748,477 @@ public final class FileDesktopStateStore: DesktopRecoveryStateStoring {
     }
 
     public func loadRecovery() throws -> Data? {
-        guard FileManager.default.fileExists(atPath: recoveryFileURL.path) else { return nil }
-        return try Data(contentsOf: recoveryFileURL)
+        try readPrivateIfPresent(at: recoveryFileURL)
     }
 
     public func saveRecovered(_ data: Data) throws {
         try prepareDirectory()
+        if FileManager.default.fileExists(atPath: fileURL.path) {
+            guard try DesktopRecoveryService.isRegularNonSymlink(fileURL) else { throw DesktopRecoveryError.unsafeSource }
+        }
         try writePrivate(data, to: fileURL)
+    }
+
+    @discardableResult
+    public func quarantinePrimary(
+        reasonCode: String,
+        detectedAtUnixMillis: Int64
+    ) throws -> URL? {
+        guard FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
+        guard try DesktopRecoveryService.isRegularNonSymlink(fileURL) else { throw DesktopRecoveryError.unsafeSource }
+        let primary = try Data(contentsOf: fileURL)
+        try preparePrivateDirectory(quarantineDirectoryURL)
+        let digest = DesktopRecoveryService.sha256(primary)
+        let incidentURL = quarantineDirectoryURL.appendingPathComponent(
+            "incident-\(digest.prefix(24))",
+            isDirectory: true
+        )
+        let quarantinedStateURL = incidentURL.appendingPathComponent("workspace.json")
+        if FileManager.default.fileExists(atPath: quarantinedStateURL.path) {
+            guard DesktopRecoveryService.sha256(try Data(contentsOf: quarantinedStateURL)) == digest else {
+                throw DesktopRecoveryError.destinationExists
+            }
+            return quarantinedStateURL
+        }
+        try preparePrivateDirectory(incidentURL)
+        try writePrivate(primary, to: quarantinedStateURL)
+        guard try Data(contentsOf: quarantinedStateURL) == primary else {
+            throw DesktopModelRecoveryError.persistenceVerificationFailed
+        }
+        let event = DesktopRedactedDiagnosticEvent(
+            category: "persistence",
+            code: reasonCode,
+            occurredAtUnixMillis: detectedAtUnixMillis
+        )
+        try writePrivate(try recoveryEncoder.encode(event), to: incidentURL.appendingPathComponent("receipt.json"))
+        return quarantinedStateURL
+    }
+
+    @discardableResult
+    public func createPrivateBackupHistory(
+        stateSchemaVersion: Int,
+        createdAtUnixMillis: Int64,
+        includesRuntimeState: Bool = false
+    ) throws -> DesktopBackupManifest? {
+        let sources = try recoverySources(includesRuntimeState: includesRuntimeState)
+        guard !sources.isEmpty else { return nil }
+        try preparePrivateDirectory(backupHistoryDirectoryURL)
+        var sourceFingerprint = SHA256()
+        for source in sources.sorted(by: { $0.archiveName < $1.archiveName }) {
+            sourceFingerprint.update(data: Data(source.archiveName.utf8))
+            sourceFingerprint.update(data: Data([0]))
+            sourceFingerprint.update(data: try Data(contentsOf: source.fileURL, options: [.mappedIfSafe]))
+        }
+        let digest = sourceFingerprint.finalize().map { String(format: "%02x", $0) }.joined()
+        let destination = backupHistoryDirectoryURL.appendingPathComponent(
+            "backup-v\(stateSchemaVersion)-\(digest.prefix(24)).kanamebackup",
+            isDirectory: true
+        )
+        if FileManager.default.fileExists(atPath: destination.path) {
+            return try DesktopRecoveryService().validateBackup(at: destination)
+        }
+        let service = DesktopRecoveryService()
+        _ = try service.createBackup(
+            at: destination,
+            sources: sources,
+            stateSchemaVersion: stateSchemaVersion,
+            createdAtUnixMillis: createdAtUnixMillis,
+            runtimeStateIncluded: includesRuntimeState
+        )
+        return try service.validateBackup(at: destination)
+    }
+
+    @discardableResult
+    public func exportRecoveryBackup(
+        to destination: URL,
+        stateSchemaVersion: Int,
+        createdAtUnixMillis: Int64
+    ) throws -> DesktopBackupManifest {
+        let runtimeLock = try acquireExclusiveRuntimeRecoveryLock()
+        defer { _ = runtimeLock }
+        try requireRuntimeQuiescent()
+        let sources = try recoverySources(includesRuntimeState: true)
+        let service = DesktopRecoveryService()
+        _ = try service.createBackup(
+            at: destination,
+            sources: sources,
+            stateSchemaVersion: stateSchemaVersion,
+            createdAtUnixMillis: createdAtUnixMillis,
+            runtimeStateIncluded: true
+        )
+        return try service.validateBackup(at: destination)
+    }
+
+    public func requireRuntimeQuiescent() throws {
+        guard FileManager.default.fileExists(atPath: conversationServiceDirectoryURL.path) else { return }
+        for url in try regularFiles(below: conversationServiceDirectoryURL)
+        where url.lastPathComponent == "worker.json" {
+            guard let data = try? Data(contentsOf: url),
+                  let state = try? JSONDecoder().decode(DesktopRecoveryWorkerState.self, from: data),
+                  state.processIdentifier > 1 else { continue }
+#if os(macOS)
+            if Darwin.kill(state.processIdentifier, 0) == 0 {
+                throw DesktopModelRecoveryError.activeRuntimeWork
+            }
+#endif
+        }
+    }
+
+    public func acquireExclusiveRuntimeRecoveryLock() throws -> KanameRuntimeRecoveryFileLock {
+        do {
+            return try KanameRuntimeRecoveryFileLock.acquireExclusiveNonblocking(
+                applicationSupportRoot: applicationSupportRootURL
+            )
+        } catch {
+            throw DesktopModelRecoveryError.activeRuntimeWork
+        }
+    }
+
+    @discardableResult
+    public func archiveRuntimeState(resetID: UUID) throws -> [DesktopRuntimeArchiveMove] {
+        try requireRuntimeQuiescent()
+        let destinationRoot = resetArchiveDirectoryURL
+            .appendingPathComponent(resetID.uuidString.lowercased(), isDirectory: true)
+        guard !FileManager.default.fileExists(atPath: destinationRoot.path) else {
+            throw DesktopRecoveryError.destinationExists
+        }
+        try preparePrivateDirectory(destinationRoot)
+        var moves: [DesktopRuntimeArchiveMove] = []
+        do {
+            for source in [localCoreDirectoryURL, conversationServiceDirectoryURL]
+            where FileManager.default.fileExists(atPath: source.path) {
+                let values = try source.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+                guard values.isDirectory == true, values.isSymbolicLink != true else {
+                    throw DesktopRecoveryError.unsafeSource
+                }
+                let destination = destinationRoot.appendingPathComponent(source.lastPathComponent, isDirectory: true)
+                try runtimeMoveItem(source, destination)
+                moves.append(.init(source: source, archive: destination))
+            }
+            return moves
+        } catch {
+            do {
+                try restoreArchivedRuntimeState(moves)
+            } catch {
+                try? persistRecoveryFailureEvent(DesktopRedactedDiagnosticEvent(
+                    category: "recovery",
+                    code: "runtime-archive-rollback-unverified",
+                    occurredAtUnixMillis: Int64(Date().timeIntervalSince1970 * 1_000)
+                ))
+                throw DesktopModelRecoveryError.recoveryRollbackFailed
+            }
+            throw error
+        }
+    }
+
+    public func restoreArchivedRuntimeState(_ moves: [DesktopRuntimeArchiveMove]) throws {
+        for move in moves.reversed() where FileManager.default.fileExists(atPath: move.archive.path) {
+            guard !FileManager.default.fileExists(atPath: move.source.path) else {
+                throw DesktopRecoveryError.destinationExists
+            }
+            try FileManager.default.createDirectory(
+                at: move.source.deletingLastPathComponent(),
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+            try runtimeMoveItem(move.archive, move.source)
+        }
+        guard moves.allSatisfy({
+            FileManager.default.fileExists(atPath: $0.source.path)
+                && !FileManager.default.fileExists(atPath: $0.archive.path)
+        }) else {
+            throw DesktopModelRecoveryError.persistenceVerificationFailed
+        }
+    }
+
+    public func hasRuntimeState() throws -> Bool {
+        try !regularFiles(below: localCoreDirectoryURL).isEmpty
+            || !regularFiles(below: conversationServiceDirectoryURL).isEmpty
+    }
+
+    public func activateVerifiedRuntimeRestore(
+        from bundleURL: URL,
+        restoreID: UUID
+    ) throws -> DesktopRuntimeRestoreTransaction {
+        let service = DesktopRecoveryService()
+        let manifest = try service.validateBackup(at: bundleURL)
+        let runtimeKinds: Set<DesktopRecoveryArtifactKind> = [
+            .localCoreJournal,
+            .localCoreSnapshot,
+            .conversationServiceState,
+        ]
+        let runtimeArtifacts = try service.verifiedArtifacts(kinds: runtimeKinds, from: bundleURL)
+        guard manifest.runtimeStateIncluded == true else {
+            guard runtimeArtifacts.isEmpty else { throw DesktopModelRecoveryError.restoreArtifactInvalid }
+            if try hasRuntimeState() { throw DesktopModelRecoveryError.restoreArtifactInvalid }
+            return DesktopRuntimeRestoreTransaction(
+                originalMoves: [],
+                activatedRoots: [],
+                failedRestoreDirectory: managedRecoveryDirectoryURL
+            )
+        }
+        let stagingRoot = managedRecoveryDirectoryURL
+            .appendingPathComponent("RuntimeRestoreStaging", isDirectory: true)
+            .appendingPathComponent(restoreID.uuidString.lowercased(), isDirectory: true)
+        guard !FileManager.default.fileExists(atPath: stagingRoot.path) else {
+            throw DesktopRecoveryError.destinationExists
+        }
+        try preparePrivateDirectory(stagingRoot)
+        do {
+            for artifact in runtimeArtifacts {
+                guard let relativePath = artifact.manifest.restoreRelativePath,
+                      Self.runtimeRestorePathIsAllowed(relativePath, kind: artifact.manifest.kind) else {
+                    throw DesktopModelRecoveryError.restoreArtifactInvalid
+                }
+                let destination = stagingRoot.appendingPathComponent(relativePath)
+                try preparePrivateDirectory(destination.deletingLastPathComponent())
+                try writePrivate(artifact.data, to: destination)
+            }
+            let originalMoves = try archiveRuntimeState(resetID: restoreID)
+            var activatedRoots: [URL] = []
+            let failedRestoreDirectory = managedRecoveryDirectoryURL
+                .appendingPathComponent("FailedRuntimeRestores", isDirectory: true)
+                .appendingPathComponent(restoreID.uuidString.lowercased(), isDirectory: true)
+            do {
+                for name in ["LocalCore", "ConversationService"] {
+                    let staged = stagingRoot.appendingPathComponent(name, isDirectory: true)
+                    guard FileManager.default.fileExists(atPath: staged.path) else { continue }
+                    let active = applicationSupportRootURL.appendingPathComponent(name, isDirectory: true)
+                    guard !FileManager.default.fileExists(atPath: active.path) else {
+                        throw DesktopRecoveryError.destinationExists
+                    }
+                    try runtimeMoveItem(staged, active)
+                    activatedRoots.append(active)
+                }
+                return DesktopRuntimeRestoreTransaction(
+                    originalMoves: originalMoves,
+                    activatedRoots: activatedRoots,
+                    failedRestoreDirectory: failedRestoreDirectory
+                )
+            } catch {
+                let transaction = DesktopRuntimeRestoreTransaction(
+                    originalMoves: originalMoves,
+                    activatedRoots: activatedRoots,
+                    failedRestoreDirectory: failedRestoreDirectory
+                )
+                do {
+                    try rollbackRuntimeRestore(transaction)
+                } catch {
+                    try? persistRecoveryFailureEvent(DesktopRedactedDiagnosticEvent(
+                        category: "recovery",
+                        code: "runtime-activation-rollback-unverified",
+                        occurredAtUnixMillis: Int64(Date().timeIntervalSince1970 * 1_000)
+                    ))
+                    throw DesktopModelRecoveryError.recoveryRollbackFailed
+                }
+                throw error
+            }
+        } catch {
+            throw error
+        }
+    }
+
+    public func rollbackRuntimeRestore(_ transaction: DesktopRuntimeRestoreTransaction) throws {
+        if !transaction.activatedRoots.isEmpty {
+            try preparePrivateDirectory(transaction.failedRestoreDirectory)
+        }
+        for active in transaction.activatedRoots.reversed()
+        where FileManager.default.fileExists(atPath: active.path) {
+            let failed = transaction.failedRestoreDirectory.appendingPathComponent(active.lastPathComponent, isDirectory: true)
+            guard !FileManager.default.fileExists(atPath: failed.path) else {
+                throw DesktopRecoveryError.destinationExists
+            }
+            try runtimeMoveItem(active, failed)
+        }
+        try restoreArchivedRuntimeState(transaction.originalMoves)
+        guard transaction.activatedRoots.allSatisfy({ active in
+            FileManager.default.fileExists(
+                atPath: transaction.failedRestoreDirectory.appendingPathComponent(active.lastPathComponent).path
+            )
+        }) else {
+            throw DesktopModelRecoveryError.persistenceVerificationFailed
+        }
+    }
+
+    private static func runtimeRestorePathIsAllowed(
+        _ path: String,
+        kind: DesktopRecoveryArtifactKind
+    ) -> Bool {
+        switch kind {
+        case .localCoreJournal, .localCoreSnapshot:
+            path.hasPrefix("LocalCore/")
+        case .conversationServiceState:
+            path.hasPrefix("ConversationService/")
+        case .workspaceState, .previousWorkspaceState:
+            false
+        }
+    }
+
+    private func recoverySources(includesRuntimeState: Bool) throws -> [DesktopRecoverySource] {
+        var sources: [DesktopRecoverySource] = []
+        if FileManager.default.fileExists(atPath: fileURL.path) {
+            guard try DesktopRecoveryService.isRegularNonSymlink(fileURL) else { throw DesktopRecoveryError.unsafeSource }
+            sources.append(.init(kind: .workspaceState, fileURL: fileURL, archiveName: "workspace.json"))
+        }
+        if FileManager.default.fileExists(atPath: recoveryFileURL.path) {
+            guard try DesktopRecoveryService.isRegularNonSymlink(recoveryFileURL) else { throw DesktopRecoveryError.unsafeSource }
+            sources.append(.init(kind: .previousWorkspaceState, fileURL: recoveryFileURL, archiveName: "workspace.previous.json"))
+        }
+        guard includesRuntimeState else { return sources }
+        sources += try runtimeRecoverySources(
+            below: localCoreDirectoryURL,
+            kind: .localCoreJournal,
+            restorePrefix: "LocalCore",
+            archivePrefix: "local-core"
+        )
+        sources += try runtimeRecoverySources(
+            below: conversationServiceDirectoryURL,
+            kind: .conversationServiceState,
+            restorePrefix: "ConversationService",
+            archivePrefix: "conversation"
+        )
+        guard sources.count <= 4_098 else { throw DesktopRecoveryError.unsafeSource }
+        return sources
+    }
+
+    private func runtimeRecoverySources(
+        below root: URL,
+        kind: DesktopRecoveryArtifactKind,
+        restorePrefix: String,
+        archivePrefix: String
+    ) throws -> [DesktopRecoverySource] {
+        try regularFiles(below: root).map { url in
+            let relative = String(url.standardizedFileURL.path.dropFirst(root.standardizedFileURL.path.count + 1))
+            let restorePath = "\(restorePrefix)/\(relative)"
+            let opaqueName = "\(archivePrefix)-\(DesktopRecoveryService.sha256(Data(restorePath.utf8)).prefix(32)).bin"
+            return DesktopRecoverySource(
+                kind: kind,
+                fileURL: url,
+                archiveName: opaqueName,
+                restoreRelativePath: restorePath
+            )
+        }
+    }
+
+    private func regularFiles(below root: URL) throws -> [URL] {
+        guard FileManager.default.fileExists(atPath: root.path) else { return [] }
+        let rootValues = try root.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        guard rootValues.isDirectory == true, rootValues.isSymbolicLink != true else {
+            throw DesktopRecoveryError.unsafeSource
+        }
+        let canonicalRoot = root.resolvingSymlinksInPath().standardizedFileURL.path
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
+            options: []
+        ) else { throw DesktopRecoveryError.missingSource }
+        var files: [URL] = []
+        for case let url as URL in enumerator {
+            let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+            guard values.isSymbolicLink != true else { throw DesktopRecoveryError.unsafeSource }
+            guard values.isRegularFile == true else { continue }
+            let canonicalPath = url.resolvingSymlinksInPath().standardizedFileURL.path
+            guard canonicalPath.hasPrefix(canonicalRoot + "/") else { throw DesktopRecoveryError.unsafeSource }
+            files.append(url)
+            guard files.count <= 4_096 else { throw DesktopRecoveryError.unsafeSource }
+        }
+        return files.sorted { $0.path < $1.path }
+    }
+
+    public func persistMigrationReceipt(_ receipt: DesktopMigrationReceipt) throws {
+        try persistRecoveryDocument(receipt, name: "migration-\(receipt.migrationID.uuidString.lowercased()).json")
+    }
+
+    public func persistRestoreReceipt(_ receipt: DesktopRestoreReceipt) throws {
+        try persistRecoveryDocument(receipt, name: "restore-\(receipt.restoreID.uuidString.lowercased()).json")
+    }
+
+    public func persistResetManifest(_ manifest: DesktopResetManifest) throws {
+        try persistRecoveryDocument(manifest, name: "reset-\(manifest.resetID.uuidString.lowercased()).json")
+    }
+
+    public func persistRecoveryFailureEvent(_ event: DesktopRedactedDiagnosticEvent) throws {
+        try persistRecoveryDocument(event, name: "failure-\(UUID().uuidString.lowercased()).json")
+    }
+
+    public func persistRecoveryLockMarker(_ event: DesktopRedactedDiagnosticEvent) throws {
+        guard event.category == "recovery",
+              event.occurredAtUnixMillis >= 0,
+              event.privateDetailByteCount == 0,
+              event.privateDetailSHA256 == nil else {
+            throw DesktopModelRecoveryError.persistenceVerificationFailed
+        }
+        try preparePrivateDirectory(managedRecoveryDirectoryURL)
+        let data = try recoveryEncoder.encode(event)
+        try writePrivate(data, to: recoveryLockMarkerURL)
+        guard try readPrivateIfPresent(at: recoveryLockMarkerURL) == data else {
+            throw DesktopModelRecoveryError.persistenceVerificationFailed
+        }
+    }
+
+    public func loadRecoveryLockMarker() throws -> DesktopRedactedDiagnosticEvent? {
+        guard let data = try readPrivateIfPresent(at: recoveryLockMarkerURL) else { return nil }
+        let event = try JSONDecoder().decode(DesktopRedactedDiagnosticEvent.self, from: data)
+        guard event.category == "recovery",
+              event.occurredAtUnixMillis >= 0,
+              event.privateDetailByteCount == 0,
+              event.privateDetailSHA256 == nil else {
+            throw DesktopModelRecoveryError.persistenceVerificationFailed
+        }
+        return DesktopRedactedDiagnosticEvent(
+            category: event.category,
+            code: event.code,
+            occurredAtUnixMillis: event.occurredAtUnixMillis
+        )
+    }
+
+    public func clearRecoveryLockMarker() throws {
+        guard FileManager.default.fileExists(atPath: recoveryLockMarkerURL.path) else { return }
+        guard try DesktopRecoveryService.isRegularNonSymlink(recoveryLockMarkerURL) else {
+            throw DesktopRecoveryError.unsafeSource
+        }
+        try FileManager.default.removeItem(at: recoveryLockMarkerURL)
+        guard !FileManager.default.fileExists(atPath: recoveryLockMarkerURL.path) else {
+            throw DesktopModelRecoveryError.persistenceVerificationFailed
+        }
+    }
+
+    private func persistRecoveryDocument<Value: Encodable>(_ value: Value, name: String) throws {
+        try preparePrivateDirectory(receiptDirectoryURL)
+        try writePrivate(try recoveryEncoder.encode(value), to: receiptDirectoryURL.appendingPathComponent(name))
     }
 
     private func prepareDirectory() throws {
         let directory = fileURL.deletingLastPathComponent()
-        try FileManager.default.createDirectory(
-            at: directory,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o700],
-            ofItemAtPath: directory.path
-        )
+        try preparePrivateDirectory(directory)
+    }
+
+    private func preparePrivateDirectory(_ directory: URL) throws {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
     }
 
     private func writePrivate(_ data: Data, to url: URL) throws {
+        if FileManager.default.fileExists(atPath: url.path) {
+            guard try DesktopRecoveryService.isRegularNonSymlink(url) else { throw DesktopRecoveryError.unsafeSource }
+        }
         try data.write(to: url, options: .atomic)
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o600],
             ofItemAtPath: url.path
         )
+    }
+
+    private func readPrivateIfPresent(at url: URL) throws -> Data? {
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        guard try DesktopRecoveryService.isRegularNonSymlink(url) else { throw DesktopRecoveryError.unsafeSource }
+        return try Data(contentsOf: url)
+    }
+
+    private var recoveryEncoder: JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return encoder
     }
 }
 
@@ -677,11 +1226,13 @@ public final class FileDesktopStateStore: DesktopRecoveryStateStoring {
 public final class DesktopAppModel: ObservableObject {
     @Published public private(set) var snapshot: DesktopAppSnapshot
     @Published public private(set) var persistenceError: String?
+    @Published public private(set) var recoveryStatus: DesktopRecoveryStatus?
 
     private let store: any DesktopStateStoring
     private let now: () -> Int64
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
+    private var providerEventIDs: Set<String>
 
     public init(
         store: any DesktopStateStoring = FileDesktopStateStore.applicationSupport(),
@@ -691,31 +1242,145 @@ public final class DesktopAppModel: ObservableObject {
         self.now = now
         self.encoder = JSONEncoder()
         self.decoder = JSONDecoder()
-        do {
+        self.providerEventIDs = []
+        self.recoveryStatus = nil
+        let timestamp = now()
+        let runtimeRecoveryLockDetected: Bool
+        if let fileStore = store as? FileDesktopStateStore {
+            do {
+                runtimeRecoveryLockDetected = try fileStore.loadRecoveryLockMarker() != nil
+            } catch {
+                runtimeRecoveryLockDetected = true
+            }
+        } else {
+            runtimeRecoveryLockDetected = false
+        }
+        if runtimeRecoveryLockDetected {
+            do {
+                if let data = try store.load(),
+                   let restored = try? Self.currentSnapshot(from: data, decoder: decoder, now: timestamp) {
+                    self.snapshot = restored.snapshot
+                } else {
+                    self.snapshot = DesktopAppSnapshot.starter(now: timestamp)
+                }
+            } catch {
+                self.snapshot = DesktopAppSnapshot.starter(now: timestamp)
+            }
+            let previousWorkspaceAvailable: Bool
+            if let recoveryStore = store as? any DesktopRecoveryStateStoring {
+                previousWorkspaceAvailable = ((try? recoveryStore.loadRecovery()) ?? nil) != nil
+            } else {
+                previousWorkspaceAvailable = false
+            }
+            self.recoveryStatus = DesktopRecoveryStatus(
+                reason: .runtimeRollbackUnverified,
+                detectedStateSchemaVersion: snapshot.version,
+                quarantineCreated: false,
+                previousWorkspaceAvailable: previousWorkspaceAvailable
+            )
+            self.persistenceError = DesktopModelRecoveryError.recoveryRollbackFailed.localizedDescription
+        } else {
+            do {
             if let data = try store.load() {
-                let restored = try Self.currentSnapshot(from: data, decoder: decoder, now: now())
+                let declaredVersion = Self.declaredSchemaVersion(from: data)
+                var backupID: UUID?
+                let migrationID = UUID()
+                if let declaredVersion, declaredVersion < DesktopAppSnapshot.currentVersion,
+                   let fileStore = store as? FileDesktopStateStore {
+                    backupID = try fileStore.createPrivateBackupHistory(
+                        stateSchemaVersion: declaredVersion,
+                        createdAtUnixMillis: timestamp
+                    )?.backupID
+                }
+                let restored = try Self.currentSnapshot(from: data, decoder: decoder, now: timestamp)
                 if restored.didMigrate {
-                    try store.save(try encoder.encode(restored.snapshot))
+                    do {
+                        let migratedData = try encoder.encode(restored.snapshot)
+                        try store.save(migratedData)
+                        guard try store.load() == migratedData else {
+                            throw DesktopModelRecoveryError.persistenceVerificationFailed
+                        }
+                        try (store as? FileDesktopStateStore)?.persistMigrationReceipt(DesktopMigrationReceipt(
+                            migrationID: migrationID,
+                            fromStateSchemaVersion: declaredVersion ?? restored.snapshot.version,
+                            toStateSchemaVersion: DesktopAppSnapshot.currentVersion,
+                            startedAtUnixMillis: timestamp,
+                            completedAtUnixMillis: now(),
+                            outcome: .applied,
+                            backupID: backupID
+                        ))
+                    } catch {
+                        try? (store as? FileDesktopStateStore)?.persistMigrationReceipt(DesktopMigrationReceipt(
+                            migrationID: migrationID,
+                            fromStateSchemaVersion: declaredVersion ?? 0,
+                            toStateSchemaVersion: DesktopAppSnapshot.currentVersion,
+                            startedAtUnixMillis: timestamp,
+                            completedAtUnixMillis: now(),
+                            outcome: .failed,
+                            backupID: backupID,
+                            reasonCode: "migration-persistence-failed"
+                        ))
+                        throw error
+                    }
                 }
                 self.snapshot = restored.snapshot
             } else {
-                let starter = DesktopAppSnapshot.starter(now: now())
+                let starter = DesktopAppSnapshot.starter(now: timestamp)
                 self.snapshot = starter
                 try store.save(try encoder.encode(starter))
             }
-        } catch {
+            } catch {
+            let primaryData: Data?
+            let primaryReadFailed: Bool
+            do {
+                primaryData = try store.load()
+                primaryReadFailed = false
+            } catch {
+                primaryData = nil
+                primaryReadFailed = true
+            }
+            let declaredVersion = primaryData.flatMap(Self.declaredSchemaVersion(from:))
+            let reason: DesktopRecoveryReason
+            if let declaredVersion, declaredVersion > DesktopAppSnapshot.currentVersion {
+                reason = .unsupportedStateVersion
+            } else if declaredVersion != nil {
+                reason = .migrationFailed
+            } else if primaryReadFailed {
+                reason = .unreadableState
+            } else if primaryData == nil {
+                reason = .initialPersistenceFailed
+            } else {
+                reason = .unreadableState
+            }
+            let quarantineCreated = ((try? (store as? FileDesktopStateStore)?.quarantinePrimary(
+                reasonCode: reason.rawValue,
+                detectedAtUnixMillis: timestamp
+            )) ?? nil) != nil
+            var previousWorkspaceAvailable = false
             if let recoveryStore = store as? any DesktopRecoveryStateStoring,
                let recoveryData = try? recoveryStore.loadRecovery(),
-               let recovered = try? Self.currentSnapshot(from: recoveryData, decoder: decoder, now: now()) {
+               let recovered = try? Self.currentSnapshot(from: recoveryData, decoder: decoder, now: timestamp) {
                 self.snapshot = recovered.snapshot
-                try? recoveryStore.saveRecovered(encoder.encode(recovered.snapshot))
-                self.persistenceError = "Kaname recovered the previous private workspace after the newest local state could not be restored."
+                previousWorkspaceAvailable = true
             } else {
-                self.snapshot = DesktopAppSnapshot.starter(now: now())
-                self.persistenceError = "Kaname opened a safe starter workspace because local state could not be restored."
+                self.snapshot = DesktopAppSnapshot.starter(now: timestamp)
+            }
+            self.recoveryStatus = DesktopRecoveryStatus(
+                reason: reason,
+                detectedStateSchemaVersion: declaredVersion,
+                quarantineCreated: quarantineCreated,
+                previousWorkspaceAvailable: previousWorkspaceAvailable
+            )
+            // Recovery is a first-class blocking workspace, not a transient
+            // save error. Keeping the generic alert clear lets Recovery Center
+            // present the preserved-state choices without an alert obscuring it.
+                self.persistenceError = nil
             }
         }
+        providerEventIDs = Set(snapshot.operations.providerEvents.map(\.id))
     }
+
+    public var isRecoveryReadOnly: Bool { recoveryStatus != nil }
 
     public var activeThreads: [DesktopThread] {
         snapshot.threads
@@ -1056,38 +1721,80 @@ public final class DesktopAppModel: ObservableObject {
         _ event: DesktopProviderEventRecord,
         assistantDelta: String? = nil
     ) -> Bool {
-        guard event.detail.utf8.count <= 65_536,
-              event.rawPayloadBase64?.utf8.count ?? 0 <= 360_000 else { return false }
-        var inserted = false
-        mutate { snapshot in
-            guard !snapshot.operations.providerEvents.contains(where: { $0.id == event.id }) else { return }
-            snapshot.operations.providerEvents.append(event)
-            inserted = true
-            guard let delta = assistantDelta, !delta.isEmpty,
-                  let threadIndex = snapshot.threads.firstIndex(where: { $0.id == event.threadID }) else { return }
-            let messageID = "assistant-\(event.runID)"
-            if let messageIndex = snapshot.threads[threadIndex].messages.firstIndex(where: { $0.id == messageID }) {
-                let current = snapshot.threads[threadIndex].messages[messageIndex]
-                snapshot.threads[threadIndex].messages[messageIndex] = DesktopMessage(
-                    id: current.id,
-                    role: .assistant,
-                    body: String((current.body + delta).prefix(262_144)),
-                    createdAtUnixMillis: current.createdAtUnixMillis
-                )
-            } else {
-                snapshot.threads[threadIndex].messages.append(
-                    DesktopMessage(
-                        id: messageID,
-                        role: .assistant,
-                        body: String(delta.prefix(262_144)),
-                        createdAtUnixMillis: event.createdAtUnixMillis
-                    )
-                )
-            }
-            snapshot.threads[threadIndex].summary = "Kaname is responding…"
-            snapshot.threads[threadIndex].updatedAtUnixMillis = event.createdAtUnixMillis
+        recordProviderEvents([DesktopProviderEventBatchItem(event: event, assistantDelta: assistantDelta)])?
+            .acceptedEventIDs.contains(event.id) == true
+    }
+
+    @discardableResult
+    public func recordProviderEvents(
+        _ items: [DesktopProviderEventBatchItem]
+    ) -> DesktopProviderEventBatchResult? {
+        guard items.count <= 64,
+              items.allSatisfy({ item in
+                  item.event.detail.utf8.count <= 65_536
+                      && (item.event.rawPayloadBase64?.utf8.count ?? 0) <= 360_000
+              }) else { return nil }
+        guard !items.isEmpty else {
+            return DesktopProviderEventBatchResult(acceptedEventIDs: [], duplicateEventIDs: [])
         }
-        return inserted
+
+        var batchEventIDs: Set<String> = []
+        var acceptedItems: [DesktopProviderEventBatchItem] = []
+        var duplicateEventIDs: [String] = []
+        acceptedItems.reserveCapacity(items.count)
+        for item in items {
+            if !providerEventIDs.contains(item.event.id), batchEventIDs.insert(item.event.id).inserted {
+                acceptedItems.append(item)
+            } else {
+                duplicateEventIDs.append(item.event.id)
+            }
+        }
+        guard !acceptedItems.isEmpty else {
+            return DesktopProviderEventBatchResult(acceptedEventIDs: [], duplicateEventIDs: duplicateEventIDs)
+        }
+
+        let persisted = mutate { snapshot in
+            for item in acceptedItems {
+                snapshot.operations.providerEvents.append(item.event)
+                Self.applyAssistantDelta(item.assistantDelta, for: item.event, to: &snapshot)
+            }
+        }
+        guard persisted else { return nil }
+        providerEventIDs.formUnion(acceptedItems.map(\.event.id))
+        return DesktopProviderEventBatchResult(
+            acceptedEventIDs: acceptedItems.map(\.event.id),
+            duplicateEventIDs: duplicateEventIDs
+        )
+    }
+
+    private static func applyAssistantDelta(
+        _ delta: String?,
+        for event: DesktopProviderEventRecord,
+        to snapshot: inout DesktopAppSnapshot
+    ) {
+        guard let delta, !delta.isEmpty,
+              let threadIndex = snapshot.threads.firstIndex(where: { $0.id == event.threadID }) else { return }
+        let messageID = "assistant-\(event.runID)"
+        if let messageIndex = snapshot.threads[threadIndex].messages.firstIndex(where: { $0.id == messageID }) {
+            let current = snapshot.threads[threadIndex].messages[messageIndex]
+            snapshot.threads[threadIndex].messages[messageIndex] = DesktopMessage(
+                id: current.id,
+                role: .assistant,
+                body: String((current.body + delta).prefix(262_144)),
+                createdAtUnixMillis: current.createdAtUnixMillis
+            )
+        } else {
+            snapshot.threads[threadIndex].messages.append(
+                DesktopMessage(
+                    id: messageID,
+                    role: .assistant,
+                    body: String(delta.prefix(262_144)),
+                    createdAtUnixMillis: event.createdAtUnixMillis
+                )
+            )
+        }
+        snapshot.threads[threadIndex].summary = "Kaname is responding…"
+        snapshot.threads[threadIndex].updatedAtUnixMillis = event.createdAtUnixMillis
     }
 
     public func completeProviderRun(id: String, tokenUsage: Int? = nil) {
@@ -2718,11 +3425,297 @@ public final class DesktopAppModel: ObservableObject {
     }
 
     public func clearPersistenceError() {
+        guard recoveryStatus == nil else { return }
         persistenceError = nil
     }
 
+    @discardableResult
+    public func exportRecoveryBackup(to destination: URL) throws -> DesktopBackupManifest {
+        guard let fileStore = store as? FileDesktopStateStore else {
+            throw DesktopModelRecoveryError.recoveryUnavailable
+        }
+        return try fileStore.exportRecoveryBackup(
+            to: destination,
+            stateSchemaVersion: recoveryStatus?.detectedStateSchemaVersion ?? snapshot.version,
+            createdAtUnixMillis: now()
+        )
+    }
+
+    public func restorePreviousWorkspace() throws {
+        guard recoveryStatus != nil else { throw DesktopModelRecoveryError.recoveryNotRequired }
+        guard recoveryStatus?.reason != .runtimeRollbackUnverified else {
+            throw DesktopModelRecoveryError.restoreArtifactInvalid
+        }
+        var runtimeLock: KanameRuntimeRecoveryFileLock?
+        if let fileStore = store as? FileDesktopStateStore {
+            runtimeLock = try fileStore.acquireExclusiveRuntimeRecoveryLock()
+            try fileStore.requireRuntimeQuiescent()
+            guard try !fileStore.hasRuntimeState() else {
+                throw DesktopModelRecoveryError.restoreArtifactInvalid
+            }
+        }
+        defer { _ = runtimeLock }
+        guard let recoveryStore = store as? any DesktopRecoveryStateStoring,
+              let recoveryData = try recoveryStore.loadRecovery() else {
+            throw DesktopModelRecoveryError.previousWorkspaceUnavailable
+        }
+        var receipt: DesktopRestoreReceipt?
+        if let fileStore = store as? FileDesktopStateStore,
+           let backup = try fileStore.createPrivateBackupHistory(
+               stateSchemaVersion: recoveryStatus?.detectedStateSchemaVersion ?? snapshot.version,
+               createdAtUnixMillis: now()
+           ) {
+            let matches = backup.artifacts.filter { $0.kind == .previousWorkspaceState }
+            guard matches.count == 1, let artifact = matches.first,
+                  artifact.byteCount == Int64(recoveryData.count),
+                  artifact.sha256 == DesktopRecoveryService.sha256(recoveryData) else {
+                throw DesktopModelRecoveryError.restoreArtifactInvalid
+            }
+            receipt = DesktopRestoreReceipt(
+                restoreID: UUID(),
+                backupID: backup.backupID,
+                stagedAtUnixMillis: now(),
+                verifiedArtifactCount: 1,
+                verifiedByteCount: Int64(recoveryData.count)
+            )
+        }
+        try restoreVerifiedWorkspaceData(recoveryData, receipt: receipt)
+    }
+
+    public func restoreWorkspace(
+        fromVerifiedBackup bundleURL: URL,
+        artifactKind: DesktopRecoveryArtifactKind = .workspaceState
+    ) throws {
+        guard recoveryStatus != nil else { throw DesktopModelRecoveryError.recoveryNotRequired }
+        guard artifactKind == .workspaceState || artifactKind == .previousWorkspaceState else {
+            throw DesktopModelRecoveryError.restoreArtifactInvalid
+        }
+        let service = DesktopRecoveryService()
+        let manifest = try service.validateBackup(at: bundleURL)
+        if recoveryStatus?.reason == .runtimeRollbackUnverified,
+           manifest.runtimeStateIncluded != true {
+            throw DesktopModelRecoveryError.restoreArtifactInvalid
+        }
+        let data = try service.verifiedArtifactData(kind: artifactKind, from: bundleURL)
+        let artifact = try Self.requireSingleRecoveryArtifact(kind: artifactKind, in: manifest)
+        let restoreID = UUID()
+        var runtimeTransaction: DesktopRuntimeRestoreTransaction?
+        var originalWorkspaceData: Data?
+        var runtimeLock: KanameRuntimeRecoveryFileLock?
+        if let fileStore = store as? FileDesktopStateStore {
+            runtimeLock = try fileStore.acquireExclusiveRuntimeRecoveryLock()
+            try fileStore.requireRuntimeQuiescent()
+            originalWorkspaceData = try fileStore.load()
+            _ = try fileStore.createPrivateBackupHistory(
+                stateSchemaVersion: recoveryStatus?.detectedStateSchemaVersion ?? snapshot.version,
+                createdAtUnixMillis: now(),
+                includesRuntimeState: true
+            )
+            do {
+                runtimeTransaction = try fileStore.activateVerifiedRuntimeRestore(
+                    from: bundleURL,
+                    restoreID: restoreID
+                )
+            } catch {
+                if let recoveryError = error as? DesktopModelRecoveryError,
+                   recoveryError == .recoveryRollbackFailed {
+                    try forceRecoveryReadOnlyAfterRollbackFailure(
+                        fileStore: fileStore,
+                        code: "restore-runtime-activation-rollback-unverified"
+                    )
+                }
+                throw error
+            }
+        }
+        defer { _ = runtimeLock }
+        let receipt = DesktopRestoreReceipt(
+            restoreID: restoreID,
+            backupID: manifest.backupID,
+            stagedAtUnixMillis: now(),
+            verifiedArtifactCount: manifest.runtimeStateIncluded == true ? manifest.artifacts.count : 1,
+            verifiedByteCount: manifest.runtimeStateIncluded == true
+                ? manifest.artifacts.reduce(0) { $0 + $1.byteCount }
+                : artifact.byteCount
+        )
+        do {
+            try restoreVerifiedWorkspaceData(
+                data,
+                receipt: receipt,
+                clearsRecoveryLockMarker: manifest.runtimeStateIncluded == true
+            )
+        } catch {
+            var workspaceRollbackVerified = false
+            var runtimeRollbackVerified = runtimeTransaction == nil
+            if let fileStore = store as? FileDesktopStateStore {
+                if let originalWorkspaceData {
+                    do {
+                        try fileStore.saveRecovered(originalWorkspaceData)
+                        workspaceRollbackVerified = try fileStore.load() == originalWorkspaceData
+                    } catch {
+                        workspaceRollbackVerified = false
+                    }
+                }
+                if let runtimeTransaction {
+                    do {
+                        try fileStore.rollbackRuntimeRestore(runtimeTransaction)
+                        runtimeRollbackVerified = true
+                    } catch {
+                        runtimeRollbackVerified = false
+                    }
+                }
+                if !workspaceRollbackVerified || !runtimeRollbackVerified {
+                    try forceRecoveryReadOnlyAfterRollbackFailure(
+                        fileStore: fileStore,
+                        code: "restore-rollback-unverified"
+                    )
+                    throw DesktopModelRecoveryError.recoveryRollbackFailed
+                }
+            }
+            throw error
+        }
+    }
+
+    @discardableResult
+    public func prepareReset(verifiedBackupAt bundleURL: URL) throws -> DesktopResetManifest {
+        let manifest = try DesktopRecoveryService().prepareResetManifest(
+            verifiedBackupAt: bundleURL,
+            preparedAtUnixMillis: now()
+        )
+        try (store as? FileDesktopStateStore)?.persistResetManifest(manifest)
+        return manifest
+    }
+
+    @discardableResult
+    public func resetWorkspace(verifiedBackupAt bundleURL: URL) throws -> DesktopResetManifest {
+        _ = try DesktopRecoveryService().validateBackup(at: bundleURL)
+        guard let fileStore = store as? FileDesktopStateStore,
+              let recoveryStore = store as? any DesktopRecoveryStateStoring else {
+            throw DesktopModelRecoveryError.recoveryUnavailable
+        }
+        let runtimeLock = try fileStore.acquireExclusiveRuntimeRecoveryLock()
+        defer { _ = runtimeLock }
+        try fileStore.requireRuntimeQuiescent()
+        guard let currentBackup = try fileStore.createPrivateBackupHistory(
+            stateSchemaVersion: recoveryStatus?.detectedStateSchemaVersion ?? snapshot.version,
+            createdAtUnixMillis: now(),
+            includesRuntimeState: true
+        ) else {
+            throw DesktopModelRecoveryError.recoveryUnavailable
+        }
+        let manifest = DesktopResetManifest(
+            resetID: UUID(),
+            preparedAtUnixMillis: now(),
+            verifiedBackupID: currentBackup.backupID,
+            localArtifacts: currentBackup.artifacts
+        )
+        try fileStore.persistResetManifest(manifest)
+        let originalWorkspaceData = try fileStore.load()
+        let runtimeMoves: [DesktopRuntimeArchiveMove]
+        do {
+            runtimeMoves = try fileStore.archiveRuntimeState(resetID: manifest.resetID)
+        } catch {
+            if let recoveryError = error as? DesktopModelRecoveryError,
+               recoveryError == .recoveryRollbackFailed {
+                try forceRecoveryReadOnlyAfterRollbackFailure(
+                    fileStore: fileStore,
+                    code: "reset-runtime-archive-rollback-unverified"
+                )
+            }
+            throw error
+        }
+        let starter = DesktopAppSnapshot.starter(now: now())
+        let encoded = try encoder.encode(starter)
+        do {
+            try recoveryStore.saveRecovered(encoded)
+            guard try recoveryStore.load() == encoded else {
+                throw DesktopModelRecoveryError.persistenceVerificationFailed
+            }
+            try fileStore.clearRecoveryLockMarker()
+        } catch {
+            var workspaceRollbackVerified = false
+            var runtimeRollbackVerified = false
+            if let originalWorkspaceData {
+                do {
+                    try fileStore.saveRecovered(originalWorkspaceData)
+                    workspaceRollbackVerified = try fileStore.load() == originalWorkspaceData
+                } catch {
+                    workspaceRollbackVerified = false
+                }
+            }
+            do {
+                try fileStore.restoreArchivedRuntimeState(runtimeMoves)
+                runtimeRollbackVerified = true
+            } catch {
+                runtimeRollbackVerified = false
+            }
+            if !workspaceRollbackVerified || !runtimeRollbackVerified {
+                try forceRecoveryReadOnlyAfterRollbackFailure(
+                    fileStore: fileStore,
+                    code: "reset-rollback-unverified"
+                )
+                throw DesktopModelRecoveryError.recoveryRollbackFailed
+            }
+            throw error
+        }
+        snapshot = starter
+        providerEventIDs = []
+        recoveryStatus = nil
+        persistenceError = nil
+        return manifest
+    }
+
+    private func forceRecoveryReadOnlyAfterRollbackFailure(
+        fileStore: FileDesktopStateStore,
+        code: String
+    ) throws {
+        recoveryStatus = DesktopRecoveryStatus(
+            reason: .runtimeRollbackUnverified,
+            detectedStateSchemaVersion: snapshot.version,
+            quarantineCreated: false,
+            previousWorkspaceAvailable: false
+        )
+        persistenceError = DesktopModelRecoveryError.recoveryRollbackFailed.localizedDescription
+        let event = DesktopRedactedDiagnosticEvent(
+            category: "recovery",
+            code: code,
+            occurredAtUnixMillis: now()
+        )
+        do {
+            try fileStore.persistRecoveryLockMarker(event)
+        } catch {
+            throw DesktopModelRecoveryError.recoveryRollbackFailed
+        }
+        try? fileStore.persistRecoveryFailureEvent(event)
+    }
+
     public func redactedDiagnostics() -> String {
-        let report = DesktopDiagnosticsReport(
+        let diagnosticsEncoder = JSONEncoder()
+        diagnosticsEncoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? diagnosticsEncoder.encode(makeRedactedDiagnosticsReport()) else { return "{}" }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    public func redactedSupportBundle() -> String {
+        let receipts = (store as? FileDesktopStateStore)?.loadRedactedRecoveryReceiptDiagnostics() ?? .empty
+        let bundle = DesktopRedactedDiagnosticsBundle(
+            generatedAtUnixMillis: now(),
+            report: makeRedactedDiagnosticsReport(),
+            migrationReceipts: receipts.migrationReceipts,
+            restoreReceipts: receipts.restoreReceipts,
+            resetReceipts: receipts.resetReceipts,
+            events: receipts.events,
+            malformedReceiptCount: receipts.malformedReceiptCount,
+            rejectedUnsafeReceiptCount: receipts.rejectedUnsafeReceiptCount,
+            receiptScanTruncated: receipts.receiptScanTruncated
+        )
+        let diagnosticsEncoder = JSONEncoder()
+        diagnosticsEncoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? diagnosticsEncoder.encode(bundle) else { return "{}" }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private func makeRedactedDiagnosticsReport() -> DesktopDiagnosticsReport {
+        DesktopDiagnosticsReport(
             schemaVersion: snapshot.version,
             generatedAtUnixMillis: now(),
             projectCount: snapshot.projects.count,
@@ -2741,14 +3734,14 @@ public final class DesktopAppModel: ObservableObject {
             relayState: snapshot.remote.relayStatus,
             queueState: snapshot.remote.queueStatus
         )
-        let diagnosticsEncoder = JSONEncoder()
-        diagnosticsEncoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? diagnosticsEncoder.encode(report) else { return "{}" }
-        return String(decoding: data, as: UTF8.self)
     }
 
     @discardableResult
     private func mutate(_ change: (inout DesktopAppSnapshot) -> Void) -> Bool {
+        guard recoveryStatus == nil else {
+            persistenceError = "Kaname is keeping this recovery workspace read-only until verified state is restored or exported."
+            return false
+        }
         var changed = snapshot
         change(&changed)
         changed.lastSavedAtUnixMillis = now()
@@ -2864,6 +3857,64 @@ public final class DesktopAppModel: ObservableObject {
         let decoded = try decoder.decode(DesktopAppSnapshot.self, from: data)
         if decoded.version == DesktopAppSnapshot.currentVersion { return (decoded, false) }
         return (try decoded.migratedToCurrent(now: now), true)
+    }
+
+    private static func declaredSchemaVersion(from data: Data) -> Int? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return object["version"] as? Int
+    }
+
+    private static func requireSingleRecoveryArtifact(
+        kind: DesktopRecoveryArtifactKind,
+        in manifest: DesktopBackupManifest
+    ) throws -> DesktopRecoveryArtifactManifest {
+        let matches = manifest.artifacts.filter { $0.kind == kind }
+        guard matches.count == 1, let artifact = matches.first else {
+            throw DesktopModelRecoveryError.restoreArtifactInvalid
+        }
+        return artifact
+    }
+
+    private func restoreVerifiedWorkspaceData(
+        _ data: Data,
+        receipt: DesktopRestoreReceipt?,
+        clearsRecoveryLockMarker: Bool = false
+    ) throws {
+        let restored: (snapshot: DesktopAppSnapshot, didMigrate: Bool)
+        do {
+            restored = try Self.currentSnapshot(from: data, decoder: decoder, now: now())
+        } catch {
+            throw DesktopModelRecoveryError.restoreArtifactInvalid
+        }
+        let encoded = try encoder.encode(restored.snapshot)
+        guard let recoveryStore = store as? any DesktopRecoveryStateStoring else {
+            throw DesktopModelRecoveryError.recoveryUnavailable
+        }
+        try recoveryStore.saveRecovered(encoded)
+        guard try recoveryStore.load() == encoded else {
+            throw DesktopModelRecoveryError.persistenceVerificationFailed
+        }
+        if restored.didMigrate, let fileStore = store as? FileDesktopStateStore {
+            try fileStore.persistMigrationReceipt(DesktopMigrationReceipt(
+                migrationID: UUID(),
+                fromStateSchemaVersion: Self.declaredSchemaVersion(from: data) ?? 0,
+                toStateSchemaVersion: DesktopAppSnapshot.currentVersion,
+                startedAtUnixMillis: now(),
+                completedAtUnixMillis: now(),
+                outcome: .applied,
+                backupID: receipt?.backupID
+            ))
+        }
+        if let receipt {
+            try (store as? FileDesktopStateStore)?.persistRestoreReceipt(receipt)
+        }
+        if clearsRecoveryLockMarker {
+            try (store as? FileDesktopStateStore)?.clearRecoveryLockMarker()
+        }
+        snapshot = restored.snapshot
+        providerEventIDs = Set(restored.snapshot.operations.providerEvents.map(\.id))
+        recoveryStatus = nil
+        persistenceError = nil
     }
 }
 

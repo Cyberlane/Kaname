@@ -226,6 +226,14 @@ private final class LocalControlService: NSObject, LocalCoreControlService {
         standardInput: Data?,
         timeout: TimeInterval
     ) throws -> Data {
+        let applicationSupportRoot = journal
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let recoveryLock = try KanameRuntimeRecoveryFileLock.acquireShared(
+            applicationSupportRoot: applicationSupportRoot
+        )
+        defer { withExtendedLifetime(recoveryLock) {} }
         guard FileManager.default.isExecutableFile(atPath: executable.path) else {
             throw LocalCoreRunnerError.unavailable
         }

@@ -72,7 +72,7 @@ let package = Package(
         ),
         .target(
             name: "KanameDesktop",
-            dependencies: ["KanameDomain", "KanameMobileSync"]
+            dependencies: ["KanameDomain", "KanameLocalCore", "KanameMobileSync"]
         ),
         .executableTarget(
             name: "KanamePrototype",

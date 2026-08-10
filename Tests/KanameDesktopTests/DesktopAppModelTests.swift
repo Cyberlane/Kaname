@@ -262,7 +262,10 @@ struct DesktopAppModelTests {
 
         #expect(model.snapshot.version == DesktopAppSnapshot.currentVersion)
         #expect(!model.snapshot.threads.isEmpty)
-        #expect(model.persistenceError != nil)
+        #expect(model.isRecoveryReadOnly)
+        #expect(model.recoveryStatus?.reason == .unreadableState)
+        #expect(model.recoveryStatus?.quarantineCreated == false)
+        #expect(model.persistenceError == nil)
         #expect(store.data == invalid)
     }
 
@@ -816,7 +819,7 @@ struct DesktopAppModelTests {
     }
 
     @Test
-    func corruptPrimaryRecoversPreviousWorkspaceWithoutRotatingItAway() throws {
+    func corruptPrimaryOpensPreviousWorkspaceReadOnlyUntilExplicitRestore() throws {
         var previous = DesktopAppSnapshot.starter(now: 1_000)
         previous.threads.append(
             DesktopThread(
@@ -836,9 +839,19 @@ struct DesktopAppModelTests {
         let model = DesktopAppModel(store: store, now: { 2_000 })
 
         #expect(model.snapshot.threads.contains { $0.title == "Recovered user thread" })
-        #expect(model.persistenceError?.contains("recovered") == true)
+        #expect(model.isRecoveryReadOnly)
+        #expect(model.recoveryStatus?.reason == .unreadableState)
         #expect(store.recovery == recovery)
-        #expect(store.primary != Data("corrupt-primary".utf8))
+        #expect(store.primary == Data("corrupt-primary".utf8))
+
+        let originalProjectCount = model.snapshot.projects.count
+        _ = model.createProject(name: "Must not persist", path: nil, summary: "Blocked")
+        #expect(model.snapshot.projects.count == originalProjectCount)
+        try model.restorePreviousWorkspace()
+        #expect(!model.isRecoveryReadOnly)
+        #expect(model.persistenceError == nil)
+        let persisted = try #require(store.primary)
+        #expect(try JSONDecoder().decode(DesktopAppSnapshot.self, from: persisted) == previous)
     }
 }
 

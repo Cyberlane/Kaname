@@ -9,6 +9,22 @@ import AppKit
 import UniformTypeIdentifiers
 #endif
 
+extension Notification.Name {
+    static let kanamePresentGlobalSearch = Notification.Name("com.cyberlane.kaname.desktop.command.global-search")
+    static let kanameBeginConversation = Notification.Name("com.cyberlane.kaname.desktop.command.new-conversation")
+    static let kanamePresentSettings = Notification.Name("com.cyberlane.kaname.desktop.command.settings")
+    static let kanameImportFiles = Notification.Name("com.cyberlane.kaname.desktop.command.import-files")
+    static let kanameExportCurrent = Notification.Name("com.cyberlane.kaname.desktop.command.export-current")
+    static let kanameNavigate = Notification.Name("com.cyberlane.kaname.desktop.command.navigate")
+    static let kanameToggleInspector = Notification.Name("com.cyberlane.kaname.desktop.command.toggle-inspector")
+    static let kanameFocusComposer = Notification.Name("com.cyberlane.kaname.desktop.command.focus-composer")
+    static let kanameGoBack = Notification.Name("com.cyberlane.kaname.desktop.command.go-back")
+    static let kanamePresentDiagnostics = Notification.Name("com.cyberlane.kaname.desktop.command.diagnostics")
+    static let kanameDesktopReady = Notification.Name("com.cyberlane.kaname.desktop.lifecycle.ready")
+    static let kanameInterruptCurrent = Notification.Name("com.cyberlane.kaname.desktop.command.interrupt-current")
+    static let kanameRetryCurrent = Notification.Name("com.cyberlane.kaname.desktop.command.retry-current")
+}
+
 private enum DesktopDestination: String, CaseIterable, Identifiable {
     case home
     case threads
@@ -79,10 +95,23 @@ private struct DesktopNavigationLocation: Equatable {
     let selectedProjectID: String?
 }
 
+private struct DesktopSearchNavigationRequest: Equatable, Identifiable {
+    let id = UUID()
+    let target: DesktopGlobalSearchNavigationTarget
+    let title: String
+}
+
+private struct DesktopSearchFallbackNotice: Equatable {
+    let destination: DesktopDestination
+    let title: String
+    let detail: String
+}
+
 private struct DesktopUIRestoreState: Codable {
     var destination: String
     var selectedThreadID: String?
     var selectedProjectID: String?
+    var showsInspector: Bool?
 }
 
 private struct DesktopUIRestoreStore {
@@ -112,13 +141,29 @@ private struct NewConversationRequest: Identifiable {
     let projectID: String?
 }
 
+private struct DesktopQALargeTextKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+private extension EnvironmentValues {
+    var desktopQALargeText: Bool {
+        get { self[DesktopQALargeTextKey.self] }
+        set { self[DesktopQALargeTextKey.self] = newValue }
+    }
+}
+
 struct KanameDesktopWorkspace: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.sizeCategory) private var sizeCategory
     private let uiRestoreStore: DesktopUIRestoreStore
+    private let initialGlobalSearchQuery: String
+    private let usesQALargeText: Bool
     @StateObject private var model: DesktopAppModel
     @StateObject private var conversationRuntime: DesktopConversationRuntime
     @StateObject private var automationScheduler: DesktopAutomationSchedulerViewModel
     @StateObject private var personalIntegrations: DesktopPersonalIntegrationViewModel
     @StateObject private var updates: DesktopUpdateViewModel
+    @StateObject private var portableTransfer = DesktopPortableTransferViewModel()
     @State private var destination: DesktopDestination
     @State private var selectedThreadID: String?
     @State private var selectedProjectID: String?
@@ -128,7 +173,21 @@ struct KanameDesktopWorkspace: View {
     @State private var showsNewProject = false
     @State private var showsInspector = true
     @State private var showsSettings = false
+    @State private var showsGlobalSearch = false
+    @State private var showsDiagnostics = false
     @State private var navigationHistory: [DesktopNavigationLocation] = []
+    @State private var pendingCreatedThreadID: String?
+    @State private var composerFocusRequest: DesktopComposerFocusRequest?
+    @State private var workspaceAnnouncement = ""
+    @State private var searchNavigationRequest: DesktopSearchNavigationRequest?
+    @State private var searchFallbackNotice: DesktopSearchFallbackNotice?
+#if os(macOS)
+    @State private var searchPreviousResponder: NSResponder?
+    @State private var modalPreviousResponder: NSResponder?
+    @State private var importPreviousResponder: NSResponder?
+    @State private var diagnosticsPreviousResponder: NSResponder?
+    @State private var navigationPreviousResponders: [NSResponder?] = []
+#endif
 
     init() {
         let environment = KanameDesktopEnvironment.current
@@ -143,6 +202,12 @@ struct KanameDesktopWorkspace: View {
         _personalIntegrations = StateObject(wrappedValue: DesktopPersonalIntegrationViewModel(environment: environment))
         _updates = StateObject(wrappedValue: DesktopUpdateViewModel(environment: environment))
         let arguments = CommandLine.arguments
+        usesQALargeText = arguments.contains("--desktop-large-text")
+        initialGlobalSearchQuery = arguments.firstIndex(of: "--desktop-search-query")
+            .flatMap { arguments.indices.contains($0 + 1) ? arguments[$0 + 1] : nil }
+            ?? ""
+        _showsGlobalSearch = State(initialValue: arguments.contains("--desktop-global-search"))
+        _showsDiagnostics = State(initialValue: arguments.contains("--desktop-diagnostics"))
         let explicitDestination = arguments.firstIndex(of: "--desktop-destination")
             .flatMap { arguments.indices.contains($0 + 1) ? DesktopDestination(rawValue: arguments[$0 + 1]) : nil }
         let requestedDestination = explicitDestination
@@ -154,6 +219,11 @@ struct KanameDesktopWorkspace: View {
             .flatMap { arguments.indices.contains($0 + 1) ? arguments[$0 + 1] : nil }
         _destination = State(initialValue: requestedDestination == .settings ? .home : requestedDestination)
         _showsSettings = State(initialValue: requestedDestination == .settings)
+        _showsInspector = State(initialValue: restoredUI?.showsInspector ?? true)
+        _newConversationRequest = State(initialValue: arguments.contains("--desktop-new-conversation")
+            ? NewConversationRequest(projectID: requestedProjectID)
+            : nil)
+        _showsNewProject = State(initialValue: arguments.contains("--desktop-new-project"))
         _selectedThreadID = State(
             initialValue: explicitDestination == nil
                 ? restoredUI?.selectedThreadID
@@ -171,38 +241,94 @@ struct KanameDesktopWorkspace: View {
                 )]
             } ?? []
         )
+#if os(macOS)
+        _navigationPreviousResponders = State(initialValue: requestedBackDestination == nil ? [] : [nil])
+#endif
     }
 
-    var body: some View {
+    @ViewBuilder
+    private var workspaceStack: some View {
         ZStack {
             navigationLayout
                 .background(Nord.polarNight0)
-                .allowsHitTesting(!showsSettings)
-                .disabled(showsSettings)
+                .allowsHitTesting(!showsSettings && !showsGlobalSearch && !model.isRecoveryReadOnly)
+                .disabled(showsSettings || showsGlobalSearch || model.isRecoveryReadOnly)
+                .dropDestination(for: URL.self) { urls, _ in
+                    prepareImport(urls: urls)
+                }
 
             if showsSettings {
                 DesktopSettingsModal(
                     model: model,
                     integrations: personalIntegrations,
                     updates: updates,
-                    dismiss: { showsSettings = false }
+                    dismiss: { dismissSettings(restoringFocus: true) }
                 )
                 .transition(.opacity.combined(with: .scale(scale: 0.985)))
                 .zIndex(1)
             }
-        }
-        .sheet(item: $newConversationRequest) { request in
-            NewDesktopThreadSheet(model: model, projectID: request.projectID) { threadID in
-                openThread(threadID)
+
+            if showsGlobalSearch {
+                ZStack {
+                    Color.black.opacity(0.46)
+                        .ignoresSafeArea()
+                        .contentShape(Rectangle())
+                        .onTapGesture { dismissGlobalSearch(restoringFocus: true) }
+
+                    DesktopGlobalSearchPalette(
+                        snapshot: model.snapshot,
+                        initialQuery: initialGlobalSearchQuery,
+                        dismiss: { dismissGlobalSearch(restoringFocus: true) },
+                        open: openSearchResult
+                    )
+                    .padding(24)
+                }
+                .transition(reduceMotion ? .identity : .opacity.combined(with: .scale(scale: 0.985)))
+                .zIndex(2)
+            }
+
+            if !workspaceAnnouncement.isEmpty {
+                Text(workspaceAnnouncement)
+                    .frame(width: 1, height: 1)
+                    .opacity(0.001)
+                    .accessibilityLabel(workspaceAnnouncement)
+            }
+
+            if model.isRecoveryReadOnly {
+                DesktopRecoveryCenter(
+                    model: model,
+                    inspectDiagnostics: presentDiagnostics
+                )
+                    .zIndex(10)
             }
         }
-        .sheet(isPresented: $showsNewProject) {
+    }
+
+    private var presentedWorkspace: some View {
+        workspaceStack
+        .sheet(item: $newConversationRequest, onDismiss: finishNewConversationPresentation) { request in
+            NewDesktopThreadSheet(model: model, projectID: request.projectID) { threadID in
+                pendingCreatedThreadID = threadID
+            }
+            .environment(\.desktopQALargeText, usesQALargeText)
+        }
+        .sheet(isPresented: $showsNewProject, onDismiss: restoreModalFocus) {
             NewDesktopProjectSheet(model: model)
+                .environment(\.desktopQALargeText, usesQALargeText)
+        }
+        .sheet(item: $portableTransfer.importReview, onDismiss: finishImportPresentation) { _ in
+            DesktopImportReviewSheet(transfer: portableTransfer, model: model)
+        }
+        .sheet(isPresented: $showsDiagnostics, onDismiss: restoreDiagnosticsFocus) {
+            DesktopDiagnosticsInspector(
+                report: model.redactedSupportBundle(),
+                dismiss: { showsDiagnostics = false }
+            )
         }
         .alert(
             "Local workspace was not saved",
             isPresented: Binding(
-                get: { model.persistenceError != nil },
+                get: { !model.isRecoveryReadOnly && model.persistenceError != nil },
                 set: { if !$0 { model.clearPersistenceError() } }
             )
         ) {
@@ -210,26 +336,143 @@ struct KanameDesktopWorkspace: View {
         } message: {
             Text(model.persistenceError ?? "The previous durable workspace remains intact.")
         }
+        .alert(
+            "Local file transfer",
+            isPresented: Binding(
+                get: { portableTransfer.message != nil },
+                set: { if !$0 { portableTransfer.message = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) { portableTransfer.message = nil }
+        } message: {
+            Text(portableTransfer.message ?? "The local file action finished.")
+        }
+    }
+
+    private var lifecycleWorkspace: some View {
+        presentedWorkspace
         .task {
+            guard !model.isRecoveryReadOnly else { return }
             personalIntegrations.startMonitoring(model: model)
+            await _Concurrency.Task<Never, Never>.yield()
+            NotificationCenter.default.post(name: .kanameDesktopReady, object: nil)
+        }
+        .onChange(of: model.isRecoveryReadOnly) { isReadOnly in
+            if isReadOnly {
+                dismissNonRecoveryPresentations()
+                return
+            }
+            personalIntegrations.startMonitoring(model: model)
+            NotificationCenter.default.post(name: .kanameDesktopReady, object: nil)
         }
         .onChange(of: destination) { _ in persistUIRestoreState() }
         .onChange(of: selectedThreadID) { _ in persistUIRestoreState() }
         .onChange(of: selectedProjectID) { _ in persistUIRestoreState() }
+        .onChange(of: showsInspector) { _ in persistUIRestoreState() }
+    }
+
+    private var primaryCommandWorkspace: some View {
+        lifecycleWorkspace
+        .onReceive(NotificationCenter.default.publisher(for: .kanamePresentGlobalSearch)) { _ in
+            presentGlobalSearch()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .kanameBeginConversation)) { _ in
+            guard acceptsNonRecoveryCommands,
+                  !showsSettings, newConversationRequest == nil, !showsNewProject else { return }
+            if showsGlobalSearch { dismissGlobalSearch(restoringFocus: false) }
+            beginConversation(projectID: inheritedProjectID)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .kanamePresentSettings)) { _ in
+            guard acceptsNonRecoveryCommands,
+                  newConversationRequest == nil, !showsNewProject else { return }
+            if showsGlobalSearch { dismissGlobalSearch(restoringFocus: false) }
+            presentSettings()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .kanameImportFiles)) { notification in
+            guard acceptsNonRecoveryCommands,
+                  !showsSettings, !showsGlobalSearch,
+                  newConversationRequest == nil, !showsNewProject else { return }
+            captureImportFocus()
+            if let urls = notification.object as? [URL] {
+                if !portableTransfer.prepareImport(urls: urls, threadID: selectedThreadID) {
+                    restoreImportFocus()
+                }
+            } else {
+                if !portableTransfer.chooseImport(threadID: selectedThreadID) {
+                    restoreImportFocus()
+                }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .kanameExportCurrent)) { _ in
+            guard acceptsNonRecoveryCommands,
+                  !showsSettings, !showsGlobalSearch,
+                  newConversationRequest == nil, !showsNewProject else { return }
+            portableTransfer.export(
+                thread: model.thread(id: selectedThreadID),
+                project: model.project(id: selectedProjectID),
+                model: model
+            )
+        }
+    }
+
+    var body: some View {
+        primaryCommandWorkspace
+        .onReceive(NotificationCenter.default.publisher(for: .kanameNavigate)) { notification in
+            guard acceptsNonRecoveryCommands,
+                  let rawDestination = notification.object as? String,
+                  let target = DesktopDestination(rawValue: rawDestination),
+                  target != .settings,
+                  newConversationRequest == nil,
+                  !showsNewProject else { return }
+            if showsGlobalSearch { dismissGlobalSearch(restoringFocus: false) }
+            if showsSettings { dismissSettings(restoringFocus: false) }
+            navigate(to: target)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .kanameToggleInspector)) { _ in
+            guard acceptsNonRecoveryCommands,
+                  !showsSettings, !showsGlobalSearch,
+                  newConversationRequest == nil, !showsNewProject else { return }
+            toggleInspector()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .kanameFocusComposer)) { _ in
+            guard acceptsNonRecoveryCommands else { return }
+            focusCurrentComposer()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .kanameGoBack)) { _ in
+            _ = handleBack()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .kanamePresentDiagnostics)) { _ in
+            presentDiagnostics()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .kanameInterruptCurrent)) { _ in
+            guard acceptsNonRecoveryCommands else { return }
+            interruptCurrentConversation()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .kanameRetryCurrent)) { _ in
+            guard acceptsNonRecoveryCommands else { return }
+            retryCurrentConversation()
+        }
         .onAppear {
             DesktopBackCommandRouter.shared.install(handleBack)
         }
         .onDisappear {
             DesktopBackCommandRouter.shared.removeHandler()
         }
-        .animation(.easeOut(duration: 0.16), value: showsSettings)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: showsSettings)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: showsGlobalSearch)
+        .environment(
+            \.sizeCategory,
+            usesQALargeText ? .accessibilityExtraExtraExtraLarge : sizeCategory
+        )
+        .environment(\.desktopQALargeText, usesQALargeText)
     }
 
     private func persistUIRestoreState() {
         uiRestoreStore.save(DesktopUIRestoreState(
             destination: destination.rawValue,
             selectedThreadID: selectedThreadID,
-            selectedProjectID: selectedProjectID
+            selectedProjectID: selectedProjectID,
+            showsInspector: showsInspector
         ))
     }
 
@@ -262,9 +505,37 @@ struct KanameDesktopWorkspace: View {
         VStack(spacing: 0) {
             workspaceHeader
             Divider()
+            if let notice = searchFallbackNotice, notice.destination == destination {
+                searchFallbackBanner(notice)
+                Divider()
+            }
             content
         }
         .toolbar { toolbar }
+    }
+
+    private func searchFallbackBanner(_ notice: DesktopSearchFallbackNotice) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "scope")
+                .foregroundStyle(Nord.frost1)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Opened the closest local view for “\(notice.title)”")
+                    .font(.subheadline.weight(.semibold))
+                Text(notice.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .accessibilityElement(children: .combine)
+            Spacer()
+            Button("Dismiss search navigation notice", systemImage: "xmark") {
+                searchFallbackNotice = nil
+            }
+            .labelStyle(.iconOnly)
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Nord.polarNight1)
     }
 
     private var workspaceHeader: some View {
@@ -277,15 +548,21 @@ struct KanameDesktopWorkspace: View {
 
             ControlGroup {
                 Button {
+                    presentGlobalSearch()
+                } label: {
+                    Label("Search workspace", systemImage: "magnifyingglass")
+                }
+                .help("Search workspace (Command-K)")
+
+                Button {
                     beginConversation(projectID: inheritedProjectID)
                 } label: {
                     Label("New conversation", systemImage: "square.and.pencil")
                 }
-                .keyboardShortcut("n", modifiers: .command)
                 .help("New conversation")
 
                 Menu {
-                    Button("New project") { showsNewProject = true }
+                    Button("New project") { presentNewProject() }
                     Divider()
                     Button("Start research") { navigate(to: .research) }
                     Button("Draft email") { navigate(to: .email) }
@@ -355,7 +632,7 @@ struct KanameDesktopWorkspace: View {
 
             Divider()
             Button {
-                showsSettings = true
+                presentSettings()
             } label: {
                 HStack {
                     Label("Settings", systemImage: DesktopDestination.settings.symbol)
@@ -401,6 +678,7 @@ struct KanameDesktopWorkspace: View {
         }
         .buttonStyle(.plain)
         .font(destination == item ? .body.weight(.semibold) : .body)
+        .accessibilityAddTraits(destination == item ? .isSelected : [])
     }
 
     @ViewBuilder
@@ -411,7 +689,7 @@ struct KanameDesktopWorkspace: View {
                 DesktopHomeView(
                     model: model,
                     searchText: searchText,
-                    openThread: openThread,
+                    openThread: { openThread($0) },
                     openDestination: navigate
                 )
             case .threads:
@@ -419,7 +697,8 @@ struct KanameDesktopWorkspace: View {
                     model: model,
                     runtime: conversationRuntime,
                     searchText: searchText,
-                    selectedThreadID: threadSelection
+                    selectedThreadID: threadSelection,
+                    composerFocusRequest: composerFocusRequest
                 )
             case .inbox:
                 DesktopInboxView(
@@ -434,23 +713,30 @@ struct KanameDesktopWorkspace: View {
                         model: model,
                         project: project,
                         startConversation: { beginConversation(projectID: project.id) },
-                        openThread: openThread
+                        openThread: { openThread($0) }
                     )
                 } else {
                     DesktopProjectsView(
                         model: model,
-                        createProject: { showsNewProject = true },
+                        createProject: { presentNewProject() },
                         openProject: openProject,
                         startConversation: { beginConversation(projectID: $0) },
-                        openThread: openThread
+                        openThread: { openThread($0) }
                     )
                 }
             case .research:
-                DesktopResearchView(model: model, openThread: openThread)
+                DesktopResearchView(model: model, openThread: { openThread($0) })
             case .knowledge:
-                DesktopKnowledgeView(model: model)
+                DesktopKnowledgeView(
+                    model: model,
+                    searchRequest: searchNavigationRequest
+                )
             case .email:
-                DesktopEmailView(model: model, integrations: personalIntegrations)
+                DesktopEmailView(
+                    model: model,
+                    integrations: personalIntegrations,
+                    allowsAutomaticInitialRead: searchNavigationRequest?.target.kind != .emailThread
+                )
             case .calendar:
                 DesktopCalendarView(model: model, integrations: personalIntegrations)
             case .automations:
@@ -466,7 +752,7 @@ struct KanameDesktopWorkspace: View {
                     model: model,
                     integrations: personalIntegrations,
                     runtime: conversationRuntime,
-                    openThread: openThread
+                    openThread: { openThread($0) }
                 )
             case .localCore:
                 LocalCoreWorkspace()
@@ -512,7 +798,6 @@ struct KanameDesktopWorkspace: View {
                 } label: {
                     Label("Back to \(backTitle)", systemImage: "chevron.left")
                 }
-                .keyboardShortcut("[", modifiers: .command)
                 .help("Back to \(backTitle)")
             }
         }
@@ -530,12 +815,17 @@ struct KanameDesktopWorkspace: View {
         }
     }
 
-    private func openThread(_ threadID: String) {
+    private func openThread(_ threadID: String, restoringComposerFocus: Bool = false) {
+        guard acceptsNonRecoveryCommands else { return }
         visit(DesktopNavigationLocation(destination: .threads, selectedThreadID: threadID, selectedProjectID: nil))
         model.markRead(threadID: threadID)
+        if restoringComposerFocus {
+            requestComposerFocus(threadID: threadID)
+        }
     }
 
     private func openProject(_ projectID: String) {
+        guard acceptsNonRecoveryCommands else { return }
         visit(DesktopNavigationLocation(destination: .projects, selectedThreadID: nil, selectedProjectID: projectID))
     }
 
@@ -544,8 +834,184 @@ struct KanameDesktopWorkspace: View {
         return model.thread(id: selectedThreadID)?.projectID
     }
 
+    private var acceptsNonRecoveryCommands: Bool {
+        !model.isRecoveryReadOnly
+            && !showsDiagnostics
+            && portableTransfer.importReview == nil
+    }
+
     private func beginConversation(projectID: String?) {
+        guard acceptsNonRecoveryCommands else { return }
+        captureModalFocus()
         newConversationRequest = NewConversationRequest(projectID: projectID)
+    }
+
+    private func presentNewProject() {
+        guard acceptsNonRecoveryCommands else { return }
+        captureModalFocus()
+        showsNewProject = true
+    }
+
+    private func presentSettings() {
+        guard acceptsNonRecoveryCommands, !showsSettings else { return }
+        captureModalFocus()
+        showsSettings = true
+    }
+
+    private func dismissSettings(restoringFocus: Bool) {
+        showsSettings = false
+        if restoringFocus {
+            restoreModalFocus()
+        } else {
+#if os(macOS)
+            modalPreviousResponder = nil
+#endif
+        }
+    }
+
+    private func finishNewConversationPresentation() {
+        if let threadID = pendingCreatedThreadID {
+            pendingCreatedThreadID = nil
+#if os(macOS)
+            modalPreviousResponder = nil
+#endif
+            openThread(threadID, restoringComposerFocus: true)
+            return
+        }
+        restoreModalFocus()
+    }
+
+    private func focusCurrentComposer() {
+        guard acceptsNonRecoveryCommands else { return }
+        guard destination == .threads,
+              let threadID = selectedThreadID,
+              model.thread(id: threadID) != nil else {
+            announce("Open a conversation before focusing the message composer.")
+            return
+        }
+        if showsGlobalSearch { dismissGlobalSearch(restoringFocus: false) }
+        if showsSettings { dismissSettings(restoringFocus: false) }
+        requestComposerFocus(threadID: threadID)
+    }
+
+    private func requestComposerFocus(threadID: String) {
+        guard let request = DesktopComposerFocusRequest.next(
+            after: composerFocusRequest,
+            threadID: threadID
+        ) else { return }
+        composerFocusRequest = request
+        announce("Message composer focused for \(model.thread(id: threadID)?.title ?? "conversation").")
+    }
+
+    private func announce(_ message: String) {
+        workspaceAnnouncement = ""
+        DispatchQueue.main.async {
+            workspaceAnnouncement = message
+            postDesktopAccessibilityAnnouncement(message)
+        }
+    }
+
+    private func interruptCurrentConversation() {
+        guard let threadID = selectedThreadID, conversationRuntime.isRunning(threadID: threadID) else {
+            announce("There is no active conversation run to interrupt.")
+            return
+        }
+        conversationRuntime.interrupt(threadID: threadID)
+        announce("Interrupt requested for the current conversation.")
+    }
+
+    private func retryCurrentConversation() {
+        guard let threadID = selectedThreadID,
+              !conversationRuntime.isRunning(threadID: threadID),
+              model.nextQueuedProviderRun(threadID: threadID) == nil,
+              let run = model.providerRuns(threadID: threadID).last,
+              run.state == .failed || run.state == .interrupted else {
+            announce("There is no failed or interrupted turn to retry.")
+            return
+        }
+        conversationRuntime.retry(runID: run.id)
+        announce("Retry queued for the current conversation.")
+    }
+
+    private func presentGlobalSearch() {
+        guard acceptsNonRecoveryCommands else { return }
+        if showsGlobalSearch {
+            dismissGlobalSearch(restoringFocus: true)
+            return
+        }
+        guard newConversationRequest == nil, !showsNewProject else { return }
+        if showsSettings { dismissSettings(restoringFocus: false) }
+#if os(macOS)
+        searchPreviousResponder = currentDesktopResponder()
+#endif
+        showsGlobalSearch = true
+    }
+
+    private func dismissGlobalSearch(restoringFocus: Bool) {
+        showsGlobalSearch = false
+#if os(macOS)
+        let responder = searchPreviousResponder
+        searchPreviousResponder = nil
+        guard restoringFocus else { return }
+        restoreDesktopResponder(responder)
+#endif
+    }
+
+    private func openSearchResult(_ result: DesktopGlobalSearchResult) {
+        dismissGlobalSearch(restoringFocus: false)
+        searchFallbackNotice = nil
+        switch DesktopGlobalSearchNavigationResolver.resolve(result.navigationTarget, in: model.snapshot) {
+        case let .conversation(threadID), let .scopedConversation(threadID):
+            searchNavigationRequest = nil
+            openThread(threadID)
+        case let .project(projectID):
+            searchNavigationRequest = nil
+            openProject(projectID)
+        case let .knowledgeDocument(path):
+            searchNavigationRequest = DesktopSearchNavigationRequest(
+                target: .init(kind: .knowledgeDocument, itemID: path, scopeID: result.navigationTarget.scopeID),
+                title: result.document.title
+            )
+            navigateFromSearch(to: .knowledge)
+            announce("Opened \(result.document.title) in the local knowledge workspace.")
+        case let .destinationFallback(target):
+            presentSearchFallback(result: result, target: target)
+        }
+    }
+
+    private func presentSearchFallback(
+        result: DesktopGlobalSearchResult,
+        target: DesktopGlobalSearchNavigationTarget
+    ) {
+        let fallback = searchFallbackDestination(for: target.kind)
+        searchNavigationRequest = DesktopSearchNavigationRequest(target: target, title: result.document.title)
+        searchFallbackNotice = DesktopSearchFallbackNotice(
+            destination: fallback.destination,
+            title: result.document.title,
+            detail: fallback.detail
+        )
+        navigateFromSearch(to: fallback.destination)
+        announce("Opened the closest local \(fallback.destination.title) view for \(result.document.title). \(fallback.detail)")
+    }
+
+    private func searchFallbackDestination(
+        for kind: DesktopGlobalSearchNavigationTarget.Kind
+    ) -> (destination: DesktopDestination, detail: String) {
+        let localOnly = "This workspace has no exact selection contract for that saved item, so Kaname preserved the typed target without guessing or performing another read."
+        switch kind {
+        case .conversation: return (.threads, localOnly)
+        case .project: return (.projects, localOnly)
+        case .research: return (.research, localOnly)
+        case .knowledgeDocument: return (.knowledge, localOnly)
+        case .emailThread:
+            return (.email, "Kaname did not contact Gmail. Use the explicit search or refresh control when you want to load the exact account-scoped thread.")
+        case .calendarEvent: return (.calendar, localOnly)
+        case .automation: return (.automations, localOnly)
+        case .githubWork: return (.github, localOnly)
+        case .skill: return (.skills, localOnly)
+        case .approval: return (.inbox, localOnly)
+        case .artifact: return (.home, localOnly)
+        }
     }
 
     private var currentLocation: DesktopNavigationLocation {
@@ -591,6 +1057,20 @@ struct KanameDesktopWorkspace: View {
     }
 
     private func navigate(to target: DesktopDestination) {
+        guard acceptsNonRecoveryCommands else { return }
+        searchNavigationRequest = nil
+        searchFallbackNotice = nil
+        visit(
+            DesktopNavigationLocation(
+                destination: target,
+                selectedThreadID: target.keepsThreadSelection ? selectedThreadID : nil,
+                selectedProjectID: nil
+            )
+        )
+    }
+
+    private func navigateFromSearch(to target: DesktopDestination) {
+        guard acceptsNonRecoveryCommands else { return }
         visit(
             DesktopNavigationLocation(
                 destination: target,
@@ -605,8 +1085,15 @@ struct KanameDesktopWorkspace: View {
         guard target != current else { return }
         if navigationHistory.last != current {
             navigationHistory.append(current)
+#if os(macOS)
+            navigationPreviousResponders.append(currentDesktopResponder())
+#endif
             if navigationHistory.count > 100 {
-                navigationHistory.removeFirst(navigationHistory.count - 100)
+                let overflow = navigationHistory.count - 100
+                navigationHistory.removeFirst(overflow)
+#if os(macOS)
+                navigationPreviousResponders.removeFirst(min(overflow, navigationPreviousResponders.count))
+#endif
             }
         }
         apply(target)
@@ -621,9 +1108,16 @@ struct KanameDesktopWorkspace: View {
     }
 
     private func toggleInspector() {
+        guard acceptsNonRecoveryCommands else { return }
+#if os(macOS)
+        let previousResponder = currentDesktopResponder()
+#endif
         preservingWindowFrame {
             showsInspector.toggle()
         }
+#if os(macOS)
+        restoreDesktopResponder(previousResponder)
+#endif
     }
 
     private func preservingWindowFrame(_ updates: () -> Void) {
@@ -649,8 +1143,20 @@ struct KanameDesktopWorkspace: View {
 
     @discardableResult
     private func handleBack() -> Bool {
+        if showsDiagnostics {
+            showsDiagnostics = false
+            return true
+        }
+        if portableTransfer.importReview != nil {
+            portableTransfer.importReview = nil
+            return true
+        }
+        if showsGlobalSearch {
+            dismissGlobalSearch(restoringFocus: true)
+            return true
+        }
         if showsSettings {
-            showsSettings = false
+            dismissSettings(restoringFocus: true)
             return true
         }
         if newConversationRequest != nil {
@@ -661,22 +1167,554 @@ struct KanameDesktopWorkspace: View {
             showsNewProject = false
             return true
         }
+        guard !model.isRecoveryReadOnly else { return false }
+        searchNavigationRequest = nil
+        searchFallbackNotice = nil
         return goBack()
     }
 
     @discardableResult
     private func goBack() -> Bool {
         while let target = navigationHistory.popLast() {
+#if os(macOS)
+            let previousResponder = navigationPreviousResponders.popLast() ?? nil
+#endif
             guard target != currentLocation else { continue }
             apply(target)
             if let threadID = target.selectedThreadID {
                 model.markRead(threadID: threadID)
             }
+#if os(macOS)
+            restoreDesktopResponder(previousResponder)
+#endif
             return true
         }
         return false
     }
+
+    private func captureModalFocus() {
+#if os(macOS)
+        if modalPreviousResponder == nil {
+            modalPreviousResponder = currentDesktopResponder()
+        }
+#endif
+    }
+
+    private func restoreModalFocus() {
+#if os(macOS)
+        let responder = modalPreviousResponder
+        modalPreviousResponder = nil
+        restoreDesktopResponder(responder)
+#endif
+    }
+
+    private func prepareImport(urls: [URL]) -> Bool {
+        guard acceptsNonRecoveryCommands else { return false }
+        captureImportFocus()
+        let prepared = portableTransfer.prepareImport(urls: urls, threadID: selectedThreadID)
+        if !prepared { restoreImportFocus() }
+        return prepared
+    }
+
+    private func finishImportPresentation() {
+        portableTransfer.importReview = nil
+        restoreImportFocus()
+    }
+
+    private func presentDiagnostics() {
+        guard !showsDiagnostics,
+              portableTransfer.importReview == nil,
+              newConversationRequest == nil,
+              !showsNewProject,
+              !showsGlobalSearch else { return }
+#if os(macOS)
+        diagnosticsPreviousResponder = currentDesktopResponder()
+#endif
+        showsDiagnostics = true
+    }
+
+    private func dismissNonRecoveryPresentations() {
+        showsGlobalSearch = false
+        showsSettings = false
+        newConversationRequest = nil
+        showsNewProject = false
+        portableTransfer.importReview = nil
+        searchNavigationRequest = nil
+        searchFallbackNotice = nil
+#if os(macOS)
+        searchPreviousResponder = nil
+        modalPreviousResponder = nil
+        importPreviousResponder = nil
+#endif
+    }
+
+    private func captureImportFocus() {
+#if os(macOS)
+        importPreviousResponder = currentDesktopResponder()
+#endif
+    }
+
+    private func restoreImportFocus() {
+#if os(macOS)
+        let responder = importPreviousResponder
+        importPreviousResponder = nil
+        restoreDesktopResponder(responder)
+#endif
+    }
+
+    private func restoreDiagnosticsFocus() {
+#if os(macOS)
+        let responder = diagnosticsPreviousResponder
+        diagnosticsPreviousResponder = nil
+        restoreDesktopResponder(responder)
+#endif
+    }
 }
+
+#if os(macOS)
+@MainActor
+private func currentDesktopResponder() -> NSResponder? {
+    (NSApplication.shared.keyWindow ?? NSApplication.shared.mainWindow)?.firstResponder
+}
+
+@MainActor
+private func restoreDesktopResponder(_ responder: NSResponder?) {
+    DispatchQueue.main.async {
+        let window = NSApplication.shared.keyWindow ?? NSApplication.shared.mainWindow
+        guard let responder, window?.makeFirstResponder(responder) == true else {
+            window?.makeFirstResponder(nil)
+            return
+        }
+    }
+}
+
+@MainActor
+private func postDesktopAccessibilityAnnouncement(_ message: String) {
+    guard !message.isEmpty,
+          let window = NSApplication.shared.keyWindow ?? NSApplication.shared.mainWindow else { return }
+    NSAccessibility.post(
+        element: window,
+        notification: .announcementRequested,
+        userInfo: [
+            .announcement: message,
+            .priority: NSAccessibilityPriorityLevel.medium.rawValue,
+        ]
+    )
+}
+#endif
+
+private enum DesktopGlobalSearchScheduledSource: Sendable {
+    case cached(DesktopGlobalSearchLocalCorpus)
+    case snapshot(DesktopAppSnapshot)
+}
+
+private struct DesktopGlobalSearchScheduledRequest: Sendable {
+    let generation: UInt64
+    let query: DesktopGlobalSearchQuery
+    let source: DesktopGlobalSearchScheduledSource
+}
+
+private struct DesktopGlobalSearchScheduledOutput: Sendable {
+    let corpus: DesktopGlobalSearchLocalCorpus
+    let sections: [DesktopGlobalSearchSection]
+}
+
+private struct DesktopGlobalSearchPalette: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let snapshot: DesktopAppSnapshot
+    let dismiss: () -> Void
+    let open: (DesktopGlobalSearchResult) -> Void
+    @State private var query = ""
+    @State private var selection = DesktopGlobalSearchSelectionState()
+    @State private var sections: [DesktopGlobalSearchSection] = []
+    @State private var cachedCorpus: DesktopGlobalSearchLocalCorpus?
+    @State private var generationGate = DesktopGlobalSearchGenerationGate()
+    @State private var scheduledRequest: DesktopGlobalSearchScheduledRequest?
+    @State private var isSearching = false
+    @FocusState private var queryFocused: Bool
+
+    init(
+        snapshot: DesktopAppSnapshot,
+        initialQuery: String = "",
+        dismiss: @escaping () -> Void,
+        open: @escaping (DesktopGlobalSearchResult) -> Void
+    ) {
+        self.snapshot = snapshot
+        self.dismiss = dismiss
+        self.open = open
+        _query = State(initialValue: initialQuery)
+    }
+
+    private var resultCount: Int {
+        sections.reduce(0) { $0 + $1.results.count }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(Nord.frost1)
+                TextField("Search conversations, projects, and local snapshots", text: $query)
+                    .textFieldStyle(.plain)
+                    .font(.title3)
+                    .focused($queryFocused)
+                    .onSubmit { openSelection() }
+                    .accessibilityLabel("Search Kaname")
+                if isSearching {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityLabel("Updating local search results")
+                }
+                if !query.isEmpty {
+                    Button("Clear search", systemImage: "xmark.circle.fill") { query = "" }
+                        .labelStyle(.iconOnly)
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                }
+                Button("Close search", systemImage: "xmark") { dismiss() }
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.plain)
+                    .help("Close search (Escape)")
+            }
+            .padding(.horizontal, 18)
+            .frame(minHeight: 58)
+
+            Divider()
+
+            Group {
+                if DesktopGlobalSearchQuery(query).isEmpty {
+                    searchPrompt
+                } else if sections.isEmpty && isSearching {
+                    ProgressView("Searching the local snapshot…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if sections.isEmpty {
+                    EmptyPanel(
+                        symbol: "magnifyingglass",
+                        title: "No local results",
+                        detail: "Try a title, project, account, status, or source name. Kaname will not contact a provider to broaden the search."
+                    )
+                    .padding(24)
+                } else {
+                    searchResults
+                        .opacity(isSearching ? 0.62 : 1)
+                        .allowsHitTesting(!isSearching)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            Divider()
+            HStack(spacing: 14) {
+                Label("Local snapshot only", systemImage: "lock.shield")
+                    .foregroundStyle(Nord.auroraGreen)
+                Text("No providers, accounts, credentials, or vaults are contacted")
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Spacer()
+                Text("↑↓ Select   ↩ Open   esc Close")
+                    .foregroundStyle(.tertiary)
+            }
+            .font(.caption)
+            .padding(.horizontal, 18)
+            .frame(minHeight: 42)
+        }
+        .frame(maxWidth: 720, maxHeight: 580)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(Nord.polarNight3, lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.34), radius: 30, y: 14)
+        .onAppear {
+            scheduleSearch()
+            DispatchQueue.main.async { queryFocused = true }
+        }
+        .onChange(of: query) { _ in scheduleSearch() }
+        .onChange(of: snapshot.lastSavedAtUnixMillis) { _ in
+            cachedCorpus = nil
+            scheduleSearch()
+        }
+        .task(id: generationGate.latestGeneration) {
+            await runScheduledSearch(scheduledRequest)
+        }
+        .onDisappear {
+            generationGate.cancel()
+            scheduledRequest = nil
+            isSearching = false
+        }
+        .onMoveCommand { direction in
+            guard !isSearching else { return }
+            switch direction {
+            case .up: selection.move(.previous, in: sections)
+            case .down: selection.move(.next, in: sections)
+            default: break
+            }
+        }
+        .background {
+#if os(macOS)
+            DesktopGlobalSearchKeyMonitor { direction in
+                guard !isSearching else { return }
+                selection.move(direction, in: sections)
+            }
+            .frame(width: 0, height: 0)
+#endif
+        }
+        .onExitCommand(perform: dismiss)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Search Kaname")
+    }
+
+    private func scheduleSearch() {
+        let generation = generationGate.schedule()
+        let searchQuery = DesktopGlobalSearchQuery(query)
+        guard !searchQuery.isEmpty else {
+            sections = []
+            selection.reconcile(with: [])
+            scheduledRequest = nil
+            isSearching = false
+            return
+        }
+        isSearching = true
+        scheduledRequest = DesktopGlobalSearchScheduledRequest(
+            generation: generation,
+            query: searchQuery,
+            source: cachedCorpus.map(DesktopGlobalSearchScheduledSource.cached)
+                ?? .snapshot(snapshot)
+        )
+    }
+
+    private func runScheduledSearch(_ request: DesktopGlobalSearchScheduledRequest?) async {
+        guard let request else { return }
+        do {
+            try await _Concurrency.Task<Never, Never>.sleep(for: .milliseconds(120))
+        } catch {
+            return
+        }
+        guard !_Concurrency.Task<Never, Never>.isCancelled else { return }
+
+        let worker = _Concurrency.Task<DesktopGlobalSearchScheduledOutput?, Never>.detached(priority: .userInitiated) {
+            guard !_Concurrency.Task<Never, Never>.isCancelled else { return nil }
+            let corpus: DesktopGlobalSearchLocalCorpus
+            switch request.source {
+            case let .cached(value):
+                corpus = value
+            case let .snapshot(value):
+                corpus = DesktopGlobalSearchLocalIndex.corpus(from: value)
+            }
+            guard !_Concurrency.Task<Never, Never>.isCancelled else { return nil }
+            let sections = DesktopGlobalSearch.search(query: request.query, in: corpus)
+            guard !_Concurrency.Task<Never, Never>.isCancelled else { return nil }
+            return DesktopGlobalSearchScheduledOutput(corpus: corpus, sections: sections)
+        }
+        let output = await withTaskCancellationHandler {
+            await worker.value
+        } onCancel: {
+            worker.cancel()
+        }
+        guard !_Concurrency.Task<Never, Never>.isCancelled,
+              let output,
+              generationGate.accepts(request.generation),
+              scheduledRequest?.generation == request.generation else { return }
+        cachedCorpus = output.corpus
+        sections = output.sections
+        isSearching = false
+        selection.reconcile(with: output.sections)
+    }
+
+    private var searchPrompt: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "command")
+                .font(.system(size: 30, weight: .medium))
+                .foregroundStyle(Nord.frost1)
+            Text("Find anything already in Kaname")
+                .font(.headline)
+            Text("Search conversations, projects, research, knowledge, email, calendar, automations, GitHub, skills, approvals, and artifacts.")
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: 520)
+        }
+        .padding(32)
+    }
+
+    private var searchResults: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 16) {
+                    ForEach(sections) { section in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Label(section.title, systemImage: symbol(for: section.domain))
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                Text("\(section.results.count)")
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .padding(.horizontal, 6)
+
+                            ForEach(section.results) { result in
+                                resultRow(result)
+                                    .id(result.selectionID)
+                            }
+                        }
+                    }
+                }
+                .padding(14)
+            }
+            .onChange(of: selection.selectedResultID) { selectedID in
+                guard let selectedID else { return }
+                if reduceMotion {
+                    proxy.scrollTo(selectedID, anchor: .center)
+                } else {
+                    withAnimation(.easeOut(duration: 0.12)) {
+                        proxy.scrollTo(selectedID, anchor: .center)
+                    }
+                }
+            }
+        }
+        .accessibilityLabel("\(resultCount) search results")
+        .onChange(of: resultCount) { count in
+            postDesktopAccessibilityAnnouncement("\(count) local search results")
+        }
+    }
+
+    private func resultRow(_ result: DesktopGlobalSearchResult) -> some View {
+        let isSelected = selection.selectedResultID == result.selectionID
+        return Button {
+            open(result)
+        } label: {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: symbol(for: result.domain))
+                    .foregroundStyle(isSelected ? Nord.polarNight0 : Nord.frost1)
+                    .frame(width: 22, height: 22)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(result.document.title)
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(isSelected ? Nord.polarNight0 : .primary)
+                        .lineLimit(1)
+                    if !result.document.summary.isEmpty {
+                        Text(result.document.summary)
+                            .font(.subheadline)
+                            .foregroundStyle(isSelected ? Nord.polarNight1 : .secondary)
+                            .lineLimit(1)
+                    }
+                    Text(provenanceText(result.provenance))
+                        .font(.caption)
+                        .foregroundStyle(isSelected ? Nord.polarNight2 : Nord.frost1)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                if isSelected {
+                    Image(systemName: "return")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Nord.polarNight1)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .contentShape(Rectangle())
+            .background(isSelected ? Nord.frost1 : Color.clear, in: RoundedRectangle(cornerRadius: 10))
+        }
+        .buttonStyle(.plain)
+        .disabled(isSearching)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(result.domain.label), \(result.document.title), \(provenanceText(result.provenance))")
+        .accessibilityHint("Open this result")
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
+    private func openSelection() {
+        guard !isSearching else { return }
+        guard let result = selection.result(in: sections) ?? sections.first?.results.first else { return }
+        open(result)
+    }
+
+    private func provenanceText(_ provenance: DesktopGlobalSearchProvenance) -> String {
+        [
+            provenance.sourceLabel,
+            provenance.projectLabel,
+            provenance.accountLabel,
+            provenance.scopeLabel,
+        ]
+        .compactMap { $0 }
+        .reduce(into: [String]()) { labels, label in
+            if !labels.contains(label) { labels.append(label) }
+        }
+        .joined(separator: " · ")
+    }
+
+    private func symbol(for domain: DesktopGlobalSearchDomain) -> String {
+        switch domain {
+        case .conversations: "bubble.left.and.bubble.right"
+        case .projects: "folder"
+        case .research: "text.magnifyingglass"
+        case .knowledge: "diamond"
+        case .email: "envelope"
+        case .calendar: "calendar"
+        case .automations: "clock.arrow.2.circlepath"
+        case .github: "point.3.connected.trianglepath.dotted"
+        case .skills: "hammer"
+        case .approvals: "checkmark.shield"
+        case .artifacts: "doc"
+        }
+    }
+}
+
+#if os(macOS)
+private struct DesktopGlobalSearchKeyMonitor: NSViewRepresentable {
+    let move: (DesktopGlobalSearchSelectionDirection) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(move: move)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        context.coordinator.install()
+        return NSView(frame: .zero)
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.move = move
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.remove()
+    }
+
+    @MainActor
+    final class Coordinator {
+        var move: (DesktopGlobalSearchSelectionDirection) -> Void
+        private var monitor: Any?
+
+        init(move: @escaping (DesktopGlobalSearchSelectionDirection) -> Void) {
+            self.move = move
+        }
+
+        func install() {
+            guard monitor == nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                let commandModifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+                guard commandModifiers.isEmpty else { return event }
+                switch event.keyCode {
+                case 125:
+                    self?.move(.next)
+                    return nil
+                case 126:
+                    self?.move(.previous)
+                    return nil
+                default:
+                    return event
+                }
+            }
+        }
+
+        func remove() {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+            monitor = nil
+        }
+    }
+}
+#endif
 
 private struct KanameIdentityRow: View {
     var body: some View {
@@ -856,6 +1894,7 @@ private struct DesktopThreadsView: View {
     @ObservedObject var runtime: DesktopConversationRuntime
     let searchText: String
     @Binding var selectedThreadID: String?
+    let composerFocusRequest: DesktopComposerFocusRequest?
 
     var body: some View {
         HSplitView {
@@ -884,7 +1923,12 @@ private struct DesktopThreadsView: View {
             .frame(minWidth: 280, idealWidth: 350, maxWidth: 430)
 
             if let thread = model.thread(id: selectedThreadID) {
-                DesktopThreadConversation(model: model, runtime: runtime, thread: thread)
+                DesktopThreadConversation(
+                    model: model,
+                    runtime: runtime,
+                    thread: thread,
+                    composerFocusRequest: composerFocusRequest
+                )
                     .id(thread.id)
             } else {
                 EmptyPanel(
@@ -967,9 +2011,11 @@ private struct DesktopInboxView: View {
 }
 
 private struct DesktopThreadConversation: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var model: DesktopAppModel
     @ObservedObject var runtime: DesktopConversationRuntime
     let thread: DesktopThread
+    let composerFocusRequest: DesktopComposerFocusRequest?
     @State private var draft = ""
     @State private var questionAnswer = ""
     @State private var panel: Panel = .conversation
@@ -979,11 +2025,21 @@ private struct DesktopThreadConversation: View {
     @State private var runtimeProvider = "Codex"
     @State private var runtimeModel = "Use provider default"
     @State private var runtimeReasoning = "xhigh"
+    @FocusState private var composerFocused: Bool
+#if os(macOS)
+    @State private var sheetPreviousResponder: NSResponder?
+#endif
 
-    init(model: DesktopAppModel, runtime: DesktopConversationRuntime, thread: DesktopThread) {
+    init(
+        model: DesktopAppModel,
+        runtime: DesktopConversationRuntime,
+        thread: DesktopThread,
+        composerFocusRequest: DesktopComposerFocusRequest?
+    ) {
         self.model = model
         self.runtime = runtime
         self.thread = thread
+        self.composerFocusRequest = composerFocusRequest
         _draft = State(initialValue: model.composerDraft(threadID: thread.id))
     }
 
@@ -1015,6 +2071,7 @@ private struct DesktopThreadConversation: View {
                         .buttonStyle(.bordered)
                     }
                     Button {
+                        captureSheetFocus()
                         renamedTitle = thread.title
                         showsRename = true
                     } label: {
@@ -1023,6 +2080,7 @@ private struct DesktopThreadConversation: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel("Rename conversation")
                     Button {
+                        captureSheetFocus()
                         runtimeProvider = thread.provider
                         runtimeModel = thread.model
                         runtimeReasoning = thread.reasoningEffort
@@ -1055,7 +2113,7 @@ private struct DesktopThreadConversation: View {
                 ThreadEvidenceView(items: thread.evidence)
             }
         }
-        .sheet(isPresented: $showsRename) {
+        .sheet(isPresented: $showsRename, onDismiss: restoreSheetFocus) {
             DesktopRenameConversationSheet(
                 title: $renamedTitle,
                 cancel: { showsRename = false },
@@ -1064,7 +2122,7 @@ private struct DesktopThreadConversation: View {
                 }
             )
         }
-        .sheet(isPresented: $showsRuntimeSettings) {
+        .sheet(isPresented: $showsRuntimeSettings, onDismiss: restoreSheetFocus) {
             DesktopConversationRuntimeSheet(
                 provider: $runtimeProvider,
                 model: $runtimeModel,
@@ -1080,6 +2138,8 @@ private struct DesktopThreadConversation: View {
                 }
             )
         }
+        .onAppear(perform: applyComposerFocusRequest)
+        .onChange(of: composerFocusRequest) { _ in applyComposerFocusRequest() }
     }
 
     private var timeline: [DesktopConversationTimelineItem] {
@@ -1135,7 +2195,11 @@ private struct DesktopThreadConversation: View {
                 }
                 .onChange(of: timeline.count) { _ in
                     if let id = timeline.last?.id {
-                        withAnimation { proxy.scrollTo(id, anchor: .bottom) }
+                        if reduceMotion {
+                            proxy.scrollTo(id, anchor: .bottom)
+                        } else {
+                            withAnimation { proxy.scrollTo(id, anchor: .bottom) }
+                        }
                     }
                 }
             }
@@ -1165,8 +2229,10 @@ private struct DesktopThreadConversation: View {
                     .padding(.horizontal, 12)
                     .padding(.vertical, 10)
                     .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
+                    .focused($composerFocused)
                     .onSubmit(send)
                     .onChange(of: draft) { model.updateComposerDraft(threadID: thread.id, body: $0) }
+                    .accessibilityLabel("Message composer for \(thread.title)")
                 Button(action: send) {
                     Image(systemName: "arrow.up.circle.fill")
                         .font(.title2)
@@ -1187,7 +2253,33 @@ private struct DesktopThreadConversation: View {
             .foregroundStyle(.tertiary)
             .padding(.horizontal, 16)
             .padding(.bottom, 10)
+            .accessibilityElement(children: .combine)
+            .onChange(of: runtime.isRunning(threadID: thread.id)) { isRunning in
+                postDesktopAccessibilityAnnouncement(
+                    isRunning ? "\(thread.provider) is responding" : "\(thread.provider) finished responding"
+                )
+            }
         }
+    }
+
+    private func applyComposerFocusRequest() {
+        guard composerFocusRequest?.threadID == thread.id else { return }
+        panel = .conversation
+        DispatchQueue.main.async { composerFocused = true }
+    }
+
+    private func captureSheetFocus() {
+#if os(macOS)
+        sheetPreviousResponder = currentDesktopResponder()
+#endif
+    }
+
+    private func restoreSheetFocus() {
+#if os(macOS)
+        let responder = sheetPreviousResponder
+        sheetPreviousResponder = nil
+        restoreDesktopResponder(responder)
+#endif
     }
 
     private func send() {
@@ -1262,6 +2354,8 @@ private struct DesktopProviderEventCard: View {
         }
         .padding(12)
         .background(tint.opacity(0.09), in: RoundedRectangle(cornerRadius: 13))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(event.title). \(event.detail)")
     }
 
     private var symbol: String {
@@ -1314,7 +2408,7 @@ private struct DesktopRenameConversationSheet: View {
             }
         }
         .padding(24)
-        .frame(width: 440)
+        .desktopAdaptiveSheet(idealWidth: 440)
     }
 }
 
@@ -1358,7 +2452,7 @@ private struct DesktopConversationRuntimeSheet: View {
             }
         }
         .padding(24)
-        .frame(width: 520)
+        .desktopAdaptiveSheet(idealWidth: 520)
     }
 }
 
@@ -1758,7 +2852,7 @@ private struct DesktopProjectEditor: View {
                 }
             }
             .formStyle(.grouped)
-            .frame(width: 720, height: 720)
+            .desktopAdaptiveSheet(idealWidth: 720, idealHeight: 720)
             .navigationTitle("Edit \(project.name)")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -2084,19 +3178,25 @@ private final class DesktopUpdateViewModel: ObservableObject {
 #endif
     }
 
-    func rollback() {
+    func rollback(model: DesktopAppModel) {
 #if os(macOS)
+        guard !isBusy else { return }
+        let hasActiveApproval = model.snapshot.operations.approvals.contains { $0.state == .awaitingApproval }
+        isBusy = true
         _Concurrency.Task {
             do {
                 let request = try await coordinator.rollbackRequest(
                     installedBundleURL: Bundle.main.bundleURL,
-                    processIdentifier: ProcessInfo.processInfo.processIdentifier
+                    processIdentifier: ProcessInfo.processInfo.processIdentifier,
+                    composerCheckpointed: model.persistenceError == nil,
+                    hasActiveApproval: hasActiveApproval
                 )
                 try launchHelper(request)
                 message = "Restoring the previous Kaname UI…"
                 NSApplication.shared.terminate(nil)
             } catch {
                 message = error.localizedDescription
+                isBusy = false
             }
         }
 #endif
@@ -2491,6 +3591,7 @@ private final class DesktopPersonalIntegrationViewModel: ObservableObject {
 
 private struct DesktopKnowledgeView: View {
     @ObservedObject var model: DesktopAppModel
+    let searchRequest: DesktopSearchNavigationRequest?
     @StateObject private var knowledge = DesktopKnowledgeViewModel()
     @State private var selectedScopeID: String?
     @State private var selectedPath: String?
@@ -2540,17 +3641,40 @@ private struct DesktopKnowledgeView: View {
         .background(Nord.polarNight0)
         .onAppear {
             knowledge.seedDefaultScope(model: model)
-            if selectedScopeID == nil { selectedScopeID = model.snapshot.operations.vaultScopes.first?.id }
-            if selectedPath == nil, let path = selectedScope?.path, path.hasSuffix(".md") {
-                selectedPath = path
-                knowledge.inspect(model: model, path: path)
+            if !applySearchRequest() {
+                if selectedScopeID == nil { selectedScopeID = model.snapshot.operations.vaultScopes.first?.id }
+                if selectedPath == nil, let path = selectedScope?.path, path.hasSuffix(".md") {
+                    selectedPath = path
+                    knowledge.inspect(model: model, path: path)
+                }
             }
+        }
+        .onChange(of: searchRequest?.id) { _ in
+            _ = applySearchRequest()
         }
         .sheet(isPresented: $showsScopeSheet) {
             NewVaultScopeSheet(model: model) { id in
                 selectedScopeID = id
             }
         }
+    }
+
+    @discardableResult
+    private func applySearchRequest() -> Bool {
+        guard let searchRequest,
+              searchRequest.target.kind == .knowledgeDocument,
+              model.snapshot.operations.knowledgeDocuments.contains(where: {
+                  $0.path == searchRequest.target.itemID
+              }) else { return false }
+        let path = searchRequest.target.itemID
+        if let scope = model.snapshot.operations.vaultScopes
+            .filter({ path == $0.path || path.hasPrefix($0.path + "/") })
+            .max(by: { $0.path.count < $1.path.count }) {
+            selectedScopeID = scope.id
+        }
+        selectedPath = path
+        knowledge.inspect(model: model, path: path)
+        return true
     }
 
     private var knowledgeSidebar: some View {
@@ -2963,13 +4087,14 @@ private struct NewVaultScopeSheet: View {
             }
         }
         .padding(24)
-        .frame(width: 520)
+        .desktopAdaptiveSheet(idealWidth: 520)
     }
 }
 
 private struct DesktopEmailView: View {
     @ObservedObject var model: DesktopAppModel
     @ObservedObject var integrations: DesktopPersonalIntegrationViewModel
+    let allowsAutomaticInitialRead: Bool
     @StateObject private var mail = DesktopMailViewModel()
     @State private var showsComposer = false
     @State private var section = MailSection.inbox
@@ -3063,7 +4188,9 @@ private struct DesktopEmailView: View {
             )
         }
         .onAppear {
-            if mail.threads.isEmpty, !integrations.googleAccounts.isEmpty {
+            if allowsAutomaticInitialRead,
+               mail.threads.isEmpty,
+               !integrations.googleAccounts.isEmpty {
                 mail.search(accounts: googleAccounts, model: model)
             }
         }
@@ -3447,7 +4574,7 @@ private struct NewMailRuleSheet: View {
             }
         }
         .padding(24)
-        .frame(width: 560)
+        .desktopAdaptiveSheet(idealWidth: 560)
         .onAppear { accountID = accountID ?? accounts.first?.id }
     }
 }
@@ -3667,25 +4794,9 @@ private struct DesktopCalendarView: View {
                 calendar.requestApproval(model: model)
             }
             .buttonStyle(.borderedProminent)
-        } else if proposal.status == .running, approval?.state == .approved {
-            Button("Reconcile action") {
-                calendar.selectProposal(proposal.id)
-                calendar.execute(
-                    model: model,
-                    sources: model.snapshot.domains.calendarSources,
-                    googleAccounts: integrations.googleAccounts
-                )
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(calendar.isBusy)
         } else if approval?.state == .approved {
-            Button("Apply approved action") {
-                calendar.selectProposal(proposal.id)
-                calendar.execute(
-                    model: model,
-                    sources: model.snapshot.domains.calendarSources,
-                    googleAccounts: integrations.googleAccounts
-                )
+            Button(proposal.status == .running ? "Reconcile action" : "Apply approved action") {
+                executeCalendarProposal(proposal)
             }
             .buttonStyle(.borderedProminent)
             .disabled(calendar.isBusy)
@@ -3699,6 +4810,15 @@ private struct DesktopCalendarView: View {
             }
             .buttonStyle(.bordered)
         }
+    }
+
+    private func executeCalendarProposal(_ proposal: DesktopCalendarProposal) {
+        calendar.selectProposal(proposal.id)
+        calendar.execute(
+            model: model,
+            sources: model.snapshot.domains.calendarSources,
+            googleAccounts: integrations.googleAccounts
+        )
     }
 
     private func source(for event: CalendarEventSnapshot) -> DesktopCalendarSourceRecord? {
@@ -3797,7 +4917,7 @@ private struct CalendarEventMutationSheet: View {
             }
         }
         .padding(24)
-        .frame(width: 600, height: 470)
+        .desktopAdaptiveSheet(idealWidth: 600, idealHeight: 470)
     }
 
     private func save() {
@@ -5061,6 +6181,8 @@ private struct DesktopSettingsView: View {
 }
 
 private struct DesktopSettingsShell: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.desktopQALargeText) private var usesQALargeText
     private enum Category: String, CaseIterable, Identifiable {
         case general, integrations, providers, updates, calendars, scheduling, privacy, diagnostics
         var id: String { rawValue }
@@ -5096,6 +6218,8 @@ private struct DesktopSettingsShell: View {
     @Binding var draft: DesktopPreferences
     let dismiss: () -> Void
     @State private var category: Category = .general
+    @StateObject private var recoveryActions = DesktopRecoveryViewModel()
+    @FocusState private var focusedCategory: Category?
 
     init(
         model: DesktopAppModel,
@@ -5145,7 +6269,12 @@ private struct DesktopSettingsShell: View {
             }
         }
         .background(Nord.polarNight0)
-        .frame(minWidth: 820, idealWidth: 940, minHeight: 640, idealHeight: 740)
+        .frame(minWidth: 720, idealWidth: 940, maxWidth: 1_040, minHeight: 480, idealHeight: 640, maxHeight: 660)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Kaname settings")
+        .onAppear {
+            DispatchQueue.main.async { focusedCategory = category }
+        }
     }
 
     private var categoryRail: some View {
@@ -5167,6 +6296,8 @@ private struct DesktopSettingsShell: View {
                         .foregroundStyle(category == item ? Nord.snowStorm0 : .secondary)
                 }
                 .buttonStyle(.plain)
+                .focused($focusedCategory, equals: item)
+                .accessibilityAddTraits(category == item ? .isSelected : [])
             }
             Spacer()
             Button("Return to Kaname", systemImage: "arrow.left", action: dismiss)
@@ -5176,33 +6307,52 @@ private struct DesktopSettingsShell: View {
         }
         .padding(.top, 18)
         .padding(.horizontal, 10)
-        .frame(width: 205)
+        .frame(
+            minWidth: usesAccessibilityTextLayout ? 230 : 180,
+            idealWidth: usesAccessibilityTextLayout ? 260 : 205,
+            maxWidth: usesAccessibilityTextLayout ? 290 : 230
+        )
         .background(Nord.polarNight1)
     }
 
     private var footer: some View {
-        HStack {
-            Label(
-                TimeZone(identifier: draft.defaultScheduleTimeZoneIdentifier) == nil
-                    ? "The time zone will save when it is valid; other changes are saved."
-                    : "Changes save automatically.",
-                systemImage: TimeZone(identifier: draft.defaultScheduleTimeZoneIdentifier) == nil
-                    ? "exclamationmark.triangle.fill"
-                    : "checkmark.circle.fill"
-            )
-            .font(.caption)
-            .foregroundStyle(
-                TimeZone(identifier: draft.defaultScheduleTimeZoneIdentifier) == nil
-                    ? Nord.auroraYellow
-                    : Color.secondary.opacity(0.65)
-            )
-            Spacer()
-            Button("Refresh all status", systemImage: "arrow.clockwise") {
-                integrations.refreshAllStatus(model: model)
+        ViewThatFits(in: .horizontal) {
+            HStack { footerStatus; Spacer(); refreshStatusButton }
+            VStack(alignment: .leading, spacing: 8) {
+                footerStatus
+                refreshStatusButton
             }
         }
         .padding(.horizontal, 20)
-        .frame(height: 58)
+        .padding(.vertical, 10)
+        .frame(minHeight: 58)
+    }
+
+    private var footerStatus: some View {
+        Label(
+            TimeZone(identifier: draft.defaultScheduleTimeZoneIdentifier) == nil
+                ? "The time zone will save when it is valid; other changes are saved."
+                : "Changes save automatically.",
+            systemImage: TimeZone(identifier: draft.defaultScheduleTimeZoneIdentifier) == nil
+                ? "exclamationmark.triangle.fill"
+                : "checkmark.circle.fill"
+        )
+        .font(.caption)
+        .foregroundStyle(
+            TimeZone(identifier: draft.defaultScheduleTimeZoneIdentifier) == nil
+                ? Nord.auroraYellow
+                : Color.secondary.opacity(0.65)
+        )
+    }
+
+    private var refreshStatusButton: some View {
+        Button("Refresh all status", systemImage: "arrow.clockwise") {
+            integrations.refreshAllStatus(model: model)
+        }
+    }
+
+    private var usesAccessibilityTextLayout: Bool {
+        usesQALargeText || dynamicTypeSize.isAccessibilitySize
     }
 
     private var pageDetail: String {
@@ -5390,6 +6540,23 @@ private struct DesktopSettingsShell: View {
                 Text(updates.receipt.detail)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                Label(
+                    "Verification is same-signer, forward-only, and digest-bound.",
+                    systemImage: "checkmark.seal"
+                )
+                .font(.caption)
+                .foregroundStyle(Nord.frost1)
+                if let releaseNotes = updates.receipt.releaseNotes,
+                   !releaseNotes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    DisclosureGroup("Release notes") {
+                        Text(releaseNotes)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(10)
+                            .textSelection(.enabled)
+                            .padding(.top, 4)
+                    }
+                }
                 if updates.environment.channel == .stable {
                     HStack {
                         Button("Choose verified update…", systemImage: "shippingbox") { updates.chooseAndStage() }
@@ -5398,7 +6565,7 @@ private struct DesktopSettingsShell: View {
                             updates.switchAndRelaunch(model: model)
                         }
                         .disabled(updates.isBusy || updates.receipt.status != .staged)
-                        Button("Rollback", systemImage: "arrow.uturn.backward") { updates.rollback() }
+                        Button("Rollback", systemImage: "arrow.uturn.backward") { updates.rollback(model: model) }
                             .disabled(updates.isBusy || !updates.canRollback)
                     }
                 } else {
@@ -5458,13 +6625,22 @@ private struct DesktopSettingsShell: View {
     private var diagnosticsPage: some View {
         SettingsSection(title: "Recovery & diagnostics", symbol: "lifepreserver.fill") {
             Stepper("Keep audit metadata for \(draft.auditRetentionDays) days", value: $draft.auditRetentionDays, in: 7...365, step: 7)
-            Button("Copy redacted diagnostics", systemImage: "doc.on.doc") {
-#if os(macOS)
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(model.redactedDiagnostics(), forType: .string)
-#endif
+            HStack {
+                Button("Inspect diagnostics…", systemImage: "doc.text.magnifyingglass") {
+                    NotificationCenter.default.post(name: .kanamePresentDiagnostics, object: nil)
+                }
+                Button("Export verified backup…", systemImage: "externaldrive.badge.plus") {
+                    recoveryActions.exportBackup(model: model)
+                }
             }
-            Text("Diagnostics include counts and health only. They exclude content, identities, paths, and credentials.")
+            if let message = recoveryActions.message {
+                Label(message, systemImage: "info.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Text("Diagnostics are inspect-before-copy/export and include counts and health only. They exclude content, identities, paths, and credentials. Backups and crash information are never uploaded automatically.")
+                .font(.caption).foregroundStyle(.secondary)
+            Text("Factory reset is available only from the read-only Recovery Center and only after a backup validates successfully.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
@@ -5859,7 +7035,7 @@ private struct NewResearchSheet: View {
             }
         }
         .padding(24)
-        .frame(width: 540)
+        .desktopAdaptiveSheet(idealWidth: 540)
     }
 
     private var isValid: Bool {
@@ -5911,7 +7087,7 @@ private struct NewResearchSourceSheet: View {
             }
         }
         .padding(24)
-        .frame(width: 560, height: 430)
+        .desktopAdaptiveSheet(idealWidth: 560, idealHeight: 430)
     }
 
     private var isValid: Bool {
@@ -5976,7 +7152,7 @@ private struct NewKnowledgeProposalSheet: View {
             }
         }
         .padding(24)
-        .frame(width: 640, height: 600)
+        .desktopAdaptiveSheet(idealWidth: 640, idealHeight: 600)
     }
 
     private var isValid: Bool {
@@ -6040,7 +7216,7 @@ private struct NewGitStackLayerSheet: View {
             }
         }
         .padding(24)
-        .frame(width: 560, height: 440)
+        .desktopAdaptiveSheet(idealWidth: 560, idealHeight: 440)
         .onAppear {
             workspaceID = workspaceID ?? model.snapshot.domains.gitWorkspaces.first?.id
         }
@@ -6107,7 +7283,7 @@ private struct NewProviderComparisonSheet: View {
             }
         }
         .padding(24)
-        .frame(width: 580, height: 520)
+        .desktopAdaptiveSheet(idealWidth: 580, idealHeight: 520)
     }
 
     private var isValid: Bool {
@@ -6169,7 +7345,7 @@ private struct NewManagedWorktreeSheet: View {
             footer
         }
         .padding(24)
-        .frame(width: 640, height: 560)
+        .desktopAdaptiveSheet(idealWidth: 640, idealHeight: 560)
     }
 
     private var worktreeFields: some View {
@@ -6314,7 +7490,7 @@ private struct NewEmailDraftSheet: View {
             }
         }
         .padding(24)
-        .frame(width: 620, height: 500)
+        .desktopAdaptiveSheet(idealWidth: 620, idealHeight: 500)
     }
 
     private func save() {
@@ -6340,8 +7516,10 @@ private struct NewCalendarProposalSheet: View {
     @State private var timeZoneIdentifier: String
     @State private var recurrence = "Does not repeat"
 
-    private var writableSources: [DesktopCalendarSourceRecord] {
-        model.snapshot.domains.calendarSources.filter { source in
+    private static func eligibleWritableSources(
+        in sources: [DesktopCalendarSourceRecord]
+    ) -> [DesktopCalendarSourceRecord] {
+        sources.filter { source in
             let access = source.accessLevel.lowercased()
             return source.isEnabled
                 && !access.contains("read only")
@@ -6350,12 +7528,13 @@ private struct NewCalendarProposalSheet: View {
         }
     }
 
+    private var writableSources: [DesktopCalendarSourceRecord] {
+        Self.eligibleWritableSources(in: model.snapshot.domains.calendarSources)
+    }
+
     init(model: DesktopAppModel) {
         self.model = model
-        let sources = model.snapshot.domains.calendarSources.filter { source in
-            let access = source.accessLevel.lowercased()
-            return source.isEnabled && !access.contains("read only") && !access.contains("reader") && !access.contains("reconnect")
-        }
+        let sources = Self.eligibleWritableSources(in: model.snapshot.domains.calendarSources)
         _selectedCalendarSourceID = State(initialValue: sources.first?.id)
         _timeZoneIdentifier = State(initialValue: model.snapshot.preferences.defaultScheduleTimeZoneIdentifier)
     }
@@ -6411,7 +7590,7 @@ private struct NewCalendarProposalSheet: View {
             }
         }
         .padding(24)
-        .frame(width: 540, height: 470)
+        .desktopAdaptiveSheet(idealWidth: 540, idealHeight: 470)
     }
 
     private var isValid: Bool {
@@ -6558,7 +7737,7 @@ private struct NewAutomationSheet: View {
             }
         }
         .padding(24)
-        .frame(width: 650, height: 700)
+        .desktopAdaptiveSheet(idealWidth: 650, idealHeight: 700)
         .onChange(of: actionKind) { newValue in
             if newValue != .notification, authority == .localOnly { authority = .askEveryRun }
             if newValue == .notification { selectedSkillIDs.removeAll() }
@@ -6621,6 +7800,8 @@ private struct NewAutomationSheet: View {
 }
 
 private struct NewDesktopThreadSheet: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.desktopQALargeText) private var usesQALargeText
     @ObservedObject var model: DesktopAppModel
     let projectID: String?
     let created: (String) -> Void
@@ -6660,12 +7841,11 @@ private struct NewDesktopThreadSheet: View {
                     .foregroundStyle(.secondary)
                 }
                 Section("Kind") {
-                    Picker("Kind", selection: $kind) {
-                        ForEach(DesktopWorkKind.allCases, id: \.self) { kind in
-                            Text(kind.label).tag(kind)
-                        }
+                    if usesQALargeText || dynamicTypeSize.isAccessibilitySize {
+                        kindPicker.pickerStyle(.menu)
+                    } else {
+                        kindPicker.pickerStyle(.segmented)
                     }
-                    .pickerStyle(.segmented)
                     Text(kind.startDetail)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -6678,7 +7858,7 @@ private struct NewDesktopThreadSheet: View {
             }
             .formStyle(.grouped)
             .padding(12)
-            .frame(width: 540, height: 390)
+            .desktopAdaptiveSheet(idealWidth: 540, idealHeight: 390)
             .navigationTitle("New conversation")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -6692,6 +7872,14 @@ private struct NewDesktopThreadSheet: View {
                     }
                     .keyboardShortcut(.defaultAction)
                 }
+            }
+        }
+    }
+
+    private var kindPicker: some View {
+        Picker("Kind", selection: $kind) {
+            ForEach(DesktopWorkKind.allCases, id: \.self) { kind in
+                Text(kind.label).tag(kind)
             }
         }
     }
@@ -6709,9 +7897,15 @@ private struct NewDesktopProjectSheet: View {
             Form {
                 Section("Project") {
                     TextField("Name", text: $name)
-                    HStack {
-                        TextField("Local path (optional)", text: $path)
-                        Button("Choose…", action: chooseDirectory)
+                    ViewThatFits(in: .horizontal) {
+                        HStack {
+                            TextField("Local path (optional)", text: $path)
+                            Button("Choose…", action: chooseDirectory)
+                        }
+                        VStack(alignment: .leading, spacing: 8) {
+                            TextField("Local path (optional)", text: $path)
+                            Button("Choose folder…", action: chooseDirectory)
+                        }
                     }
                     TextField("Purpose", text: $summary, axis: .vertical)
                         .lineLimit(2...4)
@@ -6723,7 +7917,7 @@ private struct NewDesktopProjectSheet: View {
             }
             .formStyle(.grouped)
             .padding(12)
-            .frame(width: 540, height: 380)
+            .desktopAdaptiveSheet(idealWidth: 540, idealHeight: 380)
             .navigationTitle("New project")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -6851,28 +8045,58 @@ private struct ApprovalQueueStrip: View {
 }
 
 private struct RecordStatusPill: View {
+    @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
     let state: DesktopRecordState
 
     var body: some View {
-        Text(state.label)
+        Label {
+            Text(state.label)
+        } icon: {
+            if differentiateWithoutColor {
+                Image(systemName: state.accessibilitySymbol)
+            }
+        }
             .font(.caption2.weight(.bold))
             .foregroundStyle(state.foreground)
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
             .background(state.tint.opacity(0.18), in: Capsule())
+            .overlay {
+                if colorSchemeContrast == .increased {
+                    Capsule().strokeBorder(state.foreground, lineWidth: 1.5)
+                }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Status: \(state.label)")
     }
 }
 
 private struct ActionStatePill: View {
+    @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
     let state: DesktopActionState
 
     var body: some View {
-        Text(state.label)
+        Label {
+            Text(state.label)
+        } icon: {
+            if differentiateWithoutColor {
+                Image(systemName: state.accessibilitySymbol)
+            }
+        }
             .font(.caption2.weight(.bold))
             .foregroundStyle(state.tint)
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
             .background(state.tint.opacity(0.18), in: Capsule())
+            .overlay {
+                if colorSchemeContrast == .increased {
+                    Capsule().strokeBorder(state.tint, lineWidth: 1.5)
+                }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Action status: \(state.label)")
     }
 }
 
@@ -6989,6 +8213,9 @@ private struct ThreadCard: View {
             .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 16))
         }
         .buttonStyle(.plain)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(thread.title). \(thread.summary). Attention: \(thread.attention.label). Provider: \(thread.provider)")
+        .accessibilityHint("Open conversation")
     }
 }
 
@@ -7026,6 +8253,9 @@ private struct ThreadRow: View {
             .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
         }
         .buttonStyle(.plain)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(thread.unread ? "Unread. " : "")\(thread.title). \(thread.summary). Attention: \(thread.attention.label)")
+        .accessibilityHint("Open conversation")
     }
 }
 
@@ -7059,6 +8289,8 @@ private struct ThreadDirectoryLabel: View {
             }
         }
         .padding(.vertical, 5)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(thread.unread ? "Unread. " : "")\(thread.title). \(thread.summary). Attention: \(thread.attention.label)")
     }
 }
 
@@ -7083,6 +8315,8 @@ private struct InboxThreadLabel: View {
                 .foregroundStyle(.tertiary)
         }
         .padding(.vertical, 6)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(thread.unread ? "Unread. " : "")\(thread.title). \(thread.summary). Attention: \(thread.attention.label)")
     }
 }
 
@@ -7196,6 +8430,7 @@ private struct ProjectCard: View {
                     }
                     .buttonStyle(.plain)
                     .font(.subheadline)
+                    .accessibilityLabel("Open \(thread.title). Attention: \(thread.attention.label)")
                 }
             }
         }
@@ -7488,15 +8723,30 @@ private struct EmptyPanel: View {
 }
 
 private struct AttentionPill: View {
+    @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
     let attention: DesktopAttention
 
     var body: some View {
-        Text(attention.label)
+        Label {
+            Text(attention.label)
+        } icon: {
+            if differentiateWithoutColor {
+                Image(systemName: attention.accessibilitySymbol)
+            }
+        }
             .font(.caption.weight(.semibold))
             .foregroundStyle(attention.tint)
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
             .background(attention.tint.opacity(0.12), in: Capsule())
+            .overlay {
+                if colorSchemeContrast == .increased {
+                    Capsule().strokeBorder(attention.tint, lineWidth: 1.5)
+                }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Attention: \(attention.label)")
     }
 }
 
@@ -7573,6 +8823,47 @@ extension View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Nord.polarNight2.opacity(0.58), in: RoundedRectangle(cornerRadius: 15))
     }
+
+    fileprivate func desktopAdaptiveSheet(
+        idealWidth: Double,
+        idealHeight: Double? = nil
+    ) -> some View {
+        modifier(DesktopAdaptiveSheetModifier(idealWidth: idealWidth, idealHeight: idealHeight))
+    }
+}
+
+private struct DesktopAdaptiveSheetModifier: ViewModifier {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.desktopQALargeText) private var usesQALargeText
+    let idealWidth: Double
+    let idealHeight: Double?
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        let metrics = DesktopAccessibleSheetMetrics.adaptive(
+            idealWidth: idealWidth,
+            idealHeight: idealHeight,
+            usesAccessibilityTextSize: usesQALargeText || dynamicTypeSize.isAccessibilitySize
+        )
+        if let minimumHeight = metrics.minimumHeight,
+           let idealHeight = metrics.idealHeight,
+           let maximumHeight = metrics.maximumHeight {
+            content.frame(
+                minWidth: CGFloat(metrics.minimumWidth),
+                idealWidth: CGFloat(metrics.idealWidth),
+                maxWidth: CGFloat(metrics.maximumWidth),
+                minHeight: CGFloat(minimumHeight),
+                idealHeight: CGFloat(idealHeight),
+                maxHeight: CGFloat(maximumHeight)
+            )
+        } else {
+            content.frame(
+                minWidth: CGFloat(metrics.minimumWidth),
+                idealWidth: CGFloat(metrics.idealWidth),
+                maxWidth: CGFloat(metrics.maximumWidth)
+            )
+        }
+    }
 }
 
 private extension DesktopDestination {
@@ -7598,6 +8889,20 @@ private extension DesktopDestination {
 }
 
 private extension DesktopRecordState {
+    var accessibilitySymbol: String {
+        switch self {
+        case .ready: "checkmark.circle"
+        case .draft: "pencil.circle"
+        case .proposed: "lightbulb"
+        case .paused: "pause.circle"
+        case .disconnected: "bolt.slash"
+        case .needsReview: "eye.circle"
+        case .waiting: "clock"
+        case .running: "progress.indicator"
+        case .failed: "exclamationmark.triangle"
+        }
+    }
+
     var tint: Color {
         switch self {
         case .ready: Nord.auroraGreen
@@ -7618,6 +8923,20 @@ private extension DesktopRecordState {
 }
 
 private extension DesktopActionState {
+    var accessibilitySymbol: String {
+        switch self {
+        case .proposed: "lightbulb"
+        case .awaitingApproval: "checkmark.shield"
+        case .approved: "hand.thumbsup"
+        case .rejected: "hand.thumbsdown"
+        case .running: "progress.indicator"
+        case .completed, .reconciled: "checkmark.circle"
+        case .failed: "exclamationmark.triangle"
+        case .interrupted: "stop.circle"
+        case .cancelled: "xmark.circle"
+        }
+    }
+
     var tint: Color {
         switch self {
         case .proposed, .awaitingApproval: Nord.auroraYellow
@@ -7626,6 +8945,20 @@ private extension DesktopActionState {
         case .interrupted: Nord.auroraOrange
         case .completed, .reconciled: Nord.auroraGreen
         case .cancelled: Nord.polarNight3
+        }
+    }
+}
+
+private extension DesktopAttention {
+    var accessibilitySymbol: String {
+        switch self {
+        case .needsResponse: "bubble.left"
+        case .needsApproval: "checkmark.shield"
+        case .running: "progress.indicator"
+        case .queued: "clock"
+        case .completed: "checkmark.circle"
+        case .failed: "exclamationmark.triangle"
+        case .archived: "archivebox"
         }
     }
 }

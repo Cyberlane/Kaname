@@ -1,4 +1,5 @@
 import CryptoKit
+import Dispatch
 import Foundation
 import KanameConnectivity
 import KanameDesktop
@@ -7,21 +8,60 @@ import KanameLocalCore
 
 @MainActor
 final class DesktopConversationRuntime: ObservableObject {
+    private struct PreparedServiceEvent {
+        let serviceEvent: KanameConversationServiceEvent
+        let providerEvent: CodexRunEvent?
+        let batchItem: DesktopProviderEventBatchItem?
+    }
+
     @Published private(set) var activeThreadIDs: Set<String> = []
 
     private let model: DesktopAppModel
     private let environment: KanameDesktopEnvironment
     private let serviceStore: KanameConversationServiceStore
+    private let pollingPolicy = DesktopConversationPollingPolicy()
     private var pollingTask: _Concurrency.Task<Void, Never>?
     private var orphanChecks: [String: Int] = [:]
     private var titleTasks: [String: _Concurrency.Task<Void, Never>] = [:]
+    private var eventIndex: DesktopConversationEventCursorIndex
+    private var performanceStore = DesktopConversationPerformanceStore()
+    private var providerByRunID: [String: String]
+    private var nativeThreadByRunID: [String: String]
+    private var nativeTurnByRunID: [String: String]
+    private var pollCandidateThreadIDs: Set<String>
+    private var runningRunIDByThread: [String: String]
+    private var didReconcilePersistedTitles = false
 
     init(model: DesktopAppModel, environment: KanameDesktopEnvironment = .current) {
         self.model = model
         self.environment = environment
+        let indexStarted = DispatchTime.now().uptimeNanoseconds
+        eventIndex = DesktopConversationEventCursorIndex(
+            persistedEvents: model.snapshot.operations.providerEvents.map(Self.persistedIdentity)
+        )
+        let indexEnded = DispatchTime.now().uptimeNanoseconds
+        providerByRunID = model.snapshot.operations.providerRuns.reduce(into: [:]) { $0[$1.id] = $1.provider }
+        nativeThreadByRunID = model.snapshot.operations.providerRuns.reduce(into: [:]) { result, run in
+            if let nativeThreadID = run.nativeThreadID { result[run.id] = nativeThreadID }
+        }
+        nativeTurnByRunID = model.snapshot.operations.providerRuns.reduce(into: [:]) { result, run in
+            if let nativeTurnID = run.nativeTurnID { result[run.id] = nativeTurnID }
+        }
+        pollCandidateThreadIDs = Set(model.snapshot.operations.providerRuns.compactMap { run in
+            guard run.state == .proposed || run.state == .running else { return nil }
+            return run.threadID
+        })
+        runningRunIDByThread = model.snapshot.operations.providerRuns.reduce(into: [:]) { result, run in
+            if run.state == .running, let threadID = run.threadID { result[threadID] = run.id }
+        }
         serviceStore = KanameConversationServiceStore(
             rootDirectory: environment.applicationSupportRoot.appending(path: "ConversationService", directoryHint: .isDirectory)
         )
+        performanceStore.record(DesktopConversationPerformanceSample(
+            metric: .historyIndex,
+            durationNanoseconds: indexEnded >= indexStarted ? indexEnded - indexStarted : 0,
+            itemCount: model.snapshot.operations.providerEvents.count
+        ))
         pollingTask = _Concurrency.Task { [weak self] in await self?.pollService() }
     }
 
@@ -55,6 +95,7 @@ final class DesktopConversationRuntime: ObservableObject {
                 usesProjectContext: usesProjectContext,
                 workspacePathOverride: workspacePathOverride
               ) else { return nil }
+        pollCandidateThreadIDs.insert(threadID)
         return runID
     }
 
@@ -64,6 +105,7 @@ final class DesktopConversationRuntime: ObservableObject {
         if !events.isEmpty { return }
         let pending = (try? serviceStore.pendingRequests(threadID: threadID).contains { $0.1.runID == runID }) ?? false
         if pending {
+            pollCandidateThreadIDs.insert(threadID)
             launchWorkerIfAvailable(threadID: threadID)
             return
         }
@@ -105,6 +147,10 @@ final class DesktopConversationRuntime: ObservableObject {
         activeThreadIDs.contains(threadID)
     }
 
+    func performanceP95Nanoseconds(for metric: DesktopConversationPerformanceMetric) -> UInt64? {
+        performanceStore.p95Nanoseconds(for: metric)
+    }
+
     private func submit(runID: String) {
         guard let run = model.providerRun(id: runID),
               let threadID = run.threadID,
@@ -113,6 +159,8 @@ final class DesktopConversationRuntime: ObservableObject {
               let thread = model.thread(id: threadID) else {
             return
         }
+        providerByRunID[run.id] = run.provider
+        pollCandidateThreadIDs.insert(threadID)
         let workspace: URL
         if let override = run.workspacePathOverride {
             workspace = URL(fileURLWithPath: override, isDirectory: true).standardizedFileURL
@@ -163,7 +211,7 @@ final class DesktopConversationRuntime: ObservableObject {
                 storeRoot: serviceStore.rootDirectory,
                 threadID: threadID
             )
-            activeThreadIDs.insert(threadID)
+            setThreadActive(threadID, active: true)
         } catch {
             model.stopProviderRun(id: run.id, interrupted: false, error: error.localizedDescription)
         }
@@ -171,43 +219,93 @@ final class DesktopConversationRuntime: ObservableObject {
 
     private func pollService() async {
         while !_Concurrency.Task.isCancelled {
-            for thread in model.snapshot.threads {
-                let serviceEvents = (try? serviceStore.events(threadID: thread.id)) ?? []
-                for event in serviceEvents {
-                    if !model.snapshot.operations.providerEvents.contains(where: { $0.id == event.id }) {
-                        consume(event)
+            let cycleState = pollingState()
+            let threadIDs = cycleState.threadIDs
+            let cycleStarted = DispatchTime.now().uptimeNanoseconds
+            var remainingEventCapacity = pollingPolicy.maximumEventsPerCycle
+            for threadID in threadIDs {
+                let serviceEvents = Self.orderedServiceEvents((try? serviceStore.events(threadID: threadID)) ?? [])
+                var mayApplyNewEvents = true
+                for event in serviceEvents where eventIndex.contains(Self.identity(event)) && remainingEventCapacity > 0 {
+                    guard let prepared = prepare(event), applyEffects(for: prepared) else {
+                        mayApplyNewEvents = false
+                        break
                     }
                     try? serviceStore.acknowledge(event)
+                    remainingEventCapacity -= 1
                 }
-                let alive = serviceStore.isWorkerAlive(threadID: thread.id)
-                let hasPending = (try? serviceStore.pendingRequests(threadID: thread.id).isEmpty == false) ?? false
+                let batchStarted = DispatchTime.now().uptimeNanoseconds
+                let pendingEvents = eventIndex.unseenBatch(
+                    from: serviceEvents,
+                    maximumCount: mayApplyNewEvents ? remainingEventCapacity : 0,
+                    identity: Self.identity
+                )
+                let batchEnded = DispatchTime.now().uptimeNanoseconds
+                performanceStore.record(DesktopConversationPerformanceSample(
+                    metric: .eventBatchSelection,
+                    durationNanoseconds: batchEnded >= batchStarted ? batchEnded - batchStarted : 0,
+                    itemCount: serviceEvents.count
+                ))
+                var preparedEvents: [PreparedServiceEvent] = []
+                for event in pendingEvents {
+                    guard let prepared = prepare(event) else { break }
+                    preparedEvents.append(prepared)
+                }
+                let batchItems = preparedEvents.compactMap(\.batchItem)
+                let persistenceStarted = DispatchTime.now().uptimeNanoseconds
+                let batchResult = batchItems.isEmpty
+                    ? DesktopProviderEventBatchResult(acceptedEventIDs: [], duplicateEventIDs: [])
+                    : model.recordProviderEvents(batchItems)
+                let persistenceEnded = DispatchTime.now().uptimeNanoseconds
+                if !batchItems.isEmpty {
+                    performanceStore.record(DesktopConversationPerformanceSample(
+                        metric: .providerEventBatchPersistence,
+                        durationNanoseconds: persistenceEnded >= persistenceStarted ? persistenceEnded - persistenceStarted : 0,
+                        itemCount: batchItems.count
+                    ))
+                }
+                if let batchResult {
+                    let durableEventIDs = Set(batchResult.acceptedEventIDs + batchResult.duplicateEventIDs)
+                    for prepared in preparedEvents {
+                        guard prepared.batchItem == nil || durableEventIDs.contains(prepared.serviceEvent.id) else { break }
+                        guard applyEffects(for: prepared) else { break }
+                        eventIndex.markPersisted(Self.identity(prepared.serviceEvent))
+                        try? serviceStore.acknowledge(prepared.serviceEvent)
+                        remainingEventCapacity -= 1
+                    }
+                }
+                let alive = serviceStore.isWorkerAlive(threadID: threadID)
+                let hasPending = (try? serviceStore.pendingRequests(threadID: threadID).isEmpty == false) ?? false
                 if alive || hasPending {
-                    activeThreadIDs.insert(thread.id)
-                    orphanChecks[thread.id] = 0
-                    if hasPending && !alive { launchWorkerIfAvailable(threadID: thread.id) }
+                    setThreadActive(threadID, active: true)
+                    orphanChecks[threadID] = 0
+                    if hasPending && !alive { launchWorkerIfAvailable(threadID: threadID) }
                 } else {
-                    activeThreadIDs.remove(thread.id)
-                    reconcileOrphanedRun(threadID: thread.id)
-                }
-                if thread.titleSource == .provisional,
-                   model.providerRuns(threadID: thread.id).contains(where: { $0.state == .completed }) {
-                    scheduleTitleIfNeeded(threadID: thread.id)
+                    setThreadActive(threadID, active: false)
+                    reconcileOrphanedRun(threadID: threadID, runningRunID: cycleState.runningRunIDs[threadID])
+                    if runningRunIDByThread[threadID] == nil { pollCandidateThreadIDs.remove(threadID) }
                 }
             }
-            try? await _Concurrency.Task.sleep(for: .milliseconds(200))
+            reconcilePersistedTitlesOnce()
+            let cycleEnded = DispatchTime.now().uptimeNanoseconds
+            performanceStore.record(DesktopConversationPerformanceSample(
+                metric: .pollingCycle,
+                durationNanoseconds: cycleEnded >= cycleStarted ? cycleEnded - cycleStarted : 0,
+                itemCount: threadIDs.count
+            ))
+            let interval = pollingPolicy.intervalNanoseconds(hasCandidateThreads: !threadIDs.isEmpty)
+            try? await _Concurrency.Task.sleep(for: .nanoseconds(Int64(interval)))
         }
     }
 
-    private func consume(_ serviceEvent: KanameConversationServiceEvent) {
+    private func prepare(_ serviceEvent: KanameConversationServiceEvent) -> PreparedServiceEvent? {
         if serviceEvent.kind == .serviceStarted {
-            _ = model.beginProviderRun(id: serviceEvent.runID)
-            if let nativeThreadID = serviceEvent.nativeThreadID {
-                model.attachNativeProviderRun(
-                    id: serviceEvent.runID,
-                    nativeThreadID: nativeThreadID,
-                    nativeTurnID: serviceEvent.nativeTurnID
-                )
+            if model.providerRun(id: serviceEvent.runID)?.state == .proposed {
+                let running = model.beginProviderRun(id: serviceEvent.runID)
+                guard model.persistenceError == nil else { return nil }
+                if running?.state == .running { runningRunIDByThread[serviceEvent.threadID] = serviceEvent.runID }
             }
+            guard attachNativeIdentityIfNeeded(serviceEvent) else { return nil }
         }
         if serviceEvent.kind == .serviceFailed {
             let record = DesktopProviderEventRecord(
@@ -225,11 +323,17 @@ final class DesktopConversationRuntime: ObservableObject {
                 payloadWasTruncated: serviceEvent.payloadWasTruncated,
                 createdAtUnixMillis: serviceEvent.createdAtUnixMillis
             )
-            _ = model.recordProviderEvent(record)
-            model.stopProviderRun(id: serviceEvent.runID, interrupted: false, error: record.detail)
-            return
+            return PreparedServiceEvent(
+                serviceEvent: serviceEvent,
+                providerEvent: nil,
+                batchItem: DesktopProviderEventBatchItem(event: record)
+            )
         }
-        guard let providerKind = serviceEvent.providerKind else { return }
+        guard let providerKind = serviceEvent.providerKind else {
+            return serviceEvent.kind == .serviceStarted
+                ? PreparedServiceEvent(serviceEvent: serviceEvent, providerEvent: nil, batchItem: nil)
+                : nil
+        }
         let event = CodexRunEvent(
             kind: providerKind,
             nativeType: serviceEvent.nativeType,
@@ -240,13 +344,7 @@ final class DesktopConversationRuntime: ObservableObject {
             payload: serviceEvent.rawPayloadBase64.flatMap { Data(base64Encoded: $0) },
             payloadWasTruncated: serviceEvent.payloadWasTruncated
         )
-        if let nativeThreadID = event.threadID {
-            model.attachNativeProviderRun(
-                id: serviceEvent.runID,
-                nativeThreadID: nativeThreadID,
-                nativeTurnID: event.turnID
-            )
-        }
+        guard attachNativeIdentityIfNeeded(serviceEvent) else { return nil }
         let record = providerEventRecord(
             event,
             id: serviceEvent.id,
@@ -254,62 +352,173 @@ final class DesktopConversationRuntime: ObservableObject {
             runID: serviceEvent.runID,
             createdAtUnixMillis: serviceEvent.createdAtUnixMillis
         )
-        _ = model.recordProviderEvent(
-            record,
-            assistantDelta: event.kind == .messageDelta ? event.text : nil
+        return PreparedServiceEvent(
+            serviceEvent: serviceEvent,
+            providerEvent: event,
+            batchItem: DesktopProviderEventBatchItem(
+                event: record,
+                assistantDelta: event.kind == .messageDelta ? event.text : nil
+            )
         )
+    }
+
+    private func applyEffects(for prepared: PreparedServiceEvent) -> Bool {
+        let serviceEvent = prepared.serviceEvent
+        if serviceEvent.kind == .serviceFailed {
+            if model.providerRun(id: serviceEvent.runID)?.state != .failed {
+                model.stopProviderRun(
+                    id: serviceEvent.runID,
+                    interrupted: false,
+                    error: prepared.batchItem?.event.detail ?? "The durable provider worker stopped safely."
+                )
+                guard model.persistenceError == nil else { return false }
+            }
+            runningRunIDByThread.removeValue(forKey: serviceEvent.threadID)
+            return true
+        }
+        guard let event = prepared.providerEvent else { return true }
         if event.kind == .planUpdated, let text = event.text {
             model.addProviderPlan(threadID: serviceEvent.threadID, text: text, completed: false)
+            guard model.persistenceError == nil else { return false }
         }
         if event.kind == .toolActivity,
            let text = event.text,
            ["agent", "subagent", "task", "spawn"].contains(where: {
                text.localizedCaseInsensitiveContains($0) || event.nativeType.localizedCaseInsensitiveContains($0)
-           }), let run = model.providerRun(id: serviceEvent.runID) {
+           }) {
             let terminal = event.nativeType.localizedCaseInsensitiveContains("completed")
                 || event.nativeType.localizedCaseInsensitiveContains("finished")
             model.recordSubagentActivity(
                 threadID: serviceEvent.threadID,
                 runID: serviceEvent.runID,
-                provider: run.provider,
+                provider: providerName(runID: serviceEvent.runID),
                 nativeID: event.approvalID ?? event.nativeType,
                 title: text,
                 detail: event.nativeType,
                 state: terminal ? .completed : .running
             )
+            guard model.persistenceError == nil else { return false }
         }
 
         switch event.kind {
         case .providerCompleted:
-            model.completeProviderRun(id: serviceEvent.runID, tokenUsage: tokenUsage(from: event.payload))
-            registerServiceEvidence(threadID: serviceEvent.threadID, runID: serviceEvent.runID)
+            if model.providerRun(id: serviceEvent.runID)?.state != .completed {
+                model.completeProviderRun(id: serviceEvent.runID, tokenUsage: tokenUsage(from: event.payload))
+                guard model.persistenceError == nil else { return false }
+            }
+            runningRunIDByThread.removeValue(forKey: serviceEvent.threadID)
+            guard registerServiceEvidence(threadID: serviceEvent.threadID, runID: serviceEvent.runID) else { return false }
             scheduleTitleIfNeeded(threadID: serviceEvent.threadID)
         case .runInterrupted:
-            model.stopProviderRun(id: serviceEvent.runID, interrupted: true, error: event.text ?? "The provider turn was interrupted.")
+            if model.providerRun(id: serviceEvent.runID)?.state != .interrupted {
+                model.stopProviderRun(id: serviceEvent.runID, interrupted: true, error: event.text ?? "The provider turn was interrupted.")
+                guard model.persistenceError == nil else { return false }
+            }
+            runningRunIDByThread.removeValue(forKey: serviceEvent.threadID)
         case .runFailed:
-            model.stopProviderRun(id: serviceEvent.runID, interrupted: false, error: event.text ?? "The provider stopped without a readable result.")
+            if model.providerRun(id: serviceEvent.runID)?.state != .failed {
+                model.stopProviderRun(id: serviceEvent.runID, interrupted: false, error: event.text ?? "The provider stopped without a readable result.")
+                guard model.persistenceError == nil else { return false }
+            }
+            runningRunIDByThread.removeValue(forKey: serviceEvent.threadID)
         case .sessionStarted, .runStarted, .messageDelta, .itemStarted, .itemCompleted,
              .planUpdated, .approvalRequested, .approvalAccepted, .approvalRejected,
              .questionRequested, .questionAnswered, .toolActivity, .diffUpdated, .nativeProviderEvent:
             break
         }
+        return true
     }
 
-    private func reconcileOrphanedRun(threadID: String) {
-        guard let running = model.providerRuns(threadID: threadID).last(where: { $0.state == .running }) else {
+    private func reconcileOrphanedRun(threadID: String, runningRunID: String?) {
+        guard let runningRunID else {
             orphanChecks[threadID] = 0
             return
         }
         let count = (orphanChecks[threadID] ?? 0) + 1
         orphanChecks[threadID] = count
-        if count >= 5 {
+        if count >= pollingPolicy.orphanedRunCheckCount {
             model.stopProviderRun(
-                id: running.id,
+                id: runningRunID,
                 interrupted: true,
                 error: "The durable provider worker stopped before completion. Retry reuses the saved user message."
             )
+            if model.persistenceError == nil { runningRunIDByThread.removeValue(forKey: threadID) }
             orphanChecks[threadID] = 0
         }
+    }
+
+    private func pollingState() -> (threadIDs: [String], runningRunIDs: [String: String]) {
+        (pollCandidateThreadIDs.union(activeThreadIDs).sorted(), runningRunIDByThread)
+    }
+
+    private func reconcilePersistedTitlesOnce() {
+        guard !didReconcilePersistedTitles else { return }
+        didReconcilePersistedTitles = true
+        let completedThreadIDs = Set(model.snapshot.operations.providerRuns.compactMap { run in
+            run.state == .completed ? run.threadID : nil
+        })
+        for thread in model.snapshot.threads where thread.titleSource == .provisional && completedThreadIDs.contains(thread.id) {
+            scheduleTitleIfNeeded(threadID: thread.id)
+        }
+    }
+
+    private func attachNativeIdentityIfNeeded(_ event: KanameConversationServiceEvent) -> Bool {
+        guard let nativeThreadID = event.nativeThreadID else { return true }
+        let currentThreadID = nativeThreadByRunID[event.runID]
+        let currentTurnID = nativeTurnByRunID[event.runID]
+        let needsTurnUpdate = event.nativeTurnID.map { $0 != currentTurnID } ?? false
+        guard currentThreadID != nativeThreadID || needsTurnUpdate else { return true }
+        model.attachNativeProviderRun(
+            id: event.runID,
+            nativeThreadID: nativeThreadID,
+            nativeTurnID: event.nativeTurnID
+        )
+        guard model.persistenceError == nil else { return false }
+        nativeThreadByRunID[event.runID] = nativeThreadID
+        if let nativeTurnID = event.nativeTurnID {
+            nativeTurnByRunID[event.runID] = nativeTurnID
+        }
+        return true
+    }
+
+    private func providerName(runID: String) -> String {
+        if let provider = providerByRunID[runID] { return provider }
+        let provider = model.providerRun(id: runID)?.provider ?? "Provider"
+        providerByRunID[runID] = provider
+        return provider
+    }
+
+    private func setThreadActive(_ threadID: String, active: Bool) {
+        if active {
+            if !activeThreadIDs.contains(threadID) { activeThreadIDs.insert(threadID) }
+        } else if activeThreadIDs.contains(threadID) {
+            activeThreadIDs.remove(threadID)
+        }
+    }
+
+    private static func orderedServiceEvents(
+        _ events: [KanameConversationServiceEvent]
+    ) -> [KanameConversationServiceEvent] {
+        let runStartedAt = events.reduce(into: [String: Int64]()) { result, event in
+            result[event.runID] = min(result[event.runID] ?? event.createdAtUnixMillis, event.createdAtUnixMillis)
+        }
+        return events.sorted { lhs, rhs in
+            if lhs.runID == rhs.runID { return lhs.ordinal < rhs.ordinal }
+            let lhsStartedAt = runStartedAt[lhs.runID] ?? lhs.createdAtUnixMillis
+            let rhsStartedAt = runStartedAt[rhs.runID] ?? rhs.createdAtUnixMillis
+            if lhsStartedAt != rhsStartedAt { return lhsStartedAt < rhsStartedAt }
+            return lhs.runID < rhs.runID
+        }
+    }
+
+    private static func identity(_ event: KanameConversationServiceEvent) -> DesktopConversationEventIdentity {
+        DesktopConversationEventIdentity(id: event.id, runID: event.runID, ordinal: event.ordinal)
+    }
+
+    private static func persistedIdentity(_ event: DesktopProviderEventRecord) -> DesktopConversationEventIdentity {
+        let prefix = "\(event.runID)-service-"
+        let ordinal = event.id.hasPrefix(prefix) ? Int(event.id.dropFirst(prefix.count)) ?? 0 : 0
+        return DesktopConversationEventIdentity(id: event.id, runID: event.runID, ordinal: ordinal)
     }
 
     private func launchWorkerIfAvailable(threadID: String) {
@@ -452,7 +661,7 @@ final class DesktopConversationRuntime: ObservableObject {
         runID: String,
         createdAtUnixMillis: Int64
     ) -> DesktopProviderEventRecord {
-        let provider = model.providerRun(id: runID)?.provider ?? "Provider"
+        let provider = providerName(runID: runID)
         let presentation = Self.presentation(for: event, provider: provider)
         return DesktopProviderEventRecord(
             id: id,
@@ -503,12 +712,12 @@ final class DesktopConversationRuntime: ObservableObject {
         return Self.findTokenUsage(in: object)
     }
 
-    private func registerServiceEvidence(threadID: String, runID: String) {
+    private func registerServiceEvidence(threadID: String, runID: String) -> Bool {
         guard let url = try? serviceStore.evidenceURL(threadID: threadID, runID: runID),
-              let data = try? Data(contentsOf: url), !data.isEmpty,
-              !model.snapshot.operations.artifacts.contains(where: { $0.localPath == url.path }) else { return }
+              let data = try? Data(contentsOf: url), !data.isEmpty else { return true }
+        guard !model.snapshot.operations.artifacts.contains(where: { $0.localPath == url.path }) else { return true }
         let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-        _ = model.registerArtifact(
+        let artifactID = model.registerArtifact(
             threadID: threadID,
             name: "Provider event evidence",
             kind: .log,
@@ -516,6 +725,7 @@ final class DesktopConversationRuntime: ObservableObject {
             digest: digest,
             provenance: "Signed Kaname conversation worker"
         )
+        return artifactID != nil && model.persistenceError == nil
     }
 
     private static func findTokenUsage(in value: Any) -> Int? {

@@ -21,7 +21,20 @@ public struct KanameDesktopEnvironment: Equatable, Sendable {
 
     public static var current: KanameDesktopEnvironment {
         let declared = Bundle.main.object(forInfoDictionaryKey: "KanameDesktopChannel") as? String
-        return KanameDesktopEnvironment(channel: Channel(rawValue: declared ?? "") ?? .stable)
+        let qaSupportDirectory = qaApplicationSupportDirectory(arguments: CommandLine.arguments)
+        return KanameDesktopEnvironment(
+            channel: Channel(rawValue: declared ?? "") ?? .stable,
+            applicationSupportDirectory: qaSupportDirectory
+        )
+    }
+
+    static func qaApplicationSupportDirectory(arguments: [String]) -> URL? {
+        arguments.firstIndex(of: "--desktop-qa-application-support-base")
+            .flatMap { arguments.indices.contains($0 + 1) ? arguments[$0 + 1] : nil }
+            .flatMap { path -> URL? in
+                guard path.hasPrefix("/"), path != "/" else { return nil }
+                return URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+            }
     }
 
     public var bundleIdentifier: String {

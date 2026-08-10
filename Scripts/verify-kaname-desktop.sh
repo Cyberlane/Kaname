@@ -3,18 +3,34 @@
 set -euo pipefail
 
 app_path="${1:-$HOME/Applications/Kaname.app}"
+expected_version="${KANAME_APP_VERSION:-0.14.0}"
+expected_build="${KANAME_APP_BUILD:-23}"
 executable="$app_path/Contents/MacOS/KanamePrototype"
-service_identifier="com.cyberlane.kaname.desktop.localcore.service"
-state_directory="$HOME/Library/Application Support/Kaname/Desktop"
+info="$app_path/Contents/Info.plist"
+channel="$(plutil -extract KanameDesktopChannel raw "$info")"
+case "$channel" in
+    stable)
+        expected_identifier="com.cyberlane.kaname.desktop"
+        support_name="Kaname"
+        service_identifier="com.cyberlane.kaname.desktop.localcore.service"
+        ;;
+    candidate)
+        expected_identifier="com.cyberlane.kaname.desktop.candidate"
+        support_name="Kaname Candidate"
+        service_identifier="com.cyberlane.kaname.desktop.candidate.localcore.service"
+        ;;
+    *) echo "Unknown Kaname desktop channel: $channel" >&2; exit 1 ;;
+esac
+state_directory="$HOME/Library/Application Support/$support_name/Desktop"
 state_file="$state_directory/workspace.json"
-journal_directory="$HOME/Library/Application Support/Kaname/LocalCore/journal"
+journal_directory="$HOME/Library/Application Support/$support_name/LocalCore/journal"
 error_log="$HOME/Library/LaunchAgents/kaname-local-control-service.stderr.log"
-output_directory="$(cd "$(dirname "$0")/.." && pwd)/.build/desktop-qa"
-instance_lock="$HOME/Library/Application Support/Kaname/Runtime/desktop-instance.lock"
+output_directory="$(cd "$(dirname "$0")/.." && pwd)/.build/desktop-qa/$channel"
+instance_lock="$HOME/Library/Application Support/$support_name/Runtime/desktop-instance.lock"
 restore_running_app=false
 qualification_pid=""
 
-stable_pids() {
+bundle_pids() {
     pgrep -f "^$executable([[:space:]]|$)" || true
 }
 
@@ -30,14 +46,14 @@ restore_desktop_app() {
 
 trap restore_desktop_app EXIT
 
-if [[ -n "$(stable_pids)" ]]; then
+if [[ -n "$(bundle_pids)" ]]; then
     restore_running_app=true
-    while IFS= read -r pid; do [[ -n "$pid" ]] && kill -TERM "$pid"; done < <(stable_pids)
+    while IFS= read -r pid; do [[ -n "$pid" ]] && kill -TERM "$pid"; done < <(bundle_pids)
     for _ in {1..40}; do
-        if [[ -z "$(stable_pids)" ]]; then break; fi
+        if [[ -z "$(bundle_pids)" ]]; then break; fi
         sleep 0.05
     done
-    if [[ -n "$(stable_pids)" ]]; then
+    if [[ -n "$(bundle_pids)" ]]; then
         echo "Kaname did not stop before desktop qualification." >&2
         exit 1
     fi
@@ -48,13 +64,17 @@ fi
 [[ -x "$app_path/Contents/Resources/KanameUpdateHelper" ]]
 [[ -x "$app_path/Contents/Resources/KanameConversationWorker" ]]
 [[ -x "$app_path/Contents/Resources/kaname-local-core" ]]
-[[ "$(plutil -extract CFBundleIdentifier raw "$app_path/Contents/Info.plist")" == "com.cyberlane.kaname.desktop" ]]
-[[ "$(plutil -extract CFBundleShortVersionString raw "$app_path/Contents/Info.plist")" == "0.13.0" ]]
-[[ "$(plutil -extract CFBundleVersion raw "$app_path/Contents/Info.plist")" == "22" ]]
+[[ "$(plutil -extract CFBundleIdentifier raw "$app_path/Contents/Info.plist")" == "$expected_identifier" ]]
+[[ "$(plutil -extract CFBundleShortVersionString raw "$app_path/Contents/Info.plist")" == "$expected_version" ]]
+[[ "$(plutil -extract CFBundleVersion raw "$app_path/Contents/Info.plist")" == "$expected_build" ]]
+[[ -s "$app_path/Contents/Resources/KanameUpdateManifest.json" ]]
+[[ -s "$app_path/Contents/Resources/ReleaseNotes.md" ]]
+[[ -s "$app_path/Contents/Resources/THIRD_PARTY_NOTICES.md" ]]
+[[ -s "$app_path/Contents/Resources/Kaname-SBOM.cdx.json" ]]
 codesign --verify --deep --strict "$app_path"
 if [[ "$(plutil -extract KanameStableCodeSigning raw "$app_path/Contents/Info.plist")" == "true" ]]; then
     designated_requirement="$(codesign -d -r- "$app_path" 2>&1)"
-    [[ "$designated_requirement" == *'identifier "com.cyberlane.kaname.desktop"'* ]]
+    [[ "$designated_requirement" == *"identifier \"$expected_identifier\""* ]]
     [[ "$designated_requirement" != *"cdhash "* ]]
     app_team_identifier="$(codesign -dvv "$app_path" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
     [[ -n "$app_team_identifier" && "$app_team_identifier" != "not set" ]]
@@ -67,7 +87,9 @@ if [[ "$(plutil -extract KanameStableCodeSigning raw "$app_path/Contents/Info.pl
         [[ "$(codesign -dvv "$signed_target" 2>&1 | sed -n 's/^TeamIdentifier=//p')" == "$app_team_identifier" ]]
     done
 fi
-launchctl print "gui/$(id -u)/$service_identifier" >/dev/null
+if [[ "$channel" == stable ]]; then
+    launchctl print "gui/$(id -u)/$service_identifier" >/dev/null
+fi
 
 mkdir -p "$output_directory"
 "$executable" \
@@ -86,6 +108,20 @@ mkdir -p "$output_directory"
 "$executable" --desktop-destination projects --desktop-project-id project-kaname --snapshot "$output_directory/project-overview.png"
 "$executable" --desktop-destination knowledge --snapshot "$output_directory/knowledge.png"
 "$executable" --desktop-destination liveCodex --snapshot "$output_directory/coding.png"
+"$executable" \
+    --desktop-destination home \
+    --desktop-global-search \
+    --desktop-search-query Kaname \
+    --snapshot "$output_directory/global-search.png"
+"$executable" \
+    --desktop-destination home \
+    --desktop-diagnostics \
+    --snapshot "$output_directory/diagnostics.png"
+"$executable" \
+    --desktop-destination projects \
+    --desktop-large-text \
+    --desktop-window-size 1080x700 \
+    --snapshot "$output_directory/projects-large-text.png"
 "$executable" --desktop-destination settings --snapshot "$output_directory/settings.png"
 "$executable" \
     --desktop-destination settings \
@@ -111,7 +147,11 @@ for snapshot in \
     "$output_directory/automations.png" \
     "$output_directory/projects.png" \
     "$output_directory/project-overview.png" \
+    "$output_directory/knowledge.png" \
     "$output_directory/coding.png" \
+    "$output_directory/global-search.png" \
+    "$output_directory/diagnostics.png" \
+    "$output_directory/projects-large-text.png" \
     "$output_directory/settings.png" \
     "$output_directory/settings-integrations.png" \
     "$output_directory/settings-providers.png" \
@@ -142,7 +182,7 @@ if ! wait "$second_instance_pid"; then
     echo "The second Kaname launch did not exit cleanly." >&2
     exit 1
 fi
-[[ "$(stable_pids | wc -l | tr -d ' ')" == "1" ]]
+[[ "$(bundle_pids | wc -l | tr -d ' ')" == "1" ]]
 kill -0 "$qualification_pid"
 kill -TERM "$qualification_pid"
 wait "$qualification_pid" 2>/dev/null || true
@@ -153,15 +193,16 @@ qualification_pid=""
 
 [[ "$(stat -f %Lp "$state_directory")" == "700" ]]
 [[ "$(stat -f %Lp "$state_file")" == "600" ]]
-[[ "$(stat -f %Lp "$journal_directory")" == "700" ]]
+if [[ "$channel" == stable ]]; then
+    [[ "$(stat -f %Lp "$journal_directory")" == "700" ]]
+    journal_count="$(find "$journal_directory" -maxdepth 1 -name 'F-*.sqlite' -type f | wc -l | tr -d ' ')"
+    [[ "$journal_count" == "14" ]]
+    while IFS= read -r journal; do
+        [[ "$(stat -f %Lp "$journal")" == "600" ]]
+    done < <(find "$journal_directory" -maxdepth 1 -name 'F-*.sqlite' -type f -print)
+fi
 
-journal_count="$(find "$journal_directory" -maxdepth 1 -name 'F-*.sqlite' -type f | wc -l | tr -d ' ')"
-[[ "$journal_count" == "14" ]]
-while IFS= read -r journal; do
-    [[ "$(stat -f %Lp "$journal")" == "600" ]]
-done < <(find "$journal_directory" -maxdepth 1 -name 'F-*.sqlite' -type f -print)
-
-if [[ -s "$error_log" ]]; then
+if [[ "$channel" == stable && -s "$error_log" ]]; then
     echo "The local service wrote diagnostics to $error_log." >&2
     exit 1
 fi

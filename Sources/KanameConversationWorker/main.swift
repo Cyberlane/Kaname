@@ -89,7 +89,12 @@ private enum KanameConversationWorker {
         do {
             let root = try requiredValue(after: "--root")
             let threadID = try requiredValue(after: "--thread")
-            let store = KanameConversationServiceStore(rootDirectory: URL(fileURLWithPath: root))
+            let storeRoot = URL(fileURLWithPath: root, isDirectory: true).standardizedFileURL
+            let recoveryLock = try KanameRuntimeRecoveryFileLock.acquireShared(
+                applicationSupportRoot: storeRoot.deletingLastPathComponent()
+            )
+            defer { withExtendedLifetime(recoveryLock) {} }
+            let store = KanameConversationServiceStore(rootDirectory: storeRoot)
             let lock = try acquireLock(at: store.workerLockURL(threadID: threadID))
             defer {
                 flock(lock, LOCK_UN)

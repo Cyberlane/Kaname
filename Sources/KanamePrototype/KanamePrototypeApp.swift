@@ -10,33 +10,98 @@ import AppKit
 import Darwin
 #endif
 
+#if os(macOS)
 @main
 struct KanamePrototypeApp: App {
-#if os(macOS)
     @NSApplicationDelegateAdaptor(KanameDesktopAppDelegate.self) private var appDelegate
     private let singleInstance = KanameDesktopSingleInstanceCoordinator.acquireOrExit()
-#endif
 
     var body: some Scene {
-#if os(macOS)
-        WindowGroup {
+        Window("Kaname", id: "main") {
             KanameDesktopWorkspace()
                 .tint(Nord.frost2)
                 .preferredColorScheme(.dark)
         }
         .defaultSize(width: 1_520, height: 940)
         .commands {
-            CommandGroup(replacing: .newItem) {}
+            CommandGroup(replacing: .newItem) {
+                Button("New Conversation") {
+                    NotificationCenter.default.post(name: .kanameBeginConversation, object: nil)
+                }
+                .keyboardShortcut("n", modifiers: .command)
+                Divider()
+                Button("Import Files into Draft…") {
+                    NotificationCenter.default.post(name: .kanameImportFiles, object: nil)
+                }
+                .keyboardShortcut("i", modifiers: [.command, .shift])
+                Button("Export Current Context…") {
+                    NotificationCenter.default.post(name: .kanameExportCurrent, object: nil)
+                }
+                .keyboardShortcut("e", modifiers: [.command, .shift])
+            }
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") {
+                    NotificationCenter.default.post(name: .kanamePresentSettings, object: nil)
+                }
+                .keyboardShortcut(",", modifiers: .command)
+            }
+            CommandMenu("Conversation") {
+                Button("Focus Composer") {
+                    NotificationCenter.default.post(name: .kanameFocusComposer, object: nil)
+                }
+                .keyboardShortcut("l", modifiers: .command)
+                Divider()
+                Button("Interrupt Current Run") {
+                    NotificationCenter.default.post(name: .kanameInterruptCurrent, object: nil)
+                }
+                .keyboardShortcut(".", modifiers: .command)
+                Button("Retry Last Turn") {
+                    NotificationCenter.default.post(name: .kanameRetryCurrent, object: nil)
+                }
+                .keyboardShortcut("r", modifiers: [.command, .shift])
+            }
+            CommandMenu("Navigate") {
+                Button("Search Kaname…") {
+                    NotificationCenter.default.post(name: .kanamePresentGlobalSearch, object: nil)
+                }
+                .keyboardShortcut("k", modifiers: .command)
+                Divider()
+                navigationButton("Home", destination: "home", key: "1")
+                navigationButton("Conversations", destination: "threads", key: "2")
+                navigationButton("Inbox", destination: "inbox", key: "3")
+                navigationButton("Projects", destination: "projects", key: "4")
+                Divider()
+                Button("Go Back") {
+                    NotificationCenter.default.post(name: .kanameGoBack, object: nil)
+                }
+                .keyboardShortcut("[", modifiers: .command)
+                Button("Toggle Inspector") {
+                    NotificationCenter.default.post(name: .kanameToggleInspector, object: nil)
+                }
+                .keyboardShortcut("i", modifiers: [.command, .option])
+            }
         }
+    }
+
+    private func navigationButton(_ title: String, destination: String, key: KeyEquivalent) -> some View {
+        Button(title) {
+            NotificationCenter.default.post(name: .kanameNavigate, object: destination)
+        }
+        .keyboardShortcut(key, modifiers: .command)
+    }
+}
 #else
+@main
+struct KanamePrototypeApp: App {
+    var body: some Scene {
         WindowGroup {
             IPhoneControlSurface()
                 .tint(Nord.frost2)
                 .preferredColorScheme(.dark)
         }
-#endif
     }
 }
+#endif
 
 #if os(macOS)
 @MainActor
@@ -44,10 +109,17 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
     private var fallbackWindow: NSWindow?
     private var postedMouseBackEvent = false
     private var activationObserver: NSObjectProtocol?
+    private var readinessObserver: NSObjectProtocol?
     private var mouseBackMonitor: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        writeHealthHandshake()
+        readinessObserver = NotificationCenter.default.addObserver(
+            forName: .kanameDesktopReady,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.writeHealthHandshake() }
+        }
         mouseBackMonitor = NSEvent.addLocalMonitorForEvents(matching: .otherMouseUp) { event in
             guard event.buttonNumber == 3 else { return event }
             let handled = DesktopBackCommandRouter.shared.performBack()
@@ -71,14 +143,19 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
 
     private func writeHealthHandshake() {
         let environment = KanameDesktopEnvironment.current
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
-        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0"
+        let versionValue = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString")
+        let buildValue = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion")
+        let version = (versionValue as? String) ?? "development"
+        let build = (buildValue as? String) ?? "0"
         let payload: [String: Any] = [
             "channel": environment.channel.rawValue,
             "version": version,
             "build": build,
             "processID": ProcessInfo.processInfo.processIdentifier,
             "healthyAtUnixMillis": Int64(Date().timeIntervalSince1970 * 1_000),
+            "workspaceSchemaVersion": KanameDesktopStateSchema.currentVersion,
+            "healthNonce": commandLineValue(after: "--kaname-update-nonce") ?? "",
+            "bundleDigest": commandLineValue(after: "--kaname-update-bundle-digest") ?? "",
         ]
         do {
             try FileManager.default.createDirectory(
@@ -106,6 +183,16 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
             NSEvent.removeMonitor(mouseBackMonitor)
             self.mouseBackMonitor = nil
         }
+        if let readinessObserver {
+            NotificationCenter.default.removeObserver(readinessObserver)
+            self.readinessObserver = nil
+        }
+    }
+
+    private func commandLineValue(after flag: String) -> String? {
+        let arguments = CommandLine.arguments
+        guard let index = arguments.firstIndex(of: flag), arguments.indices.contains(index + 1) else { return nil }
+        return arguments[index + 1]
     }
 
     func applicationShouldHandleReopen(
@@ -116,9 +203,28 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        _ = ensureVisibleWindow(allowCreation: true)
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .kanameImportFiles, object: urls)
+        }
+    }
+
+    func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
+        true
+    }
+
     private func configureInitialWindow(remainingAttempts: Int) {
         if ensureVisibleWindow(allowCreation: false) { return }
-        guard remainingAttempts > 0 else { return }
+        guard remainingAttempts > 0 else {
+            _ = ensureVisibleWindow(allowCreation: true)
+            return
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
             self?.configureInitialWindow(remainingAttempts: remainingAttempts - 1)
         }
@@ -128,6 +234,8 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
     private func ensureVisibleWindow(allowCreation: Bool) -> Bool {
         if let existing = NSApplication.shared.windows.first(where: { $0.canBecomeMain }) {
             existing.sharingType = .readOnly
+            existing.minSize = NSSize(width: 1_080, height: 700)
+            existing.setFrameAutosaveName("KanameDesktopWindow-\(KanameDesktopEnvironment.current.channel.rawValue)")
             applyRequestedWindowSize(to: existing)
             if existing.isMiniaturized { existing.deminiaturize(nil) }
             existing.makeKeyAndOrderFront(nil)

@@ -1,5 +1,12 @@
 import Foundation
 
+/// The durable macOS workspace schema shared by persistence and update
+/// compatibility checks. Keeping this in KanameDomain prevents an updater from
+/// duplicating a security-sensitive version number owned by the desktop model.
+public enum KanameDesktopStateSchema {
+    public static let currentVersion = 13
+}
+
 public struct Thread: Codable, Equatable, Sendable {
     public let id: KanameID
     public let title: String
