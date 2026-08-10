@@ -29,7 +29,7 @@ Scripts/install-kaname-desktop.sh
 Scripts/verify-kaname-desktop.sh
 ```
 
-The installed app is `~/Applications/Kaname.app`. The current dogfood bundle is version `0.6.2` (build `10`). Installation also bootstraps the user-scoped `com.cyberlane.kaname.desktop.localcore.service` LaunchAgent. Verification posts a button-3 event only into Kaname's own AppKit event queue to exercise Back without Accessibility permission or global input injection. Snapshot qualification disables live provider and integration monitoring; the build and installer never call `security`, access the login Keychain, enumerate accounts, request Calendar access, or enumerate physical devices.
+The installed app is `~/Applications/Kaname.app`. The current dogfood bundle is version `0.6.3` (build `11`). Installation also bootstraps the user-scoped `com.cyberlane.kaname.desktop.localcore.service` LaunchAgent. Verification posts a button-3 event only into Kaname's own AppKit event queue to exercise Back without Accessibility permission or global input injection. Snapshot qualification disables live provider and integration monitoring; the build and installer never call `security`, access the login Keychain, enumerate accounts, request Calendar access, or enumerate physical devices.
 
 For a faster development build:
 

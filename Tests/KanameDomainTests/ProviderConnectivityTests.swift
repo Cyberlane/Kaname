@@ -223,11 +223,40 @@ struct ProviderConnectivityTests {
             URLQueryItem(name: "state", value: expectedState),
         ]
 
-        async let receivedCode = receiver.waitForCode(expectedState: expectedState)
-        let (_, response) = try await URLSession.shared.data(from: callback.url!)
+        async let callbackResult = URLSession.shared.data(from: callback.url!)
+        let receivedCode = try await receiver.waitForCode(expectedState: expectedState)
+        receiver.finish(connected: true)
+        let (body, response) = try await callbackResult
 
         #expect((response as? HTTPURLResponse)?.statusCode == 200)
-        #expect(try await receivedCode == expectedCode)
+        #expect(receivedCode == expectedCode)
+        #expect(String(decoding: body, as: UTF8.self).contains("securely saved"))
+    }
+
+    @Test
+    func googleTokenKeychainStoreWorksWithoutAuthenticationUI() throws {
+        let store = GoogleTokenKeychainStore(
+            service: "com.cyberlane.kaname.google-oauth-test.\(UUID().uuidString)"
+        )
+        let accountID = "test-account"
+        let token = Data("local-token-fixture".utf8)
+        defer { try? store.remove(accountID: accountID) }
+
+        try store.store(token, accountID: accountID)
+
+        #expect(try store.load(
+            accountID: accountID,
+            identity: "fixture@example.test",
+            allowInteraction: false
+        ) == token)
+        try store.remove(accountID: accountID)
+        #expect(throws: NativeGoogleIntegrationError.self) {
+            try store.load(
+                accountID: accountID,
+                identity: "fixture@example.test",
+                allowInteraction: false
+            )
+        }
     }
 #endif
 

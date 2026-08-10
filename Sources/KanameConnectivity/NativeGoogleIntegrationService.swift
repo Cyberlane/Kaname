@@ -182,10 +182,112 @@ private struct GoogleUserInfo: Decodable {
     }
 }
 
+final class GoogleTokenKeychainStore: @unchecked Sendable {
+    private enum Backend {
+        case dataProtection
+        case traditional
+    }
+
+    private let service: String
+
+    init(service: String) {
+        self.service = service
+    }
+
+    func store(_ data: Data, accountID: String) throws {
+        let status = upsert(data, accountID: accountID, backend: .dataProtection)
+        if status == errSecMissingEntitlement {
+            let fallback = upsert(data, accountID: accountID, backend: .traditional)
+            guard fallback == errSecSuccess else {
+                throw NativeGoogleIntegrationError.keychainFailure(fallback)
+            }
+            return
+        }
+        guard status == errSecSuccess else {
+            throw NativeGoogleIntegrationError.keychainFailure(status)
+        }
+    }
+
+    func load(accountID: String, identity: String, allowInteraction: Bool) throws -> Data {
+        let primary = copy(accountID: accountID, backend: .dataProtection, allowInteraction: allowInteraction)
+        let result = primary.status == errSecMissingEntitlement || primary.status == errSecItemNotFound
+            ? copy(accountID: accountID, backend: .traditional, allowInteraction: false)
+            : primary
+        guard result.status == errSecSuccess, let data = result.data else {
+            if result.status == errSecItemNotFound {
+                throw NativeGoogleIntegrationError.tokenUnavailable(identity)
+            }
+            throw NativeGoogleIntegrationError.keychainFailure(result.status)
+        }
+        return data
+    }
+
+    func remove(accountID: String) throws {
+        let status = SecItemDelete(lookup(accountID: accountID, backend: .dataProtection, allowInteraction: false) as CFDictionary)
+        if status == errSecMissingEntitlement || status == errSecItemNotFound {
+            let fallback = SecItemDelete(lookup(accountID: accountID, backend: .traditional, allowInteraction: false) as CFDictionary)
+            if fallback == errSecItemNotFound { return }
+            guard fallback == errSecSuccess else {
+                throw NativeGoogleIntegrationError.keychainFailure(fallback)
+            }
+            return
+        }
+        guard status == errSecSuccess else {
+            throw NativeGoogleIntegrationError.keychainFailure(status)
+        }
+    }
+
+    private func upsert(_ data: Data, accountID: String, backend: Backend) -> OSStatus {
+        let lookup = lookup(accountID: accountID, backend: backend, allowInteraction: backend == .dataProtection)
+        let updated = SecItemUpdate(lookup as CFDictionary, [kSecValueData: data] as CFDictionary)
+        if updated == errSecSuccess { return updated }
+        guard updated == errSecItemNotFound else { return updated }
+        var item = lookup
+        item[kSecValueData] = data
+        if backend == .dataProtection {
+            item[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        }
+        return SecItemAdd(item as CFDictionary, nil)
+    }
+
+    private func copy(
+        accountID: String,
+        backend: Backend,
+        allowInteraction: Bool
+    ) -> (status: OSStatus, data: Data?) {
+        var query = lookup(accountID: accountID, backend: backend, allowInteraction: allowInteraction)
+        query[kSecReturnData] = true
+        query[kSecMatchLimit] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        return (status, result as? Data)
+    }
+
+    private func lookup(
+        accountID: String,
+        backend: Backend,
+        allowInteraction: Bool
+    ) -> [CFString: Any] {
+        var query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service,
+            kSecAttrAccount: accountID,
+        ]
+        if backend == .dataProtection {
+            query[kSecUseDataProtectionKeychain] = true
+        } else if !allowInteraction {
+            let context = LAContext()
+            context.interactionNotAllowed = true
+            query[kSecUseAuthenticationContext] = context
+        }
+        return query
+    }
+}
+
 public actor NativeGoogleIntegrationService {
     private let rootDirectory: URL
     private let session: URLSession
-    private let keychainService: String
+    private let tokenStore: GoogleTokenKeychainStore
 
     public init(
         rootDirectory: URL? = nil,
@@ -195,7 +297,7 @@ public actor NativeGoogleIntegrationService {
         let applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         self.rootDirectory = rootDirectory ?? applicationSupport.appending(path: "Kaname/Google", directoryHint: .isDirectory)
         self.session = session
-        self.keychainService = keychainService
+        self.tokenStore = GoogleTokenKeychainStore(service: keychainService)
     }
 
     public var hasClientConfiguration: Bool {
@@ -233,27 +335,31 @@ public actor NativeGoogleIntegrationService {
             }
             return result
         }
-        let token = try await exchangeCode(code, request: request, configuration: configuration)
-        let user = try await fetchUserInfo(accessToken: token.accessToken)
-        guard !user.subject.isEmpty, !user.email.isEmpty, let refreshToken = token.refreshToken else {
-            throw NativeGoogleIntegrationError.invalidResponse("Google OAuth")
-        }
-        let account = NativeGoogleAccountSnapshot(
-            id: user.subject,
-            identity: user.email,
-            displayName: user.name ?? user.email,
-            capabilities: ["Gmail", "Google Calendar"]
-        )
-        try storeToken(
-            GoogleTokenRecord(
+        do {
+            let token = try await exchangeCode(code, request: request, configuration: configuration)
+            let user = try await fetchUserInfo(accessToken: token.accessToken)
+            guard !user.subject.isEmpty, !user.email.isEmpty, let refreshToken = token.refreshToken else {
+                throw NativeGoogleIntegrationError.invalidResponse("Google OAuth")
+            }
+            let account = NativeGoogleAccountSnapshot(
+                id: user.subject,
+                identity: user.email,
+                displayName: user.name ?? user.email,
+                capabilities: ["Gmail", "Google Calendar"]
+            )
+            let tokenRecord = GoogleTokenRecord(
                 accessToken: token.accessToken,
                 refreshToken: refreshToken,
                 expiresAt: Date().addingTimeInterval(token.expiresIn)
-            ),
-            accountID: account.id
-        )
-        try upsertAccount(account)
-        return account
+            )
+            try tokenStore.store(try JSONEncoder().encode(tokenRecord), accountID: account.id)
+            try upsertAccount(account)
+            receiver.finish(connected: true)
+            return account
+        } catch {
+            receiver.finish(connected: false)
+            throw error
+        }
     }
 #endif
 
@@ -436,7 +542,7 @@ public actor NativeGoogleIntegrationService {
         )
         if record.expiresAt.timeIntervalSinceNow < 60 {
             record = try await refreshToken(record, configuration: loadClientConfiguration())
-            try storeToken(record, accountID: account.id)
+            try tokenStore.store(try JSONEncoder().encode(record), accountID: account.id)
         }
         return record.accessToken
     }
@@ -460,63 +566,24 @@ public actor NativeGoogleIntegrationService {
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: rootDirectory.path)
     }
 
-    private func storeToken(_ token: GoogleTokenRecord, accountID: String) throws {
-        let data = try JSONEncoder().encode(token)
-        let lookup = keychainLookup(accountID: accountID)
-        let update = [kSecValueData: data] as CFDictionary
-        let updated = SecItemUpdate(lookup as CFDictionary, update)
-        if updated == errSecSuccess { return }
-        guard updated == errSecItemNotFound else {
-            throw NativeGoogleIntegrationError.keychainFailure(updated)
-        }
-        var item = lookup
-        item[kSecValueData] = data
-        item[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        let added = SecItemAdd(item as CFDictionary, nil)
-        guard added == errSecSuccess else {
-            throw NativeGoogleIntegrationError.keychainFailure(added)
-        }
-    }
-
     private func loadToken(
         accountID: String,
         identity: String,
         allowInteraction: Bool
     ) throws -> GoogleTokenRecord {
-        var query = keychainLookup(accountID: accountID)
-        query[kSecReturnData] = true
-        query[kSecMatchLimit] = kSecMatchLimitOne
-        if !allowInteraction {
-            let context = LAContext()
-            context.interactionNotAllowed = true
-            query[kSecUseAuthenticationContext] = context
-        }
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess,
-              let data = result as? Data,
-              let token = try? JSONDecoder().decode(GoogleTokenRecord.self, from: data) else {
-            if status == errSecItemNotFound { throw NativeGoogleIntegrationError.tokenUnavailable(identity) }
-            throw NativeGoogleIntegrationError.keychainFailure(status)
+        let data = try tokenStore.load(
+            accountID: accountID,
+            identity: identity,
+            allowInteraction: allowInteraction
+        )
+        guard let token = try? JSONDecoder().decode(GoogleTokenRecord.self, from: data) else {
+            throw NativeGoogleIntegrationError.keychainFailure(errSecDecode)
         }
         return token
     }
 
     private func removeToken(accountID: String) throws {
-        let status = SecItemDelete(keychainLookup(accountID: accountID) as CFDictionary)
-        if status == errSecItemNotFound { return }
-        guard status == errSecSuccess else {
-            throw NativeGoogleIntegrationError.keychainFailure(status)
-        }
-    }
-
-    private func keychainLookup(accountID: String) -> [CFString: Any] {
-        [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: keychainService,
-            kSecAttrAccount: accountID,
-            kSecUseDataProtectionKeychain: true,
-        ]
+        try tokenStore.remove(accountID: accountID)
     }
 
     private var clientConfigurationURL: URL { rootDirectory.appending(path: "oauth-client.json") }
@@ -617,6 +684,7 @@ final class GoogleLoopbackReceiver: @unchecked Sendable {
     private var configuredRedirectURI: URL?
     private var continuation: CheckedContinuation<(URLComponents), Error>?
     private var pendingComponents: URLComponents?
+    private var callbackConnection: NWConnection?
 
     var redirectURI: URL {
         lock.withLock {
@@ -682,11 +750,31 @@ final class GoogleLoopbackReceiver: @unchecked Sendable {
         let query = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).compactMap { item in
             item.value.map { (item.name, $0) }
         })
-        if query["error"] != nil { throw NativeGoogleIntegrationError.authorizationCancelled }
+        if query["error"] != nil {
+            finish(connected: false)
+            throw NativeGoogleIntegrationError.authorizationCancelled
+        }
         guard query["state"] == expectedState, let code = query["code"], !code.isEmpty else {
+            finish(connected: false)
             throw NativeGoogleIntegrationError.invalidAuthorizationCallback
         }
         return code
+    }
+
+    func finish(connected: Bool) {
+        let connection = lock.withLock {
+            let connection = callbackConnection
+            callbackConnection = nil
+            return connection
+        }
+        guard let connection else { return }
+        let title = connected ? "Account connected" : "Connection not completed"
+        let detail = connected
+            ? "Kaname has securely saved the account. You can close this tab and return to the app."
+            : "Kaname could not finish saving this account. Return to the app for details, then try again."
+        let body = "<html><body style='font-family:-apple-system;padding:40px'><h2>\(title)</h2><p>\(detail)</p></body></html>"
+        let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'\r\nX-Content-Type-Options: nosniff\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
+        connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in connection.cancel() })
     }
 
     func cancel() {
@@ -694,7 +782,10 @@ final class GoogleLoopbackReceiver: @unchecked Sendable {
         lock.lock()
         let continuation = self.continuation
         self.continuation = nil
+        let connection = callbackConnection
+        callbackConnection = nil
         lock.unlock()
+        connection?.cancel()
         continuation?.resume(throwing: NativeGoogleIntegrationError.authorizationCancelled)
     }
 
@@ -711,15 +802,18 @@ final class GoogleLoopbackReceiver: @unchecked Sendable {
                 connection.cancel()
                 return
             }
-            let body = "<html><body style='font-family:-apple-system;padding:40px'><h2>Account connected</h2><p>You can return to Kaname.</p></body></html>"
-            let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
-            connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in connection.cancel() })
-            self.deliver(components)
+            self.deliver(components, connection: connection)
         }
     }
 
-    private func deliver(_ components: URLComponents) {
+    private func deliver(_ components: URLComponents, connection: NWConnection) {
         lock.lock()
+        guard callbackConnection == nil else {
+            lock.unlock()
+            connection.cancel()
+            return
+        }
+        callbackConnection = connection
         if let continuation {
             self.continuation = nil
             lock.unlock()
