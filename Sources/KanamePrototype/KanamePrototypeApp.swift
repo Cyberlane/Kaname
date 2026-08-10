@@ -47,6 +47,7 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
     private var mouseBackMonitor: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        writeHealthHandshake()
         mouseBackMonitor = NSEvent.addLocalMonitorForEvents(matching: .otherMouseUp) { event in
             guard event.buttonNumber == 3 else { return event }
             let handled = DesktopBackCommandRouter.shared.performBack()
@@ -66,6 +67,38 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         configureInitialWindow(remainingAttempts: 20)
+    }
+
+    private func writeHealthHandshake() {
+        let environment = KanameDesktopEnvironment.current
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0"
+        let payload: [String: Any] = [
+            "channel": environment.channel.rawValue,
+            "version": version,
+            "build": build,
+            "processID": ProcessInfo.processInfo.processIdentifier,
+            "healthyAtUnixMillis": Int64(Date().timeIntervalSince1970 * 1_000),
+        ]
+        do {
+            try FileManager.default.createDirectory(
+                at: environment.runtimeDirectory,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: environment.runtimeDirectory.path
+            )
+            let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+            try data.write(to: environment.healthHandshakeURL, options: .atomic)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: environment.healthHandshakeURL.path
+            )
+        } catch {
+            fputs("Kaname could not write its private UI health handshake.\n", stderr)
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -110,12 +143,12 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
                 .preferredColorScheme(.dark)
         )
         let window = NSWindow(contentViewController: controller)
-        window.title = "Kaname"
+        window.title = KanameDesktopEnvironment.current.displayName
         window.sharingType = .readOnly
         window.setContentSize(requestedWindowSize ?? NSSize(width: 1_520, height: 940))
         window.minSize = NSSize(width: 1_080, height: 700)
         window.center()
-        window.setFrameAutosaveName("KanameDesktopWindow")
+        window.setFrameAutosaveName("KanameDesktopWindow-\(KanameDesktopEnvironment.current.channel.rawValue)")
         window.makeKeyAndOrderFront(nil)
         fallbackWindow = window
         NSApplication.shared.activate(ignoringOtherApps: true)
@@ -195,9 +228,7 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
 }
 
 private final class KanameDesktopSingleInstanceCoordinator: @unchecked Sendable {
-    private static let activationNotification = Notification.Name(
-        "com.cyberlane.kaname.desktop.activate-existing-instance"
-    )
+    private let activationNotification: Notification.Name
 
     private let instanceLock: KanameDesktopInstanceLock
     private var distributedObserver: NSObjectProtocol?
@@ -207,7 +238,7 @@ private final class KanameDesktopSingleInstanceCoordinator: @unchecked Sendable 
             return try KanameDesktopSingleInstanceCoordinator()
         } catch KanameDesktopInstanceLockError.alreadyRunning {
             DistributedNotificationCenter.default().postNotificationName(
-                activationNotification,
+                Notification.Name(KanameDesktopEnvironment.current.activationNotificationName),
                 object: nil,
                 deliverImmediately: true
             )
@@ -219,9 +250,11 @@ private final class KanameDesktopSingleInstanceCoordinator: @unchecked Sendable 
     }
 
     private init() throws {
-        instanceLock = try KanameDesktopInstanceLock()
+        let environment = KanameDesktopEnvironment.current
+        activationNotification = Notification.Name(environment.activationNotificationName)
+        instanceLock = try KanameDesktopInstanceLock(lockFileURL: environment.instanceLockURL)
         distributedObserver = DistributedNotificationCenter.default().addObserver(
-            forName: Self.activationNotification,
+            forName: activationNotification,
             object: nil,
             queue: .main
         ) { _ in

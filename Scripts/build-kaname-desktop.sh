@@ -5,11 +5,32 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 project_dir="$(cd "$script_dir/.." && pwd)"
 configuration="${KANAME_BUILD_CONFIGURATION:-release}"
-app_path="$project_dir/.build/Kaname.app"
+channel="${KANAME_DESKTOP_CHANNEL:-stable}"
+case "$channel" in
+    stable)
+        app_name="Kaname"
+        identifier="com.cyberlane.kaname.desktop"
+        service_identifier="com.cyberlane.kaname.desktop.localcore.service"
+        core_identifier="com.cyberlane.kaname.desktop.localcore"
+        ;;
+    candidate)
+        app_name="Kaname Candidate"
+        identifier="com.cyberlane.kaname.desktop.candidate"
+        service_identifier="com.cyberlane.kaname.desktop.candidate.localcore.service"
+        core_identifier="com.cyberlane.kaname.desktop.candidate.localcore"
+        ;;
+    *)
+        echo "KANAME_DESKTOP_CHANNEL must be stable or candidate." >&2
+        exit 1
+        ;;
+esac
+app_path="$project_dir/.build/$app_name.app"
 contents_path="$app_path/Contents"
 resources_path="$contents_path/Resources"
 binary_path="$project_dir/.build/$configuration/KanamePrototype"
 service_binary_path="$project_dir/.build/$configuration/KanameLocalControlService"
+update_helper_path="$project_dir/.build/$configuration/KanameUpdateHelper"
+conversation_worker_path="$project_dir/.build/$configuration/KanameConversationWorker"
 core_configuration="$configuration"
 if [[ "$configuration" == "debug" ]]; then
     core_binary_path="$project_dir/Rust/KanameCore/target/debug/kaname-local-core"
@@ -20,9 +41,6 @@ fi
 info_plist="$contents_path/Info.plist"
 icon_source="$project_dir/.build/KanameIcon-1024.png"
 iconset_path="$project_dir/.build/Kaname.iconset"
-identifier="com.cyberlane.kaname.desktop"
-service_identifier="com.cyberlane.kaname.desktop.localcore.service"
-core_identifier="com.cyberlane.kaname.desktop.localcore"
 service_requirement="identifier \"$service_identifier\""
 google_oauth_config_path="${KANAME_GOOGLE_OAUTH_CONFIG:-$HOME/Library/Application Support/Kaname/Build/google-oauth-client.json}"
 google_oauth_client_id="${KANAME_GOOGLE_OAUTH_CLIENT_ID:-}"
@@ -49,6 +67,8 @@ fi
 cd "$project_dir"
 swift build -c "$configuration" --product KanamePrototype
 swift build -c "$configuration" --product KanameLocalControlService
+swift build -c "$configuration" --product KanameUpdateHelper
+swift build -c "$configuration" --product KanameConversationWorker
 if [[ "$core_configuration" == "debug" ]]; then
     cargo build --locked --manifest-path Rust/KanameCore/Cargo.toml --bin kaname-local-core
 else
@@ -88,11 +108,11 @@ plutil -replace CFBundleExecutable -string KanamePrototype "$info_plist"
 plutil -replace CFBundleIconFile -string Kaname "$info_plist"
 plutil -replace CFBundleIdentifier -string "$identifier" "$info_plist"
 plutil -replace CFBundleInfoDictionaryVersion -string 6.0 "$info_plist"
-plutil -replace CFBundleName -string Kaname "$info_plist"
-plutil -replace CFBundleDisplayName -string Kaname "$info_plist"
+plutil -replace CFBundleName -string "$app_name" "$info_plist"
+plutil -replace CFBundleDisplayName -string "$app_name" "$info_plist"
 plutil -replace CFBundlePackageType -string APPL "$info_plist"
-plutil -replace CFBundleShortVersionString -string 0.8.0 "$info_plist"
-plutil -replace CFBundleVersion -string 17 "$info_plist"
+plutil -replace CFBundleShortVersionString -string 0.9.0 "$info_plist"
+plutil -replace CFBundleVersion -string 18 "$info_plist"
 plutil -replace LSApplicationCategoryType -string public.app-category.developer-tools "$info_plist"
 plutil -replace LSMinimumSystemVersion -string 14.0 "$info_plist"
 plutil -replace NSPrincipalClass -string NSApplication "$info_plist"
@@ -101,6 +121,7 @@ plutil -replace NSSupportsAutomaticGraphicsSwitching -bool YES "$info_plist"
 plutil -replace NSCalendarsFullAccessUsageDescription -string "Kaname reads the calendars you select and changes events only after an exact in-app approval." "$info_plist"
 plutil -replace KanameLocalCoreMachService -string "$service_identifier" "$info_plist"
 plutil -replace KanameLocalCoreServiceRequirement -string "$service_requirement" "$info_plist"
+plutil -replace KanameDesktopChannel -string "$channel" "$info_plist"
 plutil -replace KanameStableCodeSigning -bool "$stable_code_signing" "$info_plist"
 if [[ -n "$google_oauth_client_id" ]]; then
     plutil -replace KanameGoogleOAuthClientID -string "$google_oauth_client_id" "$info_plist"
@@ -111,11 +132,15 @@ fi
 
 cp "$binary_path" "$contents_path/MacOS/KanamePrototype"
 cp "$service_binary_path" "$resources_path/KanameLocalControlService"
+cp "$update_helper_path" "$resources_path/KanameUpdateHelper"
+cp "$conversation_worker_path" "$resources_path/KanameConversationWorker"
 cp "$core_binary_path" "$resources_path/kaname-local-core"
 cp "$project_dir/LICENSE" "$resources_path/LICENSE"
 chmod 755 "$contents_path/MacOS/KanamePrototype"
-chmod 755 "$resources_path/KanameLocalControlService" "$resources_path/kaname-local-core"
+chmod 755 "$resources_path/KanameLocalControlService" "$resources_path/KanameUpdateHelper" "$resources_path/KanameConversationWorker" "$resources_path/kaname-local-core"
 codesign "${codesign_arguments[@]}" --identifier "$service_identifier" "$resources_path/KanameLocalControlService"
+codesign "${codesign_arguments[@]}" --identifier "$identifier.update-helper" "$resources_path/KanameUpdateHelper"
+codesign "${codesign_arguments[@]}" --identifier "$identifier.conversation-worker" "$resources_path/KanameConversationWorker"
 codesign "${codesign_arguments[@]}" --identifier "$core_identifier" "$resources_path/kaname-local-core"
 codesign "${codesign_arguments[@]}" --identifier "$identifier" "$app_path"
 codesign --verify --deep --strict "$app_path"

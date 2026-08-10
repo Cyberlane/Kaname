@@ -133,6 +133,20 @@ struct DesktopAppModelTests {
     }
 
     @Test
+    @MainActor
+    func composerDraftSurvivesRestartAndClearsOnlyAfterSendCheckpoint() throws {
+        let store = MemoryDesktopStateStore()
+        let model = DesktopAppModel(store: store, now: { 1_000 })
+        let threadID = model.createConversation(kind: .coding, projectID: nil)
+        #expect(model.updateComposerDraft(threadID: threadID, body: "Unsent work in progress"))
+
+        let restored = DesktopAppModel(store: store, now: { 2_000 })
+        #expect(restored.composerDraft(threadID: threadID) == "Unsent work in progress")
+        #expect(restored.updateComposerDraft(threadID: threadID, body: ""))
+        #expect(DesktopAppModel(store: store, now: { 3_000 }).composerDraft(threadID: threadID).isEmpty)
+    }
+
+    @Test
     func orphanedRunBecomesRecoverableWithoutDuplicatingItsUserMessage() throws {
         let model = DesktopAppModel(store: MemoryDesktopStateStore(), now: { 1_000 })
         let projectID = try #require(model.snapshot.projects.first?.id)

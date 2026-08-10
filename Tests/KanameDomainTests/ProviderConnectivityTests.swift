@@ -249,6 +249,87 @@ struct ProviderConnectivityTests {
     }
 
     @Test
+    func stableAndCandidateDesktopEnvironmentsNeverShareMutableState() {
+        let base = URL(fileURLWithPath: "/tmp/kaname-environment-test", isDirectory: true)
+        let stable = KanameDesktopEnvironment(channel: .stable, applicationSupportDirectory: base)
+        let candidate = KanameDesktopEnvironment(channel: .candidate, applicationSupportDirectory: base)
+
+        #expect(stable.bundleIdentifier == "com.cyberlane.kaname.desktop")
+        #expect(candidate.bundleIdentifier == "com.cyberlane.kaname.desktop.candidate")
+        #expect(stable.applicationSupportRoot != candidate.applicationSupportRoot)
+        #expect(stable.instanceLockURL != candidate.instanceLockURL)
+        #expect(stable.workspaceFileURL != candidate.workspaceFileURL)
+        #expect(stable.providerStateDirectory != candidate.providerStateDirectory)
+        #expect(stable.connectivityDirectory != candidate.connectivityDirectory)
+        #expect(stable.googleDirectory != candidate.googleDirectory)
+        #expect(stable.googleKeychainService != candidate.googleKeychainService)
+        #expect(stable.localCoreMachService != candidate.localCoreMachService)
+        #expect(stable.activationNotificationName != candidate.activationNotificationName)
+    }
+
+    @Test
+    func durableConversationServiceQueuesControlsAndEvidencePrivately() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "kaname-conversation-service-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = KanameConversationServiceStore(rootDirectory: root)
+        let request = KanameConversationServiceRequest(
+            runID: "run-1",
+            threadID: "thread-1",
+            projectID: "project-1",
+            provider: "Codex",
+            model: "gpt-5.6-terra",
+            reasoningEffort: "xhigh",
+            prompt: "Read-only check",
+            workspacePath: "/tmp/workspace",
+            providerStatePath: "/tmp/provider",
+            resumableNativeThreadID: nil,
+            localCoreMachService: "service",
+            localCoreRequirement: "requirement",
+            createdAtUnixMillis: 1_000
+        )
+        try store.enqueue(request)
+        let queued = try store.pendingRequests(threadID: "thread-1")
+        #expect(queued.map(\.1) == [request])
+        #expect((try FileManager.default.attributesOfItem(atPath: root.path)[.posixPermissions] as? NSNumber)?.intValue == 0o700)
+
+        let event = KanameConversationServiceEvent.record(
+            id: "run-1-service-1",
+            runID: "run-1",
+            threadID: "thread-1",
+            ordinal: 1,
+            kind: .provider,
+            providerKind: .runStarted,
+            nativeType: "turn/start",
+            nativeThreadID: "native-thread",
+            nativeTurnID: "native-turn",
+            approvalID: nil,
+            text: nil,
+            rawPayloadBase64: nil,
+            payloadWasTruncated: false,
+            createdAtUnixMillis: 1_001
+        )
+        try store.append(event)
+        #expect(try store.events(threadID: "thread-1") == [event])
+        try store.acknowledge(event)
+        #expect(try store.events(threadID: "thread-1").isEmpty)
+        try store.requestInterrupt(threadID: "thread-1", runID: "run-1")
+        #expect(store.consumeInterrupt(threadID: "thread-1", runID: "run-1"))
+        #expect(!store.consumeInterrupt(threadID: "thread-1", runID: "run-1"))
+        try store.requestAnswer(
+            threadID: "thread-1",
+            runID: "run-1",
+            requestID: "question-request",
+            answers: ["question-1": ["Proceed"]]
+        )
+        let answer = try #require(store.consumeAnswer(threadID: "thread-1", runID: "run-1"))
+        #expect(answer.0 == "question-request")
+        #expect(answer.1 == ["question-1": ["Proceed"]])
+        try store.finishRequest(at: queued[0].0, threadID: "thread-1")
+        #expect(try store.pendingRequests(threadID: "thread-1").isEmpty)
+    }
+
+    @Test
     func googleLoopbackReceiverBindsBeforeCompletingCallback() async throws {
         let receiver = try await GoogleLoopbackReceiver.start()
         let expectedState = "state-\(UUID().uuidString)"

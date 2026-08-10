@@ -10,87 +10,68 @@ final class DesktopConversationRuntime: ObservableObject {
     @Published private(set) var activeThreadIDs: Set<String> = []
 
     private let model: DesktopAppModel
-    private var sessions: [String: CodexLiveSession] = [:]
-    private var eventTasks: [String: _Concurrency.Task<Void, Never>] = [:]
-    private var recorders: [String: CodexJournalRecorder] = [:]
-    private var currentRunIDs: [String: String] = [:]
-    private var eventOrdinals: [String: Int] = [:]
+    private let environment: KanameDesktopEnvironment
+    private let serviceStore: KanameConversationServiceStore
+    private var pollingTask: _Concurrency.Task<Void, Never>?
+    private var orphanChecks: [String: Int] = [:]
     private var titleTasks: [String: _Concurrency.Task<Void, Never>] = [:]
 
-    init(model: DesktopAppModel) {
+    init(model: DesktopAppModel, environment: KanameDesktopEnvironment = .current) {
         self.model = model
-        model.recoverOrphanedProviderRuns()
+        self.environment = environment
+        serviceStore = KanameConversationServiceStore(
+            rootDirectory: environment.applicationSupportRoot.appending(path: "ConversationService", directoryHint: .isDirectory)
+        )
+        pollingTask = _Concurrency.Task { [weak self] in await self?.pollService() }
     }
 
     deinit {
-        for task in eventTasks.values { task.cancel() }
+        pollingTask?.cancel()
         for task in titleTasks.values { task.cancel() }
     }
 
-    func send(threadID: String, body: String) {
+    @discardableResult
+    func send(threadID: String, body: String) -> Bool {
         guard let messageID = model.appendUserMessage(threadID: threadID, body: body),
-              model.enqueueProviderRun(threadID: threadID, sourceMessageID: messageID) != nil else { return }
-        scheduleNext(threadID: threadID)
+              let runID = model.enqueueProviderRun(threadID: threadID, sourceMessageID: messageID) else { return false }
+        submit(runID: runID)
+        return true
     }
 
     func retry(runID: String) {
-        guard let threadID = model.providerRun(id: runID)?.threadID,
-              model.retryProviderRun(id: runID) != nil else { return }
-        scheduleNext(threadID: threadID)
+        guard let replacementID = model.retryProviderRun(id: runID) else { return }
+        submit(runID: replacementID)
     }
 
     func interrupt(threadID: String) {
-        guard let session = sessions[threadID] else { return }
-        _Concurrency.Task {
-            do {
-                try await session.interrupt()
-            } catch {
-                if let runID = currentRunIDs[threadID] {
-                    model.stopProviderRun(id: runID, interrupted: true, error: error.localizedDescription)
-                }
-                await releaseSession(threadID: threadID)
-            }
-        }
+        guard let run = model.providerRuns(threadID: threadID).last(where: { $0.state == .running }) else { return }
+        try? serviceStore.requestInterrupt(threadID: threadID, runID: run.id)
     }
 
     func answerQuestion(threadID: String, event: DesktopProviderEventRecord, answer: String) {
-        guard let session = sessions[threadID], let approvalID = event.approvalID else { return }
+        guard let approvalID = event.approvalID else { return }
         let cleanAnswer = answer.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanAnswer.isEmpty, cleanAnswer.utf8.count <= 4_096 else { return }
         let questionIDs = Self.questionIDs(from: event.rawPayloadBase64)
         guard !questionIDs.isEmpty else { return }
-        _Concurrency.Task {
-            do {
-                try await session.answerQuestion(
-                    requestID: approvalID,
-                    answers: Dictionary(uniqueKeysWithValues: questionIDs.map { ($0, [cleanAnswer]) })
-                )
-            } catch {
-                if let runID = currentRunIDs[threadID] {
-                    model.stopProviderRun(id: runID, interrupted: false, error: error.localizedDescription)
-                }
-                await releaseSession(threadID: threadID)
-            }
-        }
+        try? serviceStore.requestAnswer(
+            threadID: threadID,
+            runID: event.runID,
+            requestID: approvalID,
+            answers: Dictionary(uniqueKeysWithValues: questionIDs.map { ($0, [cleanAnswer]) })
+        )
     }
 
     func isRunning(threadID: String) -> Bool {
         activeThreadIDs.contains(threadID)
     }
 
-    private func scheduleNext(threadID: String) {
-        guard !activeThreadIDs.contains(threadID) else { return }
-        activeThreadIDs.insert(threadID)
-        _Concurrency.Task { await runNext(threadID: threadID) }
-    }
-
-    private func runNext(threadID: String) async {
-        guard let queued = model.nextQueuedProviderRun(threadID: threadID),
-              let run = model.beginProviderRun(id: queued.id),
+    private func submit(runID: String) {
+        guard let run = model.providerRun(id: runID),
+              let threadID = run.threadID,
               let sourceMessageID = run.sourceMessageID,
               let message = model.message(threadID: threadID, id: sourceMessageID),
               let thread = model.thread(id: threadID) else {
-            activeThreadIDs.remove(threadID)
             return
         }
         guard run.provider.caseInsensitiveCompare("Codex") == .orderedSame else {
@@ -99,14 +80,12 @@ final class DesktopConversationRuntime: ObservableObject {
                 interrupted: false,
                 error: "\(run.provider) does not yet support the unified streaming runtime. Choose Codex or use its bounded Coding discussion surface."
             )
-            activeThreadIDs.remove(threadID)
-            scheduleNextIfQueued(threadID: threadID)
             return
         }
         let workspace: URL
         if let projectWorkspace = model.workspaceURL(threadID: threadID) {
             workspace = projectWorkspace
-        } else if thread.projectID == nil, let standaloneWorkspace = try? Self.prepareStandaloneWorkspace() {
+        } else if thread.projectID == nil, let standaloneWorkspace = try? prepareStandaloneWorkspace() {
             workspace = standaloneWorkspace
         } else {
             model.stopProviderRun(
@@ -114,129 +93,135 @@ final class DesktopConversationRuntime: ObservableObject {
                 interrupted: false,
                 error: "Choose a valid project workspace before starting a provider. The message remains saved locally."
             )
-            activeThreadIDs.remove(threadID)
             return
         }
-        guard let runner = LocalCoreRunner.bundled() else {
+        guard let machService = Bundle.main.object(forInfoDictionaryKey: "KanameLocalCoreMachService") as? String,
+              let requirement = Bundle.main.object(forInfoDictionaryKey: "KanameLocalCoreServiceRequirement") as? String else {
             model.stopProviderRun(
                 id: run.id,
                 interrupted: false,
                 error: "The signed local journal service is unavailable, so Kaname did not send the message."
             )
-            activeThreadIDs.remove(threadID)
             return
         }
-        let projectID = KanameID(rawValue: thread.projectID ?? "standalone")
-        let productThreadID = KanameID(rawValue: threadID)
-        let productRunID = KanameID(rawValue: run.id)
-
-        let providerInstance = ProviderInstance(
-            id: ProviderInstanceID(rawValue: "codexLocal")!,
-            driver: .codex,
-            displayName: "Codex local"
-        )
-        recorders[threadID] = CodexJournalRecorder(
-            runner: runner,
-            context: CodexJournalContext(
-                projectID: projectID,
-                threadID: productThreadID,
-                runID: productRunID,
-                providerInstance: providerInstance
-            )
-        )
-        currentRunIDs[threadID] = run.id
-        eventOrdinals[run.id] = 0
-
-        let request = CodexCodingRequest(
-            prompt: providerPrompt(thread: thread, userMessage: message.body),
+        let request = KanameConversationServiceRequest(
+            runID: run.id,
+            threadID: threadID,
+            projectID: thread.projectID ?? "standalone",
+            provider: run.provider,
             model: resolvedModel(run.model),
             reasoningEffort: run.reasoningEffort,
-            sandbox: .readOnly
+            prompt: providerPrompt(thread: thread, userMessage: message.body),
+            workspacePath: workspace.path,
+            providerStatePath: environment.providerStateDirectory.path,
+            resumableNativeThreadID: model.latestNativeThreadID(threadID: threadID),
+            localCoreMachService: machService,
+            localCoreRequirement: requirement,
+            createdAtUnixMillis: run.startedAtUnixMillis
         )
         do {
-            let liveRun: CodexLiveRun
-            if let existing = sessions[threadID] {
-                liveRun = try await existing.continueRun(request)
-            } else {
-                let session = makeSession(instance: providerInstance, workspace: workspace)
-                sessions[threadID] = session
-                observe(session: session, threadID: threadID)
-                let resumableThreadID = model.latestNativeThreadID(threadID: threadID)
-                do {
-                    liveRun = try await session.start(request, resumingNativeThreadID: resumableThreadID)
-                } catch {
-                    guard resumableThreadID != nil else { throw error }
-                    await releaseSession(threadID: threadID, preserveActiveState: true)
-                    let replacement = makeSession(instance: providerInstance, workspace: workspace)
-                    sessions[threadID] = replacement
-                    observe(session: replacement, threadID: threadID)
-                    liveRun = try await replacement.start(request)
-                }
-            }
-            model.attachNativeProviderRun(
-                id: run.id,
-                nativeThreadID: liveRun.nativeThreadID,
-                nativeTurnID: liveRun.nativeTurnID
+            try serviceStore.enqueue(request)
+            _ = try KanameConversationWorkerLauncher.launch(
+                executableURL: workerExecutableURL(),
+                storeRoot: serviceStore.rootDirectory,
+                threadID: threadID
             )
+            activeThreadIDs.insert(threadID)
         } catch {
             model.stopProviderRun(id: run.id, interrupted: false, error: error.localizedDescription)
-            await releaseSession(threadID: threadID)
         }
     }
 
-    private func observe(session: CodexLiveSession, threadID: String) {
-        eventTasks[threadID]?.cancel()
-        eventTasks[threadID] = _Concurrency.Task { [weak self] in
-            let stream = await session.events()
-            for await event in stream {
-                guard let self else { return }
-                await self.consume(event, threadID: threadID)
+    private func pollService() async {
+        while !_Concurrency.Task.isCancelled {
+            for thread in model.snapshot.threads {
+                let serviceEvents = (try? serviceStore.events(threadID: thread.id)) ?? []
+                for event in serviceEvents {
+                    if !model.snapshot.operations.providerEvents.contains(where: { $0.id == event.id }) {
+                        consume(event)
+                    }
+                    try? serviceStore.acknowledge(event)
+                }
+                let alive = serviceStore.isWorkerAlive(threadID: thread.id)
+                let hasPending = (try? serviceStore.pendingRequests(threadID: thread.id).isEmpty == false) ?? false
+                if alive || hasPending {
+                    activeThreadIDs.insert(thread.id)
+                    orphanChecks[thread.id] = 0
+                    if hasPending && !alive { launchWorkerIfAvailable(threadID: thread.id) }
+                } else {
+                    activeThreadIDs.remove(thread.id)
+                    reconcileOrphanedRun(threadID: thread.id)
+                }
+                if thread.titleSource == .provisional,
+                   model.providerRuns(threadID: thread.id).contains(where: { $0.state == .completed }) {
+                    scheduleTitleIfNeeded(threadID: thread.id)
+                }
+            }
+            try? await _Concurrency.Task.sleep(for: .milliseconds(200))
+        }
+    }
+
+    private func consume(_ serviceEvent: KanameConversationServiceEvent) {
+        if serviceEvent.kind == .serviceStarted {
+            _ = model.beginProviderRun(id: serviceEvent.runID)
+            if let nativeThreadID = serviceEvent.nativeThreadID, let nativeTurnID = serviceEvent.nativeTurnID {
+                model.attachNativeProviderRun(id: serviceEvent.runID, nativeThreadID: nativeThreadID, nativeTurnID: nativeTurnID)
             }
         }
-    }
-
-    private func consume(_ event: CodexRunEvent, threadID: String) async {
-        guard let runID = currentRunIDs[threadID], let recorder = recorders[threadID] else { return }
-        do {
-            _ = try await recorder.record(event)
-        } catch {
-            model.stopProviderRun(
-                id: runID,
-                interrupted: false,
-                error: "The local journal rejected a provider observation. The run stopped without accepting a result."
+        if serviceEvent.kind == .serviceFailed {
+            let record = DesktopProviderEventRecord(
+                id: serviceEvent.id,
+                threadID: serviceEvent.threadID,
+                runID: serviceEvent.runID,
+                kind: .error,
+                title: "Provider stopped",
+                detail: serviceEvent.text ?? "The durable provider worker stopped safely.",
+                nativeType: serviceEvent.nativeType,
+                nativeThreadID: serviceEvent.nativeThreadID,
+                nativeTurnID: serviceEvent.nativeTurnID,
+                approvalID: serviceEvent.approvalID,
+                rawPayloadBase64: serviceEvent.rawPayloadBase64,
+                payloadWasTruncated: serviceEvent.payloadWasTruncated,
+                createdAtUnixMillis: serviceEvent.createdAtUnixMillis
             )
-            await releaseSession(threadID: threadID)
+            _ = model.recordProviderEvent(record)
+            model.stopProviderRun(id: serviceEvent.runID, interrupted: false, error: record.detail)
             return
         }
-
-        let ordinal = (eventOrdinals[runID] ?? 0) + 1
-        eventOrdinals[runID] = ordinal
-        let record = providerEventRecord(event, threadID: threadID, runID: runID, ordinal: ordinal)
+        guard let providerKind = serviceEvent.providerKind else { return }
+        let event = CodexRunEvent(
+            kind: providerKind,
+            nativeType: serviceEvent.nativeType,
+            threadID: serviceEvent.nativeThreadID,
+            turnID: serviceEvent.nativeTurnID,
+            approvalID: serviceEvent.approvalID,
+            text: serviceEvent.text,
+            payload: serviceEvent.rawPayloadBase64.flatMap { Data(base64Encoded: $0) },
+            payloadWasTruncated: serviceEvent.payloadWasTruncated
+        )
+        let record = providerEventRecord(
+            event,
+            id: serviceEvent.id,
+            threadID: serviceEvent.threadID,
+            runID: serviceEvent.runID,
+            createdAtUnixMillis: serviceEvent.createdAtUnixMillis
+        )
         _ = model.recordProviderEvent(
             record,
             assistantDelta: event.kind == .messageDelta ? event.text : nil
         )
         if event.kind == .planUpdated, let text = event.text {
-            model.addProviderPlan(threadID: threadID, text: text, completed: false)
+            model.addProviderPlan(threadID: serviceEvent.threadID, text: text, completed: false)
         }
 
         switch event.kind {
         case .providerCompleted:
-            model.completeProviderRun(id: runID, tokenUsage: tokenUsage(from: event.payload))
-            currentRunIDs.removeValue(forKey: threadID)
-            recorders.removeValue(forKey: threadID)
-            eventOrdinals.removeValue(forKey: runID)
-            activeThreadIDs.remove(threadID)
-            scheduleTitleIfNeeded(threadID: threadID)
-            scheduleNextIfQueued(threadID: threadID)
+            model.completeProviderRun(id: serviceEvent.runID, tokenUsage: tokenUsage(from: event.payload))
+            scheduleTitleIfNeeded(threadID: serviceEvent.threadID)
         case .runInterrupted:
-            model.stopProviderRun(id: runID, interrupted: true, error: event.text ?? "The provider turn was interrupted.")
-            await releaseSession(threadID: threadID)
-            scheduleNextIfQueued(threadID: threadID)
+            model.stopProviderRun(id: serviceEvent.runID, interrupted: true, error: event.text ?? "The provider turn was interrupted.")
         case .runFailed:
-            model.stopProviderRun(id: runID, interrupted: false, error: event.text ?? "The provider stopped without a readable result.")
-            await releaseSession(threadID: threadID)
-            scheduleNextIfQueued(threadID: threadID)
+            model.stopProviderRun(id: serviceEvent.runID, interrupted: false, error: event.text ?? "The provider stopped without a readable result.")
         case .sessionStarted, .runStarted, .messageDelta, .itemStarted, .itemCompleted,
              .planUpdated, .approvalRequested, .approvalAccepted, .approvalRejected,
              .questionRequested, .questionAnswered, .toolActivity, .diffUpdated, .nativeProviderEvent:
@@ -244,10 +229,40 @@ final class DesktopConversationRuntime: ObservableObject {
         }
     }
 
-    private func scheduleNextIfQueued(threadID: String) {
-        if model.nextQueuedProviderRun(threadID: threadID) != nil {
-            scheduleNext(threadID: threadID)
+    private func reconcileOrphanedRun(threadID: String) {
+        guard let running = model.providerRuns(threadID: threadID).last(where: { $0.state == .running }) else {
+            orphanChecks[threadID] = 0
+            return
         }
+        let count = (orphanChecks[threadID] ?? 0) + 1
+        orphanChecks[threadID] = count
+        if count >= 5 {
+            model.stopProviderRun(
+                id: running.id,
+                interrupted: true,
+                error: "The durable provider worker stopped before completion. Retry reuses the saved user message."
+            )
+            orphanChecks[threadID] = 0
+        }
+    }
+
+    private func launchWorkerIfAvailable(threadID: String) {
+        _ = try? KanameConversationWorkerLauncher.launch(
+            executableURL: workerExecutableURL(),
+            storeRoot: serviceStore.rootDirectory,
+            threadID: threadID
+        )
+    }
+
+    private func workerExecutableURL() throws -> URL {
+        if let bundled = Bundle.main.url(forResource: "KanameConversationWorker", withExtension: nil) {
+            return bundled
+        }
+        if let executable = Bundle.main.executableURL {
+            let sibling = executable.deletingLastPathComponent().appending(path: "KanameConversationWorker")
+            if FileManager.default.isExecutableFile(atPath: sibling.path) { return sibling }
+        }
+        throw KanameConversationServiceError.workerUnavailable
     }
 
     private func scheduleTitleIfNeeded(threadID: String) {
@@ -308,27 +323,6 @@ final class DesktopConversationRuntime: ObservableObject {
         }
     }
 
-    private func releaseSession(threadID: String, preserveActiveState: Bool = false) async {
-        let session = sessions.removeValue(forKey: threadID)
-        eventTasks.removeValue(forKey: threadID)?.cancel()
-        recorders.removeValue(forKey: threadID)
-        if !preserveActiveState {
-            if let runID = currentRunIDs.removeValue(forKey: threadID) { eventOrdinals.removeValue(forKey: runID) }
-            activeThreadIDs.remove(threadID)
-        }
-        await session?.close()
-    }
-
-    private func makeSession(instance: ProviderInstance, workspace: URL) -> CodexLiveSession {
-        CodexLiveSession(
-            configuration: .init(
-                instance: instance,
-                workspaceURL: workspace,
-                persistentSessionDirectory: Self.providerStateDirectory
-            )
-        )
-    }
-
     private func providerPrompt(thread: DesktopThread, userMessage: String) -> String {
         let project = model.project(id: thread.projectID)
         let context = project?.context
@@ -355,13 +349,14 @@ final class DesktopConversationRuntime: ObservableObject {
 
     private func providerEventRecord(
         _ event: CodexRunEvent,
+        id: String,
         threadID: String,
         runID: String,
-        ordinal: Int
+        createdAtUnixMillis: Int64
     ) -> DesktopProviderEventRecord {
         let presentation = Self.presentation(for: event)
         return DesktopProviderEventRecord(
-            id: "\(runID)-\(ordinal)",
+            id: id,
             threadID: threadID,
             runID: runID,
             kind: presentation.kind,
@@ -373,7 +368,7 @@ final class DesktopConversationRuntime: ObservableObject {
             approvalID: event.approvalID,
             rawPayloadBase64: event.payload?.base64EncodedString(),
             payloadWasTruncated: event.payloadWasTruncated,
-            createdAtUnixMillis: Int64(Date().timeIntervalSince1970 * 1_000)
+            createdAtUnixMillis: createdAtUnixMillis
         )
     }
 
@@ -433,18 +428,8 @@ final class DesktopConversationRuntime: ObservableObject {
         return questions.compactMap { $0["id"] as? String }.filter { !$0.isEmpty }
     }
 
-    private static var providerStateDirectory: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appending(path: "Kaname", directoryHint: .isDirectory)
-            .appending(path: "Desktop", directoryHint: .isDirectory)
-            .appending(path: "Codex", directoryHint: .isDirectory)
-    }
-
-    private static func prepareStandaloneWorkspace() throws -> URL {
-        let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appending(path: "Kaname", directoryHint: .isDirectory)
-            .appending(path: "Desktop", directoryHint: .isDirectory)
-            .appending(path: "Standalone", directoryHint: .isDirectory)
+    private func prepareStandaloneWorkspace() throws -> URL {
+        let directory = environment.standaloneWorkspaceDirectory
         try FileManager.default.createDirectory(
             at: directory,
             withIntermediateDirectories: true,

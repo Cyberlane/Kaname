@@ -390,7 +390,7 @@ public struct DesktopPreferences: Codable, Equatable, Sendable {
 }
 
 public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
-    public static let currentVersion = 8
+    public static let currentVersion = 9
 
     public var version: Int
     public var projects: [DesktopProject]
@@ -546,7 +546,7 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
     }
 
     func migratedToCurrent(now: Int64) throws -> DesktopAppSnapshot {
-        guard (1...7).contains(version) else { throw DesktopModelError.unsupportedVersion }
+        guard (1...8).contains(version) else { throw DesktopModelError.unsupportedVersion }
         var migrated = self
         migrated.version = Self.currentVersion
         if migrated.domains == .empty {
@@ -614,14 +614,14 @@ public final class FileDesktopStateStore: DesktopRecoveryStateStoring {
         self.fileURL = fileURL
     }
 
-    public static func applicationSupport() -> FileDesktopStateStore {
+    public static func applicationSupport(rootDirectoryName: String = "Kaname") -> FileDesktopStateStore {
         let base = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
         )[0]
         return FileDesktopStateStore(
             fileURL: base
-                .appendingPathComponent("Kaname", isDirectory: true)
+                .appendingPathComponent(rootDirectoryName, isDirectory: true)
                 .appendingPathComponent("Desktop", isDirectory: true)
                 .appendingPathComponent("workspace.json")
         )
@@ -910,6 +910,23 @@ public final class DesktopAppModel: ObservableObject {
 
     public func providerRun(id: String) -> DesktopProviderRunRecord? {
         snapshot.operations.providerRuns.first { $0.id == id }
+    }
+
+    public func composerDraft(threadID: String) -> String {
+        snapshot.operations.composerDrafts[threadID] ?? ""
+    }
+
+    @discardableResult
+    public func updateComposerDraft(threadID: String, body: String) -> Bool {
+        guard snapshot.threads.contains(where: { $0.id == threadID }), body.utf8.count <= 32_000 else { return false }
+        mutate { snapshot in
+            if body.isEmpty {
+                snapshot.operations.composerDrafts.removeValue(forKey: threadID)
+            } else {
+                snapshot.operations.composerDrafts[threadID] = body
+            }
+        }
+        return persistenceError == nil
     }
 
     public func message(threadID: String, id: String) -> DesktopMessage? {

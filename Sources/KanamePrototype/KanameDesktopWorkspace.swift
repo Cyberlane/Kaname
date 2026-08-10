@@ -6,6 +6,7 @@ import Foundation
 import SwiftUI
 #if os(macOS)
 import AppKit
+import UniformTypeIdentifiers
 #endif
 
 private enum DesktopDestination: String, CaseIterable, Identifiable {
@@ -78,15 +79,45 @@ private struct DesktopNavigationLocation: Equatable {
     let selectedProjectID: String?
 }
 
+private struct DesktopUIRestoreState: Codable {
+    var destination: String
+    var selectedThreadID: String?
+    var selectedProjectID: String?
+}
+
+private struct DesktopUIRestoreStore {
+    let fileURL: URL
+
+    func load() -> DesktopUIRestoreState? {
+        guard let data = try? Data(contentsOf: fileURL) else { return nil }
+        return try? JSONDecoder().decode(DesktopUIRestoreState.self, from: data)
+    }
+
+    func save(_ state: DesktopUIRestoreState) {
+        do {
+            let directory = fileURL.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+            try JSONEncoder().encode(state).write(to: fileURL, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
+        } catch {
+            // Workspace persistence remains authoritative; selection restoration
+            // is helpful UI continuity and must never prevent Kaname from opening.
+        }
+    }
+}
+
 private struct NewConversationRequest: Identifiable {
     let id = UUID()
     let projectID: String?
 }
 
 struct KanameDesktopWorkspace: View {
+    private let uiRestoreStore: DesktopUIRestoreStore
     @StateObject private var model: DesktopAppModel
     @StateObject private var conversationRuntime: DesktopConversationRuntime
-    @StateObject private var personalIntegrations = DesktopPersonalIntegrationViewModel()
+    @StateObject private var personalIntegrations: DesktopPersonalIntegrationViewModel
+    @StateObject private var updates: DesktopUpdateViewModel
     @State private var destination: DesktopDestination
     @State private var selectedThreadID: String?
     @State private var selectedProjectID: String?
@@ -99,12 +130,20 @@ struct KanameDesktopWorkspace: View {
     @State private var navigationHistory: [DesktopNavigationLocation] = []
 
     init() {
-        let desktopModel = DesktopAppModel()
+        let environment = KanameDesktopEnvironment.current
+        let restoreStore = DesktopUIRestoreStore(fileURL: environment.desktopDirectory.appending(path: "ui-restore.json"))
+        let restoredUI = restoreStore.load()
+        uiRestoreStore = restoreStore
+        let desktopModel = DesktopAppModel(store: FileDesktopStateStore(fileURL: environment.workspaceFileURL))
         _model = StateObject(wrappedValue: desktopModel)
-        _conversationRuntime = StateObject(wrappedValue: DesktopConversationRuntime(model: desktopModel))
+        _conversationRuntime = StateObject(wrappedValue: DesktopConversationRuntime(model: desktopModel, environment: environment))
+        _personalIntegrations = StateObject(wrappedValue: DesktopPersonalIntegrationViewModel(environment: environment))
+        _updates = StateObject(wrappedValue: DesktopUpdateViewModel(environment: environment))
         let arguments = CommandLine.arguments
-        let requestedDestination = arguments.firstIndex(of: "--desktop-destination")
+        let explicitDestination = arguments.firstIndex(of: "--desktop-destination")
             .flatMap { arguments.indices.contains($0 + 1) ? DesktopDestination(rawValue: arguments[$0 + 1]) : nil }
+        let requestedDestination = explicitDestination
+            ?? restoredUI.flatMap { DesktopDestination(rawValue: $0.destination) }
             ?? .home
         let requestedBackDestination = arguments.firstIndex(of: "--desktop-back-target")
             .flatMap { arguments.indices.contains($0 + 1) ? DesktopDestination(rawValue: arguments[$0 + 1]) : nil }
@@ -113,11 +152,13 @@ struct KanameDesktopWorkspace: View {
         _destination = State(initialValue: requestedDestination == .settings ? .home : requestedDestination)
         _showsSettings = State(initialValue: requestedDestination == .settings)
         _selectedThreadID = State(
-            initialValue: [.home, .threads, .inbox].contains(requestedDestination)
-                ? "thread-desktop-dogfood"
-                : nil
+            initialValue: explicitDestination == nil
+                ? restoredUI?.selectedThreadID
+                : ([.home, .threads, .inbox].contains(requestedDestination) ? "thread-desktop-dogfood" : nil)
         )
-        _selectedProjectID = State(initialValue: requestedDestination == .projects ? requestedProjectID : nil)
+        _selectedProjectID = State(initialValue: explicitDestination == nil
+            ? restoredUI?.selectedProjectID
+            : (requestedDestination == .projects ? requestedProjectID : nil))
         _navigationHistory = State(
             initialValue: requestedBackDestination.map {
                 [DesktopNavigationLocation(
@@ -140,6 +181,7 @@ struct KanameDesktopWorkspace: View {
                 DesktopSettingsModal(
                     model: model,
                     integrations: personalIntegrations,
+                    updates: updates,
                     dismiss: { showsSettings = false }
                 )
                 .transition(.opacity.combined(with: .scale(scale: 0.985)))
@@ -168,6 +210,9 @@ struct KanameDesktopWorkspace: View {
         .task {
             personalIntegrations.startMonitoring(model: model)
         }
+        .onChange(of: destination) { _ in persistUIRestoreState() }
+        .onChange(of: selectedThreadID) { _ in persistUIRestoreState() }
+        .onChange(of: selectedProjectID) { _ in persistUIRestoreState() }
         .onAppear {
             DesktopBackCommandRouter.shared.install(handleBack)
         }
@@ -175,6 +220,14 @@ struct KanameDesktopWorkspace: View {
             DesktopBackCommandRouter.shared.removeHandler()
         }
         .animation(.easeOut(duration: 0.16), value: showsSettings)
+    }
+
+    private func persistUIRestoreState() {
+        uiRestoreStore.save(DesktopUIRestoreState(
+            destination: destination.rawValue,
+            selectedThreadID: selectedThreadID,
+            selectedProjectID: selectedProjectID
+        ))
     }
 
     @ViewBuilder
@@ -410,7 +463,7 @@ struct KanameDesktopWorkspace: View {
             case .localCore:
                 LocalCoreWorkspace()
             case .settings:
-                DesktopSettingsView(model: model, integrations: personalIntegrations)
+                DesktopSettingsView(model: model, integrations: personalIntegrations, updates: updates)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -919,6 +972,13 @@ private struct DesktopThreadConversation: View {
     @State private var runtimeModel = "Use provider default"
     @State private var runtimeReasoning = "xhigh"
 
+    init(model: DesktopAppModel, runtime: DesktopConversationRuntime, thread: DesktopThread) {
+        self.model = model
+        self.runtime = runtime
+        self.thread = thread
+        _draft = State(initialValue: model.composerDraft(threadID: thread.id))
+    }
+
     private enum Panel: String, CaseIterable, Identifiable {
         case conversation
         case plan
@@ -1098,6 +1158,7 @@ private struct DesktopThreadConversation: View {
                     .padding(.vertical, 10)
                     .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
                     .onSubmit(send)
+                    .onChange(of: draft) { model.updateComposerDraft(threadID: thread.id, body: $0) }
                 Button(action: send) {
                     Image(systemName: "arrow.up.circle.fill")
                         .font(.title2)
@@ -1123,8 +1184,10 @@ private struct DesktopThreadConversation: View {
 
     private func send() {
         let body = draft
-        draft = ""
-        runtime.send(threadID: thread.id, body: body)
+        if runtime.send(threadID: thread.id, body: body) {
+            draft = ""
+            model.updateComposerDraft(threadID: thread.id, body: "")
+        }
     }
 }
 
@@ -1942,6 +2005,115 @@ private final class DesktopLocalReadViewModel: ObservableObject {
 }
 
 @MainActor
+private final class DesktopUpdateViewModel: ObservableObject {
+    let environment: KanameDesktopEnvironment
+    @Published private(set) var receipt: KanameUpdateReceipt
+    @Published private(set) var isBusy = false
+    @Published private(set) var canRollback = false
+    @Published private(set) var message: String?
+
+    private let coordinator: KanameUpdateCoordinator
+    private var helperProcess: Process?
+
+    init(environment: KanameDesktopEnvironment = .current) {
+        self.environment = environment
+        coordinator = KanameUpdateCoordinator(environment: environment)
+        receipt = KanameUpdateReceipt(
+            status: .idle,
+            detail: environment.channel == .stable
+                ? "No update is staged."
+                : "This candidate has its own state and cannot replace stable Kaname.",
+            updatedAtUnixMillis: 0
+        )
+        _Concurrency.Task { await refresh() }
+    }
+
+    func chooseAndStage() {
+#if os(macOS)
+        let panel = NSOpenPanel()
+        panel.title = "Choose a stable Kaname update"
+        panel.prompt = "Verify and stage"
+        panel.allowedContentTypes = [.applicationBundle]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.treatsFilePackagesAsDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        isBusy = true
+        message = "Verifying the signature and staging a private copy…"
+        _Concurrency.Task {
+            do {
+                receipt = try await coordinator.stage(bundleURL: url)
+                message = "Update ready. Your current Kaname remains active until you choose Switch and relaunch."
+            } catch {
+                message = error.localizedDescription
+            }
+            isBusy = false
+            await refreshRollbackAvailability()
+        }
+#endif
+    }
+
+    func switchAndRelaunch(model: DesktopAppModel) {
+#if os(macOS)
+        let hasActiveApproval = model.snapshot.operations.approvals.contains { $0.state == .awaitingApproval }
+        isBusy = true
+        _Concurrency.Task {
+            do {
+                let request = try await coordinator.switchRequest(
+                    installedBundleURL: Bundle.main.bundleURL,
+                    processIdentifier: ProcessInfo.processInfo.processIdentifier,
+                    composerCheckpointed: model.persistenceError == nil,
+                    hasActiveApproval: hasActiveApproval
+                )
+                try launchHelper(request)
+                message = "Switching after the current UI closes…"
+                NSApplication.shared.terminate(nil)
+            } catch {
+                message = error.localizedDescription
+                isBusy = false
+            }
+        }
+#endif
+    }
+
+    func rollback() {
+#if os(macOS)
+        _Concurrency.Task {
+            do {
+                let request = try await coordinator.rollbackRequest(
+                    installedBundleURL: Bundle.main.bundleURL,
+                    processIdentifier: ProcessInfo.processInfo.processIdentifier
+                )
+                try launchHelper(request)
+                message = "Restoring the previous Kaname UI…"
+                NSApplication.shared.terminate(nil)
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+#endif
+    }
+
+    private func launchHelper(_ request: KanameUpdateLaunchRequest) throws {
+        let process = Process()
+        process.executableURL = request.helperURL
+        process.arguments = request.arguments
+        try process.run()
+        helperProcess = process
+    }
+
+    private func refresh() async {
+        receipt = await coordinator.receipt()
+        await refreshRollbackAvailability()
+    }
+
+    private func refreshRollbackAvailability() async {
+        let backupURL = await coordinator.backupBundleURL
+        canRollback = FileManager.default.fileExists(atPath: backupURL.path)
+    }
+}
+
+@MainActor
 private final class DesktopPersonalIntegrationViewModel: ObservableObject {
     @Published private(set) var googleAccounts: [NativeGoogleAccountSnapshot] = []
     @Published private(set) var googleCalendars: [PersonalCalendarSourceSnapshot] = []
@@ -1961,12 +2133,16 @@ private final class DesktopPersonalIntegrationViewModel: ObservableObject {
     @Published private(set) var message: String?
 
     private let integrations = PersonalIntegrationService()
-    private let googleIntegration = NativeGoogleIntegrationService()
+    private let googleIntegration: NativeGoogleIntegrationService
     private let appleCalendar = AppleCalendarIntegrationService()
-    private let providerCache = ProviderCapabilityCacheStore()
-    private var monitoringTask: _Concurrency.Task<Void, Never>?
+    private let providerCache: ProviderCapabilityCacheStore
 
-    init() {
+    init(environment: KanameDesktopEnvironment = .current) {
+        googleIntegration = NativeGoogleIntegrationService(
+            rootDirectory: environment.googleDirectory,
+            keychainService: environment.googleKeychainService
+        )
+        providerCache = ProviderCapabilityCacheStore(directory: environment.connectivityDirectory)
         appleAccessState = appleCalendar.accessState
         _Concurrency.Task {
             hasGoogleClientConfiguration = await googleIntegration.hasClientConfiguration
@@ -1977,6 +2153,8 @@ private final class DesktopPersonalIntegrationViewModel: ObservableObject {
             }
         }
     }
+
+    private var monitoringTask: _Concurrency.Task<Void, Never>?
 
     func startMonitoring(model: DesktopAppModel) {
         guard monitoringTask == nil else { return }
@@ -3376,6 +3554,7 @@ private struct DesktopDevicesView: View {
 private struct DesktopSettingsModal: View {
     @ObservedObject var model: DesktopAppModel
     @ObservedObject var integrations: DesktopPersonalIntegrationViewModel
+    @ObservedObject var updates: DesktopUpdateViewModel
     let dismiss: () -> Void
 
     var body: some View {
@@ -3385,7 +3564,7 @@ private struct DesktopSettingsModal: View {
                 .contentShape(Rectangle())
                 .onTapGesture(perform: dismiss)
 
-            DesktopSettingsView(model: model, integrations: integrations, dismiss: dismiss)
+            DesktopSettingsView(model: model, integrations: integrations, updates: updates, dismiss: dismiss)
                 .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                 .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
                 .overlay {
@@ -3407,16 +3586,19 @@ private struct DesktopSettingsView: View {
     @Environment(\.dismiss) private var environmentDismiss
     @ObservedObject var model: DesktopAppModel
     @ObservedObject var integrations: DesktopPersonalIntegrationViewModel
+    @ObservedObject var updates: DesktopUpdateViewModel
     @State private var draft: DesktopPreferences
     private let explicitDismiss: (() -> Void)?
 
     init(
         model: DesktopAppModel,
         integrations: DesktopPersonalIntegrationViewModel,
+        updates: DesktopUpdateViewModel,
         dismiss: (() -> Void)? = nil
     ) {
         self.model = model
         self.integrations = integrations
+        self.updates = updates
         explicitDismiss = dismiss
         _draft = State(initialValue: model.snapshot.preferences)
     }
@@ -3425,6 +3607,7 @@ private struct DesktopSettingsView: View {
         DesktopSettingsShell(
             model: model,
             integrations: integrations,
+            updates: updates,
             draft: $draft,
             dismiss: { explicitDismiss?() ?? environmentDismiss() }
         )
@@ -3441,13 +3624,14 @@ private struct DesktopSettingsView: View {
 
 private struct DesktopSettingsShell: View {
     private enum Category: String, CaseIterable, Identifiable {
-        case general, integrations, providers, calendars, scheduling, privacy, diagnostics
+        case general, integrations, providers, updates, calendars, scheduling, privacy, diagnostics
         var id: String { rawValue }
         var label: String {
             switch self {
             case .general: "General"
             case .integrations: "Integrations"
             case .providers: "Coding providers"
+            case .updates: "Updates"
             case .calendars: "Calendars"
             case .scheduling: "Scheduling"
             case .privacy: "Privacy & Safety"
@@ -3459,6 +3643,7 @@ private struct DesktopSettingsShell: View {
             case .general: "gearshape.fill"
             case .integrations: "link"
             case .providers: "chevron.left.forwardslash.chevron.right"
+            case .updates: "arrow.triangle.2.circlepath.circle.fill"
             case .calendars: "calendar"
             case .scheduling: "clock.fill"
             case .privacy: "lock.shield.fill"
@@ -3469,6 +3654,7 @@ private struct DesktopSettingsShell: View {
 
     @ObservedObject var model: DesktopAppModel
     @ObservedObject var integrations: DesktopPersonalIntegrationViewModel
+    @ObservedObject var updates: DesktopUpdateViewModel
     @Binding var draft: DesktopPreferences
     let dismiss: () -> Void
     @State private var category: Category = .general
@@ -3476,11 +3662,13 @@ private struct DesktopSettingsShell: View {
     init(
         model: DesktopAppModel,
         integrations: DesktopPersonalIntegrationViewModel,
+        updates: DesktopUpdateViewModel,
         draft: Binding<DesktopPreferences>,
         dismiss: @escaping () -> Void
     ) {
         self.model = model
         self.integrations = integrations
+        self.updates = updates
         _draft = draft
         self.dismiss = dismiss
         let arguments = CommandLine.arguments
@@ -3584,6 +3772,7 @@ private struct DesktopSettingsShell: View {
         case .general: "Workspace presentation and review defaults"
         case .integrations: "Personal services, account health, and explicit authorization"
         case .providers: "Local coding agents available to Kaname"
+        case .updates: "Verified switching, health checks, and rollback"
         case .calendars: "Choose which connected calendars Kaname may show"
         case .scheduling: "Stable wall-clock behavior when you travel"
         case .privacy: "Notification content and execution authority"
@@ -3596,6 +3785,7 @@ private struct DesktopSettingsShell: View {
         case .general: generalPage
         case .integrations: integrationsPage
         case .providers: providersPage
+        case .updates: updatesPage
         case .calendars: calendarsPage
         case .scheduling: schedulingPage
         case .privacy: privacyPage
@@ -3747,6 +3937,47 @@ private struct DesktopSettingsShell: View {
                             .foregroundStyle(source.provider == .google ? .blue : .red)
                     }
                 }
+            }
+        }
+    }
+
+    private var updatesPage: some View {
+        VStack(spacing: 14) {
+            SettingsSection(title: "Update continuity", symbol: "arrow.triangle.2.circlepath.circle.fill") {
+                LabeledContent("Channel", value: updates.environment.displayName)
+                LabeledContent("State", value: updates.receipt.status.rawValue.capitalized)
+                if let version = updates.receipt.version {
+                    LabeledContent("Ready", value: "\(version) (\(updates.receipt.build ?? "—"))")
+                }
+                Text(updates.receipt.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if updates.environment.channel == .stable {
+                    HStack {
+                        Button("Choose verified update…", systemImage: "shippingbox") { updates.chooseAndStage() }
+                            .disabled(updates.isBusy)
+                        Button("Switch and relaunch", systemImage: "arrow.clockwise") {
+                            updates.switchAndRelaunch(model: model)
+                        }
+                        .disabled(updates.isBusy || updates.receipt.status != .staged)
+                        Button("Rollback", systemImage: "arrow.uturn.backward") { updates.rollback() }
+                            .disabled(updates.isBusy || !updates.canRollback)
+                    }
+                } else {
+                    Label("Candidate state is isolated. Qualify here, then stage a stable-identity build from stable Kaname.", systemImage: "testtube.2")
+                        .font(.caption)
+                        .foregroundStyle(Nord.frost1)
+                }
+                if let message = updates.message {
+                    Label(message, systemImage: "info.circle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            SettingsSection(title: "Switch safety", symbol: "checkmark.shield.fill") {
+                Label("Composer drafts and the current selection are checkpointed locally before a switch.", systemImage: "square.and.arrow.down")
+                Label("An active approval blocks switching until you resolve it.", systemImage: "hand.raised.fill")
+                Label("A missed health deadline automatically restores the previous bundle.", systemImage: "lifepreserver.fill")
             }
         }
     }

@@ -15,11 +15,7 @@ public enum KanameDesktopInstanceLockError: Error, Equatable, Sendable {
 /// processes; those children must never keep the desktop-app lock alive.
 public final class KanameDesktopInstanceLock: @unchecked Sendable {
     public static var defaultLockFileURL: URL {
-        FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first!
-            .appending(path: "Kaname/Runtime", directoryHint: .isDirectory)
-            .appending(path: "desktop-instance.lock", directoryHint: .notDirectory)
+        KanameDesktopEnvironment.current.instanceLockURL
     }
 
     private let descriptor: Int32

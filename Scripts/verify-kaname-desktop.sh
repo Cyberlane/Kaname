@@ -14,6 +14,10 @@ instance_lock="$HOME/Library/Application Support/Kaname/Runtime/desktop-instance
 restore_running_app=false
 qualification_pid=""
 
+stable_pids() {
+    pgrep -f "^$executable([[:space:]]|$)" || true
+}
+
 restore_desktop_app() {
     if [[ -n "$qualification_pid" ]] && kill -0 "$qualification_pid" 2>/dev/null; then
         kill -TERM "$qualification_pid"
@@ -26,14 +30,14 @@ restore_desktop_app() {
 
 trap restore_desktop_app EXIT
 
-if pgrep -x KanamePrototype >/dev/null; then
+if [[ -n "$(stable_pids)" ]]; then
     restore_running_app=true
-    pkill -TERM -x KanamePrototype
+    while IFS= read -r pid; do [[ -n "$pid" ]] && kill -TERM "$pid"; done < <(stable_pids)
     for _ in {1..40}; do
-        if ! pgrep -x KanamePrototype >/dev/null; then break; fi
+        if [[ -z "$(stable_pids)" ]]; then break; fi
         sleep 0.05
     done
-    if pgrep -x KanamePrototype >/dev/null; then
+    if [[ -n "$(stable_pids)" ]]; then
         echo "Kaname did not stop before desktop qualification." >&2
         exit 1
     fi
@@ -41,10 +45,12 @@ fi
 
 [[ -x "$executable" ]]
 [[ -x "$app_path/Contents/Resources/KanameLocalControlService" ]]
+[[ -x "$app_path/Contents/Resources/KanameUpdateHelper" ]]
+[[ -x "$app_path/Contents/Resources/KanameConversationWorker" ]]
 [[ -x "$app_path/Contents/Resources/kaname-local-core" ]]
 [[ "$(plutil -extract CFBundleIdentifier raw "$app_path/Contents/Info.plist")" == "com.cyberlane.kaname.desktop" ]]
-[[ "$(plutil -extract CFBundleShortVersionString raw "$app_path/Contents/Info.plist")" == "0.8.0" ]]
-[[ "$(plutil -extract CFBundleVersion raw "$app_path/Contents/Info.plist")" == "17" ]]
+[[ "$(plutil -extract CFBundleShortVersionString raw "$app_path/Contents/Info.plist")" == "0.9.0" ]]
+[[ "$(plutil -extract CFBundleVersion raw "$app_path/Contents/Info.plist")" == "18" ]]
 codesign --verify --deep --strict "$app_path"
 if [[ "$(plutil -extract KanameStableCodeSigning raw "$app_path/Contents/Info.plist")" == "true" ]]; then
     designated_requirement="$(codesign -d -r- "$app_path" 2>&1)"
@@ -54,6 +60,8 @@ if [[ "$(plutil -extract KanameStableCodeSigning raw "$app_path/Contents/Info.pl
     [[ -n "$app_team_identifier" && "$app_team_identifier" != "not set" ]]
     for signed_target in \
         "$app_path/Contents/Resources/KanameLocalControlService" \
+        "$app_path/Contents/Resources/KanameUpdateHelper" \
+        "$app_path/Contents/Resources/KanameConversationWorker" \
         "$app_path/Contents/Resources/kaname-local-core"
     do
         [[ "$(codesign -dvv "$signed_target" 2>&1 | sed -n 's/^TeamIdentifier=//p')" == "$app_team_identifier" ]]
@@ -131,7 +139,7 @@ if ! wait "$second_instance_pid"; then
     echo "The second Kaname launch did not exit cleanly." >&2
     exit 1
 fi
-[[ "$(pgrep -x KanamePrototype | wc -l | tr -d ' ')" == "1" ]]
+[[ "$(stable_pids | wc -l | tr -d ' ')" == "1" ]]
 kill -0 "$qualification_pid"
 kill -TERM "$qualification_pid"
 wait "$qualification_pid" 2>/dev/null || true

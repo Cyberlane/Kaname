@@ -23,6 +23,8 @@ let package = Package(
         .executable(name: "KanameXPCQualification", targets: ["KanameXPCQualification"]),
         .executable(name: "KanameLocalControlService", targets: ["KanameLocalControlService"]),
         .executable(name: "KanameLocalCoreXPCMeasure", targets: ["KanameLocalCoreXPCMeasure"]),
+        .executable(name: "KanameUpdateHelper", targets: ["KanameUpdateHelper"]),
+        .executable(name: "KanameConversationWorker", targets: ["KanameConversationWorker"]),
         .executable(name: "KanameProtocolFixtureTool", targets: ["KanameProtocolFixtureTool"]),
         .executable(name: "KanamePhase3Qualification", targets: ["KanamePhase3Qualification"]),
     ],
@@ -99,6 +101,11 @@ let package = Package(
         .executableTarget(
             name: "KanameLocalCoreXPCMeasure",
             dependencies: ["KanameLocalCore", "KanameMobileSync", "KanameProtocol"]
+        ),
+        .executableTarget(name: "KanameUpdateHelper"),
+        .executableTarget(
+            name: "KanameConversationWorker",
+            dependencies: ["KanameConnectivity", "KanameDomain", "KanameLocalCore"]
         ),
         .executableTarget(
             name: "KanameProtocolFixtureTool",

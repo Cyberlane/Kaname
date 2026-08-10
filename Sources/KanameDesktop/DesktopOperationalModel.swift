@@ -289,6 +289,7 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
     public var gitStackLayers: [DesktopGitStackLayer]
     public var providerRuns: [DesktopProviderRunRecord]
     public var providerEvents: [DesktopProviderEventRecord]
+    public var composerDrafts: [String: String]
     public var comparisons: [DesktopComparisonRecord]
     public var automationRuns: [DesktopAutomationRunRecord]
     public var audit: [DesktopAuditRecord]
@@ -301,6 +302,7 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         gitStackLayers: [],
         providerRuns: [],
         providerEvents: [],
+        composerDrafts: [:],
         comparisons: [],
         automationRuns: [],
         audit: []
@@ -314,6 +316,7 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         case gitStackLayers
         case providerRuns
         case providerEvents
+        case composerDrafts
         case comparisons
         case automationRuns
         case audit
@@ -327,6 +330,7 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         gitStackLayers: [DesktopGitStackLayer],
         providerRuns: [DesktopProviderRunRecord],
         providerEvents: [DesktopProviderEventRecord],
+        composerDrafts: [String: String],
         comparisons: [DesktopComparisonRecord],
         automationRuns: [DesktopAutomationRunRecord],
         audit: [DesktopAuditRecord]
@@ -338,6 +342,7 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         self.gitStackLayers = gitStackLayers
         self.providerRuns = providerRuns
         self.providerEvents = providerEvents
+        self.composerDrafts = composerDrafts
         self.comparisons = comparisons
         self.automationRuns = automationRuns
         self.audit = audit
@@ -352,6 +357,7 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         gitStackLayers = try container.decode([DesktopGitStackLayer].self, forKey: .gitStackLayers)
         providerRuns = try container.decode([DesktopProviderRunRecord].self, forKey: .providerRuns)
         providerEvents = try container.decodeIfPresent([DesktopProviderEventRecord].self, forKey: .providerEvents) ?? []
+        composerDrafts = try container.decodeIfPresent([String: String].self, forKey: .composerDrafts) ?? [:]
         comparisons = try container.decode([DesktopComparisonRecord].self, forKey: .comparisons)
         automationRuns = try container.decode([DesktopAutomationRunRecord].self, forKey: .automationRuns)
         audit = try container.decode([DesktopAuditRecord].self, forKey: .audit)
