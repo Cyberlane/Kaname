@@ -440,8 +440,17 @@ public protocol DesktopStateStoring: AnyObject {
     func save(_ data: Data) throws
 }
 
-public final class FileDesktopStateStore: DesktopStateStoring {
+public protocol DesktopRecoveryStateStoring: DesktopStateStoring {
+    func loadRecovery() throws -> Data?
+    func saveRecovered(_ data: Data) throws
+}
+
+public final class FileDesktopStateStore: DesktopRecoveryStateStoring {
     public let fileURL: URL
+
+    public var recoveryFileURL: URL {
+        fileURL.deletingLastPathComponent().appendingPathComponent("workspace.previous.json")
+    }
 
     public init(fileURL: URL) {
         self.fileURL = fileURL
@@ -466,6 +475,25 @@ public final class FileDesktopStateStore: DesktopStateStoring {
     }
 
     public func save(_ data: Data) throws {
+        try prepareDirectory()
+        if FileManager.default.fileExists(atPath: fileURL.path) {
+            let previous = try Data(contentsOf: fileURL)
+            try writePrivate(previous, to: recoveryFileURL)
+        }
+        try writePrivate(data, to: fileURL)
+    }
+
+    public func loadRecovery() throws -> Data? {
+        guard FileManager.default.fileExists(atPath: recoveryFileURL.path) else { return nil }
+        return try Data(contentsOf: recoveryFileURL)
+    }
+
+    public func saveRecovered(_ data: Data) throws {
+        try prepareDirectory()
+        try writePrivate(data, to: fileURL)
+    }
+
+    private func prepareDirectory() throws {
         let directory = fileURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(
             at: directory,
@@ -476,10 +504,13 @@ public final class FileDesktopStateStore: DesktopStateStoring {
             [.posixPermissions: 0o700],
             ofItemAtPath: directory.path
         )
-        try data.write(to: fileURL, options: .atomic)
+    }
+
+    private func writePrivate(_ data: Data, to url: URL) throws {
+        try data.write(to: url, options: .atomic)
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o600],
-            ofItemAtPath: fileURL.path
+            ofItemAtPath: url.path
         )
     }
 }
@@ -504,20 +535,27 @@ public final class DesktopAppModel: ObservableObject {
         self.decoder = JSONDecoder()
         do {
             if let data = try store.load() {
-                var restored = try decoder.decode(DesktopAppSnapshot.self, from: data)
-                if restored.version != DesktopAppSnapshot.currentVersion {
-                    restored = try restored.migratedToCurrent(now: now())
-                    try store.save(try encoder.encode(restored))
+                let restored = try Self.currentSnapshot(from: data, decoder: decoder, now: now())
+                if restored.didMigrate {
+                    try store.save(try encoder.encode(restored.snapshot))
                 }
-                self.snapshot = restored
+                self.snapshot = restored.snapshot
             } else {
                 let starter = DesktopAppSnapshot.starter(now: now())
                 self.snapshot = starter
                 try store.save(try encoder.encode(starter))
             }
         } catch {
-            self.snapshot = DesktopAppSnapshot.starter(now: now())
-            self.persistenceError = "Kaname opened a safe starter workspace because local state could not be restored."
+            if let recoveryStore = store as? any DesktopRecoveryStateStoring,
+               let recoveryData = try? recoveryStore.loadRecovery(),
+               let recovered = try? Self.currentSnapshot(from: recoveryData, decoder: decoder, now: now()) {
+                self.snapshot = recovered.snapshot
+                try? recoveryStore.saveRecovered(encoder.encode(recovered.snapshot))
+                self.persistenceError = "Kaname recovered the previous private workspace after the newest local state could not be restored."
+            } else {
+                self.snapshot = DesktopAppSnapshot.starter(now: now())
+                self.persistenceError = "Kaname opened a safe starter workspace because local state could not be restored."
+            }
         }
     }
 
@@ -1038,6 +1076,16 @@ public final class DesktopAppModel: ObservableObject {
 
     private static func normalized(_ value: String) -> String {
         value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func currentSnapshot(
+        from data: Data,
+        decoder: JSONDecoder,
+        now: Int64
+    ) throws -> (snapshot: DesktopAppSnapshot, didMigrate: Bool) {
+        let decoded = try decoder.decode(DesktopAppSnapshot.self, from: data)
+        if decoded.version == DesktopAppSnapshot.currentVersion { return (decoded, false) }
+        return (try decoded.migratedToCurrent(now: now), true)
     }
 }
 

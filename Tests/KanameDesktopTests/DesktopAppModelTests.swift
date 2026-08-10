@@ -246,8 +246,10 @@ struct DesktopAppModelTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let file = root.appendingPathComponent("workspace.json")
         let store = FileDesktopStateStore(fileURL: file)
+        let previous = Data("previous-private-workspace".utf8)
         let expected = Data("private-local-workspace".utf8)
 
+        try store.save(previous)
         try store.save(expected)
 
         let directoryMode = try #require(
@@ -256,9 +258,40 @@ struct DesktopAppModelTests {
         let fileMode = try #require(
             FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? NSNumber
         )
+        let recoveryMode = try #require(
+            FileManager.default.attributesOfItem(atPath: store.recoveryFileURL.path)[.posixPermissions] as? NSNumber
+        )
         #expect(try store.load() == expected)
+        #expect(try store.loadRecovery() == previous)
         #expect(directoryMode.intValue == 0o700)
         #expect(fileMode.intValue == 0o600)
+        #expect(recoveryMode.intValue == 0o600)
+    }
+
+    @Test
+    func corruptPrimaryRecoversPreviousWorkspaceWithoutRotatingItAway() throws {
+        var previous = DesktopAppSnapshot.starter(now: 1_000)
+        previous.threads.append(
+            DesktopThread(
+                title: "Recovered user thread",
+                summary: "Must survive corruption",
+                kind: .planning,
+                attention: .needsResponse,
+                updatedAtUnixMillis: 1_001
+            )
+        )
+        let recovery = try JSONEncoder().encode(previous)
+        let store = MemoryRecoveryDesktopStateStore(
+            primary: Data("corrupt-primary".utf8),
+            recovery: recovery
+        )
+
+        let model = DesktopAppModel(store: store, now: { 2_000 })
+
+        #expect(model.snapshot.threads.contains { $0.title == "Recovered user thread" })
+        #expect(model.persistenceError?.contains("recovered") == true)
+        #expect(store.recovery == recovery)
+        #expect(store.primary != Data("corrupt-primary".utf8))
     }
 }
 
@@ -271,4 +304,19 @@ private final class MemoryDesktopStateStore: DesktopStateStoring {
 
     func load() -> Data? { data }
     func save(_ data: Data) { self.data = data }
+}
+
+private final class MemoryRecoveryDesktopStateStore: DesktopRecoveryStateStoring {
+    var primary: Data?
+    var recovery: Data?
+
+    init(primary: Data?, recovery: Data?) {
+        self.primary = primary
+        self.recovery = recovery
+    }
+
+    func load() -> Data? { primary }
+    func save(_ data: Data) { primary = data }
+    func loadRecovery() -> Data? { recovery }
+    func saveRecovered(_ data: Data) { primary = data }
 }
