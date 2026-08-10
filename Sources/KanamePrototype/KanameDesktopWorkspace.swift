@@ -114,33 +114,71 @@ struct KanameDesktopWorkspace: View {
 
     @ViewBuilder
     private var navigationLayout: some View {
-        if #available(macOS 14.0, *) {
-            NavigationSplitView {
-                sidebar
-            } detail: {
+        NavigationSplitView {
+            sidebar
+        } detail: {
+            workspaceColumns
+        }
+        .navigationSplitViewStyle(.balanced)
+    }
+
+    @ViewBuilder
+    private var workspaceColumns: some View {
+        if showsInspector {
+            HSplitView {
                 centerColumn
-            }
-            .navigationSplitViewStyle(.balanced)
-            .inspector(isPresented: $showsInspector) {
+                    .frame(minWidth: 500, maxWidth: .infinity, maxHeight: .infinity)
+
                 inspectorColumn
-                    .inspectorColumnWidth(min: 280, ideal: 340, max: 440)
+                    .frame(minWidth: 280, idealWidth: 340, maxWidth: 440)
             }
         } else {
-            NavigationSplitView {
-                sidebar
-            } content: {
-                centerColumn
-            } detail: {
-                inspectorColumn
-            }
-            .navigationSplitViewStyle(.balanced)
+            centerColumn
         }
     }
 
     private var centerColumn: some View {
-        content
-            .navigationTitle(destination.title)
-            .toolbar { toolbar }
+        VStack(spacing: 0) {
+            workspaceHeader
+            Divider()
+            content
+        }
+        .toolbar { toolbar }
+    }
+
+    private var workspaceHeader: some View {
+        HStack(spacing: 12) {
+            Text(destination.title)
+                .font(.headline)
+                .lineLimit(1)
+
+            Spacer()
+
+            ControlGroup {
+                Button {
+                    showsNewThread = true
+                } label: {
+                    Label("New thread", systemImage: "square.and.pencil")
+                }
+                .keyboardShortcut("n", modifiers: .command)
+                .help("New thread")
+
+                Menu {
+                    Button("New project") { showsNewProject = true }
+                    Divider()
+                    Button("Open Devices & Remote") { navigate(to: .devices) }
+                    Button("Open Codex Workspace") { navigate(to: .liveCodex) }
+                } label: {
+                    Label("More", systemImage: "ellipsis.circle")
+                }
+                .help("More workspace actions")
+            }
+            .controlGroupStyle(.navigation)
+            .labelStyle(.iconOnly)
+        }
+        .padding(.horizontal, 16)
+        .frame(height: 53)
+        .background(Nord.polarNight0)
     }
 
     private var sidebar: some View {
@@ -304,24 +342,15 @@ struct KanameDesktopWorkspace: View {
         }
 
         ToolbarItem(placement: .primaryAction) {
-            ControlGroup {
-                Button {
-                    showsNewThread = true
-                } label: {
-                    Label("New thread", systemImage: "square.and.pencil")
-                }
-                .keyboardShortcut("n", modifiers: .command)
-
-                Menu {
-                    Button("New project") { showsNewProject = true }
-                    Divider()
-                    Button("Open Devices & Remote") { navigate(to: .devices) }
-                    Button("Open Codex Workspace") { navigate(to: .liveCodex) }
-                } label: {
-                    Label("More", systemImage: "ellipsis.circle")
-                }
+            Button {
+                toggleInspector()
+            } label: {
+                Label(
+                    showsInspector ? "Hide Inspector" : "Show Inspector",
+                    systemImage: "sidebar.right"
+                )
             }
-            .controlGroupStyle(.navigation)
+            .help(showsInspector ? "Hide Inspector" : "Show Inspector")
         }
     }
 
@@ -375,8 +404,37 @@ struct KanameDesktopWorkspace: View {
     }
 
     private func apply(_ target: DesktopNavigationLocation) {
-        destination = target.destination
-        selectedThreadID = target.selectedThreadID
+        preservingWindowFrame {
+            destination = target.destination
+            selectedThreadID = target.selectedThreadID
+        }
+    }
+
+    private func toggleInspector() {
+        preservingWindowFrame {
+            showsInspector.toggle()
+        }
+    }
+
+    private func preservingWindowFrame(_ updates: () -> Void) {
+#if os(macOS)
+        let window = NSApplication.shared.keyWindow ?? NSApplication.shared.mainWindow
+        let frame = window?.frame
+#endif
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction, updates)
+#if os(macOS)
+        guard let window, let frame, !window.styleMask.contains(.fullScreen) else { return }
+        DispatchQueue.main.async {
+            guard !window.inLiveResize, !window.styleMask.contains(.fullScreen) else { return }
+            window.setFrame(frame, display: true)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            guard !window.inLiveResize, !window.styleMask.contains(.fullScreen) else { return }
+            window.setFrame(frame, display: true)
+        }
+#endif
     }
 
     @discardableResult
