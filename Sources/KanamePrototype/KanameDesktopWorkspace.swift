@@ -94,7 +94,7 @@ struct KanameDesktopWorkspace: View {
                 .navigationTitle(destination.title)
                 .toolbar { toolbar }
         } detail: {
-            inspector
+            inspectorColumn
         }
         .navigationSplitViewStyle(.balanced)
         .background(Nord.polarNight0)
@@ -152,7 +152,6 @@ struct KanameDesktopWorkspace: View {
             .scrollContentBackground(.hidden)
             .background(Nord.polarNight1)
             .listStyle(.sidebar)
-            .searchable(text: $searchText, prompt: "Search Kaname")
 
             Divider()
             Button {
@@ -252,6 +251,22 @@ struct KanameDesktopWorkspace: View {
         }
     }
 
+    private var inspectorColumn: some View {
+        VStack(spacing: 0) {
+            DesktopInspectorSearchField(text: $searchText)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+
+            Divider()
+
+            inspector
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Nord.polarNight1)
+        .navigationSplitViewColumnWidth(min: 280, ideal: 340, max: 440)
+    }
+
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
         if let backTitle {
@@ -267,23 +282,24 @@ struct KanameDesktopWorkspace: View {
         }
 
         ToolbarItem(placement: .primaryAction) {
-            Button {
-                showsNewThread = true
-            } label: {
-                Label("New thread", systemImage: "square.and.pencil")
-            }
-            .keyboardShortcut("n", modifiers: .command)
-        }
+            ControlGroup {
+                Button {
+                    showsNewThread = true
+                } label: {
+                    Label("New thread", systemImage: "square.and.pencil")
+                }
+                .keyboardShortcut("n", modifiers: .command)
 
-        ToolbarItem(placement: .secondaryAction) {
-            Menu {
-                Button("New project") { showsNewProject = true }
-                Divider()
-                Button("Open Devices & Remote") { navigate(to: .devices) }
-                Button("Open Codex Workspace") { navigate(to: .liveCodex) }
-            } label: {
-                Label("More", systemImage: "ellipsis.circle")
+                Menu {
+                    Button("New project") { showsNewProject = true }
+                    Divider()
+                    Button("Open Devices & Remote") { navigate(to: .devices) }
+                    Button("Open Codex Workspace") { navigate(to: .liveCodex) }
+                } label: {
+                    Label("More", systemImage: "ellipsis.circle")
+                }
             }
+            .controlGroupStyle(.navigation)
         }
     }
 
@@ -957,8 +973,6 @@ private struct DesktopThreadInspector: View {
             }
             .padding(18)
         }
-        .background(Nord.polarNight1)
-        .frame(minWidth: 280, idealWidth: 330, maxWidth: 400)
     }
 }
 
@@ -1000,8 +1014,38 @@ private struct DesktopContextInspector: View {
             }
             .padding(18)
         }
-        .background(Nord.polarNight1)
-        .frame(minWidth: 280, idealWidth: 330, maxWidth: 400)
+    }
+}
+
+private struct DesktopInspectorSearchField: View {
+    @Binding var text: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+
+            TextField("Search Kaname", text: $text)
+                .textFieldStyle(.plain)
+
+            if !text.isEmpty {
+                Button {
+                    text = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Clear search")
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(Nord.polarNight0.opacity(0.74), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Nord.polarNight3.opacity(0.72), lineWidth: 1)
+        }
     }
 }
 

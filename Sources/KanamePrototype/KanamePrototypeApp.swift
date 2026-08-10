@@ -54,6 +54,7 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
     private func ensureVisibleWindow() {
         if let existing = NSApplication.shared.windows.first(where: { $0.isVisible }) {
             existing.sharingType = .readOnly
+            applyRequestedWindowSize(to: existing)
             existing.makeKeyAndOrderFront(nil)
             NSApplication.shared.activate(ignoringOtherApps: true)
             postMouseBackEventIfRequested(to: existing)
@@ -68,7 +69,7 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
         let window = NSWindow(contentViewController: controller)
         window.title = "Kaname"
         window.sharingType = .readOnly
-        window.setContentSize(NSSize(width: 1_520, height: 940))
+        window.setContentSize(requestedWindowSize ?? NSSize(width: 1_520, height: 940))
         window.minSize = NSSize(width: 1_080, height: 700)
         window.center()
         window.setFrameAutosaveName("KanameDesktopWindow")
@@ -77,6 +78,25 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
         NSApplication.shared.activate(ignoringOtherApps: true)
         postMouseBackEventIfRequested(to: window)
         captureSnapshotIfRequested(window: window)
+    }
+
+    private var requestedWindowSize: NSSize? {
+        let arguments = CommandLine.arguments
+        guard let flagIndex = arguments.firstIndex(of: "--desktop-window-size"),
+              arguments.indices.contains(flagIndex + 1) else { return nil }
+        let dimensions = arguments[flagIndex + 1].lowercased().split(separator: "x", maxSplits: 1)
+        guard dimensions.count == 2,
+              let width = Double(dimensions[0]),
+              let height = Double(dimensions[1]),
+              width >= 1_080,
+              height >= 700 else { return nil }
+        return NSSize(width: width, height: height)
+    }
+
+    private func applyRequestedWindowSize(to window: NSWindow) {
+        guard let requestedWindowSize else { return }
+        window.setContentSize(requestedWindowSize)
+        window.center()
     }
 
     private func postMouseBackEventIfRequested(to window: NSWindow) {

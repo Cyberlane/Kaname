@@ -5,6 +5,7 @@ Kaname is a local-first macOS workspace for project-aware agent threads, attenti
 ## What is usable
 
 - Home, Threads, Inbox, Projects, Devices & Remote, Codex Workspace, Local Core, and Settings are integrated in one three-column desktop shell.
+- The inspector is a single resizable surface with its own stable search field, while the primary content actions remain grouped together in the center toolbar.
 - Projects, threads, messages, attention, archive state, and preferences survive restart in `~/Library/Application Support/Kaname/Desktop/workspace.json`.
 - The workspace directory is mode `0700` and its state file is mode `0600`.
 - Local Core replays the deterministic F-01 through F-14 corpus through a user-scoped Mach service and persists its journals beneath `~/Library/Application Support/Kaname/LocalCore/journal`.

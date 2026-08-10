@@ -19,7 +19,14 @@ codesign --verify --deep --strict "$app_path"
 launchctl print "gui/$(id -u)/$service_identifier" >/dev/null
 
 mkdir -p "$output_directory"
-"$executable" --desktop-destination home --snapshot "$output_directory/home.png"
+"$executable" \
+    --desktop-destination home \
+    --desktop-window-size 1520x940 \
+    --snapshot "$output_directory/home-wide.png"
+"$executable" \
+    --desktop-destination home \
+    --desktop-window-size 1080x700 \
+    --snapshot "$output_directory/home-compact.png"
 "$executable" --desktop-destination localCore --load-local-core --snapshot "$output_directory/local-core.png"
 "$executable" \
     --desktop-destination settings \
@@ -28,7 +35,8 @@ mkdir -p "$output_directory"
     --snapshot "$output_directory/mouse-back.png"
 
 for snapshot in \
-    "$output_directory/home.png" \
+    "$output_directory/home-wide.png" \
+    "$output_directory/home-compact.png" \
     "$output_directory/local-core.png" \
     "$output_directory/mouse-back.png"
 do
