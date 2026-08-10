@@ -12,5 +12,7 @@
   "min_file_coverage": 0.85,
   "max_zero_fragment_files": 12,
   "fail_on_parse_diagnostic": true,
-  "exclude_generated": true
+  "exclude_generated": true,
+  "baseline": ".mori-baseline.json",
+  "baseline_scope": "path"
 }
