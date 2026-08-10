@@ -209,6 +209,62 @@ public struct DesktopCapabilityUpdateRecord: Codable, Equatable, Identifiable, S
     public var reviewedAtUnixMillis: Int64?
 }
 
+public struct DesktopMailActionRecord: Codable, Equatable, Identifiable, Sendable {
+    public enum Kind: String, Codable, CaseIterable, Equatable, Sendable {
+        case archive
+        case trash
+        case labels
+        case createDraft
+        case send
+
+        public var label: String {
+            switch self {
+            case .archive: "Archive"
+            case .trash: "Move to Trash"
+            case .labels: "Change labels"
+            case .createDraft: "Create Gmail draft"
+            case .send: "Send email"
+            }
+        }
+    }
+
+    public let id: String
+    public var accountID: String
+    public var accountIdentity: String
+    public var threadID: String?
+    public var kind: Kind
+    public var preview: String
+    public var exactTarget: String
+    public var approvalID: String?
+    public var standingRuleID: String?
+    public var state: DesktopActionState
+    public var remoteReceipt: String?
+    public var createdAtUnixMillis: Int64
+    public var reconciledAtUnixMillis: Int64?
+}
+
+public struct DesktopMailStandingRule: Codable, Equatable, Identifiable, Sendable {
+    public let id: String
+    public var accountID: String
+    public var accountIdentity: String
+    public var name: String
+    public var query: String
+    public var action: DesktopMailActionRecord.Kind
+    public var enabled: Bool
+    public var createdAtUnixMillis: Int64
+}
+
+public struct DesktopMailAttentionRecord: Codable, Equatable, Identifiable, Sendable {
+    public var id: String { "\(accountID):\(threadID)" }
+    public var accountID: String
+    public var threadID: String
+    public var accountIdentity: String
+    public var sender: String
+    public var subject: String
+    public var unread: Bool
+    public var updatedAtUnixMillis: Int64
+}
+
 public struct DesktopArtifactRecord: Codable, Equatable, Identifiable, Sendable {
     public enum Kind: String, Codable, CaseIterable, Equatable, Sendable {
         case file
@@ -401,6 +457,9 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
     public var knowledgeDocuments: [DesktopKnowledgeDocumentRecord]
     public var knowledgeWrites: [DesktopKnowledgeWriteRecord]
     public var capabilityUpdates: [DesktopCapabilityUpdateRecord]
+    public var mailActions: [DesktopMailActionRecord]
+    public var mailStandingRules: [DesktopMailStandingRule]
+    public var mailAttention: [DesktopMailAttentionRecord]
     public var audit: [DesktopAuditRecord]
 
     public static let empty = DesktopOperationalSnapshot(
@@ -424,6 +483,9 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         knowledgeDocuments: [],
         knowledgeWrites: [],
         capabilityUpdates: [],
+        mailActions: [],
+        mailStandingRules: [],
+        mailAttention: [],
         audit: []
     )
 
@@ -448,6 +510,9 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         case knowledgeDocuments
         case knowledgeWrites
         case capabilityUpdates
+        case mailActions
+        case mailStandingRules
+        case mailAttention
         case audit
     }
 
@@ -472,6 +537,9 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         knowledgeDocuments: [DesktopKnowledgeDocumentRecord] = [],
         knowledgeWrites: [DesktopKnowledgeWriteRecord] = [],
         capabilityUpdates: [DesktopCapabilityUpdateRecord] = [],
+        mailActions: [DesktopMailActionRecord] = [],
+        mailStandingRules: [DesktopMailStandingRule] = [],
+        mailAttention: [DesktopMailAttentionRecord] = [],
         audit: [DesktopAuditRecord]
     ) {
         self.researchSources = researchSources
@@ -494,6 +562,9 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         self.knowledgeDocuments = knowledgeDocuments
         self.knowledgeWrites = knowledgeWrites
         self.capabilityUpdates = capabilityUpdates
+        self.mailActions = mailActions
+        self.mailStandingRules = mailStandingRules
+        self.mailAttention = mailAttention
         self.audit = audit
     }
 
@@ -519,6 +590,9 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         knowledgeDocuments = try container.decodeIfPresent([DesktopKnowledgeDocumentRecord].self, forKey: .knowledgeDocuments) ?? []
         knowledgeWrites = try container.decodeIfPresent([DesktopKnowledgeWriteRecord].self, forKey: .knowledgeWrites) ?? []
         capabilityUpdates = try container.decodeIfPresent([DesktopCapabilityUpdateRecord].self, forKey: .capabilityUpdates) ?? []
+        mailActions = try container.decodeIfPresent([DesktopMailActionRecord].self, forKey: .mailActions) ?? []
+        mailStandingRules = try container.decodeIfPresent([DesktopMailStandingRule].self, forKey: .mailStandingRules) ?? []
+        mailAttention = try container.decodeIfPresent([DesktopMailAttentionRecord].self, forKey: .mailAttention) ?? []
         audit = try container.decode([DesktopAuditRecord].self, forKey: .audit)
     }
 }

@@ -107,7 +107,8 @@ public enum GoogleOAuthRequestBuilder {
         "openid",
         "email",
         "profile",
-        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.modify",
+        "https://www.googleapis.com/auth/gmail.compose",
         "https://www.googleapis.com/auth/calendar.readonly",
     ]
 
@@ -426,7 +427,7 @@ public actor NativeGoogleIntegrationService {
         try writeAccountIndex(current)
     }
 
-    private func selectedAccounts(_ accountIDs: [String]?) throws -> [NativeGoogleAccountSnapshot] {
+    func selectedAccounts(_ accountIDs: [String]?) throws -> [NativeGoogleAccountSnapshot] {
         let all = try accounts()
         guard let accountIDs else { return all }
         let selected = Set(accountIDs)
@@ -511,13 +512,18 @@ public actor NativeGoogleIntegrationService {
         catch { throw NativeGoogleIntegrationError.invalidResponse("Google identity") }
     }
 
-    private func authorizedData(url: URL, accessToken: String, service: String) async throws -> Data {
-        var request = URLRequest(url: url)
+    func authorizedData(url: URL, accessToken: String, service: String) async throws -> Data {
+        let request = URLRequest(url: url)
+        return try await authorizedData(request: request, accessToken: accessToken, service: service)
+    }
+
+    func authorizedData(request: URLRequest, accessToken: String, service: String) async throws -> Data {
+        var request = request
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         return try await responseData(for: request, service: service)
     }
 
-    private func responseData(for request: URLRequest, service: String) async throws -> Data {
+    func responseData(for request: URLRequest, service: String) async throws -> Data {
         do {
             let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
@@ -531,7 +537,7 @@ public actor NativeGoogleIntegrationService {
         }
     }
 
-    private func validAccessToken(
+    func validAccessToken(
         for account: NativeGoogleAccountSnapshot,
         allowKeychainInteraction: Bool = true
     ) async throws -> String {
@@ -826,7 +832,7 @@ final class GoogleLoopbackReceiver: @unchecked Sendable {
 }
 #endif
 
-private extension Data {
+extension Data {
     func base64URLEncodedString() -> String {
         base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")

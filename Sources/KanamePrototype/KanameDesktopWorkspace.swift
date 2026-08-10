@@ -2965,120 +2965,485 @@ private struct NewVaultScopeSheet: View {
 private struct DesktopEmailView: View {
     @ObservedObject var model: DesktopAppModel
     @ObservedObject var integrations: DesktopPersonalIntegrationViewModel
+    @StateObject private var mail = DesktopMailViewModel()
     @State private var showsComposer = false
+    @State private var section = MailSection.inbox
+    @State private var selectedAccountID: String?
+    @State private var pendingMutation: GmailThreadMutation?
+    @State private var pendingOutboundDraftID: String?
+    @State private var pendingOutboundSend = false
+    @State private var showsRuleSheet = false
+    @State private var replySeed: MailReplySeed?
 
     private var accounts: [DesktopAccountRecord] {
         model.snapshot.domains.accounts.filter { $0.service == .gmail }
     }
 
+    private var googleAccounts: [NativeGoogleAccountSnapshot] {
+        if let selectedAccountID { return integrations.googleAccounts.filter { $0.id == selectedAccountID } }
+        return integrations.googleAccounts
+    }
+
+    private var activeAction: DesktopMailActionRecord? {
+        mail.activeActionID.flatMap { id in model.snapshot.operations.mailActions.first { $0.id == id } }
+    }
+
+    private var activeApproval: DesktopApprovalRecord? {
+        activeAction?.approvalID.flatMap { id in model.snapshot.operations.approvals.first { $0.id == id } }
+    }
+
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                SurfaceHeader(
-                    title: "Email",
-                    detail: "One inbox across your selected Gmail accounts, with account-isolated drafts",
-                    symbol: DesktopDestination.email.symbol
-                ) {
-                    ControlGroup {
-                        Button("Refresh inbox", systemImage: "arrow.clockwise") {
-                            integrations.refreshInbox(model: model)
-                        }
-                        .disabled(integrations.isRefreshingInbox || accounts.isEmpty)
-                        Button("New draft", systemImage: "square.and.pencil") { showsComposer = true }
-                    }
-                    .controlGroupStyle(.navigation)
-                }
-
-                AccountStrip(accounts: accounts)
-
-                if integrations.isRefreshingInbox {
-                    HStack(spacing: 10) {
-                        ProgressView()
-                        Text("Reading selected Gmail inboxes…")
-                    }
-                    .panelStyle()
-                } else if !integrations.mailThreads.isEmpty {
-                    SectionHeading(
-                        title: "Unified inbox",
-                        detail: "Each result retains its source account. No message content is committed to the repository."
-                    )
-                    VStack(spacing: 0) {
-                        ForEach(Array(integrations.mailThreads.enumerated()), id: \.element.externalIdentifier) { index, thread in
-                            HStack(alignment: .top, spacing: 12) {
-                                Image(systemName: thread.flags.lowercased().contains("unread") ? "envelope.fill" : "envelope.open")
-                                    .foregroundStyle(Nord.frost0)
-                                VStack(alignment: .leading, spacing: 4) {
-                                    HStack {
-                                        Text(thread.sender).font(.subheadline.weight(.semibold))
-                                        Spacer()
-                                        Text(thread.dateDescription).font(.caption2).foregroundStyle(.secondary)
-                                    }
-                                    Text(thread.subject).font(.subheadline)
-                                    Text(thread.snippet).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                                    Text(thread.accountIdentity)
-                                        .font(.caption2)
-                                        .foregroundStyle(Nord.frost1)
-                                }
-                            }
-                            .padding(.vertical, 12)
-                            if index < integrations.mailThreads.count - 1 { Divider() }
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 15))
-                }
-
-                SectionHeading(
-                    title: "Local drafts",
-                    detail: "Saving here cannot send mail or grant mailbox access."
-                )
-                if model.snapshot.domains.emailDrafts.isEmpty {
-                    EmptyPanel(
-                        symbol: "envelope.badge",
-                        title: "No email drafts",
-                        detail: "Draft locally now; select and authorize an exact account before any future send."
-                    )
-                    .frame(minHeight: 240)
-                } else {
-                    VStack(spacing: 12) {
-                        ForEach(model.snapshot.domains.emailDrafts.sorted { $0.updatedAtUnixMillis > $1.updatedAtUnixMillis }) { draft in
-                            HStack(alignment: .top, spacing: 14) {
-                                Image(systemName: "doc.text.fill")
-                                    .font(.title2)
-                                    .foregroundStyle(Nord.frost0)
-                                VStack(alignment: .leading, spacing: 5) {
-                                    HStack {
-                                        Text(draft.subject.isEmpty ? "Untitled draft" : draft.subject)
-                                            .font(.headline)
-                                        RecordStatusPill(state: draft.status)
-                                    }
-                                    Text(draft.recipients.isEmpty ? "No recipients selected" : draft.recipients)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                    Text(draft.body)
-                                        .font(.subheadline)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(3)
-                                }
-                                Spacer()
-                            }
-                            .panelStyle()
-                        }
-                    }
-                }
-
-                BoundaryCallout(
-                    title: "Sending is a consequential action",
-                    detail: "Every send will identify the exact account, recipients, attachments, resolved content, approval, and external reconciliation result."
-                )
-            }
+        VStack(spacing: 0) {
+            SurfaceHeader(
+                title: "Email",
+                detail: "Account-isolated Gmail search, complete threads, local drafts, and reconciled actions",
+                symbol: DesktopDestination.email.symbol
+            )
             .padding(24)
-            .frame(maxWidth: .infinity, alignment: .leading)
+
+            HStack {
+                Text("View").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                Picker("", selection: $section) {
+                    ForEach(MailSection.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .frame(width: 280)
+                Spacer()
+                Text("Account").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                Picker("", selection: $selectedAccountID) {
+                    Text("All accounts").tag(String?.none)
+                    ForEach(integrations.googleAccounts) { Text($0.identity).tag(Optional($0.id)) }
+                }
+                .labelsHidden()
+                .frame(maxWidth: 300)
+                Menu {
+                    Button("New local draft", systemImage: "square.and.pencil") { showsComposer = true }
+                    Button("Refresh current search", systemImage: "arrow.clockwise") {
+                        mail.search(accounts: googleAccounts, model: model)
+                    }
+                    .disabled(mail.isBusy || googleAccounts.isEmpty)
+                    Button("New standing rule", systemImage: "checklist") { showsRuleSheet = true }
+                        .disabled(integrations.googleAccounts.isEmpty)
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .accessibilityLabel("Email actions")
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 16)
+
+            Divider()
+
+            switch section {
+            case .inbox: inboxWorkspace
+            case .drafts: draftsWorkspace
+            case .rules: rulesWorkspace
+            }
         }
         .background(Nord.polarNight0)
         .sheet(isPresented: $showsComposer) {
             NewEmailDraftSheet(model: model)
         }
+        .sheet(isPresented: $showsRuleSheet) {
+            NewMailRuleSheet(model: model, mail: mail, accounts: integrations.googleAccounts)
+        }
+        .sheet(item: $replySeed) { seed in
+            NewEmailDraftSheet(
+                model: model,
+                accountID: seed.accountID,
+                recipients: seed.recipients,
+                subject: seed.subject,
+                body: ""
+            )
+        }
+        .onAppear {
+            if mail.threads.isEmpty, !integrations.googleAccounts.isEmpty {
+                mail.search(accounts: googleAccounts, model: model)
+            }
+        }
+    }
+
+    private var inboxWorkspace: some View {
+        HSplitView {
+            mailThreadList.frame(minWidth: 300, idealWidth: 370, maxWidth: 460)
+
+            threadDetail
+                .frame(minWidth: 480, maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private var mailThreadList: some View {
+        VStack(spacing: 12) {
+            HStack {
+                TextField("Gmail search (for example: in:inbox is:unread)", text: $mail.query)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { mail.search(accounts: googleAccounts, model: model) }
+                Button("Run", systemImage: "magnifyingglass") { mail.search(accounts: googleAccounts, model: model) }
+                    .labelStyle(.iconOnly)
+            }
+            .padding([.horizontal, .top], 16)
+
+            if mail.isBusy, mail.threads.isEmpty {
+                ProgressView("Reading Gmail…").frame(maxHeight: .infinity)
+            } else if mail.threads.isEmpty {
+                EmptyPanel(
+                    symbol: "tray",
+                    title: "No matching threads",
+                    detail: "Search one or all connected accounts. Every result keeps its source account."
+                )
+                .padding(16)
+            } else {
+                List(selection: mailThreadSelection) {
+                    ForEach(mail.threads, id: \.stableID) { thread in
+                        MailThreadRow(thread: thread)
+                            .tag(thread.stableID)
+                            .onTapGesture {
+                                mail.select(thread)
+                                mail.loadLabels(accountID: thread.accountID)
+                            }
+                    }
+                }
+                if !mail.nextPageTokens.isEmpty {
+                    Button("Load next page") { mail.search(accounts: googleAccounts, model: model, loadMore: true) }
+                        .padding(.bottom, 12)
+                }
+            }
+        }
+    }
+
+    private var mailThreadSelection: Binding<String?> {
+        Binding(
+            get: { mail.selectedThread?.stableID },
+            set: { stableID in
+                guard let stableID, let thread = mail.threads.first(where: { $0.stableID == stableID }) else { return }
+                mail.select(thread)
+            }
+        )
+    }
+
+    @ViewBuilder
+    private var threadDetail: some View {
+        if let thread = mail.selectedThread {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack(alignment: .top) {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(thread.messages.last?.subject ?? "(No subject)").font(.title2.weight(.bold))
+                            Text(thread.accountIdentity).font(.caption).foregroundStyle(Nord.frost1)
+                            Text("\(thread.messages.count) message(s) · \(thread.labels.joined(separator: ", "))")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        ControlGroup {
+                            Button("Refresh", systemImage: "arrow.clockwise") { mail.refreshSelected(model: model) }
+                            Button("Summarize", systemImage: "text.quote") { mail.summarize(thread) }
+                            Button("Draft reply", systemImage: "arrowshape.turn.up.left") {
+                                replySeed = replySeed(for: thread)
+                            }
+                            Button("Archive", systemImage: "archivebox") {
+                                pendingMutation = .archive
+                                mail.proposeThreadMutation(
+                                    model: model,
+                                    thread: thread,
+                                    mutation: .archive,
+                                    preview: "Remove Inbox from this thread in \(thread.accountIdentity).",
+                                    kind: .archive
+                                )
+                            }
+                            Button("Trash", systemImage: "trash") {
+                                pendingMutation = .trash
+                                mail.proposeThreadMutation(
+                                    model: model,
+                                    thread: thread,
+                                    mutation: .trash,
+                                    preview: "Move this thread to Gmail Trash in \(thread.accountIdentity).",
+                                    kind: .trash
+                                )
+                            }
+                            Menu("Label", systemImage: "tag") {
+                                ForEach(mail.labels[thread.accountID] ?? []) { label in
+                                    Button(label.name) {
+                                        let alreadyApplied = thread.labels.contains(label.id)
+                                        let mutation = GmailThreadMutation.applyLabels(
+                                            add: alreadyApplied ? [] : [label.id],
+                                            remove: alreadyApplied ? [label.id] : []
+                                        )
+                                        pendingMutation = mutation
+                                        mail.proposeThreadMutation(
+                                            model: model,
+                                            thread: thread,
+                                            mutation: mutation,
+                                            preview: "\(alreadyApplied ? "Remove" : "Add") label \(label.name) \(alreadyApplied ? "from" : "to") this thread in \(thread.accountIdentity).",
+                                            kind: .labels
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        .controlGroupStyle(.navigation)
+                    }
+
+                    if let summary = mail.localSummary {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Label("Private on-device summary", systemImage: "lock.shield")
+                                .font(.headline)
+                            Text(summary).textSelection(.enabled)
+                        }
+                        .panelStyle()
+                    }
+
+                    ForEach(thread.messages) { message in
+                        VStack(alignment: .leading, spacing: 9) {
+                            HStack {
+                                Text(message.sender).font(.headline)
+                                Spacer()
+                                Text(message.dateDescription).font(.caption2).foregroundStyle(.secondary)
+                            }
+                            Text("To: \(message.recipients)").font(.caption).foregroundStyle(.secondary)
+                            Divider()
+                            Text(message.body.isEmpty ? "No readable text body." : message.body)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            if !message.attachments.isEmpty {
+                                HStack {
+                                    ForEach(message.attachments) { attachment in
+                                        Button(attachment.filename, systemImage: "paperclip") {
+                                            mail.saveAttachment(accountID: thread.accountID, attachment: attachment)
+                                        }
+                                        .help("Download \(attachment.size) bytes, then choose where to save")
+                                    }
+                                }
+                            }
+                        }
+                        .panelStyle()
+                    }
+
+                    actionReview
+                    mailStatus
+                }
+                .padding(20)
+            }
+        } else {
+            EmptyPanel(symbol: "envelope.open", title: "Choose a thread", detail: "Read the complete account-scoped conversation, attachments, labels, and action history here.")
+                .padding(24)
+        }
+    }
+
+    private var draftsWorkspace: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                BoundaryCallout(
+                    title: "Local until you decide",
+                    detail: "Creating a Gmail draft and sending are separate exact actions. Send is never covered by a standing rule."
+                )
+                if model.snapshot.domains.emailDrafts.isEmpty {
+                    EmptyPanel(symbol: "doc.badge.plus", title: "No local drafts", detail: "Compose locally without touching Gmail, then preview a remote draft or send.")
+                }
+                ForEach(model.snapshot.domains.emailDrafts.sorted { $0.updatedAtUnixMillis > $1.updatedAtUnixMillis }) { draft in
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack { Text(draft.subject.isEmpty ? "Untitled draft" : draft.subject).font(.headline); Spacer(); RecordStatusPill(state: draft.status) }
+                        LabeledContent("Recipients", value: draft.recipients.isEmpty ? "None" : draft.recipients)
+                        Text(draft.body).foregroundStyle(.secondary).lineLimit(6)
+                        if let account = googleAccount(for: draft) {
+                            Text("From \(account.identity)").font(.caption).foregroundStyle(Nord.frost1)
+                            HStack {
+                                Button("Review Gmail draft") {
+                                    pendingOutboundDraftID = draft.id
+                                    pendingOutboundSend = false
+                                    mail.proposeOutbound(model: model, draft: draft, account: account, send: false)
+                                }
+                                Button("Review send") {
+                                    pendingOutboundDraftID = draft.id
+                                    pendingOutboundSend = true
+                                    mail.proposeOutbound(model: model, draft: draft, account: account, send: true)
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(draft.recipients.isEmpty || draft.body.isEmpty)
+                            }
+                        } else {
+                            Label("Choose or reconnect the draft account before any Gmail action.", systemImage: "person.crop.circle.badge.exclamationmark")
+                                .font(.caption).foregroundStyle(Nord.auroraYellow)
+                        }
+                    }
+                    .panelStyle()
+                }
+                actionReview
+                mailStatus
+            }
+            .padding(24)
+        }
+    }
+
+    private var rulesWorkspace: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                BoundaryCallout(
+                    title: "Visible, narrow standing authority",
+                    detail: "Rules bind one Gmail account, one saved query, and one reversible action. Trash and send always require an exact approval."
+                )
+                if model.snapshot.operations.mailStandingRules.isEmpty {
+                    EmptyPanel(symbol: "checklist", title: "No standing rules", detail: "Save a narrow archive rule from a tested Gmail query. Rules remain visible and pausable.")
+                }
+                ForEach(model.snapshot.operations.mailStandingRules) { rule in
+                    HStack(alignment: .top, spacing: 14) {
+                        Image(systemName: rule.enabled ? "checkmark.shield.fill" : "pause.circle").foregroundStyle(rule.enabled ? Nord.auroraGreen : .secondary)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(rule.name).font(.headline)
+                            Text(rule.accountIdentity).font(.caption).foregroundStyle(Nord.frost1)
+                            Text(rule.query).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                            Text(rule.action.label).font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Toggle("Enabled", isOn: Binding(
+                            get: { rule.enabled },
+                            set: { model.setMailStandingRuleEnabled(id: rule.id, enabled: $0) }
+                        ))
+                        Button("Run now") { mail.runStandingRule(model: model, rule: rule) }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(!rule.enabled || mail.isBusy)
+                    }
+                    .panelStyle()
+                }
+                mailStatus
+            }
+            .padding(24)
+        }
+    }
+
+    @ViewBuilder
+    private var actionReview: some View {
+        if let action = activeAction {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack { Label("Action preview", systemImage: "checkmark.shield").font(.headline); Spacer(); ActionStatePill(state: action.state) }
+                Text(action.preview)
+                Text(action.exactTarget).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
+                if let draftID = pendingOutboundDraftID,
+                   let draft = model.snapshot.domains.emailDrafts.first(where: { $0.id == draftID }) {
+                    DisclosureGroup("Resolved message body") { Text(draft.body).textSelection(.enabled).padding(.top, 6) }
+                }
+                HStack {
+                    if action.standingRuleID != nil {
+                        Button("Run under standing rule") { executeActive(action: action) }.buttonStyle(.borderedProminent)
+                    } else if activeApproval == nil {
+                        Button("Request approval") { mail.requestActiveApproval(model: model) }.buttonStyle(.borderedProminent)
+                    } else if activeApproval?.state == .approved {
+                        Button(action.kind == .send ? "Send approved message" : "Apply approved action") { executeActive(action: action) }
+                            .buttonStyle(.borderedProminent)
+                    } else {
+                        Label(activeApproval?.state == .rejected ? "Rejected" : "Waiting in Inbox", systemImage: "tray.full")
+                    }
+                }
+            }
+            .panelStyle()
+        }
+    }
+
+    @ViewBuilder
+    private var mailStatus: some View {
+        if !mail.failedAccounts.isEmpty {
+            BoundaryCallout(title: "Partial Gmail refresh", detail: "Other accounts remain usable. Reconnect: \(mail.failedAccounts.joined(separator: ", ")).")
+        }
+        if let message = mail.message { BoundaryCallout(title: "Mail status", detail: message) }
+    }
+
+    private func executeActive(action: DesktopMailActionRecord) {
+        if let mutation = pendingMutation {
+            mail.executeActiveThreadMutation(model: model, mutation: mutation)
+        } else if let draftID = pendingOutboundDraftID,
+                  let draft = model.snapshot.domains.emailDrafts.first(where: { $0.id == draftID }) {
+            mail.executeOutbound(model: model, draft: draft, send: pendingOutboundSend)
+        }
+    }
+
+    private func googleAccount(for draft: DesktopEmailDraft) -> NativeGoogleAccountSnapshot? {
+        guard let localID = draft.accountID,
+              let identity = accounts.first(where: { $0.id == localID })?.identity else { return nil }
+        return integrations.googleAccounts.first { $0.identity == identity }
+    }
+
+    private func replySeed(for thread: GmailThreadDetailSnapshot) -> MailReplySeed? {
+        guard let message = thread.messages.last,
+              let localAccountID = accounts.first(where: { $0.identity == thread.accountIdentity })?.id else { return nil }
+        let subject = message.subject.lowercased().hasPrefix("re:") ? message.subject : "Re: \(message.subject)"
+        return MailReplySeed(accountID: localAccountID, recipients: message.sender, subject: subject)
+    }
+}
+
+private enum MailSection: String, CaseIterable {
+    case inbox
+    case drafts
+    case rules
+
+    var label: String { rawValue.capitalized }
+}
+
+private struct MailReplySeed: Identifiable {
+    let id = UUID()
+    let accountID: String
+    let recipients: String
+    let subject: String
+}
+
+private struct MailThreadRow: View {
+    let thread: GmailThreadDetailSnapshot
+
+    var body: some View {
+        let last = thread.messages.last
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(last?.sender ?? "Unknown sender").font(.subheadline.weight(.semibold)).lineLimit(1)
+                Spacer()
+                if thread.labels.contains("UNREAD") { Circle().fill(Nord.frost0).frame(width: 7, height: 7) }
+            }
+            Text(subject(last)).font(.subheadline).lineLimit(1)
+            Text(thread.snippet).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+            Text(thread.accountIdentity).font(.caption2).foregroundStyle(Nord.frost1)
+        }
+        .padding(.vertical, 5)
+    }
+
+    private func subject(_ message: GmailMessageSnapshot?) -> String {
+        guard let subject = message?.subject, !subject.isEmpty else { return "(No subject)" }
+        return subject
+    }
+}
+
+private struct NewMailRuleSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var model: DesktopAppModel
+    @ObservedObject var mail: DesktopMailViewModel
+    let accounts: [NativeGoogleAccountSnapshot]
+    @State private var accountID: String?
+    @State private var name = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("New Gmail standing rule").font(.title2.weight(.bold))
+            Text("This saves the current tested query as reversible archive authority for one account. It never covers Trash or Send.")
+                .foregroundStyle(.secondary)
+            Picker("Account", selection: $accountID) {
+                Text("Choose account").tag(String?.none)
+                ForEach(accounts) { Text($0.identity).tag(Optional($0.id)) }
+            }
+            TextField("Rule name", text: $name).textFieldStyle(.roundedBorder)
+            LabeledContent("Gmail query", value: mail.query)
+            LabeledContent("Action", value: "Archive")
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Save rule") {
+                    guard let account = accounts.first(where: { $0.id == accountID }) else { return }
+                    mail.createStandingRule(model: model, account: account, name: name, action: .archive)
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(accountID == nil || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(24)
+        .frame(width: 560)
+        .onAppear { accountID = accountID ?? accounts.first?.id }
     }
 }
 
@@ -4552,7 +4917,7 @@ private struct DesktopSettingsShell: View {
             } details: {
                 if integrations.googleAccounts.isEmpty {
                     Text(integrations.hasGoogleClientConfiguration
-                        ? "Connect Google opens the system browser, asks for read-only Gmail and Calendar permission, and returns directly to Kaname."
+                        ? "Connect Google opens the system browser, asks for Gmail read/manage/compose and read-only Calendar permission, and returns directly to Kaname. Existing read-only Gmail accounts must reconnect once before mail actions can run."
                         : "Google is not registered in this build yet. Its private OAuth client registration belongs in Kaname's build configuration, not in Settings.")
                         .font(.caption).foregroundStyle(.secondary)
                 } else {
@@ -5547,11 +5912,20 @@ private struct NewEmailDraftSheet: View {
     @State private var subject = ""
     @State private var draftBody = ""
 
-    init(model: DesktopAppModel) {
+    init(
+        model: DesktopAppModel,
+        accountID: String? = nil,
+        recipients: String = "",
+        subject: String = "",
+        body: String = ""
+    ) {
         self.model = model
-        _selectedAccountID = State(initialValue: model.snapshot.domains.accounts.first {
+        _selectedAccountID = State(initialValue: accountID ?? model.snapshot.domains.accounts.first {
             $0.service == .gmail && $0.status == .ready
         }?.id)
+        _recipients = State(initialValue: recipients)
+        _subject = State(initialValue: subject)
+        _draftBody = State(initialValue: body)
     }
 
     var body: some View {
@@ -6575,10 +6949,13 @@ struct SurfaceHeader<Actions: View>: View {
                 .background(Nord.polarNight2, in: RoundedRectangle(cornerRadius: 12))
             VStack(alignment: .leading, spacing: 3) {
                 Text(title).font(.largeTitle.weight(.bold))
-                Text(detail).font(.subheadline).foregroundStyle(.secondary)
+                Text(detail)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
             }
-            Spacer()
-            actions
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+            actions.fixedSize(horizontal: true, vertical: false)
         }
         .padding(22)
     }

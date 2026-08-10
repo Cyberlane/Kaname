@@ -220,7 +220,8 @@ struct ProviderConnectivityTests {
         #expect(query["redirect_uri"] == "http://127.0.0.1:43123/oauth/callback")
         #expect(query["code_challenge_method"] == "S256")
         #expect(query["access_type"] == "offline")
-        #expect(query["scope"]?.contains("gmail.readonly") == true)
+        #expect(query["scope"]?.contains("gmail.modify") == true)
+        #expect(query["scope"]?.contains("gmail.compose") == true)
         #expect(query["scope"]?.contains("calendar.readonly") == true)
     }
 

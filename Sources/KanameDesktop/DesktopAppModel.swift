@@ -390,7 +390,7 @@ public struct DesktopPreferences: Codable, Equatable, Sendable {
 }
 
 public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
-    public static let currentVersion = 11
+    public static let currentVersion = 12
 
     public var version: Int
     public var projects: [DesktopProject]
@@ -546,7 +546,7 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
     }
 
     func migratedToCurrent(now: Int64) throws -> DesktopAppSnapshot {
-        guard (1...10).contains(version) else { throw DesktopModelError.unsupportedVersion }
+        guard (1...11).contains(version) else { throw DesktopModelError.unsupportedVersion }
         var migrated = self
         migrated.version = Self.currentVersion
         if migrated.domains == .empty {
@@ -1323,7 +1323,7 @@ public final class DesktopAppModel: ObservableObject {
     }
 
     public func setCalendarSourceEnabled(id: String, enabled: Bool) {
-        mutateDomainRecord(at: \.calendarSources, id: id) { source in
+        mutateRecord(at: \.domains.calendarSources, id: id) { source in
             source.isEnabled = enabled
         }
     }
@@ -1375,6 +1375,128 @@ public final class DesktopAppModel: ObservableObject {
             }
         }
         return draft.id
+    }
+
+    @discardableResult
+    public func recordMailAction(
+        accountID: String,
+        accountIdentity: String,
+        threadID: String?,
+        kind: DesktopMailActionRecord.Kind,
+        preview: String,
+        exactTarget: String,
+        standingRuleID: String? = nil
+    ) -> String? {
+        let cleanPreview = Self.normalized(preview)
+        let cleanTarget = Self.normalized(exactTarget)
+        guard !accountID.isEmpty, !accountIdentity.isEmpty, !cleanPreview.isEmpty, !cleanTarget.isEmpty,
+              cleanPreview.utf8.count <= 8_192, cleanTarget.utf8.count <= 2_048 else { return nil }
+        let action = DesktopMailActionRecord(
+            id: UUID().uuidString.lowercased(),
+            accountID: accountID,
+            accountIdentity: accountIdentity,
+            threadID: threadID,
+            kind: kind,
+            preview: cleanPreview,
+            exactTarget: cleanTarget,
+            approvalID: nil,
+            standingRuleID: standingRuleID,
+            state: standingRuleID == nil ? .proposed : .approved,
+            remoteReceipt: nil,
+            createdAtUnixMillis: now(),
+            reconciledAtUnixMillis: nil
+        )
+        mutate { $0.operations.mailActions.append(action) }
+        return action.id
+    }
+
+    public func attachMailApproval(actionID: String, approvalID: String) {
+        mutateRecord(at: \.operations.mailActions, id: actionID) { action in
+            action.approvalID = approvalID
+            action.state = .awaitingApproval
+        }
+    }
+
+    public func reconcileMailAction(id: String, state: DesktopActionState, remoteReceipt: String?) {
+        let timestamp = now()
+        mutate { snapshot in
+            guard let index = snapshot.operations.mailActions.firstIndex(where: { $0.id == id }) else { return }
+            snapshot.operations.mailActions[index].state = state
+            snapshot.operations.mailActions[index].remoteReceipt = remoteReceipt
+            snapshot.operations.mailActions[index].reconciledAtUnixMillis = timestamp
+            snapshot.operations.audit.append(DesktopAuditRecord(
+                id: UUID().uuidString.lowercased(),
+                domain: "gmail",
+                action: snapshot.operations.mailActions[index].kind.rawValue,
+                target: snapshot.operations.mailActions[index].exactTarget,
+                state: state,
+                detail: remoteReceipt ?? "Remote reconciliation did not complete.",
+                recordedAtUnixMillis: timestamp
+            ))
+        }
+    }
+
+    @discardableResult
+    public func createMailStandingRule(
+        accountID: String,
+        accountIdentity: String,
+        name: String,
+        query: String,
+        action: DesktopMailActionRecord.Kind
+    ) -> String? {
+        let cleanName = Self.normalized(name)
+        let cleanQuery = Self.normalized(query)
+        guard !accountID.isEmpty, !accountIdentity.isEmpty, !cleanName.isEmpty, !cleanQuery.isEmpty,
+              action == .archive || action == .labels else { return nil }
+        let rule = DesktopMailStandingRule(
+            id: UUID().uuidString.lowercased(),
+            accountID: accountID,
+            accountIdentity: accountIdentity,
+            name: cleanName,
+            query: cleanQuery,
+            action: action,
+            enabled: true,
+            createdAtUnixMillis: now()
+        )
+        mutate { $0.operations.mailStandingRules.append(rule) }
+        return rule.id
+    }
+
+    public func setMailStandingRuleEnabled(id: String, enabled: Bool) {
+        mutate { snapshot in
+            guard let index = snapshot.operations.mailStandingRules.firstIndex(where: { $0.id == id }) else { return }
+            snapshot.operations.mailStandingRules[index].enabled = enabled
+        }
+    }
+
+    public func replaceMailAttention(_ records: [DesktopMailAttentionRecord]) {
+        mutate { $0.operations.mailAttention = records }
+    }
+
+    public func reconcileMailAttention(
+        _ entries: [(accountID: String, threadID: String, accountIdentity: String, sender: String, subject: String, unread: Bool)]
+    ) {
+        let timestamp = now()
+        mutate { snapshot in
+            snapshot.operations.mailAttention = entries.map {
+                DesktopMailAttentionRecord(
+                    accountID: $0.accountID,
+                    threadID: $0.threadID,
+                    accountIdentity: $0.accountIdentity,
+                    sender: $0.sender,
+                    subject: $0.subject,
+                    unread: $0.unread,
+                    updatedAtUnixMillis: timestamp
+                )
+            }
+        }
+    }
+
+    public func markEmailDraft(id: String, status: DesktopRecordState) {
+        mutateRecord(at: \.domains.emailDrafts, id: id) { draft in
+            draft.status = status
+            draft.updatedAtUnixMillis = now()
+        }
     }
 
     @discardableResult
@@ -1434,13 +1556,13 @@ public final class DesktopAppModel: ObservableObject {
     }
 
     public func setAutomationPaused(id: String, paused: Bool) {
-        mutateDomainRecord(at: \.automations, id: id) { rule in
+        mutateRecord(at: \.domains.automations, id: id) { rule in
             rule.status = paused ? .paused : .draft
         }
     }
 
     public func setSkillEnabled(id: String, enabled: Bool) {
-        mutateDomainRecord(at: \.skills, id: id) { skill in
+        mutateRecord(at: \.domains.skills, id: id) { skill in
             skill.enabled = enabled
         }
     }
@@ -1561,10 +1683,10 @@ public final class DesktopAppModel: ObservableObject {
         projectID: String?,
         role: DesktopKnowledgeDocumentRecord.Role?
     ) {
-        mutate { snapshot in
-            guard let index = snapshot.operations.knowledgeDocuments.firstIndex(where: { $0.path == path }) else { return }
-            snapshot.operations.knowledgeDocuments[index].projectID = projectID
-            snapshot.operations.knowledgeDocuments[index].role = role
+        guard let id = snapshot.operations.knowledgeDocuments.first(where: { $0.path == path })?.id else { return }
+        mutateRecord(at: \.operations.knowledgeDocuments, id: id) { document in
+            document.projectID = projectID
+            document.role = role
         }
     }
 
@@ -2136,14 +2258,14 @@ public final class DesktopAppModel: ObservableObject {
         return didFindThread
     }
 
-    private func mutateDomainRecord<Record: Identifiable>(
-        at keyPath: WritableKeyPath<DesktopDomainSnapshot, [Record]>,
+    private func mutateRecord<Record: Identifiable>(
+        at keyPath: WritableKeyPath<DesktopAppSnapshot, [Record]>,
         id: String,
         change: (inout Record) -> Void
     ) where Record.ID == String {
         mutate { snapshot in
-            guard let index = snapshot.domains[keyPath: keyPath].firstIndex(where: { $0.id == id }) else { return }
-            change(&snapshot.domains[keyPath: keyPath][index])
+            guard let index = snapshot[keyPath: keyPath].firstIndex(where: { $0.id == id }) else { return }
+            change(&snapshot[keyPath: keyPath][index])
         }
     }
 

@@ -738,6 +738,55 @@ struct DesktopAppModelTests {
     }
 
     @Test
+    func mailActionsStandingRulesAndMobileAttentionRemainAccountScopedAndDurable() throws {
+        let store = MemoryDesktopStateStore()
+        let model = DesktopAppModel(store: store, now: { 14_000 })
+        let target = "gmail:account-1:thread:thread-1:archive"
+        let actionID = try #require(model.recordMailAction(
+            accountID: "account-1",
+            accountIdentity: "one@example.test",
+            threadID: "thread-1",
+            kind: .archive,
+            preview: "Remove Inbox from one thread.",
+            exactTarget: target
+        ))
+        let approvalID = try #require(model.createApproval(
+            threadID: nil,
+            title: "Archive",
+            exactTarget: target,
+            consequence: "Remove Inbox from one thread.",
+            dataLeavingDevice: "Account and thread identifiers",
+            reversible: true,
+            expiresAtUnixMillis: nil
+        ))
+        model.attachMailApproval(actionID: actionID, approvalID: approvalID)
+        model.resolveApproval(id: approvalID, approved: true)
+        model.reconcileMailAction(id: actionID, state: .reconciled, remoteReceipt: "Labels: STARRED")
+        let ruleID = try #require(model.createMailStandingRule(
+            accountID: "account-1",
+            accountIdentity: "one@example.test",
+            name: "Archive receipts",
+            query: "from:receipts@example.test older_than:30d",
+            action: .archive
+        ))
+        model.setMailStandingRuleEnabled(id: ruleID, enabled: false)
+        model.reconcileMailAttention([(
+            accountID: "account-1",
+            threadID: "thread-2",
+            accountIdentity: "one@example.test",
+            sender: "Sender",
+            subject: "Needs attention",
+            unread: true
+        )])
+
+        let restored = DesktopAppModel(store: store, now: { 15_000 })
+        #expect(restored.snapshot.operations.mailActions.first { $0.id == actionID }?.state == .reconciled)
+        #expect(restored.snapshot.operations.mailStandingRules.first { $0.id == ruleID }?.enabled == false)
+        #expect(restored.snapshot.operations.mailAttention.first?.id == "account-1:thread-2")
+        #expect(restored.snapshot.operations.audit.last?.domain == "gmail")
+    }
+
+    @Test
     func fileStoreUsesPrivateDirectoryAndFileModes() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("kaname-desktop-state-\(UUID().uuidString)")
