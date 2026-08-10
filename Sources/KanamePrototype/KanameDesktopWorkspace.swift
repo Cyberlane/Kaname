@@ -347,7 +347,7 @@ struct KanameDesktopWorkspace: View {
             case .devices:
                 DesktopDevicesView(model: model)
             case .liveCodex:
-                DesktopCodingView()
+                DesktopCodingView(model: model)
             case .localCore:
                 LocalCoreWorkspace()
             case .settings:
@@ -758,6 +758,13 @@ private struct DesktopInboxView: View {
                 .frame(width: 180)
             }
 
+
+            if !model.snapshot.operations.approvals.isEmpty {
+                ApprovalQueueStrip(model: model)
+                    .padding(.horizontal, 18)
+                    .padding(.bottom, 14)
+            }
+
             if threads.isEmpty {
                 EmptyPanel(
                     symbol: "tray",
@@ -930,6 +937,7 @@ private struct DesktopResearchView: View {
     @ObservedObject var model: DesktopAppModel
     let openThread: (String) -> Void
     @State private var showsNewResearch = false
+    @State private var sourceTarget: DesktopResearchRecord?
 
     var body: some View {
         ScrollView {
@@ -977,6 +985,19 @@ private struct DesktopResearchView: View {
                                 Divider()
                                 LabeledContent("Sources", value: "\(record.sourceCount)")
                                     .font(.caption)
+                                if let latest = model.snapshot.operations.researchSources
+                                    .filter({ $0.researchID == record.id })
+                                    .sorted(by: { $0.retrievedAtUnixMillis > $1.retrievedAtUnixMillis })
+                                    .first {
+                                    Text(latest.title)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
+                                Button("Add source", systemImage: "link.badge.plus") {
+                                    sourceTarget = record
+                                }
+                                .buttonStyle(.bordered)
                                 RelativeTime(unixMillis: record.updatedAtUnixMillis)
                             }
                             .panelStyle()
@@ -993,11 +1014,15 @@ private struct DesktopResearchView: View {
                 openThread(threadID)
             }
         }
+        .sheet(item: $sourceTarget) { research in
+            NewResearchSourceSheet(model: model, research: research)
+        }
     }
 }
 
 private struct DesktopKnowledgeView: View {
     @ObservedObject var model: DesktopAppModel
+    @State private var showsNewProposal = false
 
     var body: some View {
         ScrollView {
@@ -1006,7 +1031,12 @@ private struct DesktopKnowledgeView: View {
                     title: "Obsidian & Knowledge",
                     detail: "Explicit private notes, repository knowledge, freshness, and conflicts",
                     symbol: DesktopDestination.knowledge.symbol
-                )
+                ) {
+                    Button("Propose edit", systemImage: "doc.badge.plus") {
+                        showsNewProposal = true
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
 
                 HStack(alignment: .top, spacing: 14) {
                     MetricCard(
@@ -1018,7 +1048,7 @@ private struct DesktopKnowledgeView: View {
                     )
                     MetricCard(
                         title: "Proposed edits",
-                        value: "0",
+                        value: "\(model.snapshot.operations.knowledgeProposals.filter { $0.state == .proposed }.count)",
                         detail: "Nothing writes silently",
                         symbol: "doc.badge.ellipsis",
                         tint: Nord.auroraYellow
@@ -1058,6 +1088,35 @@ private struct DesktopKnowledgeView: View {
                 .padding(.horizontal, 18)
                 .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 16))
 
+                if !model.snapshot.operations.knowledgeProposals.isEmpty {
+                    SectionHeading(
+                        title: "Review queue",
+                        detail: "Every proposal retains its target and base revision."
+                    )
+                    ForEach(model.snapshot.operations.knowledgeProposals) { proposal in
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text(proposal.title).font(.headline)
+                                Spacer()
+                                ActionStatePill(state: proposal.state)
+                            }
+                            Text(proposal.target)
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                            Text(proposal.summary)
+                                .font(.subheadline)
+                            DisclosureGroup("Proposed content") {
+                                Text(proposal.proposedContent)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.top, 8)
+                            }
+                        }
+                        .panelStyle()
+                    }
+                }
+
                 BoundaryCallout(
                     title: "Reviewable knowledge changes",
                     detail: "Obsidian and Lode edits will appear as proposed diffs with source revision and conflict state before Kaname writes them."
@@ -1067,6 +1126,9 @@ private struct DesktopKnowledgeView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Nord.polarNight0)
+        .sheet(isPresented: $showsNewProposal) {
+            NewKnowledgeProposalSheet(model: model)
+        }
     }
 }
 
@@ -1271,14 +1333,42 @@ private struct DesktopAutomationsView: View {
                                     .foregroundStyle(.secondary)
                                 }
                                 Spacer()
-                                Button(rule.status == .paused ? "Resume draft" : "Pause") {
-                                    model.setAutomationPaused(id: rule.id, paused: rule.status != .paused)
+                                VStack(alignment: .trailing, spacing: 8) {
+                                    Button("Dry run") {
+                                        _ = model.recordAutomationDryRun(id: rule.id)
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    Button(rule.status == .paused ? "Resume draft" : "Pause") {
+                                        model.setAutomationPaused(id: rule.id, paused: rule.status != .paused)
+                                    }
+                                    .buttonStyle(.bordered)
                                 }
-                                .buttonStyle(.bordered)
                             }
                             .panelStyle()
                         }
                     }
+                }
+
+                if !model.snapshot.operations.automationRuns.isEmpty {
+                    SectionHeading(title: "Run history", detail: "Dry runs and future scheduled executions share durable evidence.")
+                    VStack(spacing: 0) {
+                        ForEach(Array(model.snapshot.operations.automationRuns.reversed().enumerated()), id: \.element.id) { index, run in
+                            HStack(spacing: 12) {
+                                Image(systemName: run.state == .completed ? "checkmark.circle.fill" : "clock")
+                                    .foregroundStyle(run.state == .completed ? Nord.auroraGreen : Nord.frost1)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(run.detail).font(.subheadline)
+                                    RelativeTime(unixMillis: run.scheduledAtUnixMillis)
+                                }
+                                Spacer()
+                                ActionStatePill(state: run.state)
+                            }
+                            .padding(.vertical, 12)
+                            if index < model.snapshot.operations.automationRuns.count - 1 { Divider() }
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 15))
                 }
             }
             .padding(24)
@@ -1293,6 +1383,7 @@ private struct DesktopAutomationsView: View {
 
 private struct DesktopGitHubView: View {
     @ObservedObject var model: DesktopAppModel
+    @State private var showsNewLayer = false
 
     private var accounts: [DesktopAccountRecord] {
         model.snapshot.domains.accounts.filter { $0.service == .github }
@@ -1305,7 +1396,13 @@ private struct DesktopGitHubView: View {
                     title: "GitHub",
                     detail: "Local repositories, remote state, pull requests, checks, and stack dependencies",
                     symbol: DesktopDestination.github.symbol
-                )
+                ) {
+                    Button("New stack layer", systemImage: "arrow.triangle.branch") {
+                        showsNewLayer = true
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.snapshot.domains.gitWorkspaces.isEmpty)
+                }
                 AccountStrip(accounts: accounts)
 
                 SectionHeading(
@@ -1336,6 +1433,39 @@ private struct DesktopGitHubView: View {
                     }
                 }
 
+                SectionHeading(
+                    title: "Stack graph",
+                    detail: "Dependencies are local proposals until GitHub is connected and exact remote state is reconciled."
+                )
+                if model.snapshot.operations.gitStackLayers.isEmpty {
+                    EmptyPanel(
+                        symbol: "arrow.triangle.branch",
+                        title: "No stack layers",
+                        detail: "Model branch and pull-request dependencies locally before publishing anything."
+                    )
+                    .frame(minHeight: 180)
+                } else {
+                    VStack(spacing: 10) {
+                        ForEach(model.snapshot.operations.gitStackLayers) { layer in
+                            HStack(alignment: .top, spacing: 13) {
+                                Image(systemName: "circle.hexagongrid.fill")
+                                    .foregroundStyle(Nord.frost1)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(layer.title).font(.headline)
+                                    Text("\(layer.branch) → \(layer.baseBranch)")
+                                        .font(.system(.caption, design: .monospaced))
+                                    Text("\(layer.checkSummary) · \(layer.reviewSummary)")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                ActionStatePill(state: layer.state)
+                            }
+                            .panelStyle()
+                        }
+                    }
+                }
+
                 BoundaryCallout(
                     title: "Publishing remains explicit",
                     detail: "Push, pull-request creation, review replies, merges, releases, and other remote mutations require an exact proposal, approval, and independently reconciled result."
@@ -1345,6 +1475,9 @@ private struct DesktopGitHubView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Nord.polarNight0)
+        .sheet(isPresented: $showsNewLayer) {
+            NewGitStackLayerSheet(model: model)
+        }
     }
 }
 
@@ -1408,7 +1541,9 @@ private struct DesktopSkillsView: View {
 }
 
 private struct DesktopCodingView: View {
+    @ObservedObject var model: DesktopAppModel
     @State private var panel = Panel.overview
+    @State private var showsNewComparison = false
 
     private enum Panel: String, CaseIterable, Identifiable {
         case overview
@@ -1504,8 +1639,13 @@ private struct DesktopCodingView: View {
 
                 HStack(alignment: .top, spacing: 14) {
                     VStack(alignment: .leading, spacing: 11) {
-                        Label("Explicit comparison", systemImage: "rectangle.split.3x1.fill")
-                            .font(.headline)
+                        HStack {
+                            Label("Explicit comparison", systemImage: "rectangle.split.3x1.fill")
+                                .font(.headline)
+                            Spacer()
+                            Button("New comparison") { showsNewComparison = true }
+                                .buttonStyle(.bordered)
+                        }
                         Text("A comparison creates separate provider runs from the same approved brief. Results stay side by side; histories and contexts are never silently merged.")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
@@ -1534,6 +1674,35 @@ private struct DesktopCodingView: View {
                         }
                     }
                     .panelStyle()
+                }
+
+                if !model.snapshot.operations.comparisons.isEmpty {
+                    SectionHeading(
+                        title: "Comparison drafts",
+                        detail: "Each provider receives a separate run identity from the same frozen brief."
+                    )
+                    ForEach(model.snapshot.operations.comparisons) { comparison in
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text(comparison.title).font(.headline)
+                                Spacer()
+                                ActionStatePill(state: comparison.state)
+                            }
+                            Text(comparison.brief)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                            HStack(spacing: 8) {
+                                ForEach(model.snapshot.operations.providerRuns.filter { comparison.runIDs.contains($0.id) }) { run in
+                                    Label(run.provider, systemImage: "cpu")
+                                        .font(.caption.weight(.semibold))
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 5)
+                                        .background(Nord.polarNight0, in: Capsule())
+                                }
+                            }
+                        }
+                        .panelStyle()
+                    }
                 }
 
                 SectionHeading(
@@ -1569,6 +1738,9 @@ private struct DesktopCodingView: View {
             }
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .sheet(isPresented: $showsNewComparison) {
+            NewProviderComparisonSheet(model: model, availableProviders: providers.map(\.name))
         }
     }
 }
@@ -1816,6 +1988,29 @@ private struct DesktopThreadInspector: View {
                 }
                 .panelStyle()
 
+                let artifacts = model.snapshot.operations.artifacts.filter { $0.threadID == thread.id }
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Artifacts")
+                        .font(.headline)
+                    if artifacts.isEmpty {
+                        Text("No artifacts attached.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(artifacts) { artifact in
+                            VStack(alignment: .leading, spacing: 3) {
+                                Label(artifact.name, systemImage: artifact.kind.symbol)
+                                    .font(.subheadline.weight(.semibold))
+                                Text(artifact.localPath)
+                                    .font(.system(.caption2, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                        }
+                    }
+                }
+                .panelStyle()
+
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Thread actions")
                         .font(.headline)
@@ -1948,6 +2143,256 @@ private struct NewResearchSheet: View {
         model.appendUserMessage(threadID: threadID, body: question)
         dismiss()
         created(threadID)
+    }
+}
+
+private struct NewResearchSourceSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var model: DesktopAppModel
+    let research: DesktopResearchRecord
+    @State private var title = ""
+    @State private var location = ""
+    @State private var publisher = ""
+    @State private var note = ""
+    @State private var isPrimary = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Add research source")
+                .font(.title2.weight(.bold))
+            Text(research.title)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Form {
+                TextField("Source title", text: $title)
+                TextField("URL or local reference", text: $location)
+                TextField("Publisher or owner", text: $publisher)
+                Toggle("Primary source", isOn: $isPrimary)
+                TextField("Evidence note", text: $note, axis: .vertical)
+                    .lineLimit(2...5)
+            }
+            .formStyle(.grouped)
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                Button("Add source") { save() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!isValid)
+            }
+        }
+        .padding(24)
+        .frame(width: 560, height: 430)
+    }
+
+    private var isValid: Bool {
+        !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !location.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func save() {
+        guard model.addResearchSource(
+            researchID: research.id,
+            title: title,
+            location: location,
+            publisher: publisher,
+            isPrimary: isPrimary,
+            note: note
+        ) != nil else { return }
+        dismiss()
+    }
+}
+
+private struct NewKnowledgeProposalSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var model: DesktopAppModel
+    @State private var sourceID: String?
+    @State private var title = ""
+    @State private var target = ""
+    @State private var summary = ""
+    @State private var proposedContent = ""
+    @State private var baseRevision = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Propose knowledge edit")
+                .font(.title2.weight(.bold))
+            Text("This stores a reviewable local proposal. It does not write to Obsidian, Lode, or a repository.")
+                .foregroundStyle(.secondary)
+            Form {
+                Picker("Knowledge source", selection: $sourceID) {
+                    Text("Unlinked proposal").tag(nil as String?)
+                    ForEach(model.snapshot.domains.knowledgeSources) { source in
+                        Text(source.name).tag(source.id as String?)
+                    }
+                }
+                TextField("Title", text: $title)
+                TextField("Exact target path", text: $target)
+                TextField("Summary", text: $summary)
+                TextField("Base revision or digest", text: $baseRevision)
+                TextEditor(text: $proposedContent)
+                    .font(.system(.body, design: .monospaced))
+                    .scrollContentBackground(.hidden)
+                    .padding(8)
+                    .frame(minHeight: 150)
+                    .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 9))
+            }
+            .formStyle(.grouped)
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                Button("Save proposal") { save() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!isValid)
+            }
+        }
+        .padding(24)
+        .frame(width: 640, height: 600)
+    }
+
+    private var isValid: Bool {
+        !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !proposedContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func save() {
+        guard model.createKnowledgeProposal(
+            sourceID: sourceID,
+            title: title,
+            target: target,
+            summary: summary,
+            proposedContent: proposedContent,
+            baseRevision: baseRevision
+        ) != nil else { return }
+        dismiss()
+    }
+}
+
+private struct NewGitStackLayerSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var model: DesktopAppModel
+    @State private var workspaceID: String?
+    @State private var title = ""
+    @State private var branch = ""
+    @State private var baseBranch = "main"
+    @State private var dependsOnLayerID: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("New local stack layer")
+                .font(.title2.weight(.bold))
+            Text("Model dependency and review state without creating a branch or pull request.")
+                .foregroundStyle(.secondary)
+            Form {
+                Picker("Workspace", selection: $workspaceID) {
+                    Text("Select workspace").tag(nil as String?)
+                    ForEach(model.snapshot.domains.gitWorkspaces) { workspace in
+                        Text(workspace.name).tag(workspace.id as String?)
+                    }
+                }
+                TextField("Layer title", text: $title)
+                TextField("Branch", text: $branch)
+                TextField("Base branch", text: $baseBranch)
+                Picker("Depends on", selection: $dependsOnLayerID) {
+                    Text("No layer dependency").tag(nil as String?)
+                    ForEach(model.snapshot.operations.gitStackLayers) { layer in
+                        Text(layer.title).tag(layer.id as String?)
+                    }
+                }
+            }
+            .formStyle(.grouped)
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                Button("Save layer") { save() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!isValid)
+            }
+        }
+        .padding(24)
+        .frame(width: 560, height: 440)
+        .onAppear {
+            workspaceID = workspaceID ?? model.snapshot.domains.gitWorkspaces.first?.id
+        }
+    }
+
+    private var isValid: Bool {
+        workspaceID != nil
+            && !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !branch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !baseBranch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func save() {
+        guard let workspaceID,
+              model.addGitStackLayer(
+                workspaceID: workspaceID,
+                title: title,
+                branch: branch,
+                baseBranch: baseBranch,
+                dependsOnLayerID: dependsOnLayerID
+              ) != nil else { return }
+        dismiss()
+    }
+}
+
+private struct NewProviderComparisonSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var model: DesktopAppModel
+    let availableProviders: [String]
+    @State private var title = ""
+    @State private var brief = ""
+    @State private var selectedProviders: Set<String> = []
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("New provider comparison")
+                .font(.title2.weight(.bold))
+            Text("Freeze one local brief into separate provider run identities. This form does not start a provider.")
+                .foregroundStyle(.secondary)
+            TextField("Comparison title", text: $title)
+                .textFieldStyle(.roundedBorder)
+            TextField("Shared brief", text: $brief, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(4...10)
+            VStack(alignment: .leading, spacing: 9) {
+                Text("Providers").font(.headline)
+                ForEach(availableProviders, id: \.self) { provider in
+                    Toggle(provider, isOn: Binding(
+                        get: { selectedProviders.contains(provider) },
+                        set: { selected in
+                            if selected { selectedProviders.insert(provider) }
+                            else { selectedProviders.remove(provider) }
+                        }
+                    ))
+                }
+            }
+            .panelStyle()
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                Button("Save comparison draft") { save() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!isValid)
+            }
+        }
+        .padding(24)
+        .frame(width: 580, height: 520)
+    }
+
+    private var isValid: Bool {
+        !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !brief.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && selectedProviders.count >= 2
+    }
+
+    private func save() {
+        guard model.createProviderComparison(
+            title: title,
+            brief: brief,
+            providers: Array(selectedProviders)
+        ) != nil else { return }
+        dismiss()
     }
 }
 
@@ -2271,6 +2716,63 @@ private struct AccountStrip: View {
     }
 }
 
+private struct ApprovalQueueStrip: View {
+    @ObservedObject var model: DesktopAppModel
+
+    private var pending: [DesktopApprovalRecord] {
+        model.snapshot.operations.approvals.filter { $0.state == .awaitingApproval }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label("Approval proposals", systemImage: "checkmark.shield.fill")
+                    .font(.headline)
+                Spacer()
+                Text("\(pending.count) pending")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(pending) { approval in
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack {
+                        Text(approval.title).font(.subheadline.weight(.semibold))
+                        Spacer()
+                        RecordStatusPill(state: .needsReview)
+                    }
+                    Text(approval.exactTarget)
+                        .font(.system(.caption, design: .monospaced))
+                    Text(approval.consequence)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        Label(approval.reversible ? "Reversible" : "Not reversible", systemImage: approval.reversible ? "arrow.uturn.backward.circle" : "exclamationmark.triangle")
+                        if !approval.dataLeavingDevice.isEmpty {
+                            Label(approval.dataLeavingDevice, systemImage: "arrow.up.right.square")
+                        }
+                        Spacer()
+                        Button("Reject") { model.resolveApproval(id: approval.id, approved: false) }
+                        Button("Record approval") { model.resolveApproval(id: approval.id, approved: true) }
+                            .buttonStyle(.borderedProminent)
+                    }
+                    .font(.caption)
+                }
+                .padding(12)
+                .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 10))
+            }
+            if pending.isEmpty {
+                Text("No action is waiting for approval.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            Text("Recording a decision here never dispatches the proposed external action by itself.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+        .panelStyle()
+    }
+}
+
 private struct RecordStatusPill: View {
     let state: DesktopRecordState
 
@@ -2278,6 +2780,19 @@ private struct RecordStatusPill: View {
         Text(state.label)
             .font(.caption2.weight(.bold))
             .foregroundStyle(state.foreground)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(state.tint.opacity(0.18), in: Capsule())
+    }
+}
+
+private struct ActionStatePill: View {
+    let state: DesktopActionState
+
+    var body: some View {
+        Text(state.label)
+            .font(.caption2.weight(.bold))
+            .foregroundStyle(state.tint)
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
             .background(state.tint.opacity(0.18), in: Capsule())
@@ -2986,6 +3501,18 @@ private extension DesktopRecordState {
     }
 }
 
+private extension DesktopActionState {
+    var tint: Color {
+        switch self {
+        case .proposed, .awaitingApproval: Nord.auroraYellow
+        case .approved, .running: Nord.frost1
+        case .rejected, .failed: Nord.auroraRed
+        case .completed, .reconciled: Nord.auroraGreen
+        case .cancelled: Nord.polarNight3
+        }
+    }
+}
+
 private extension DesktopKnowledgeSource.Kind {
     var symbol: String {
         switch self {
@@ -3011,6 +3538,18 @@ private extension DesktopSkillRecord.Kind {
         case .tool: "hammer.fill"
         case .connector: "cable.connector"
         case .hook: "point.topleft.down.to.point.bottomright.curvepath"
+        }
+    }
+}
+
+private extension DesktopArtifactRecord.Kind {
+    var symbol: String {
+        switch self {
+        case .file: "doc.fill"
+        case .diff: "plus.forwardslash.minus"
+        case .report: "doc.text.fill"
+        case .image: "photo.fill"
+        case .log: "list.bullet.rectangle.fill"
         }
     }
 }
