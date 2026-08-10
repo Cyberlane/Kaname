@@ -118,4 +118,26 @@ struct ProviderConnectivityTests {
         #expect(inventory.connectedProviderIDs == ["connected"])
         #expect(inventory.models == [ProviderModel(id: "connected/one", displayName: "One", isDefault: true)])
     }
+
+    @Test
+    func desktopLocalReadsRejectVaultTraversalAndParseBranches() throws {
+        #expect(try DesktopLocalReadService.validatedVaultPath("Projects/Coding ADE/Overview.md") == "Projects/Coding ADE/Overview.md")
+        #expect(throws: DesktopLocalReadError.self) {
+            try DesktopLocalReadService.validatedVaultPath("../Private.md")
+        }
+        #expect(DesktopLocalReadService.branch(from: "## main...origin/main [ahead 2]") == "main")
+        #expect(DesktopLocalReadService.branch(from: "## feature/work") == "feature/work")
+    }
+
+    @Test
+    func desktopGitInspectionIsBoundedAndReadOnly() async throws {
+        let inspection = try await DesktopLocalReadService().inspectGitWorkspace(
+            path: FileManager.default.currentDirectoryPath
+        )
+
+        #expect(inspection.root.hasSuffix("coding-ade"))
+        #expect(!inspection.branch.isEmpty)
+        #expect(inspection.head.count == 12)
+        #expect(!inspection.wasTruncated)
+    }
 }
