@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import KanameConnectivity
+import KanameDesktop
 import KanameDomain
 import KanameFixtures
 import KanamePrototypeUI
@@ -43,8 +44,18 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
     private var fallbackWindow: NSWindow?
     private var postedMouseBackEvent = false
     private var activationObserver: NSObjectProtocol?
+    private var mouseBackMonitor: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        mouseBackMonitor = NSEvent.addLocalMonitorForEvents(matching: .otherMouseUp) { event in
+            guard event.buttonNumber == 3 else { return event }
+            let handled = DesktopBackCommandRouter.shared.performBack()
+            if CommandLine.arguments.contains("--require-mouse-back-handled"), !handled {
+                fputs("Kaname did not handle the requested mouse Back event.\n", stderr)
+                Darwin.exit(EXIT_FAILURE)
+            }
+            return handled ? nil : event
+        }
         activationObserver = NotificationCenter.default.addObserver(
             forName: .kanameActivateExistingInstance,
             object: nil,
@@ -55,6 +66,13 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         configureInitialWindow(remainingAttempts: 20)
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        if let mouseBackMonitor {
+            NSEvent.removeMonitor(mouseBackMonitor)
+            self.mouseBackMonitor = nil
+        }
     }
 
     func applicationShouldHandleReopen(
@@ -366,7 +384,18 @@ private struct PrototypeWorkspace: View {
                 .navigationSplitViewColumnWidth(min: 280, ideal: 340, max: 440)
             }
             .navigationSplitViewStyle(.balanced)
-            .background(MouseBackButtonHandler(action: goBack))
+            .onAppear {
+                DesktopBackCommandRouter.shared.install {
+                    if showsSettings {
+                        showsSettings = false
+                        return true
+                    }
+                    return goBack()
+                }
+            }
+            .onDisappear {
+                DesktopBackCommandRouter.shared.removeHandler()
+            }
             .sheet(item: $newFlow) { flow in
                 NewFlowSheet(flow: flow)
             }
@@ -722,52 +751,6 @@ private struct ScheduleFixtureCard: View {
         .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 16))
     }
 }
-
-#if os(macOS)
-struct MouseBackButtonHandler: NSViewRepresentable {
-    let action: () -> Bool
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(action: action)
-    }
-
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView(frame: .zero)
-        context.coordinator.monitor = NSEvent.addLocalMonitorForEvents(matching: .otherMouseUp) { [weak coordinator = context.coordinator] event in
-            guard event.buttonNumber == 3, coordinator?.action() == true else { return event }
-            return nil
-        }
-        return view
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) {
-        context.coordinator.action = action
-    }
-
-    final class Coordinator {
-        var action: () -> Bool
-        var monitor: Any?
-
-        init(action: @escaping () -> Bool) {
-            self.action = action
-        }
-
-        deinit {
-            if let monitor {
-                NSEvent.removeMonitor(monitor)
-            }
-        }
-    }
-}
-#else
-struct MouseBackButtonHandler: View {
-    let action: () -> Bool
-
-    var body: some View {
-        EmptyView()
-    }
-}
-#endif
 
 private struct SurfaceButton: View {
     let surface: PrototypeSurface

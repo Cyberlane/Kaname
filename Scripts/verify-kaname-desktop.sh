@@ -43,8 +43,8 @@ fi
 [[ -x "$app_path/Contents/Resources/KanameLocalControlService" ]]
 [[ -x "$app_path/Contents/Resources/kaname-local-core" ]]
 [[ "$(plutil -extract CFBundleIdentifier raw "$app_path/Contents/Info.plist")" == "com.cyberlane.kaname.desktop" ]]
-[[ "$(plutil -extract CFBundleShortVersionString raw "$app_path/Contents/Info.plist")" == "0.6.5" ]]
-[[ "$(plutil -extract CFBundleVersion raw "$app_path/Contents/Info.plist")" == "13" ]]
+[[ "$(plutil -extract CFBundleShortVersionString raw "$app_path/Contents/Info.plist")" == "0.6.6" ]]
+[[ "$(plutil -extract CFBundleVersion raw "$app_path/Contents/Info.plist")" == "14" ]]
 codesign --verify --deep --strict "$app_path"
 if [[ "$(plutil -extract KanameStableCodeSigning raw "$app_path/Contents/Info.plist")" == "true" ]]; then
     designated_requirement="$(codesign -d -r- "$app_path" 2>&1)"
@@ -84,9 +84,10 @@ mkdir -p "$output_directory"
     --desktop-settings-category providers \
     --snapshot "$output_directory/settings-providers.png"
 "$executable" \
-    --desktop-destination settings \
+    --desktop-destination calendar \
     --desktop-back-target home \
     --post-mouse-back \
+    --require-mouse-back-handled \
     --snapshot "$output_directory/mouse-back.png"
 
 for snapshot in \

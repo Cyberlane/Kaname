@@ -5,6 +5,24 @@ import Testing
 @MainActor
 struct DesktopAppModelTests {
     @Test
+    func desktopBackCommandRouterRetainsTheActiveHandlerUntilRemoval() {
+        let router = DesktopBackCommandRouter()
+        var calls = 0
+
+        #expect(router.performBack() == false)
+        router.install {
+            calls += 1
+            return true
+        }
+        #expect(router.performBack() == true)
+        #expect(calls == 1)
+
+        router.removeHandler()
+        #expect(router.performBack() == false)
+        #expect(calls == 1)
+    }
+
+    @Test
     func localThreadsProjectsAndMessagesSurviveRestart() throws {
         let store = MemoryDesktopStateStore()
         var clock: Int64 = 1_000

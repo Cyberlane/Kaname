@@ -115,9 +115,22 @@ struct KanameDesktopWorkspace: View {
     }
 
     var body: some View {
-        navigationLayout
-        .background(Nord.polarNight0)
-        .background(MouseBackButtonHandler(action: goBack))
+        ZStack {
+            navigationLayout
+                .background(Nord.polarNight0)
+                .allowsHitTesting(!showsSettings)
+                .disabled(showsSettings)
+
+            if showsSettings {
+                DesktopSettingsModal(
+                    model: model,
+                    integrations: personalIntegrations,
+                    dismiss: { showsSettings = false }
+                )
+                .transition(.opacity.combined(with: .scale(scale: 0.985)))
+                .zIndex(1)
+            }
+        }
         .sheet(isPresented: $showsNewThread) {
             NewDesktopThreadSheet(model: model) { threadID in
                 openThread(threadID)
@@ -125,9 +138,6 @@ struct KanameDesktopWorkspace: View {
         }
         .sheet(isPresented: $showsNewProject) {
             NewDesktopProjectSheet(model: model)
-        }
-        .sheet(isPresented: $showsSettings) {
-            DesktopSettingsView(model: model, integrations: personalIntegrations)
         }
         .alert(
             "Local workspace was not saved",
@@ -143,6 +153,13 @@ struct KanameDesktopWorkspace: View {
         .task {
             personalIntegrations.startMonitoring(model: model)
         }
+        .onAppear {
+            DesktopBackCommandRouter.shared.install(handleBack)
+        }
+        .onDisappear {
+            DesktopBackCommandRouter.shared.removeHandler()
+        }
+        .animation(.easeOut(duration: 0.16), value: showsSettings)
     }
 
     @ViewBuilder
@@ -500,6 +517,23 @@ struct KanameDesktopWorkspace: View {
             window.setFrame(frame, display: true)
         }
 #endif
+    }
+
+    @discardableResult
+    private func handleBack() -> Bool {
+        if showsSettings {
+            showsSettings = false
+            return true
+        }
+        if showsNewThread {
+            showsNewThread = false
+            return true
+        }
+        if showsNewProject {
+            showsNewProject = false
+            return true
+        }
+        return goBack()
     }
 
     @discardableResult
@@ -2511,15 +2545,51 @@ private struct DesktopDevicesView: View {
     }
 }
 
+private struct DesktopSettingsModal: View {
+    @ObservedObject var model: DesktopAppModel
+    @ObservedObject var integrations: DesktopPersonalIntegrationViewModel
+    let dismiss: () -> Void
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.58)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture(perform: dismiss)
+
+            DesktopSettingsView(model: model, integrations: integrations, dismiss: dismiss)
+                .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .stroke(Nord.polarNight3, lineWidth: 1)
+                }
+                .shadow(color: .black.opacity(0.42), radius: 28, y: 12)
+                .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .onTapGesture { }
+                .padding(24)
+                .accessibilityAddTraits(.isModal)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onExitCommand(perform: dismiss)
+    }
+}
+
 private struct DesktopSettingsView: View {
-    @Environment(\.dismiss) private var dismiss
+    @Environment(\.dismiss) private var environmentDismiss
     @ObservedObject var model: DesktopAppModel
     @ObservedObject var integrations: DesktopPersonalIntegrationViewModel
     @State private var draft: DesktopPreferences
+    private let explicitDismiss: (() -> Void)?
 
-    init(model: DesktopAppModel, integrations: DesktopPersonalIntegrationViewModel) {
+    init(
+        model: DesktopAppModel,
+        integrations: DesktopPersonalIntegrationViewModel,
+        dismiss: (() -> Void)? = nil
+    ) {
         self.model = model
         self.integrations = integrations
+        explicitDismiss = dismiss
         _draft = State(initialValue: model.snapshot.preferences)
     }
 
@@ -2528,7 +2598,7 @@ private struct DesktopSettingsView: View {
             model: model,
             integrations: integrations,
             draft: $draft,
-            dismiss: { dismiss() }
+            dismiss: { explicitDismiss?() ?? environmentDismiss() }
         )
         .onChange(of: draft) { updated in
             var persisted = updated
