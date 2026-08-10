@@ -75,6 +75,7 @@ private enum DesktopDestination: String, CaseIterable, Identifiable {
 private struct DesktopNavigationLocation: Equatable {
     let destination: DesktopDestination
     let selectedThreadID: String?
+    let selectedProjectID: String?
 }
 
 private struct NewConversationRequest: Identifiable {
@@ -87,6 +88,7 @@ struct KanameDesktopWorkspace: View {
     @StateObject private var personalIntegrations = DesktopPersonalIntegrationViewModel()
     @State private var destination: DesktopDestination
     @State private var selectedThreadID: String?
+    @State private var selectedProjectID: String?
     @State private var searchText = ""
     @State private var inboxFilter: DesktopAttention? = nil
     @State private var newConversationRequest: NewConversationRequest?
@@ -102,6 +104,8 @@ struct KanameDesktopWorkspace: View {
             ?? .home
         let requestedBackDestination = arguments.firstIndex(of: "--desktop-back-target")
             .flatMap { arguments.indices.contains($0 + 1) ? DesktopDestination(rawValue: arguments[$0 + 1]) : nil }
+        let requestedProjectID = arguments.firstIndex(of: "--desktop-project-id")
+            .flatMap { arguments.indices.contains($0 + 1) ? arguments[$0 + 1] : nil }
         _destination = State(initialValue: requestedDestination == .settings ? .home : requestedDestination)
         _showsSettings = State(initialValue: requestedDestination == .settings)
         _selectedThreadID = State(
@@ -109,11 +113,13 @@ struct KanameDesktopWorkspace: View {
                 ? "thread-desktop-dogfood"
                 : nil
         )
+        _selectedProjectID = State(initialValue: requestedDestination == .projects ? requestedProjectID : nil)
         _navigationHistory = State(
             initialValue: requestedBackDestination.map {
                 [DesktopNavigationLocation(
                     destination: $0,
-                    selectedThreadID: $0.keepsThreadSelection ? "thread-desktop-dogfood" : nil
+                    selectedThreadID: $0.keepsThreadSelection ? "thread-desktop-dogfood" : nil,
+                    selectedProjectID: nil
                 )]
             } ?? []
         )
@@ -203,7 +209,7 @@ struct KanameDesktopWorkspace: View {
 
     private var workspaceHeader: some View {
         HStack(spacing: 12) {
-            Text(destination.title)
+            Text(workspaceTitle)
                 .font(.headline)
                 .lineLimit(1)
 
@@ -362,12 +368,22 @@ struct KanameDesktopWorkspace: View {
                     selectedThreadID: threadSelection
                 )
             case .projects:
-                DesktopProjectsView(
-                    model: model,
-                    createProject: { showsNewProject = true },
-                    startConversation: { beginConversation(projectID: $0) },
-                    openThread: openThread
-                )
+                if let project = model.project(id: selectedProjectID) {
+                    DesktopProjectOverview(
+                        model: model,
+                        project: project,
+                        startConversation: { beginConversation(projectID: project.id) },
+                        openThread: openThread
+                    )
+                } else {
+                    DesktopProjectsView(
+                        model: model,
+                        createProject: { showsNewProject = true },
+                        openProject: openProject,
+                        startConversation: { beginConversation(projectID: $0) },
+                        openThread: openThread
+                    )
+                }
             case .research:
                 DesktopResearchView(model: model, openThread: openThread)
             case .knowledge:
@@ -397,7 +413,9 @@ struct KanameDesktopWorkspace: View {
 
     @ViewBuilder
     private var inspector: some View {
-        if let thread = model.thread(id: selectedThreadID), [.home, .threads, .inbox].contains(destination) {
+        if let project = model.project(id: selectedProjectID), destination == .projects {
+            DesktopProjectInspector(model: model, project: project)
+        } else if let thread = model.thread(id: selectedThreadID), [.home, .threads, .inbox].contains(destination) {
             DesktopThreadInspector(model: model, thread: thread)
         } else {
             DesktopContextInspector(destination: destination, model: model)
@@ -447,8 +465,12 @@ struct KanameDesktopWorkspace: View {
     }
 
     private func openThread(_ threadID: String) {
-        visit(DesktopNavigationLocation(destination: .threads, selectedThreadID: threadID))
+        visit(DesktopNavigationLocation(destination: .threads, selectedThreadID: threadID, selectedProjectID: nil))
         model.markRead(threadID: threadID)
+    }
+
+    private func openProject(_ projectID: String) {
+        visit(DesktopNavigationLocation(destination: .projects, selectedThreadID: nil, selectedProjectID: projectID))
     }
 
     private var inheritedProjectID: String? {
@@ -461,14 +483,22 @@ struct KanameDesktopWorkspace: View {
     }
 
     private var currentLocation: DesktopNavigationLocation {
-        DesktopNavigationLocation(destination: destination, selectedThreadID: selectedThreadID)
+        DesktopNavigationLocation(
+            destination: destination,
+            selectedThreadID: selectedThreadID,
+            selectedProjectID: selectedProjectID
+        )
     }
 
     private var threadSelection: Binding<String?> {
         Binding(
             get: { selectedThreadID },
             set: { threadID in
-                visit(DesktopNavigationLocation(destination: destination, selectedThreadID: threadID))
+                visit(DesktopNavigationLocation(
+                    destination: destination,
+                    selectedThreadID: threadID,
+                    selectedProjectID: nil
+                ))
                 if let threadID { model.markRead(threadID: threadID) }
             }
         )
@@ -480,14 +510,26 @@ struct KanameDesktopWorkspace: View {
            let thread = model.thread(id: location.selectedThreadID) {
             return thread.title
         }
+        if location.destination == .projects,
+           let project = model.project(id: location.selectedProjectID) {
+            return project.name
+        }
         return location.destination.title
+    }
+
+    private var workspaceTitle: String {
+        if destination == .projects, let project = model.project(id: selectedProjectID) {
+            return project.name
+        }
+        return destination.title
     }
 
     private func navigate(to target: DesktopDestination) {
         visit(
             DesktopNavigationLocation(
                 destination: target,
-                selectedThreadID: target.keepsThreadSelection ? selectedThreadID : nil
+                selectedThreadID: target.keepsThreadSelection ? selectedThreadID : nil,
+                selectedProjectID: nil
             )
         )
     }
@@ -508,6 +550,7 @@ struct KanameDesktopWorkspace: View {
         preservingWindowFrame {
             destination = target.destination
             selectedThreadID = target.selectedThreadID
+            selectedProjectID = target.selectedProjectID
         }
     }
 
@@ -966,8 +1009,15 @@ private struct DesktopThreadConversation: View {
 private struct DesktopProjectsView: View {
     @ObservedObject var model: DesktopAppModel
     let createProject: () -> Void
+    let openProject: (String) -> Void
     let startConversation: (String) -> Void
     let openThread: (String) -> Void
+    @State private var query = ""
+    @State private var showsArchived = false
+
+    private var projects: [DesktopProject] {
+        model.projects(matching: query, includeArchived: showsArchived)
+    }
 
     var body: some View {
         ScrollView {
@@ -981,14 +1031,46 @@ private struct DesktopProjectsView: View {
                         .buttonStyle(.borderedProminent)
                 }
 
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 330), spacing: 14)], spacing: 14) {
-                    ForEach(model.snapshot.projects) { project in
-                        ProjectCard(
-                            project: project,
-                            threads: model.activeThreads.filter { $0.projectID == project.id },
-                            startConversation: { startConversation(project.id) },
-                            openThread: openThread
-                        )
+                HStack(spacing: 12) {
+                    Label {
+                        TextField("Search projects", text: $query)
+                            .textFieldStyle(.plain)
+                    } icon: {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 11))
+
+                    Picker("Project state", selection: $showsArchived) {
+                        Text("Active").tag(false)
+                        Text("Archived").tag(true)
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 190)
+                }
+
+                if projects.isEmpty {
+                    EmptyPanel(
+                        symbol: showsArchived ? "archivebox" : "folder",
+                        title: query.isEmpty ? (showsArchived ? "No archived projects" : "No active projects") : "No matching projects",
+                        detail: query.isEmpty
+                            ? "Projects keep repository, instruction, skill, and knowledge context deliberate."
+                            : "Try a project name, purpose, path, or instruction reference."
+                    )
+                    .frame(minHeight: 280)
+                } else {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 330), spacing: 14)], spacing: 14) {
+                        ForEach(projects) { project in
+                            ProjectCard(
+                                project: project,
+                                threads: model.activeThreads.filter { $0.projectID == project.id },
+                                openProject: { openProject(project.id) },
+                                startConversation: { startConversation(project.id) },
+                                openThread: openThread
+                            )
+                        }
                     }
                 }
             }
@@ -996,6 +1078,454 @@ private struct DesktopProjectsView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Nord.polarNight0)
+    }
+}
+
+private struct DesktopProjectOverview: View {
+    @ObservedObject var model: DesktopAppModel
+    let project: DesktopProject
+    let startConversation: () -> Void
+    let openThread: (String) -> Void
+    @State private var showsEditor = false
+    @State private var showsArchiveConfirmation = false
+
+    private var threads: [DesktopThread] {
+        model.snapshot.threads
+            .filter { $0.projectID == project.id && $0.attention != .archived }
+            .sorted { $0.updatedAtUnixMillis > $1.updatedAtUnixMillis }
+    }
+
+    private var threadIDs: Set<String> { Set(threads.map(\.id)) }
+
+    private var runs: [DesktopProviderRunRecord] {
+        model.snapshot.operations.providerRuns.filter { run in
+            run.threadID.map(threadIDs.contains) == true
+        }
+    }
+
+    private var artifacts: [DesktopArtifactRecord] {
+        model.snapshot.operations.artifacts.filter { artifact in
+            artifact.threadID.map(threadIDs.contains) == true
+        }
+    }
+
+    private var workspaces: [DesktopGitWorkspace] {
+        model.snapshot.domains.gitWorkspaces.filter { $0.projectID == project.id }
+    }
+
+    private var knowledgeSources: [DesktopKnowledgeSource] {
+        let selected = Set(project.context.knowledgeSourceIDs)
+        return model.snapshot.domains.knowledgeSources.filter { selected.contains($0.id) }
+    }
+
+    private var skills: [DesktopSkillRecord] {
+        let selected = Set(project.context.skillIDs)
+        return model.snapshot.domains.skills.filter { selected.contains($0.id) }
+    }
+
+    private var attentionCount: Int {
+        threads.filter { $0.attention == .needsResponse || $0.attention == .needsApproval || $0.unread }.count
+    }
+
+    private var hasActiveRun: Bool {
+        runs.contains { $0.state == .running || $0.state == .awaitingApproval }
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                SurfaceHeader(
+                    title: project.name,
+                    detail: project.summary.isEmpty ? "No purpose recorded yet." : project.summary,
+                    symbol: "folder.fill"
+                ) {
+                    HStack(spacing: 10) {
+                        Button("Edit context", systemImage: "slider.horizontal.3") { showsEditor = true }
+                            .buttonStyle(.bordered)
+                        if project.archivedAtUnixMillis == nil {
+                            Button("New conversation", systemImage: "square.and.pencil", action: startConversation)
+                                .buttonStyle(.borderedProminent)
+                        } else {
+                            Button("Restore project", systemImage: "arrow.uturn.backward") {
+                                model.setProjectArchived(id: project.id, archived: false)
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+                    }
+                }
+
+                if project.archivedAtUnixMillis != nil {
+                    BoundaryCallout(
+                        title: "Archived project",
+                        detail: "Its context remains inspectable and recoverable. Restore it before starting new work."
+                    )
+                }
+
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), spacing: 12)], spacing: 12) {
+                    ProjectMetric(title: "Conversations", value: "\(threads.count)", symbol: "bubble.left.and.bubble.right", tint: Nord.frost1)
+                    ProjectMetric(title: "Needs you", value: "\(attentionCount)", symbol: "person.crop.circle.badge.exclamationmark", tint: attentionCount == 0 ? Nord.auroraGreen : Nord.auroraYellow)
+                    ProjectMetric(title: "Provider runs", value: "\(runs.count)", symbol: "cpu", tint: Nord.frost2)
+                    ProjectMetric(title: "Artifacts", value: "\(artifacts.count)", symbol: "doc.on.doc", tint: Nord.auroraPurple)
+                }
+
+                HStack(alignment: .top, spacing: 14) {
+                    DesktopProjectSection(title: "Execution context", symbol: "scope") {
+                        ProjectContextFact(label: "Default kind", value: project.context.defaultKind.label)
+                        ProjectContextFact(label: "Provider", value: project.context.defaultProvider)
+                        ProjectContextFact(label: "Model", value: project.context.defaultModel)
+                        if let path = project.path {
+                            ProjectContextFact(label: "Primary workspace", value: path, monospaced: true)
+                        }
+                        if workspaces.isEmpty && project.path == nil {
+                            ProjectEmptyContext(text: "No repository or workspace linked")
+                        } else {
+                            ForEach(workspaces) { workspace in
+                                ProjectSourceRow(
+                                    symbol: "externaldrive.fill",
+                                    title: workspace.name,
+                                    detail: "\(workspace.branch) · \(workspace.remoteSummary)",
+                                    status: workspace.status.label
+                                )
+                            }
+                        }
+                    }
+
+                    DesktopProjectSection(title: "Instructions", symbol: "text.book.closed") {
+                        if project.context.instructionReferences.isEmpty {
+                            ProjectEmptyContext(text: "No instruction source linked")
+                        } else {
+                            ForEach(project.context.instructionReferences, id: \.self) { reference in
+                                ProjectSourceRow(
+                                    symbol: "doc.text",
+                                    title: reference,
+                                    detail: "Included deliberately",
+                                    status: "Linked"
+                                )
+                            }
+                        }
+                    }
+                }
+
+                HStack(alignment: .top, spacing: 14) {
+                    DesktopProjectSection(title: "Knowledge", symbol: "books.vertical.fill") {
+                        if knowledgeSources.isEmpty {
+                            ProjectEmptyContext(text: "No knowledge source linked")
+                        } else {
+                            ForEach(knowledgeSources) { source in
+                                ProjectSourceRow(
+                                    symbol: source.kind == .obsidian ? "diamond.fill" : "folder.fill",
+                                    title: source.name,
+                                    detail: source.scope,
+                                    status: source.status.label
+                                )
+                            }
+                        }
+                    }
+
+                    DesktopProjectSection(title: "Skills & tools", symbol: "hammer.fill") {
+                        if skills.isEmpty {
+                            ProjectEmptyContext(text: "No project skill linked")
+                        } else {
+                            ForEach(skills) { skill in
+                                ProjectSourceRow(
+                                    symbol: skill.kind == .hook ? "point.3.connected.trianglepath.dotted" : "hammer",
+                                    title: skill.name,
+                                    detail: skill.scope,
+                                    status: skill.enabled ? "Enabled" : "Disabled"
+                                )
+                            }
+                        }
+                    }
+                }
+
+                DesktopProjectSection(title: "Recent conversations", symbol: "clock.arrow.circlepath") {
+                    if threads.isEmpty {
+                        ProjectEmptyContext(text: "No active conversation in this project")
+                    } else {
+                        ForEach(threads.prefix(8)) { thread in
+                            Button { openThread(thread.id) } label: {
+                                HStack(spacing: 10) {
+                                    Circle().fill(thread.attention.tint).frame(width: 8, height: 8)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(thread.title).font(.subheadline.weight(.semibold)).lineLimit(1)
+                                        Text(thread.summary).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                    }
+                                    Spacer()
+                                    Text(thread.kind.label).font(.caption2).foregroundStyle(.secondary)
+                                    Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary)
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+
+                if project.archivedAtUnixMillis == nil {
+                    Divider()
+                    Button("Archive project", systemImage: "archivebox") { showsArchiveConfirmation = true }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(hasActiveRun ? .secondary : Nord.auroraRed)
+                        .disabled(hasActiveRun)
+                        .help(hasActiveRun ? "Finish or interrupt active runs before archiving" : "Archive this project and its conversations")
+                }
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .background(Nord.polarNight0)
+        .sheet(isPresented: $showsEditor) {
+            DesktopProjectEditor(model: model, project: project)
+        }
+        .confirmationDialog(
+            "Archive \(project.name)?",
+            isPresented: $showsArchiveConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Archive project and conversations", role: .destructive) {
+                model.setProjectArchived(id: project.id, archived: true)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This is recoverable. Linked context remains local and inspectable.")
+        }
+    }
+}
+
+private struct DesktopProjectEditor: View {
+    @ObservedObject var model: DesktopAppModel
+    let project: DesktopProject
+    @Environment(\.dismiss) private var dismiss
+    @State private var name: String
+    @State private var path: String
+    @State private var summary: String
+    @State private var instructionText: String
+    @State private var knowledgeSourceIDs: Set<String>
+    @State private var skillIDs: Set<String>
+    @State private var defaultKind: DesktopWorkKind
+    @State private var defaultProvider: String
+    @State private var defaultModel: String
+    @State private var saveError: String?
+
+    init(model: DesktopAppModel, project: DesktopProject) {
+        self.model = model
+        self.project = project
+        _name = State(initialValue: project.name)
+        _path = State(initialValue: project.path ?? "")
+        _summary = State(initialValue: project.summary)
+        _instructionText = State(initialValue: project.context.instructionReferences.joined(separator: "\n"))
+        _knowledgeSourceIDs = State(initialValue: Set(project.context.knowledgeSourceIDs))
+        _skillIDs = State(initialValue: Set(project.context.skillIDs))
+        _defaultKind = State(initialValue: project.context.defaultKind)
+        _defaultProvider = State(initialValue: project.context.defaultProvider)
+        _defaultModel = State(initialValue: project.context.defaultModel)
+    }
+
+    private var instructions: [String] {
+        instructionText.split(whereSeparator: \Character.isNewline).map(String.init)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Project") {
+                    TextField("Name", text: $name)
+                    TextField("Purpose", text: $summary, axis: .vertical).lineLimit(2...5)
+                    TextField("Primary workspace path", text: $path)
+                }
+
+                Section("Conversation defaults") {
+                    Picker("Kind", selection: $defaultKind) {
+                        ForEach(DesktopWorkKind.allCases, id: \.self) { Text($0.label).tag($0) }
+                    }
+                    TextField("Provider", text: $defaultProvider)
+                    TextField("Model", text: $defaultModel)
+                    Text("Defaults remove setup friction; every run still shows its actual provider, model, context, and authority.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("Instruction references") {
+                    TextEditor(text: $instructionText)
+                        .font(.body.monospaced())
+                        .frame(minHeight: 90)
+                    Text("One repository-relative or deliberately scoped reference per line.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("Knowledge") {
+                    if model.snapshot.domains.knowledgeSources.isEmpty {
+                        Text("No knowledge sources are available.").foregroundStyle(.secondary)
+                    } else {
+                        ForEach(model.snapshot.domains.knowledgeSources) { source in
+                            Toggle(isOn: membership(source.id, in: $knowledgeSourceIDs)) {
+                                VStack(alignment: .leading) {
+                                    Text(source.name)
+                                    Text(source.scope).font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
+                            .accessibilityLabel(source.name)
+                            .accessibilityValue("\(source.kind.label), \(source.scope), \(source.status.label)")
+                        }
+                    }
+                }
+
+                Section("Skills & tools") {
+                    if model.snapshot.domains.skills.isEmpty {
+                        Text("No skills or tools are available.").foregroundStyle(.secondary)
+                    } else {
+                        ForEach(model.snapshot.domains.skills) { skill in
+                            Toggle(isOn: membership(skill.id, in: $skillIDs)) {
+                                VStack(alignment: .leading) {
+                                    Text(skill.name)
+                                    Text("\(skill.kind.label) · \(skill.scope)").font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
+                            .accessibilityLabel(skill.name)
+                            .accessibilityValue("\(skill.kind.label), \(skill.scope), \(skill.enabled ? "enabled" : "disabled")")
+                        }
+                    }
+                }
+
+                Section("Review") {
+                    LabeledContent("Instructions", value: "\(instructions.count)")
+                    LabeledContent("Knowledge sources", value: "\(knowledgeSourceIDs.count)")
+                    LabeledContent("Skills & tools", value: "\(skillIDs.count)")
+                    Text("Saving replaces this project's context selection only. It does not start a provider, read a source, or grant write authority.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if let saveError {
+                        Label(saveError, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(Nord.auroraRed)
+                    }
+                }
+            }
+            .formStyle(.grouped)
+            .frame(width: 720, height: 720)
+            .navigationTitle("Edit \(project.name)")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save context", action: save)
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+    }
+
+    private func membership(_ id: String, in selection: Binding<Set<String>>) -> Binding<Bool> {
+        Binding(
+            get: { selection.wrappedValue.contains(id) },
+            set: { enabled in
+                if enabled { selection.wrappedValue.insert(id) }
+                else { selection.wrappedValue.remove(id) }
+            }
+        )
+    }
+
+    private func save() {
+        let context = DesktopProjectContext(
+            instructionReferences: instructions,
+            knowledgeSourceIDs: Array(knowledgeSourceIDs).sorted(),
+            skillIDs: Array(skillIDs).sorted(),
+            defaultKind: defaultKind,
+            defaultProvider: defaultProvider,
+            defaultModel: defaultModel
+        )
+        if model.updateProject(id: project.id, name: name, path: path, summary: summary, context: context) {
+            dismiss()
+        } else {
+            saveError = "Review the project name, paths, and defaults before saving."
+        }
+    }
+}
+
+private struct DesktopProjectSection<Content: View>: View {
+    let title: String
+    let symbol: String
+    @ViewBuilder let content: Content
+
+    init(title: String, symbol: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.symbol = symbol
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(title, systemImage: symbol).font(.headline)
+            Divider()
+            content
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 15))
+    }
+}
+
+private struct ProjectMetric: View {
+    let title: String
+    let value: String
+    let symbol: String
+    let tint: Color
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: symbol).font(.title2).foregroundStyle(tint).frame(width: 30)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(value).font(.title2.weight(.bold))
+                Text(title).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+        .padding(14)
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+    }
+}
+
+private struct ProjectContextFact: View {
+    let label: String
+    let value: String
+    var monospaced = false
+
+    var body: some View {
+        LabeledContent(label) {
+            Text(value)
+                .font(monospaced ? .caption.monospaced() : .caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        }
+    }
+}
+
+private struct ProjectSourceRow: View {
+    let symbol: String
+    let title: String
+    let detail: String
+    let status: String
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: symbol).foregroundStyle(Nord.frost1).frame(width: 22)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.subheadline.weight(.medium)).lineLimit(1)
+                Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+            }
+            Spacer()
+            Text(status).font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct ProjectEmptyContext: View {
+    let text: String
+
+    var body: some View {
+        Text(text).font(.caption).foregroundStyle(.tertiary).frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -3221,6 +3751,68 @@ private struct DesktopThreadInspector: View {
     }
 }
 
+private struct DesktopProjectInspector: View {
+    @ObservedObject var model: DesktopAppModel
+    let project: DesktopProject
+
+    private var projectThreads: [DesktopThread] {
+        model.snapshot.threads.filter { $0.projectID == project.id }
+    }
+
+    private var lastFreshness: Int64? {
+        let selected = Set(project.context.knowledgeSourceIDs)
+        return model.snapshot.domains.knowledgeSources
+            .filter { selected.contains($0.id) }
+            .compactMap(\.lastReadAtUnixMillis)
+            .max()
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                InspectorTitle(title: "Project context", symbol: "folder.fill")
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(project.name).font(.headline)
+                    Text(project.summary.isEmpty ? "No purpose recorded." : project.summary)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Divider()
+                    InspectorFact(label: "Default kind", value: project.context.defaultKind.label)
+                    InspectorFact(label: "Provider", value: project.context.defaultProvider)
+                    InspectorFact(label: "Model", value: project.context.defaultModel)
+                }
+                .panelStyle()
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Included context").font(.headline)
+                    InspectorStatus(label: "Instructions", value: "\(project.context.instructionReferences.count)", tint: Nord.frost1)
+                    InspectorStatus(label: "Knowledge", value: "\(project.context.knowledgeSourceIDs.count)", tint: Nord.frost2)
+                    InspectorStatus(label: "Skills & tools", value: "\(project.context.skillIDs.count)", tint: Nord.auroraPurple)
+                    InspectorStatus(label: "Conversations", value: "\(projectThreads.count)", tint: Nord.auroraGreen)
+                    if let lastFreshness {
+                        HStack {
+                            Text("Last source read").font(.caption).foregroundStyle(.secondary)
+                            Spacer()
+                            RelativeTime(unixMillis: lastFreshness).font(.caption)
+                        }
+                    }
+                }
+                .panelStyle()
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Boundary").font(.headline)
+                    Text("Only the sources selected here may enter a new project conversation by default. A conversation still shows its exact runtime context and asks separately for consequential authority.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                .panelStyle()
+            }
+            .padding(18)
+        }
+    }
+}
+
 private struct DesktopContextInspector: View {
     let destination: DesktopDestination
     @ObservedObject var model: DesktopAppModel
@@ -3804,6 +4396,13 @@ private struct NewDesktopThreadSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var kind: DesktopWorkKind = .coding
 
+    init(model: DesktopAppModel, projectID: String?, created: @escaping (String) -> Void) {
+        self.model = model
+        self.projectID = projectID
+        self.created = created
+        _kind = State(initialValue: model.project(id: projectID)?.context.defaultKind ?? .coding)
+    }
+
     private var project: DesktopProject? {
         model.project(id: projectID)
     }
@@ -4291,21 +4890,29 @@ private struct QuickActionCard: View {
 private struct ProjectCard: View {
     let project: DesktopProject
     let threads: [DesktopThread]
+    let openProject: () -> Void
     let startConversation: () -> Void
     let openThread: (String) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 13) {
             HStack {
-                Image(systemName: "folder.fill")
-                    .font(.title2)
-                    .foregroundStyle(Nord.frost2)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(project.name).font(.title3.weight(.bold))
-                    Text("\(threads.count) active thread\(threads.count == 1 ? "" : "s")")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                Button(action: openProject) {
+                    HStack(spacing: 12) {
+                        Image(systemName: "folder.fill")
+                            .font(.title2)
+                            .foregroundStyle(Nord.frost2)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(project.name).font(.title3.weight(.bold))
+                            Text("\(threads.count) active thread\(threads.count == 1 ? "" : "s")")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .accessibilityHint("Open project overview")
                 Spacer()
                 Button(action: startConversation) {
                     Image(systemName: "square.and.pencil")
@@ -4317,15 +4924,30 @@ private struct ProjectCard: View {
                 .help("New conversation in \(project.name)")
                 .accessibilityLabel("New conversation in \(project.name)")
             }
-            Text(project.summary.isEmpty ? "No purpose recorded yet." : project.summary)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-            if let path = project.path {
-                Label(path, systemImage: "externaldrive")
-                    .font(.caption.monospaced())
+            Button(action: openProject) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(project.summary.isEmpty ? "No purpose recorded yet." : project.summary)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    if let path = project.path {
+                        Label(path, systemImage: "externaldrive")
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    HStack(spacing: 12) {
+                        Label("\(project.context.knowledgeSourceIDs.count)", systemImage: "books.vertical")
+                        Label("\(project.context.skillIDs.count)", systemImage: "hammer")
+                        Label(project.context.defaultProvider, systemImage: "cpu")
+                    }
+                    .font(.caption2)
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Open \(project.name) project overview")
             Divider()
             if threads.isEmpty {
                 Text("No active work")

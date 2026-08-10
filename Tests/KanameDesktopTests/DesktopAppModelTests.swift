@@ -248,6 +248,69 @@ struct DesktopAppModelTests {
     }
 
     @Test
+    func versionSixWorkspaceAddsDeliberateProjectContext() throws {
+        var versionSix = DesktopAppSnapshot.starter(now: 1_000)
+        versionSix.version = 6
+        let data = try JSONEncoder().encode(versionSix)
+        var json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        var projects = try #require(json["projects"] as? [[String: Any]])
+        projects[0].removeValue(forKey: "context")
+        projects[0].removeValue(forKey: "archivedAtUnixMillis")
+        json["projects"] = projects
+        let store = MemoryDesktopStateStore(data: try JSONSerialization.data(withJSONObject: json))
+
+        let model = DesktopAppModel(store: store, now: { 2_000 })
+        let project = try #require(model.project(id: "project-kaname"))
+
+        #expect(model.snapshot.version == DesktopAppSnapshot.currentVersion)
+        #expect(project.context.instructionReferences == ["AGENTS.md"])
+        #expect(project.context.knowledgeSourceIDs == ["knowledge-coding-ade", "knowledge-kaname-repository"])
+        #expect(project.context.skillIDs == ["skill-mori-review", "skill-obsidian"])
+        #expect(project.archivedAtUnixMillis == nil)
+    }
+
+    @Test
+    func projectContextSearchEditingAndArchiveStayCoherent() throws {
+        let store = MemoryDesktopStateStore()
+        var clock: Int64 = 1_000
+        let model = DesktopAppModel(store: store, now: { clock })
+        let projectID = try #require(
+            model.createProject(name: "Quartz", path: "/tmp/quartz", summary: "Desktop client")
+        )
+        let context = DesktopProjectContext(
+            instructionReferences: [" AGENTS.md ", "Docs/UX.md", "AGENTS.md", ""],
+            knowledgeSourceIDs: ["knowledge-coding-ade", "missing-source"],
+            skillIDs: ["skill-mori-review", "missing-skill"],
+            defaultKind: .planning,
+            defaultProvider: " Codex ",
+            defaultModel: " Use provider default "
+        )
+
+        #expect(model.updateProject(
+            id: projectID,
+            name: "Quartz Desktop",
+            path: "/tmp/quartz-desktop",
+            summary: "Thoughtful native workspace",
+            context: context
+        ))
+        let updated = try #require(model.project(id: projectID))
+        #expect(updated.context.instructionReferences == ["AGENTS.md", "Docs/UX.md"])
+        #expect(updated.context.knowledgeSourceIDs == ["knowledge-coding-ade"])
+        #expect(updated.context.skillIDs == ["skill-mori-review"])
+        #expect(updated.context.defaultKind == .planning)
+        #expect(updated.context.defaultProvider == "Codex")
+        #expect(model.projects(matching: "ux.md").map(\.id) == [projectID])
+
+        clock += 1
+        model.setProjectArchived(id: projectID, archived: true)
+        #expect(!model.activeProjects.contains { $0.id == projectID })
+        #expect(model.projects(matching: "quartz", includeArchived: true).map(\.id) == [projectID])
+
+        model.setProjectArchived(id: projectID, archived: false)
+        #expect(model.activeProjects.contains { $0.id == projectID })
+    }
+
+    @Test
     func searchArchiveAndPrivacyPreferencesRemainCoherent() throws {
         let store = MemoryDesktopStateStore()
         let model = DesktopAppModel(store: store, now: { 1_000 })

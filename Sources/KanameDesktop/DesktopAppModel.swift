@@ -153,12 +153,52 @@ public struct DesktopThread: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+public struct DesktopProjectContext: Codable, Equatable, Sendable {
+    public var instructionReferences: [String]
+    public var knowledgeSourceIDs: [String]
+    public var skillIDs: [String]
+    public var defaultKind: DesktopWorkKind
+    public var defaultProvider: String
+    public var defaultModel: String
+
+    public init(
+        instructionReferences: [String] = [],
+        knowledgeSourceIDs: [String] = [],
+        skillIDs: [String] = [],
+        defaultKind: DesktopWorkKind = .coding,
+        defaultProvider: String = "Codex",
+        defaultModel: String = "Use provider default"
+    ) {
+        self.instructionReferences = instructionReferences
+        self.knowledgeSourceIDs = knowledgeSourceIDs
+        self.skillIDs = skillIDs
+        self.defaultKind = defaultKind
+        self.defaultProvider = defaultProvider
+        self.defaultModel = defaultModel
+    }
+
+    public static let empty = DesktopProjectContext()
+}
+
+private struct DesktopProjectPayload: Decodable {
+    let id: String
+    let name: String
+    let path: String?
+    let summary: String
+    let accent: String?
+    let context: DesktopProjectContext?
+    let archivedAtUnixMillis: Int64?
+    let createdAtUnixMillis: Int64
+}
+
 public struct DesktopProject: Codable, Equatable, Identifiable, Sendable {
     public let id: String
     public var name: String
     public var path: String?
     public var summary: String
     public var accent: String
+    public var context: DesktopProjectContext
+    public var archivedAtUnixMillis: Int64?
     public var createdAtUnixMillis: Int64
 
     public init(
@@ -167,10 +207,27 @@ public struct DesktopProject: Codable, Equatable, Identifiable, Sendable {
         path: String? = nil,
         summary: String,
         accent: String = "frost",
+        context: DesktopProjectContext = .empty,
+        archivedAtUnixMillis: Int64? = nil,
         createdAtUnixMillis: Int64
     ) {
         (self.id, self.name, self.path) = (id, name, path)
-        (self.summary, self.accent, self.createdAtUnixMillis) = (summary, accent, createdAtUnixMillis)
+        (self.summary, self.accent, self.context) = (summary, accent, context)
+        (self.archivedAtUnixMillis, self.createdAtUnixMillis) = (archivedAtUnixMillis, createdAtUnixMillis)
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let payload = try DesktopProjectPayload(from: decoder)
+        self.init(
+            id: payload.id,
+            name: payload.name,
+            path: payload.path,
+            summary: payload.summary,
+            accent: payload.accent ?? "frost",
+            context: payload.context ?? .empty,
+            archivedAtUnixMillis: payload.archivedAtUnixMillis,
+            createdAtUnixMillis: payload.createdAtUnixMillis
+        )
     }
 }
 
@@ -280,7 +337,7 @@ public struct DesktopPreferences: Codable, Equatable, Sendable {
 }
 
 public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
-    public static let currentVersion = 6
+    public static let currentVersion = 7
 
     public var version: Int
     public var projects: [DesktopProject]
@@ -335,6 +392,14 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
             id: "project-kaname",
             name: "Kaname",
             summary: "Local-first personal agent workspace",
+            context: DesktopProjectContext(
+                instructionReferences: ["AGENTS.md"],
+                knowledgeSourceIDs: ["knowledge-coding-ade", "knowledge-kaname-repository"],
+                skillIDs: ["skill-mori-review", "skill-obsidian"],
+                defaultKind: .coding,
+                defaultProvider: "Codex",
+                defaultModel: "Use provider default"
+            ),
             createdAtUnixMillis: now
         )
         return DesktopAppSnapshot(
@@ -428,11 +493,19 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
     }
 
     func migratedToCurrent(now: Int64) throws -> DesktopAppSnapshot {
-        guard (1...5).contains(version) else { throw DesktopModelError.unsupportedVersion }
+        guard (1...6).contains(version) else { throw DesktopModelError.unsupportedVersion }
         var migrated = self
         migrated.version = Self.currentVersion
         if migrated.domains == .empty {
             migrated.domains = .starter(now: now)
+        }
+        if let index = migrated.projects.firstIndex(where: { $0.id == "project-kaname" }),
+           migrated.projects[index].context == .empty {
+            migrated.projects[index].context = DesktopProjectContext(
+                instructionReferences: ["AGENTS.md"],
+                knowledgeSourceIDs: ["knowledge-coding-ade", "knowledge-kaname-repository"],
+                skillIDs: ["skill-mori-review", "skill-obsidian"]
+            )
         }
         migrated.lastSavedAtUnixMillis = now
 
@@ -603,6 +676,18 @@ public final class DesktopAppModel: ObservableObject {
             .sorted { $0.updatedAtUnixMillis > $1.updatedAtUnixMillis }
     }
 
+    public var activeProjects: [DesktopProject] {
+        snapshot.projects
+            .filter { $0.archivedAtUnixMillis == nil }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    public var archivedProjects: [DesktopProject] {
+        snapshot.projects
+            .filter { $0.archivedAtUnixMillis != nil }
+            .sorted { ($0.archivedAtUnixMillis ?? 0) > ($1.archivedAtUnixMillis ?? 0) }
+    }
+
     public func thread(id: String?) -> DesktopThread? {
         guard let id else { return nil }
         return snapshot.threads.first { $0.id == id }
@@ -611,6 +696,18 @@ public final class DesktopAppModel: ObservableObject {
     public func project(id: String?) -> DesktopProject? {
         guard let id else { return nil }
         return snapshot.projects.first { $0.id == id }
+    }
+
+    public func projects(matching query: String, includeArchived: Bool = false) -> [DesktopProject] {
+        let normalized = Self.normalized(query).lowercased()
+        let projects = includeArchived ? archivedProjects : activeProjects
+        guard !normalized.isEmpty else { return projects }
+        return projects.filter { project in
+            project.name.lowercased().contains(normalized)
+                || project.summary.lowercased().contains(normalized)
+                || project.path?.lowercased().contains(normalized) == true
+                || project.context.instructionReferences.contains { $0.lowercased().contains(normalized) }
+        }
     }
 
     public func threads(matching query: String, attention: DesktopAttention? = nil) -> [DesktopThread] {
@@ -719,6 +816,59 @@ public final class DesktopAppModel: ObservableObject {
         )
         mutate { $0.projects.append(project) }
         return project.id
+    }
+
+    @discardableResult
+    public func updateProject(
+        id: String,
+        name: String,
+        path: String?,
+        summary: String,
+        context: DesktopProjectContext
+    ) -> Bool {
+        let cleanName = Self.normalized(name)
+        let cleanSummary = Self.normalized(summary)
+        let cleanPath = path.map(Self.normalized)
+        let instructions = Self.uniqueNormalized(context.instructionReferences, maximumCount: 24, maximumBytes: 1_024)
+        let knowledgeIDs = Set(snapshot.domains.knowledgeSources.map(\.id))
+        let skillIDs = Set(snapshot.domains.skills.map(\.id))
+        let provider = Self.normalized(context.defaultProvider)
+        let model = Self.normalized(context.defaultModel)
+        guard snapshot.projects.contains(where: { $0.id == id }),
+              !cleanName.isEmpty, cleanName.utf8.count <= 120,
+              cleanSummary.utf8.count <= 2_000,
+              cleanPath?.utf8.count ?? 0 <= 4_096,
+              !provider.isEmpty, provider.utf8.count <= 120,
+              !model.isEmpty, model.utf8.count <= 200 else { return false }
+        let sanitizedContext = DesktopProjectContext(
+            instructionReferences: instructions,
+            knowledgeSourceIDs: Self.unique(context.knowledgeSourceIDs.filter(knowledgeIDs.contains)),
+            skillIDs: Self.unique(context.skillIDs.filter(skillIDs.contains)),
+            defaultKind: context.defaultKind,
+            defaultProvider: provider,
+            defaultModel: model
+        )
+        mutate { snapshot in
+            guard let index = snapshot.projects.firstIndex(where: { $0.id == id }) else { return }
+            snapshot.projects[index].name = cleanName
+            snapshot.projects[index].path = cleanPath?.isEmpty == false ? cleanPath : nil
+            snapshot.projects[index].summary = cleanSummary
+            snapshot.projects[index].context = sanitizedContext
+        }
+        return true
+    }
+
+    public func setProjectArchived(id: String, archived: Bool) {
+        mutate { snapshot in
+            guard let index = snapshot.projects.firstIndex(where: { $0.id == id }) else { return }
+            snapshot.projects[index].archivedAtUnixMillis = archived ? now() : nil
+            if archived {
+                for threadIndex in snapshot.threads.indices where snapshot.threads[threadIndex].projectID == id {
+                    snapshot.threads[threadIndex].attention = .archived
+                    snapshot.threads[threadIndex].unread = false
+                }
+            }
+        }
     }
 
     public func updatePreferences(_ preferences: DesktopPreferences) {
@@ -1193,6 +1343,21 @@ public final class DesktopAppModel: ObservableObject {
 
     private static func normalized(_ value: String) -> String {
         value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func unique(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        return values.filter { seen.insert($0).inserted }
+    }
+
+    private static func uniqueNormalized(
+        _ values: [String],
+        maximumCount: Int,
+        maximumBytes: Int
+    ) -> [String] {
+        let values = unique(values.map(normalized).filter { !$0.isEmpty && $0.utf8.count <= maximumBytes })
+        guard values.count > maximumCount else { return values }
+        return Array(values[0..<maximumCount])
     }
 
     private static func provisionalConversationTitle(from firstMessage: String) -> String {
