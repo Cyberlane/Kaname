@@ -61,15 +61,21 @@ public final class AppleCalendarIntegrationService {
     }
 
     nonisolated static func accessState(for status: EKAuthorizationStatus) -> AppleCalendarAccessState {
-        let mapping: [EKAuthorizationStatus: AppleCalendarAccessState] = [
+        let legacyMapping: [EKAuthorizationStatus: AppleCalendarAccessState] = [
             .notDetermined: .notRequested,
             .restricted: .restricted,
             .denied: .denied,
-            .writeOnly: .writeOnly,
-            .fullAccess: .ready,
             .authorized: .ready,
         ]
-        return mapping[status] ?? .unavailable
+        if let mapped = legacyMapping[status] { return mapped }
+        if #available(macOS 14.0, iOS 17.0, *) {
+            let modernMapping: [EKAuthorizationStatus: AppleCalendarAccessState] = [
+                .writeOnly: .writeOnly,
+                .fullAccess: .ready,
+            ]
+            return modernMapping[status] ?? .unavailable
+        }
+        return .unavailable
     }
 }
 #endif

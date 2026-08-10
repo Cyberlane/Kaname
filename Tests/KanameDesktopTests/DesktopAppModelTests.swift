@@ -153,6 +153,35 @@ struct DesktopAppModelTests {
     }
 
     @Test
+    func versionFiveCalendarProposalMigratesWithoutAnExactSource() throws {
+        var versionFive = DesktopAppSnapshot.starter(now: 1_000)
+        versionFive.version = 5
+        versionFive.domains.calendarProposals = [DesktopCalendarProposal(
+            id: "legacy-calendar-proposal",
+            accountID: "google-account",
+            title: "Legacy event",
+            startAtUnixMillis: 2_000,
+            durationMinutes: 30,
+            timeZoneIdentifier: "Asia/Tokyo",
+            recurrence: "Does not repeat",
+            status: .proposed
+        )]
+        var json = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(versionFive)) as? [String: Any])
+        var domains = try #require(json["domains"] as? [String: Any])
+        var proposals = try #require(domains["calendarProposals"] as? [[String: Any]])
+        proposals[0].removeValue(forKey: "calendarSourceID")
+        domains["calendarProposals"] = proposals
+        json["domains"] = domains
+
+        let store = MemoryDesktopStateStore(data: try JSONSerialization.data(withJSONObject: json))
+        let model = DesktopAppModel(store: store, now: { 3_000 })
+
+        #expect(model.snapshot.version == DesktopAppSnapshot.currentVersion)
+        #expect(model.snapshot.domains.calendarProposals.first?.calendarSourceID == nil)
+        #expect(model.snapshot.domains.calendarProposals.first?.title == "Legacy event")
+    }
+
+    @Test
     func searchArchiveAndPrivacyPreferencesRemainCoherent() throws {
         let store = MemoryDesktopStateStore()
         let model = DesktopAppModel(store: store, now: { 1_000 })
@@ -215,6 +244,8 @@ struct DesktopAppModelTests {
         )
         let calendarID = try #require(
             model.createCalendarProposal(
+                accountID: "google-account",
+                calendarSourceID: "google-calendar-primary",
                 title: "Review Kaname",
                 startAtUnixMillis: 10_000,
                 durationMinutes: 30,
@@ -236,7 +267,12 @@ struct DesktopAppModelTests {
         let restored = DesktopAppModel(store: store, now: { 6_000 })
         #expect(restored.snapshot.domains.research.contains { $0.id == researchID })
         #expect(restored.snapshot.domains.emailDrafts.contains { $0.id == emailID && $0.status == .draft })
-        #expect(restored.snapshot.domains.calendarProposals.contains { $0.id == calendarID && $0.status == .proposed })
+        #expect(restored.snapshot.domains.calendarProposals.contains {
+            $0.id == calendarID
+                && $0.status == .proposed
+                && $0.accountID == "google-account"
+                && $0.calendarSourceID == "google-calendar-primary"
+        })
         #expect(restored.snapshot.domains.automations.contains { $0.id == automationID && $0.status == .paused })
     }
 

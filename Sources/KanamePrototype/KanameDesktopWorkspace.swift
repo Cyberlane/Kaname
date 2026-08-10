@@ -1,5 +1,6 @@
 import KanameDesktop
 import KanameConnectivity
+import KanameDomain
 import KanamePrototypeUI
 import Foundation
 import SwiftUI
@@ -78,6 +79,7 @@ private struct DesktopNavigationLocation: Equatable {
 
 struct KanameDesktopWorkspace: View {
     @StateObject private var model = DesktopAppModel()
+    @StateObject private var personalIntegrations = DesktopPersonalIntegrationViewModel()
     @State private var destination: DesktopDestination
     @State private var selectedThreadID: String?
     @State private var searchText = ""
@@ -125,7 +127,7 @@ struct KanameDesktopWorkspace: View {
             NewDesktopProjectSheet(model: model)
         }
         .sheet(isPresented: $showsSettings) {
-            DesktopSettingsView(model: model)
+            DesktopSettingsView(model: model, integrations: personalIntegrations)
         }
         .alert(
             "Local workspace was not saved",
@@ -341,23 +343,23 @@ struct KanameDesktopWorkspace: View {
             case .knowledge:
                 DesktopKnowledgeView(model: model)
             case .email:
-                DesktopEmailView(model: model)
+                DesktopEmailView(model: model, integrations: personalIntegrations)
             case .calendar:
-                DesktopCalendarView(model: model)
+                DesktopCalendarView(model: model, integrations: personalIntegrations)
             case .automations:
                 DesktopAutomationsView(model: model)
             case .github:
-                DesktopGitHubView(model: model)
+                DesktopGitHubView(model: model, integrations: personalIntegrations)
             case .skills:
                 DesktopSkillsView(model: model)
             case .devices:
                 DesktopDevicesView(model: model)
             case .liveCodex:
-                DesktopCodingView(model: model)
+                DesktopCodingView(model: model, integrations: personalIntegrations)
             case .localCore:
                 LocalCoreWorkspace()
             case .settings:
-                DesktopSettingsView(model: model)
+                DesktopSettingsView(model: model, integrations: personalIntegrations)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -1066,6 +1068,215 @@ private final class DesktopLocalReadViewModel: ObservableObject {
     }
 }
 
+@MainActor
+private final class DesktopPersonalIntegrationViewModel: ObservableObject {
+    @Published private(set) var googleAccounts: [ExistingCLIAccountSnapshot] = []
+    @Published private(set) var googleCalendars: [PersonalCalendarSourceSnapshot] = []
+    @Published private(set) var mailThreads: [PersonalMailThreadSnapshot] = []
+    @Published private(set) var githubAccess: GitHubCLIAccessSnapshot?
+    @Published private(set) var providerCapabilities: [ProviderCapabilitySnapshot] = []
+    @Published private(set) var appleAccessState: AppleCalendarAccessState
+    @Published private(set) var isRefreshingGoogle = false
+    @Published private(set) var isRefreshingInbox = false
+    @Published private(set) var isRefreshingGitHub = false
+    @Published private(set) var isRefreshingProviders = false
+    @Published private(set) var isRequestingAppleCalendar = false
+    @Published private(set) var message: String?
+
+    private let integrations = PersonalIntegrationService()
+    private let appleCalendar = AppleCalendarIntegrationService()
+
+    init() {
+        appleAccessState = appleCalendar.accessState
+    }
+
+    func refreshGoogle(model: DesktopAppModel) {
+        guard !isRefreshingGoogle else { return }
+        isRefreshingGoogle = true
+        message = nil
+        _Concurrency.Task {
+            do {
+                let discovered = try await integrations.discoverGoogleAccounts()
+                googleAccounts = discovered
+                let gmailAccounts = discovered.map { accountRecord(for: $0, service: .gmail) }
+                let calendarAccounts = discovered.map { accountRecord(for: $0, service: .googleCalendar) }
+                model.replaceAccounts(
+                    for: [.gmail, .googleCalendar],
+                    with: gmailAccounts + calendarAccounts
+                )
+
+                let identities = discovered.map(\.identity)
+                googleCalendars = try await integrations.listGoogleCalendars(accounts: identities)
+                let googleSources = googleCalendars.map { calendar in
+                    DesktopCalendarSourceRecord.connected(
+                        id: stableID(prefix: "google-calendar", value: "\(calendar.accountIdentity)|\(calendar.externalIdentifier)"),
+                        accountID: stableID(prefix: DesktopAccountRecord.Service.googleCalendar.rawValue, value: calendar.accountIdentity),
+                        externalIdentifier: calendar.externalIdentifier,
+                        provider: .google,
+                        displayName: calendar.name,
+                        ownerIdentity: calendar.accountIdentity,
+                        accessLevel: calendar.role,
+                        isPrimary: calendar.isPrimary,
+                        isEnabled: true
+                    )
+                }
+                let appleSources = model.snapshot.domains.calendarSources.filter { $0.provider == .apple }
+                model.replaceCalendarSources(appleSources + googleSources)
+                message = "Refreshed \(discovered.count) Google account\(discovered.count == 1 ? "" : "s") and \(googleCalendars.count) calendar\(googleCalendars.count == 1 ? "" : "s")."
+            } catch {
+                message = error.localizedDescription
+            }
+            isRefreshingGoogle = false
+        }
+    }
+
+    func refreshInbox(model: DesktopAppModel) {
+        guard !isRefreshingInbox else { return }
+        let identities = model.snapshot.domains.accounts
+            .filter { $0.service == .gmail && $0.status == .ready }
+            .map(\.identity)
+        guard !identities.isEmpty else {
+            message = "Refresh Google accounts before reading the inbox."
+            return
+        }
+        isRefreshingInbox = true
+        message = nil
+        _Concurrency.Task {
+            do {
+                mailThreads = try await integrations.listGoogleInbox(accounts: identities)
+                message = "Read \(mailThreads.count) inbox thread\(mailThreads.count == 1 ? "" : "s") across \(identities.count) account\(identities.count == 1 ? "" : "s")."
+            } catch {
+                message = error.localizedDescription
+            }
+            isRefreshingInbox = false
+        }
+    }
+
+    func refreshGitHub(model: DesktopAppModel) {
+        guard !isRefreshingGitHub else { return }
+        isRefreshingGitHub = true
+        message = nil
+        _Concurrency.Task {
+            do {
+                let access = try await integrations.inspectGitHubAccess()
+                githubAccess = access
+                model.replaceAccounts(
+                    for: [.github],
+                    with: [DesktopAccountRecord(
+                        id: stableID(prefix: DesktopAccountRecord.Service.github.rawValue, value: access.login),
+                        service: .github,
+                        displayName: access.displayName,
+                        identity: access.login,
+                        status: .ready,
+                        scope: "Current gh CLI host and token scope"
+                    )]
+                )
+                message = "GitHub CLI access is ready for @\(access.login)."
+            } catch {
+                message = error.localizedDescription
+            }
+            isRefreshingGitHub = false
+        }
+    }
+
+    func refreshProviders() {
+        guard !isRefreshingProviders else { return }
+        isRefreshingProviders = true
+        message = nil
+        _Concurrency.Task {
+            let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            let definitions: [(String, ProviderDriverKind, String, String)] = [
+                ("codexLocal", .codex, "Codex", "codex"),
+                ("claudeLocal", .claudeAgent, "Claude", "claude"),
+                ("opencodeLocal", .openCode, "OpenCode", "opencode"),
+            ]
+            let prober = ProviderCapabilityProber()
+            var results: [ProviderCapabilitySnapshot] = []
+            for definition in definitions {
+                guard let identifier = ProviderInstanceID(rawValue: definition.0) else { continue }
+                let instance = ProviderInstance(id: identifier, driver: definition.1, displayName: definition.2)
+                results.append(await prober.probe(ProviderProbeConfiguration(
+                    instance: instance,
+                    executable: definition.3,
+                    workingDirectory: directory
+                )))
+            }
+            providerCapabilities = results
+            let ready = results.filter { $0.state == .ready || $0.state == .degraded }.count
+            message = "Refreshed \(results.count) native provider adapter\(results.count == 1 ? "" : "s"); \(ready) available."
+            isRefreshingProviders = false
+        }
+    }
+
+    func requestAppleCalendarAccess(model: DesktopAppModel) {
+        guard !isRequestingAppleCalendar else { return }
+        isRequestingAppleCalendar = true
+        message = nil
+        _Concurrency.Task {
+            do {
+                let calendars = try await appleCalendar.requestAccessAndListCalendars()
+                appleAccessState = appleCalendar.accessState
+                let sourceNames = Array(Set(calendars.map(\.sourceName))).sorted()
+                let accounts = sourceNames.map { sourceName in
+                    DesktopAccountRecord(
+                        id: stableID(prefix: DesktopAccountRecord.Service.appleCalendar.rawValue, value: sourceName),
+                        service: .appleCalendar,
+                        displayName: sourceName,
+                        identity: sourceName,
+                        status: .ready,
+                        scope: "Calendars selected in Kaname settings"
+                    )
+                }
+                model.replaceAccounts(for: [.appleCalendar], with: accounts)
+                let googleSources = model.snapshot.domains.calendarSources.filter { $0.provider == .google }
+                let appleSources = calendars.map { calendar in
+                    DesktopCalendarSourceRecord.connected(
+                        id: stableID(prefix: "apple-calendar", value: calendar.externalIdentifier),
+                        accountID: stableID(prefix: DesktopAccountRecord.Service.appleCalendar.rawValue, value: calendar.sourceName),
+                        externalIdentifier: calendar.externalIdentifier,
+                        provider: .apple,
+                        displayName: calendar.name,
+                        ownerIdentity: calendar.sourceName,
+                        accessLevel: calendar.allowsChanges ? "read and write" : "read only",
+                        isPrimary: false,
+                        isEnabled: true
+                    )
+                }
+                model.replaceCalendarSources(googleSources + appleSources)
+                message = calendars.isEmpty
+                    ? "Apple Calendar access was not granted."
+                    : "Loaded \(calendars.count) Apple calendar\(calendars.count == 1 ? "" : "s")."
+            } catch {
+                appleAccessState = appleCalendar.accessState
+                message = error.localizedDescription
+            }
+            isRequestingAppleCalendar = false
+        }
+    }
+
+    private func accountRecord(
+        for account: ExistingCLIAccountSnapshot,
+        service: DesktopAccountRecord.Service
+    ) -> DesktopAccountRecord {
+        DesktopAccountRecord(
+            id: stableID(prefix: service.rawValue, value: account.identity),
+            service: service,
+            displayName: account.identity,
+            identity: account.identity,
+            status: .ready,
+            scope: account.capabilities.isEmpty ? "Existing zele session" : account.capabilities.joined(separator: ", ")
+        )
+    }
+
+    private func stableID(prefix: String, value: String) -> String {
+        let encoded = Data(value.lowercased().utf8).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        return "\(prefix)-\(encoded)"
+    }
+}
+
 private struct DesktopKnowledgeView: View {
     @ObservedObject var model: DesktopAppModel
     @StateObject private var localReads = DesktopLocalReadViewModel()
@@ -1213,6 +1424,7 @@ private struct DesktopKnowledgeView: View {
 
 private struct DesktopEmailView: View {
     @ObservedObject var model: DesktopAppModel
+    @ObservedObject var integrations: DesktopPersonalIntegrationViewModel
     @State private var showsComposer = false
 
     private var accounts: [DesktopAccountRecord] {
@@ -1224,14 +1436,57 @@ private struct DesktopEmailView: View {
             VStack(alignment: .leading, spacing: 22) {
                 SurfaceHeader(
                     title: "Email",
-                    detail: "Account-isolated drafts, approvals, and reconciled delivery",
+                    detail: "One inbox across your selected Gmail accounts, with account-isolated drafts",
                     symbol: DesktopDestination.email.symbol
                 ) {
-                    Button("New draft", systemImage: "square.and.pencil") { showsComposer = true }
-                        .buttonStyle(.borderedProminent)
+                    ControlGroup {
+                        Button("Refresh inbox", systemImage: "arrow.clockwise") {
+                            integrations.refreshInbox(model: model)
+                        }
+                        .disabled(integrations.isRefreshingInbox || accounts.isEmpty)
+                        Button("New draft", systemImage: "square.and.pencil") { showsComposer = true }
+                    }
+                    .controlGroupStyle(.navigation)
                 }
 
                 AccountStrip(accounts: accounts)
+
+                if integrations.isRefreshingInbox {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text("Reading selected Gmail inboxes…")
+                    }
+                    .panelStyle()
+                } else if !integrations.mailThreads.isEmpty {
+                    SectionHeading(
+                        title: "Unified inbox",
+                        detail: "Each result retains its source account. No message content is committed to the repository."
+                    )
+                    VStack(spacing: 0) {
+                        ForEach(Array(integrations.mailThreads.enumerated()), id: \.element.externalIdentifier) { index, thread in
+                            HStack(alignment: .top, spacing: 12) {
+                                Image(systemName: thread.flags.lowercased().contains("unread") ? "envelope.fill" : "envelope.open")
+                                    .foregroundStyle(Nord.frost0)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    HStack {
+                                        Text(thread.sender).font(.subheadline.weight(.semibold))
+                                        Spacer()
+                                        Text(thread.dateDescription).font(.caption2).foregroundStyle(.secondary)
+                                    }
+                                    Text(thread.subject).font(.subheadline)
+                                    Text(thread.snippet).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                                    Text(thread.accountIdentity)
+                                        .font(.caption2)
+                                        .foregroundStyle(Nord.frost1)
+                                }
+                            }
+                            .padding(.vertical, 12)
+                            if index < integrations.mailThreads.count - 1 { Divider() }
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 15))
+                }
 
                 SectionHeading(
                     title: "Local drafts",
@@ -1289,6 +1544,7 @@ private struct DesktopEmailView: View {
 
 private struct DesktopCalendarView: View {
     @ObservedObject var model: DesktopAppModel
+    @ObservedObject var integrations: DesktopPersonalIntegrationViewModel
     @State private var showsProposal = false
 
     private var accounts: [DesktopAccountRecord] {
@@ -1302,14 +1558,49 @@ private struct DesktopCalendarView: View {
             VStack(alignment: .leading, spacing: 22) {
                 SurfaceHeader(
                     title: "Calendar",
-                    detail: "Source-aware event proposals, time zones, conflicts, and reconciliation",
+                    detail: "Google and Apple calendars with pinned scheduling zones and local-time transparency",
                     symbol: DesktopDestination.calendar.symbol
                 ) {
-                    Button("Propose event", systemImage: "calendar.badge.plus") { showsProposal = true }
-                        .buttonStyle(.borderedProminent)
+                    ControlGroup {
+                        Button("Refresh Google", systemImage: "arrow.clockwise") {
+                            integrations.refreshGoogle(model: model)
+                        }
+                        .disabled(integrations.isRefreshingGoogle)
+                        Button("Propose event", systemImage: "calendar.badge.plus") { showsProposal = true }
+                    }
+                    .controlGroupStyle(.navigation)
                 }
 
                 AccountStrip(accounts: accounts)
+
+                if !model.snapshot.domains.calendarSources.isEmpty {
+                    SectionHeading(
+                        title: "Visible calendars",
+                        detail: "Enable every calendar you want Kaname to show. This selection remains private on this Mac."
+                    )
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 300), spacing: 12)], spacing: 12) {
+                        ForEach(model.snapshot.domains.calendarSources) { source in
+                            HStack(spacing: 12) {
+                                Image(systemName: source.provider == .apple ? "apple.logo" : "g.circle.fill")
+                                    .foregroundStyle(source.isEnabled ? Nord.frost1 : .secondary)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(source.displayName).font(.subheadline.weight(.semibold))
+                                    Text("\(source.ownerIdentity) · \(source.accessLevel)")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
+                                Spacer()
+                                Toggle("Visible", isOn: Binding(
+                                    get: { source.isEnabled },
+                                    set: { model.setCalendarSourceEnabled(id: source.id, enabled: $0) }
+                                ))
+                                .labelsHidden()
+                            }
+                            .panelStyle()
+                        }
+                    }
+                }
 
                 SectionHeading(
                     title: "Event proposals",
@@ -1325,6 +1616,11 @@ private struct DesktopCalendarView: View {
                 } else {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 320), spacing: 14)], spacing: 14) {
                         ForEach(model.snapshot.domains.calendarProposals.sorted { $0.startAtUnixMillis < $1.startAtUnixMillis }) { proposal in
+                            let eventDate = Date(timeIntervalSince1970: Double(proposal.startAtUnixMillis) / 1_000)
+                            let presentation = DesktopTimeZonePresenter.presentation(
+                                for: eventDate,
+                                anchoredTimeZoneIdentifier: proposal.timeZoneIdentifier
+                            )
                             VStack(alignment: .leading, spacing: 11) {
                                 HStack {
                                     Image(systemName: "calendar")
@@ -1334,12 +1630,20 @@ private struct DesktopCalendarView: View {
                                     RecordStatusPill(state: proposal.status)
                                 }
                                 Text(proposal.title).font(.headline)
-                                Text(Date(timeIntervalSince1970: Double(proposal.startAtUnixMillis) / 1_000), style: .date)
-                                Text(Date(timeIntervalSince1970: Double(proposal.startAtUnixMillis) / 1_000), style: .time)
+                                Text(presentation?.anchored ?? eventDate.formatted())
                                     .font(.title3.weight(.semibold))
+                                if presentation?.differsFromViewer == true {
+                                    Text("Here: \(presentation?.viewerLocal ?? "") (\(presentation?.viewerTimeZoneIdentifier ?? ""))")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
                                 Divider()
+                                if let sourceID = proposal.calendarSourceID,
+                                   let source = model.snapshot.domains.calendarSources.first(where: { $0.id == sourceID }) {
+                                    LabeledContent("Calendar", value: "\(source.displayName) · \(source.ownerIdentity)")
+                                }
                                 LabeledContent("Duration", value: "\(proposal.durationMinutes) minutes")
-                                LabeledContent("Time zone", value: proposal.timeZoneIdentifier)
+                                LabeledContent("Pinned zone", value: proposal.timeZoneIdentifier)
                                 LabeledContent("Recurrence", value: proposal.recurrence)
                             }
                             .font(.caption)
@@ -1389,6 +1693,13 @@ private struct DesktopAutomationsView: View {
                 } else {
                     VStack(spacing: 12) {
                         ForEach(model.snapshot.domains.automations) { rule in
+                            let referenceDate = rule.nextRunAtUnixMillis.map {
+                                Date(timeIntervalSince1970: Double($0) / 1_000)
+                            } ?? Date(timeIntervalSince1970: Double(rule.createdAtUnixMillis ?? 0) / 1_000)
+                            let presentation = DesktopTimeZonePresenter.presentation(
+                                for: referenceDate,
+                                anchoredTimeZoneIdentifier: rule.timeZoneIdentifier
+                            )
                             HStack(alignment: .top, spacing: 14) {
                                 Image(systemName: rule.status == .paused ? "pause.circle.fill" : "clock.arrow.2.circlepath")
                                     .font(.title2)
@@ -1404,12 +1715,17 @@ private struct DesktopAutomationsView: View {
                                         .font(.subheadline)
                                         .foregroundStyle(.secondary)
                                     HStack(spacing: 14) {
-                                        Label(rule.timeZoneIdentifier, systemImage: "globe")
+                                        Label("Pinned: \(rule.timeZoneIdentifier)", systemImage: "globe")
                                         Label(rule.missedRunPolicy.label, systemImage: "forward.end")
                                         Label(rule.lastResult, systemImage: "list.bullet.clipboard")
                                     }
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
+                                    if presentation?.differsFromViewer == true {
+                                        Text("Viewer zone: \(presentation?.viewerTimeZoneIdentifier ?? TimeZone.autoupdatingCurrent.identifier)")
+                                            .font(.caption2)
+                                            .foregroundStyle(.tertiary)
+                                    }
                                 }
                                 Spacer()
                                 VStack(alignment: .trailing, spacing: 8) {
@@ -1462,6 +1778,7 @@ private struct DesktopAutomationsView: View {
 
 private struct DesktopGitHubView: View {
     @ObservedObject var model: DesktopAppModel
+    @ObservedObject var integrations: DesktopPersonalIntegrationViewModel
     @StateObject private var localReads = DesktopLocalReadViewModel()
     @State private var showsNewLayer = false
 
@@ -1478,6 +1795,10 @@ private struct DesktopGitHubView: View {
                     symbol: DesktopDestination.github.symbol
                 ) {
                     ControlGroup {
+                        Button("Refresh gh access", systemImage: "person.crop.circle.badge.checkmark") {
+                            integrations.refreshGitHub(model: model)
+                        }
+                        .disabled(integrations.isRefreshingGitHub)
                         Button("Refresh local Git", systemImage: "arrow.clockwise") {
                             if let workspace = model.snapshot.domains.gitWorkspaces.first {
                                 localReads.inspectGit(path: workspace.localPath)
@@ -1660,12 +1981,15 @@ private struct DesktopSkillsView: View {
 
 private struct DesktopCodingView: View {
     @ObservedObject var model: DesktopAppModel
+    @ObservedObject var integrations: DesktopPersonalIntegrationViewModel
     @State private var panel = Panel.overview
     @State private var showsNewComparison = false
 
     private enum Panel: String, CaseIterable, Identifiable {
         case overview
         case codex
+        case claude
+        case openCode
 
         var id: String { rawValue }
 
@@ -1673,6 +1997,8 @@ private struct DesktopCodingView: View {
             switch self {
             case .overview: "Control plane"
             case .codex: "Codex run"
+            case .claude: "Claude"
+            case .openCode: "OpenCode"
             }
         }
     }
@@ -1726,6 +2052,10 @@ private struct DesktopCodingView: View {
                 overview
             case .codex:
                 CodexLiveWorkspace()
+            case .claude:
+                NativeProviderDiscussionView(driver: .claude)
+            case .openCode:
+                NativeProviderDiscussionView(driver: .openCode)
             }
         }
         .background(Nord.polarNight0)
@@ -1739,10 +2069,16 @@ private struct DesktopCodingView: View {
                     detail: "Native provider semantics, isolated workspaces, explicit comparisons, and verified acceptance",
                     symbol: DesktopDestination.liveCodex.symbol
                 ) {
-                    Button("Open Codex run", systemImage: "arrow.right.circle.fill") {
-                        panel = .codex
+                    ControlGroup {
+                        Button("Refresh sessions", systemImage: "arrow.clockwise") {
+                            integrations.refreshProviders()
+                        }
+                        .disabled(integrations.isRefreshingProviders)
+                        Button("Open Codex run", systemImage: "arrow.right.circle.fill") {
+                            panel = .codex
+                        }
                     }
-                    .buttonStyle(.borderedProminent)
+                    .controlGroupStyle(.navigation)
                 }
 
                 SectionHeading(
@@ -1751,7 +2087,12 @@ private struct DesktopCodingView: View {
                 )
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 270), spacing: 14)], spacing: 14) {
                     ForEach(providers) { provider in
-                        ProviderCapabilityCard(provider: provider)
+                        ProviderCapabilityCard(
+                            provider: provider,
+                            snapshot: integrations.providerCapabilities.first {
+                                $0.instance.displayName == provider.name
+                            }
+                        )
                     }
                 }
 
@@ -1886,29 +2227,39 @@ private struct LocalProviderDescriptor: Identifiable {
 
 private struct ProviderCapabilityCard: View {
     let provider: LocalProviderDescriptor
+    let snapshot: ProviderCapabilitySnapshot?
+
+    private var status: DesktopRecordState {
+        guard let snapshot else { return provider.executableURL == nil ? .disconnected : .ready }
+        switch snapshot.state {
+        case .ready, .degraded: return .ready
+        case .authenticationRequired: return .needsReview
+        case .unavailable, .unsupported: return .disconnected
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Image(systemName: "cpu.fill")
-                    .foregroundStyle(provider.executableURL == nil ? .secondary : Nord.frost1)
+                    .foregroundStyle(status == .ready ? Nord.frost1 : .secondary)
                 Text(provider.name).font(.headline)
                 Spacer()
-                RecordStatusPill(state: provider.executableURL == nil ? .disconnected : .ready)
+                RecordStatusPill(state: status)
             }
-            Text(provider.adapter)
+            Text(snapshot.map { "\(provider.adapter) · \($0.state.rawValue)" } ?? provider.adapter)
                 .font(.subheadline.weight(.semibold))
             Text(provider.capabilities)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Divider()
-            Text(provider.executableURL?.path ?? "Executable not found")
+            Text(snapshot?.version.map { "Version \($0)" } ?? provider.executableURL?.path ?? "Executable not found")
                 .font(.system(.caption2, design: .monospaced))
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .help(provider.executableURL?.path ?? "Executable not found")
+                .help(snapshot?.detail ?? provider.executableURL?.path ?? "Executable not found")
         }
         .panelStyle()
     }
@@ -2009,10 +2360,12 @@ private struct DesktopDevicesView: View {
 private struct DesktopSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var model: DesktopAppModel
+    @ObservedObject var integrations: DesktopPersonalIntegrationViewModel
     @State private var draft: DesktopPreferences
 
-    init(model: DesktopAppModel) {
+    init(model: DesktopAppModel, integrations: DesktopPersonalIntegrationViewModel) {
         self.model = model
+        self.integrations = integrations
         _draft = State(initialValue: model.snapshot.preferences)
     }
 
@@ -2029,6 +2382,95 @@ private struct DesktopSettingsView: View {
                     Toggle("Show technical details by default", isOn: $draft.showTechnicalDetails)
                     Toggle("Use compact thread rows", isOn: $draft.compactRows)
                     Toggle("Confirm before archiving", isOn: $draft.confirmBeforeArchiving)
+                }
+
+                SettingsSection(title: "Personal integrations", symbol: "person.crop.circle.badge.checkmark") {
+                    Text("Kaname reuses sessions owned by zele, gh, Codex, Claude, and OpenCode. Tokens stay with those tools; account references and selections stay in Kaname's private Application Support data.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    integrationRow(
+                        title: "Gmail & Google Calendar",
+                        detail: googleIntegrationDetail,
+                        busy: integrations.isRefreshingGoogle,
+                        action: "Refresh zele accounts"
+                    ) {
+                        integrations.refreshGoogle(model: model)
+                    }
+                    integrationRow(
+                        title: "Apple Calendar",
+                        detail: "Permission: \(appleCalendarAccessLabel)",
+                        busy: integrations.isRequestingAppleCalendar,
+                        action: integrations.appleAccessState == .notRequested ? "Request access" : "Refresh calendars"
+                    ) {
+                        integrations.requestAppleCalendarAccess(model: model)
+                    }
+                    integrationRow(
+                        title: "GitHub",
+                        detail: model.snapshot.domains.accounts.first(where: { $0.service == .github })
+                            .map { "Current gh account: @\($0.identity)" } ?? "Uses the account and host available to gh today",
+                        busy: integrations.isRefreshingGitHub,
+                        action: "Refresh gh access"
+                    ) {
+                        integrations.refreshGitHub(model: model)
+                    }
+                    integrationRow(
+                        title: "Coding providers",
+                        detail: providerIntegrationDetail,
+                        busy: integrations.isRefreshingProviders,
+                        action: "Refresh local sessions"
+                    ) {
+                        integrations.refreshProviders()
+                    }
+
+                    if let message = integrations.message {
+                        Text(message)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                }
+
+                if !model.snapshot.domains.calendarSources.isEmpty {
+                    SettingsSection(title: "Calendar selection", symbol: "calendar.badge.checkmark") {
+                        Text("These choices affect Kaname only; they do not hide or delete calendars in Google or Apple Calendar.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        ForEach(model.snapshot.domains.calendarSources) { source in
+                            Toggle(isOn: Binding(
+                                get: { source.isEnabled },
+                                set: { model.setCalendarSourceEnabled(id: source.id, enabled: $0) }
+                            )) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(source.displayName)
+                                    Text("\(source.provider.label) · \(source.ownerIdentity)")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                SettingsSection(title: "Scheduling", symbol: "clock.badge.checkmark") {
+                    TextField("Default IANA time zone", text: $draft.defaultScheduleTimeZoneIdentifier)
+                    HStack {
+                        Button("Use current zone") {
+                            draft.defaultScheduleTimeZoneIdentifier = TimeZone.autoupdatingCurrent.identifier
+                        }
+                        Spacer()
+                        Text("Viewer zone: \(TimeZone.autoupdatingCurrent.identifier)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Text("Recurring schedules stay pinned to this zone's wall clock after travel, including daylight-saving changes. Kaname also shows the equivalent time in your current viewing zone.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if TimeZone(identifier: draft.defaultScheduleTimeZoneIdentifier) == nil {
+                        Label("Enter a valid IANA identifier such as Asia/Tokyo.", systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(Nord.auroraYellow)
+                    }
                 }
 
                 SettingsSection(title: "Notification privacy", symbol: "hand.raised.fill") {
@@ -2079,6 +2521,7 @@ private struct DesktopSettingsView: View {
                         dismiss()
                     }
                         .buttonStyle(.borderedProminent)
+                        .disabled(TimeZone(identifier: draft.defaultScheduleTimeZoneIdentifier) == nil)
                 }
             }
             .padding(24)
@@ -2086,6 +2529,55 @@ private struct DesktopSettingsView: View {
         }
         .background(Nord.polarNight0)
         .frame(minWidth: 700, idealWidth: 820, minHeight: 620, idealHeight: 720)
+    }
+
+    private var googleIntegrationDetail: String {
+        let gmailCount = model.snapshot.domains.accounts.filter { $0.service == .gmail }.count
+        let calendarCount = model.snapshot.domains.calendarSources.filter { $0.provider == .google }.count
+        return gmailCount == 0
+            ? "Uses every account already available to zele"
+            : "\(gmailCount) Gmail account\(gmailCount == 1 ? "" : "s") · \(calendarCount) Google calendar\(calendarCount == 1 ? "" : "s")"
+    }
+
+    private var providerIntegrationDetail: String {
+        guard !integrations.providerCapabilities.isEmpty else {
+            return "Reuses the current Codex, Claude, and OpenCode installations"
+        }
+        let available = integrations.providerCapabilities.filter {
+            $0.state == .ready || $0.state == .degraded
+        }.count
+        return "\(available) of \(integrations.providerCapabilities.count) native adapters available"
+    }
+
+    private var appleCalendarAccessLabel: String {
+        switch integrations.appleAccessState {
+        case .notRequested: "Not requested"
+        case .denied: "Denied"
+        case .restricted: "Restricted"
+        case .writeOnly: "Write only"
+        case .ready: "Ready"
+        case .unavailable: "Unavailable"
+        }
+    }
+
+    @ViewBuilder
+    private func integrationRow(
+        title: String,
+        detail: String,
+        busy: Bool,
+        action: String,
+        perform: @escaping () -> Void
+    ) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).font(.subheadline.weight(.semibold))
+                Text(detail).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            if busy { ProgressView().controlSize(.small) }
+            Button(action, action: perform)
+                .disabled(busy)
+        }
     }
 }
 
@@ -2542,20 +3034,28 @@ private struct NewProviderComparisonSheet: View {
 private struct NewEmailDraftSheet: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var model: DesktopAppModel
+    @State private var selectedAccountID: String?
     @State private var recipients = ""
     @State private var subject = ""
     @State private var draftBody = ""
+
+    init(model: DesktopAppModel) {
+        self.model = model
+        _selectedAccountID = State(initialValue: model.snapshot.domains.accounts.first {
+            $0.service == .gmail && $0.status == .ready
+        }?.id)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("New local email draft")
                 .font(.title2.weight(.bold))
-            HStack(spacing: 8) {
-                Image(systemName: "person.crop.circle.badge.questionmark")
-                Text("No account selected · sending unavailable")
+            Picker("Gmail account", selection: $selectedAccountID) {
+                Text("No account selected").tag(nil as String?)
+                ForEach(model.snapshot.domains.accounts.filter { $0.service == .gmail }) { account in
+                    Text(account.identity).tag(account.id as String?)
+                }
             }
-            .font(.subheadline)
-            .foregroundStyle(Nord.auroraYellow)
             TextField("Recipients (optional while drafting)", text: $recipients)
                 .textFieldStyle(.roundedBorder)
             TextField("Subject", text: $subject)
@@ -2584,7 +3084,7 @@ private struct NewEmailDraftSheet: View {
 
     private func save() {
         guard model.saveEmailDraft(
-            accountID: nil,
+            accountID: selectedAccountID,
             recipients: recipients,
             subject: subject,
             body: draftBody
@@ -2596,11 +3096,19 @@ private struct NewEmailDraftSheet: View {
 private struct NewCalendarProposalSheet: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var model: DesktopAppModel
+    @State private var selectedCalendarSourceID: String?
     @State private var title = ""
     @State private var start = Date().addingTimeInterval(3_600)
     @State private var durationMinutes = 30
-    @State private var timeZoneIdentifier = TimeZone.current.identifier
+    @State private var timeZoneIdentifier: String
     @State private var recurrence = "Does not repeat"
+
+    init(model: DesktopAppModel) {
+        self.model = model
+        let sources = model.snapshot.domains.calendarSources.filter(\.isEnabled)
+        _selectedCalendarSourceID = State(initialValue: sources.first?.id)
+        _timeZoneIdentifier = State(initialValue: model.snapshot.preferences.defaultScheduleTimeZoneIdentifier)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -2610,9 +3118,19 @@ private struct NewCalendarProposalSheet: View {
                 .foregroundStyle(.secondary)
             Form {
                 TextField("Title", text: $title)
+                Picker("Calendar", selection: $selectedCalendarSourceID) {
+                    Text("Choose later").tag(nil as String?)
+                    ForEach(model.snapshot.domains.calendarSources.filter(\.isEnabled)) { source in
+                        Text("\(source.displayName) · \(source.ownerIdentity)").tag(source.id as String?)
+                    }
+                }
                 DatePicker("Start", selection: $start)
+                    .environment(\.timeZone, TimeZone(identifier: timeZoneIdentifier) ?? .autoupdatingCurrent)
                 Stepper("Duration: \(durationMinutes) minutes", value: $durationMinutes, in: 5...1_440, step: 5)
                 TextField("IANA time zone", text: $timeZoneIdentifier)
+                Text("The wall-clock time stays pinned to this zone after travel. Kaname shows the local equivalent elsewhere.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Picker("Recurrence", selection: $recurrence) {
                     Text("Does not repeat").tag("Does not repeat")
                     Text("Daily").tag("Daily")
@@ -2639,7 +3157,12 @@ private struct NewCalendarProposalSheet: View {
     }
 
     private func save() {
+        let source = selectedCalendarSourceID.flatMap { selectedID in
+            model.snapshot.domains.calendarSources.first { $0.id == selectedID }
+        }
         guard model.createCalendarProposal(
+            accountID: source?.accountID,
+            calendarSourceID: source?.id,
             title: title,
             startAtUnixMillis: Int64(start.timeIntervalSince1970 * 1_000),
             durationMinutes: durationMinutes,
@@ -2655,9 +3178,14 @@ private struct NewAutomationSheet: View {
     @ObservedObject var model: DesktopAppModel
     @State private var name = ""
     @State private var schedule = "Every Monday at 09:00"
-    @State private var timeZoneIdentifier = TimeZone.current.identifier
+    @State private var timeZoneIdentifier: String
     @State private var actionSummary = ""
     @State private var missedRunPolicy = DesktopAutomationRule.MissedRunPolicy.skip
+
+    init(model: DesktopAppModel) {
+        self.model = model
+        _timeZoneIdentifier = State(initialValue: model.snapshot.preferences.defaultScheduleTimeZoneIdentifier)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -2669,6 +3197,9 @@ private struct NewAutomationSheet: View {
                 TextField("Name", text: $name)
                 TextField("Human schedule or cron expression", text: $schedule)
                 TextField("IANA time zone", text: $timeZoneIdentifier)
+                Text("Pinned wall-clock zone. Travel changes the displayed local equivalent, not when the rule runs in this zone.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 TextField("What should happen?", text: $actionSummary, axis: .vertical)
                     .lineLimit(3...7)
                 Picker("Missed run", selection: $missedRunPolicy) {
@@ -3336,7 +3867,7 @@ private struct RemoteTimelineRow: View {
     }
 }
 
-private struct BoundaryCallout: View {
+struct BoundaryCallout: View {
     let title: String
     let detail: String
 
@@ -3458,7 +3989,7 @@ private struct DesktopMessageBubble: View {
     }
 }
 
-private struct SurfaceHeader<Actions: View>: View {
+struct SurfaceHeader<Actions: View>: View {
     let title: String
     let detail: String
     let symbol: String
@@ -3597,7 +4128,7 @@ private struct SettingsSection<Content: View>: View {
     }
 }
 
-private extension View {
+extension View {
     func panelStyle() -> some View {
         padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)

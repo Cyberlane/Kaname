@@ -211,9 +211,55 @@ struct ProviderConnectivityTests {
         #expect(AppleCalendarIntegrationService.accessState(for: .notDetermined) == .notRequested)
         #expect(AppleCalendarIntegrationService.accessState(for: .denied) == .denied)
         #expect(AppleCalendarIntegrationService.accessState(for: .restricted) == .restricted)
-        #expect(AppleCalendarIntegrationService.accessState(for: .fullAccess) == .ready)
+        if #available(macOS 14.0, *) {
+            #expect(AppleCalendarIntegrationService.accessState(for: .fullAccess) == .ready)
+        }
     }
 #endif
+
+    @Test
+    func nativeProviderDiscussionParsesClaudeAndOpenCodeResponses() throws {
+        let claude = try NativeProviderDiscussionService.parse(
+            driver: .claude,
+            output: #"{"result":"Plan safely.","session_id":"claude-session"}"#
+        )
+        #expect(claude.text == "Plan safely.")
+        #expect(claude.sessionIdentifier == "claude-session")
+
+        let openCode = try NativeProviderDiscussionService.parse(
+            driver: .openCode,
+            output: """
+            {"type":"step_start","sessionID":"open-session"}
+            {"type":"text","part":{"text":"First step."}}
+            {"type":"text","part":{"text":"Second step."}}
+            """
+        )
+        #expect(openCode.text == "First step.\nSecond step.")
+        #expect(openCode.sessionIdentifier == "open-session")
+    }
+
+    @Test
+    func nativeProviderDiscussionUsesPlanModeWithoutAutoApproval() async throws {
+        let executable = try makeFixtureExecutable("""
+        #!/bin/sh
+        for argument in "$@"; do
+          if [ "$argument" = "--auto" ]; then
+            exit 99
+          fi
+        done
+        printf '%s\\n' '{"type":"text","sessionID":"fixture","part":{"text":"Plan only."}}'
+        """)
+        defer { try? FileManager.default.removeItem(at: executable.deletingLastPathComponent()) }
+
+        let result = try await NativeProviderDiscussionService(timeout: .seconds(2)).run(
+            driver: .openCode,
+            prompt: "Review only",
+            workspace: executable.deletingLastPathComponent(),
+            executable: executable.path
+        )
+        #expect(result.text == "Plan only.")
+        #expect(result.sessionIdentifier == "fixture")
+    }
 
     private func makeFixtureExecutable(_ source: String) throws -> URL {
         let directory = FileManager.default.temporaryDirectory

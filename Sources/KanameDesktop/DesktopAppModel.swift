@@ -276,7 +276,7 @@ public struct DesktopPreferences: Codable, Equatable, Sendable {
 }
 
 public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
-    public static let currentVersion = 5
+    public static let currentVersion = 6
 
     public var version: Int
     public var projects: [DesktopProject]
@@ -424,7 +424,7 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
     }
 
     func migratedToCurrent(now: Int64) throws -> DesktopAppSnapshot {
-        guard (1...4).contains(version) else { throw DesktopModelError.unsupportedVersion }
+        guard (1...5).contains(version) else { throw DesktopModelError.unsupportedVersion }
         var migrated = self
         migrated.version = Self.currentVersion
         if migrated.domains == .empty {
@@ -790,6 +790,7 @@ public final class DesktopAppModel: ObservableObject {
     @discardableResult
     public func createCalendarProposal(
         accountID: String? = nil,
+        calendarSourceID: String? = nil,
         title: String,
         startAtUnixMillis: Int64,
         durationMinutes: Int,
@@ -803,6 +804,7 @@ public final class DesktopAppModel: ObservableObject {
         let proposal = DesktopCalendarProposal(
             id: UUID().uuidString.lowercased(),
             accountID: accountID,
+            calendarSourceID: calendarSourceID,
             title: cleanTitle,
             startAtUnixMillis: startAtUnixMillis,
             durationMinutes: durationMinutes,

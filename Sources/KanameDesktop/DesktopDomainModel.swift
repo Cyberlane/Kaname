@@ -89,6 +89,18 @@ public struct DesktopAccountRecord: Codable, Equatable, Identifiable, Sendable {
     public var identity: String
     public var status: DesktopRecordState
     public var scope: String
+
+    public init(
+        id: String,
+        service: Service,
+        displayName: String,
+        identity: String,
+        status: DesktopRecordState,
+        scope: String
+    ) {
+        (self.id, self.service, self.displayName, self.identity, self.status, self.scope) =
+            (id, service, displayName, identity, status, scope)
+    }
 }
 
 public struct DesktopCalendarSourceRecord: Codable, Equatable, Identifiable, Sendable {
@@ -108,6 +120,30 @@ public struct DesktopCalendarSourceRecord: Codable, Equatable, Identifiable, Sen
     public var accessLevel: String
     public var isPrimary: Bool
     public var isEnabled: Bool
+
+    public static func connected(
+        id: String,
+        accountID: String,
+        externalIdentifier: String,
+        provider: Provider,
+        displayName: String,
+        ownerIdentity: String,
+        accessLevel: String,
+        isPrimary: Bool,
+        isEnabled: Bool
+    ) -> Self {
+        Self(
+            id: id,
+            accountID: accountID,
+            externalIdentifier: externalIdentifier,
+            provider: provider,
+            displayName: displayName,
+            ownerIdentity: ownerIdentity,
+            accessLevel: accessLevel,
+            isPrimary: isPrimary,
+            isEnabled: isEnabled
+        )
+    }
 }
 
 public struct DesktopEmailDraft: Codable, Equatable, Identifiable, Sendable {
@@ -123,12 +159,14 @@ public struct DesktopEmailDraft: Codable, Equatable, Identifiable, Sendable {
 public struct DesktopCalendarProposal: Codable, Equatable, Identifiable, Sendable {
     public let id: String
     public var accountID: String?
+    public var calendarSourceID: String?
     public var title: String
     public var startAtUnixMillis: Int64
     public var durationMinutes: Int
     public var timeZoneIdentifier: String
     public var recurrence: String
     public var status: DesktopRecordState
+
 }
 
 public struct DesktopAutomationRule: Codable, Equatable, Identifiable, Sendable {
