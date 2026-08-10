@@ -2,6 +2,9 @@ import Foundation
 import Testing
 @testable import KanameConnectivity
 @testable import KanameDomain
+#if canImport(EventKit)
+import EventKit
+#endif
 
 struct ProviderConnectivityTests {
     @Test
@@ -139,5 +142,86 @@ struct ProviderConnectivityTests {
         #expect(!inspection.branch.isEmpty)
         #expect(inspection.head.count == 12)
         #expect(!inspection.wasTruncated)
+    }
+
+    @Test
+    func flatZeleOutputPreservesAccountScopedMailAndCalendarFields() throws {
+        let parsed = try FlatYAMLListParser.parse(
+            """
+            summary: 2 threads (inbox)
+            items:
+              - account: first@example.test
+                id: thread-1
+                subject: 'It''s ready: review'
+                messages: 3
+              - account: second@example.test
+                id: thread-2
+                subject: Another account
+                messages: 1
+            """
+        )
+
+        #expect(parsed.count == 2)
+        #expect(parsed[0]["account"] == "first@example.test")
+        #expect(parsed[0]["subject"] == "It's ready: review")
+        #expect(parsed[1]["id"] == "thread-2")
+    }
+
+    @Test
+    func personalIntegrationDiscoversEveryExistingCLIAccountWithoutTokens() async throws {
+        let executable = try makeFixtureExecutable(
+            """
+            #!/bin/sh
+            printf '%s\n' \\
+              'summary: 4 account(s)' \\
+              'items:' \\
+              '  - email: one@example.test' \\
+              '    type: google' \\
+              "    capabilities: 'gmail, calendar'" \\
+              '    status: Authenticated' \\
+              '  - email: two@example.test' \\
+              '    type: google' \\
+              "    capabilities: 'gmail, calendar'" \\
+              '    status: Authenticated' \\
+              '  - email: three@example.test' \\
+              '    type: google' \\
+              "    capabilities: 'gmail, calendar'" \\
+              '    status: Authenticated' \\
+              '  - email: four@example.test' \\
+              '    type: google' \\
+              "    capabilities: 'gmail, calendar'" \\
+              '    status: Authenticated'
+            """
+        )
+        defer { try? FileManager.default.removeItem(at: executable.deletingLastPathComponent()) }
+
+        let accounts = try await PersonalIntegrationService(timeout: .seconds(2))
+            .discoverGoogleAccounts(executable: executable.path)
+
+        #expect(accounts.count == 4)
+        #expect(accounts.map(\.identity) == [
+            "one@example.test", "two@example.test", "three@example.test", "four@example.test",
+        ])
+        #expect(accounts.allSatisfy { $0.capabilities == ["gmail", "calendar"] })
+    }
+
+#if canImport(EventKit)
+    @Test
+    func appleCalendarAuthorizationMapsWithoutRequestingPermission() {
+        #expect(AppleCalendarIntegrationService.accessState(for: .notDetermined) == .notRequested)
+        #expect(AppleCalendarIntegrationService.accessState(for: .denied) == .denied)
+        #expect(AppleCalendarIntegrationService.accessState(for: .restricted) == .restricted)
+        #expect(AppleCalendarIntegrationService.accessState(for: .fullAccess) == .ready)
+    }
+#endif
+
+    private func makeFixtureExecutable(_ source: String) throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kaname-integration-fixture-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let executable = directory.appendingPathComponent("connector")
+        try Data(source.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        return executable
     }
 }

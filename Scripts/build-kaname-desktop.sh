@@ -77,6 +77,7 @@ plutil -replace LSMinimumSystemVersion -string 14.0 "$info_plist"
 plutil -replace NSPrincipalClass -string NSApplication "$info_plist"
 plutil -replace NSHighResolutionCapable -bool YES "$info_plist"
 plutil -replace NSSupportsAutomaticGraphicsSwitching -bool YES "$info_plist"
+plutil -replace NSCalendarsFullAccessUsageDescription -string "Kaname reads the calendars you select and changes events only after an exact in-app approval." "$info_plist"
 plutil -replace KanameLocalCoreMachService -string "$service_identifier" "$info_plist"
 plutil -replace KanameLocalCoreServiceRequirement -string "$service_requirement" "$info_plist"
 
