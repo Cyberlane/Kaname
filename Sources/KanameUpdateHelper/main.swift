@@ -55,7 +55,7 @@ private enum KanameUpdateHelper {
         } catch {
             try? FileManager.default.removeItem(at: installed)
             try FileManager.default.moveItem(at: backup, to: installed)
-            try launch(installed)
+            try launchRestoredExecutable(in: installed)
             try writeReceipt(.rolledBack, detail: "The candidate missed its health deadline. Kaname restored the previous bundle.", to: receipt)
             throw error
         }
@@ -74,7 +74,7 @@ private enum KanameUpdateHelper {
         try FileManager.default.moveItem(at: installed, to: replaced)
         try FileManager.default.moveItem(at: backup, to: installed)
         try? FileManager.default.removeItem(at: health)
-        try launch(installed)
+        try launchRestoredExecutable(in: installed)
         try waitForHealth(at: health, version: nil, build: nil, timeout: timeout)
         try writeReceipt(.rolledBack, detail: "The previous Kaname bundle is active.", to: receipt)
     }
@@ -93,7 +93,10 @@ private enum KanameUpdateHelper {
     }
 
     private static func launch(_ app: URL) throws {
-        let arguments = ["/usr/bin/open", app.path]
+        // Force Launch Services to instantiate the bundle now. During rollback
+        // the restored app has the same identifier and path as the just-failed
+        // candidate, which can otherwise be treated as an already-known launch.
+        let arguments = ["/usr/bin/open", "-n", app.path]
         let storage = arguments.map { strdup($0) }
         defer { storage.forEach { free($0) } }
         var argv = storage + [nil]
@@ -103,6 +106,25 @@ private enum KanameUpdateHelper {
         }
         var status: Int32 = 0
         guard waitpid(child, &status, 0) == child, status == 0 else {
+            throw UpdateHelperError.launchFailed
+        }
+    }
+
+    private static func launchRestoredExecutable(in app: URL) throws {
+        let info = app.appending(path: "Contents/Info.plist")
+        guard let dictionary = NSDictionary(contentsOf: info),
+              let executableName = dictionary["CFBundleExecutable"] as? String,
+              !executableName.isEmpty,
+              !executableName.contains("/") else { throw UpdateHelperError.launchFailed }
+        let executable = app.appending(path: "Contents/MacOS/\(executableName)").standardizedFileURL
+        guard executable.path.hasPrefix(app.standardizedFileURL.path + "/"),
+              FileManager.default.isExecutableFile(atPath: executable.path) else {
+            throw UpdateHelperError.launchFailed
+        }
+        var argv: [UnsafeMutablePointer<CChar>?] = [strdup(executable.path), nil]
+        defer { free(argv[0]) }
+        var child: pid_t = 0
+        guard posix_spawn(&child, executable.path, nil, nil, &argv, environ) == 0 else {
             throw UpdateHelperError.launchFailed
         }
     }
