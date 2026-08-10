@@ -42,6 +42,15 @@ private enum DesktopDestination: String, CaseIterable, Identifiable {
         case .settings: "gearshape.fill"
         }
     }
+
+    var keepsThreadSelection: Bool {
+        self == .home || self == .threads || self == .inbox
+    }
+}
+
+private struct DesktopNavigationLocation: Equatable {
+    let destination: DesktopDestination
+    let selectedThreadID: String?
 }
 
 struct KanameDesktopWorkspace: View {
@@ -52,17 +61,28 @@ struct KanameDesktopWorkspace: View {
     @State private var inboxFilter: DesktopAttention? = nil
     @State private var showsNewThread = false
     @State private var showsNewProject = false
+    @State private var navigationHistory: [DesktopNavigationLocation] = []
 
     init() {
         let arguments = CommandLine.arguments
         let requestedDestination = arguments.firstIndex(of: "--desktop-destination")
             .flatMap { arguments.indices.contains($0 + 1) ? DesktopDestination(rawValue: arguments[$0 + 1]) : nil }
             ?? .home
+        let requestedBackDestination = arguments.firstIndex(of: "--desktop-back-target")
+            .flatMap { arguments.indices.contains($0 + 1) ? DesktopDestination(rawValue: arguments[$0 + 1]) : nil }
         _destination = State(initialValue: requestedDestination)
         _selectedThreadID = State(
             initialValue: [.home, .threads, .inbox].contains(requestedDestination)
                 ? "thread-desktop-dogfood"
                 : nil
+        )
+        _navigationHistory = State(
+            initialValue: requestedBackDestination.map {
+                [DesktopNavigationLocation(
+                    destination: $0,
+                    selectedThreadID: $0.keepsThreadSelection ? "thread-desktop-dogfood" : nil
+                )]
+            } ?? []
         )
     }
 
@@ -78,10 +98,10 @@ struct KanameDesktopWorkspace: View {
         }
         .navigationSplitViewStyle(.balanced)
         .background(Nord.polarNight0)
+        .background(MouseBackButtonHandler(action: goBack))
         .sheet(isPresented: $showsNewThread) {
             NewDesktopThreadSheet(model: model) { threadID in
-                selectedThreadID = threadID
-                destination = .threads
+                openThread(threadID)
             }
         }
         .sheet(isPresented: $showsNewProject) {
@@ -136,8 +156,7 @@ struct KanameDesktopWorkspace: View {
 
             Divider()
             Button {
-                destination = .settings
-                selectedThreadID = nil
+                navigate(to: .settings)
             } label: {
                 HStack {
                     Label("Settings", systemImage: DesktopDestination.settings.symbol)
@@ -159,10 +178,7 @@ struct KanameDesktopWorkspace: View {
 
     private func destinationButton(_ item: DesktopDestination, count: Int? = nil) -> some View {
         Button {
-            destination = item
-            if item != .threads && item != .inbox && item != .home {
-                selectedThreadID = nil
-            }
+            navigate(to: item)
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: item.symbol)
@@ -197,20 +213,20 @@ struct KanameDesktopWorkspace: View {
                     model: model,
                     searchText: searchText,
                     openThread: openThread,
-                    openDestination: { destination = $0 }
+                    openDestination: navigate
                 )
             case .threads:
                 DesktopThreadsView(
                     model: model,
                     searchText: searchText,
-                    selectedThreadID: $selectedThreadID
+                    selectedThreadID: threadSelection
                 )
             case .inbox:
                 DesktopInboxView(
                     model: model,
                     searchText: searchText,
                     filter: $inboxFilter,
-                    selectedThreadID: $selectedThreadID
+                    selectedThreadID: threadSelection
                 )
             case .projects:
                 DesktopProjectsView(model: model, createProject: { showsNewProject = true }, openThread: openThread)
@@ -238,6 +254,18 @@ struct KanameDesktopWorkspace: View {
 
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
+        if let backTitle {
+            ToolbarItem(placement: .navigation) {
+                Button {
+                    _ = goBack()
+                } label: {
+                    Label("Back to \(backTitle)", systemImage: "chevron.left")
+                }
+                .keyboardShortcut("[", modifiers: .command)
+                .help("Back to \(backTitle)")
+            }
+        }
+
         ToolbarItem(placement: .primaryAction) {
             Button {
                 showsNewThread = true
@@ -251,8 +279,8 @@ struct KanameDesktopWorkspace: View {
             Menu {
                 Button("New project") { showsNewProject = true }
                 Divider()
-                Button("Open Devices & Remote") { destination = .devices }
-                Button("Open Codex Workspace") { destination = .liveCodex }
+                Button("Open Devices & Remote") { navigate(to: .devices) }
+                Button("Open Codex Workspace") { navigate(to: .liveCodex) }
             } label: {
                 Label("More", systemImage: "ellipsis.circle")
             }
@@ -260,9 +288,70 @@ struct KanameDesktopWorkspace: View {
     }
 
     private func openThread(_ threadID: String) {
-        selectedThreadID = threadID
-        destination = .threads
+        visit(DesktopNavigationLocation(destination: .threads, selectedThreadID: threadID))
         model.markRead(threadID: threadID)
+    }
+
+    private var currentLocation: DesktopNavigationLocation {
+        DesktopNavigationLocation(destination: destination, selectedThreadID: selectedThreadID)
+    }
+
+    private var threadSelection: Binding<String?> {
+        Binding(
+            get: { selectedThreadID },
+            set: { threadID in
+                visit(DesktopNavigationLocation(destination: destination, selectedThreadID: threadID))
+                if let threadID { model.markRead(threadID: threadID) }
+            }
+        )
+    }
+
+    private var backTitle: String? {
+        guard let location = navigationHistory.last else { return nil }
+        if location.destination == destination,
+           let thread = model.thread(id: location.selectedThreadID) {
+            return thread.title
+        }
+        return location.destination.title
+    }
+
+    private func navigate(to target: DesktopDestination) {
+        visit(
+            DesktopNavigationLocation(
+                destination: target,
+                selectedThreadID: target.keepsThreadSelection ? selectedThreadID : nil
+            )
+        )
+    }
+
+    private func visit(_ target: DesktopNavigationLocation) {
+        let current = currentLocation
+        guard target != current else { return }
+        if navigationHistory.last != current {
+            navigationHistory.append(current)
+            if navigationHistory.count > 100 {
+                navigationHistory.removeFirst(navigationHistory.count - 100)
+            }
+        }
+        apply(target)
+    }
+
+    private func apply(_ target: DesktopNavigationLocation) {
+        destination = target.destination
+        selectedThreadID = target.selectedThreadID
+    }
+
+    @discardableResult
+    private func goBack() -> Bool {
+        while let target = navigationHistory.popLast() {
+            guard target != currentLocation else { continue }
+            apply(target)
+            if let threadID = target.selectedThreadID {
+                model.markRead(threadID: threadID)
+            }
+            return true
+        }
+        return false
     }
 }
 

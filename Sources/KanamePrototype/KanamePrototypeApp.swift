@@ -35,6 +35,7 @@ struct KanamePrototypeApp: App {
 @MainActor
 final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
     private var fallbackWindow: NSWindow?
+    private var postedMouseBackEvent = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         DispatchQueue.main.async { [weak self] in
@@ -55,6 +56,7 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
             existing.sharingType = .readOnly
             existing.makeKeyAndOrderFront(nil)
             NSApplication.shared.activate(ignoringOtherApps: true)
+            postMouseBackEventIfRequested(to: existing)
             captureSnapshotIfRequested(window: existing)
             return
         }
@@ -73,7 +75,24 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
         window.makeKeyAndOrderFront(nil)
         fallbackWindow = window
         NSApplication.shared.activate(ignoringOtherApps: true)
+        postMouseBackEventIfRequested(to: window)
         captureSnapshotIfRequested(window: window)
+    }
+
+    private func postMouseBackEventIfRequested(to window: NSWindow) {
+        guard CommandLine.arguments.contains("--post-mouse-back"), !postedMouseBackEvent else { return }
+        postedMouseBackEvent = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            guard let button = CGMouseButton(rawValue: 3),
+                  let event = CGEvent(
+                    mouseEventSource: nil,
+                    mouseType: .otherMouseUp,
+                    mouseCursorPosition: CGPoint(x: window.frame.midX, y: window.frame.midY),
+                    mouseButton: button
+                  ),
+                  let nativeEvent = NSEvent(cgEvent: event) else { return }
+            NSApplication.shared.postEvent(nativeEvent, atStart: false)
+        }
     }
 
     private func captureSnapshotIfRequested(window: NSWindow) {
@@ -594,7 +613,7 @@ private struct ScheduleFixtureCard: View {
 }
 
 #if os(macOS)
-private struct MouseBackButtonHandler: NSViewRepresentable {
+struct MouseBackButtonHandler: NSViewRepresentable {
     let action: () -> Bool
 
     func makeCoordinator() -> Coordinator {
@@ -630,7 +649,7 @@ private struct MouseBackButtonHandler: NSViewRepresentable {
     }
 }
 #else
-private struct MouseBackButtonHandler: View {
+struct MouseBackButtonHandler: View {
     let action: () -> Bool
 
     var body: some View {

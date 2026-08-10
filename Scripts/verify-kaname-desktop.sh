@@ -21,8 +21,17 @@ launchctl print "gui/$(id -u)/$service_identifier" >/dev/null
 mkdir -p "$output_directory"
 "$executable" --desktop-destination home --snapshot "$output_directory/home.png"
 "$executable" --desktop-destination localCore --load-local-core --snapshot "$output_directory/local-core.png"
+"$executable" \
+    --desktop-destination settings \
+    --desktop-back-target home \
+    --post-mouse-back \
+    --snapshot "$output_directory/mouse-back.png"
 
-for snapshot in "$output_directory/home.png" "$output_directory/local-core.png"; do
+for snapshot in \
+    "$output_directory/home.png" \
+    "$output_directory/local-core.png" \
+    "$output_directory/mouse-back.png"
+do
     [[ -s "$snapshot" ]]
     [[ "$(stat -f %z "$snapshot")" -gt 100000 ]]
 done
