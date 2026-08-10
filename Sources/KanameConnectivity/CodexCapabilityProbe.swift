@@ -93,10 +93,7 @@ actor CodexAppServerConnection {
     }
 
     static func start(configuration: ProviderProbeConfiguration) async throws -> CodexAppServerConnection {
-        var environment: [String: String] = [:]
-        if let home = configuration.codexHome {
-            environment["CODEX_HOME"] = home.path()
-        }
+        let environment = processEnvironment(codexHome: configuration.codexHome)
 
         let process = try LocalProcess.start(
             executable: configuration.executable,
@@ -108,6 +105,10 @@ actor CodexAppServerConnection {
         let connection = CodexAppServerConnection(process: process)
         await connection.beginReading()
         return connection
+    }
+
+    static func processEnvironment(codexHome: URL?) -> [String: String] {
+        codexHome.map { ["CODEX_HOME": $0.path] } ?? [:]
     }
 
     func request(
@@ -543,7 +544,7 @@ enum CodexCapabilityProbe {
     ) async throws -> [String] {
         let response = try await object(connection.request(
             method: "skills/list",
-            parameters: ["cwds": [workingDirectory.path()]],
+            parameters: ["cwds": [workingDirectory.path]],
             timeout: timeout
         ))
         let entries = response["data"] as? [[String: Any]] ?? []

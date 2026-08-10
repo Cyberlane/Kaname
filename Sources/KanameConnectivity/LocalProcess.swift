@@ -71,15 +71,15 @@ final class RunningLocalProcess: @unchecked Sendable {
 
     fileprivate init(
         process: Process,
-        standardInput: FileHandle,
-        standardOutput: FileHandle,
-        standardError: FileHandle,
+        input: Pipe,
+        output: Pipe,
+        error: Pipe,
         exitLatch: ProcessExitLatch
     ) {
         self.process = process
-        self.standardInput = standardInput
-        self.standardOutput = standardOutput
-        self.standardError = standardError
+        standardInput = input.fileHandleForWriting
+        standardOutput = output.fileHandleForReading
+        standardError = error.fileHandleForReading
         self.exitLatch = exitLatch
     }
 
@@ -103,6 +103,12 @@ final class RunningLocalProcess: @unchecked Sendable {
 }
 
 enum LocalProcess {
+    private static let standardUserExecutableDirectories = [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin").path,
+    ]
+
     static func resolveExecutable(named requested: String, environment: [String: String] = ProcessInfo.processInfo.environment) -> URL? {
         let expanded = (requested as NSString).expandingTildeInPath
         if expanded.contains("/") {
@@ -111,10 +117,11 @@ enum LocalProcess {
                 : nil
         }
 
-        let searchPath = environment["PATH"]?.split(separator: ":").map(String.init) ?? []
-        for directory in searchPath {
+        let environmentPath = environment["PATH"]?.split(separator: ":").map(String.init) ?? []
+        var seen = Set<String>()
+        for directory in (environmentPath + standardUserExecutableDirectories) where seen.insert(directory).inserted {
             let candidate = URL(fileURLWithPath: directory).appending(path: expanded)
-            if FileManager.default.isExecutableFile(atPath: candidate.path()) {
+            if FileManager.default.isExecutableFile(atPath: candidate.path) {
                 return candidate
             }
         }
@@ -147,6 +154,7 @@ enum LocalProcess {
         for name in environmentRemovals {
             environment.removeValue(forKey: name)
         }
+        environment["PATH"] = childSearchPath(executableURL: executableURL, environment: environment)
         process.environment = environment
         let exitLatch = ProcessExitLatch()
         process.terminationHandler = { _ in
@@ -161,11 +169,20 @@ enum LocalProcess {
 
         return RunningLocalProcess(
             process: process,
-            standardInput: input.fileHandleForWriting,
-            standardOutput: output.fileHandleForReading,
-            standardError: error.fileHandleForReading,
+            input: input,
+            output: output,
+            error: error,
             exitLatch: exitLatch
         )
+    }
+
+    static func childSearchPath(executableURL: URL, environment: [String: String]) -> String {
+        let inherited = environment["PATH"]?.split(separator: ":").map(String.init) ?? []
+        let candidates = [executableURL.deletingLastPathComponent().path]
+            + standardUserExecutableDirectories
+            + inherited
+        var seen = Set<String>()
+        return candidates.filter { !$0.isEmpty && seen.insert($0).inserted }.joined(separator: ":")
     }
 
     static func capture(
@@ -235,21 +252,38 @@ enum LocalProcess {
     }
 
     private static func waitForExit(of running: RunningLocalProcess, timeout: Duration, command: String) async throws -> Int32 {
-        try await withThrowingTaskGroup(of: Int32.self) { group in
-            group.addTask {
+        try await LocalProcessRace.first(
+            timeout: timeout,
+            timeoutMessage: "Timed out while checking \(command).",
+            onTimeout: {
+                running.terminate()
+            },
+            operation: {
                 running.exitLatch.wait()
                 return running.process.terminationStatus
             }
+        )
+    }
+}
+
+enum LocalProcessRace {
+    static func first<Result: Sendable>(
+        timeout: Duration,
+        timeoutMessage: String,
+        onTimeout: @escaping @Sendable () -> Void,
+        operation: @escaping @Sendable () async throws -> Result
+    ) async throws -> Result {
+        try await withThrowingTaskGroup(of: Result.self) { group in
+            group.addTask(operation: operation)
             group.addTask {
                 try await _Concurrency.Task.sleep(for: timeout)
-                running.terminate()
-                throw ProviderConnectivityError.processTimedOut("Timed out while checking \(command).")
+                onTimeout()
+                throw ProviderConnectivityError.processTimedOut(timeoutMessage)
             }
-
+            defer { group.cancelAll() }
             guard let first = try await group.next() else {
-                throw ProviderConnectivityError.processTimedOut("Timed out while checking \(command).")
+                throw ProviderConnectivityError.processTimedOut(timeoutMessage)
             }
-            group.cancelAll()
             return first
         }
     }

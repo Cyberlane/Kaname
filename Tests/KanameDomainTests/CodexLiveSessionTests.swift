@@ -70,6 +70,25 @@ struct CodexLiveSessionTests {
         #expect(thread["sandbox"] as? String == "workspace-write")
         #expect(thread["ephemeral"] as? Bool == true)
 
+        let persistentConfiguration = CodexLiveSessionConfiguration(
+            instance: codexInstance(),
+            workspaceURL: workspace,
+            persistentSessionDirectory: URL(fileURLWithPath: "/private/tmp/kaname-codex-sessions")
+        )
+        let persistentThread = CodexLiveSession.threadStartParameters(
+            configuration: persistentConfiguration,
+            request: request
+        )
+        #expect(persistentThread["ephemeral"] as? Bool == false)
+        let resume = CodexLiveSession.threadResumeParameters(
+            configuration: persistentConfiguration,
+            request: request,
+            threadID: "thread-123"
+        )
+        #expect(resume["threadId"] as? String == "thread-123")
+        #expect(resume["cwd"] as? String == workspace.path)
+        #expect(resume["excludeTurns"] as? Bool == true)
+
         let turn = CodexLiveSession.turnStartParameters(
             configuration: configuration,
             request: request,
@@ -83,6 +102,41 @@ struct CodexLiveSessionTests {
         #expect(sandbox?["type"] as? String == "workspaceWrite")
         #expect(sandbox?["networkAccess"] as? Bool == false)
         #expect(sandbox?["writableRoots"] as? [String] == [workspace.path])
+    }
+
+    @Test
+    func persistentIsolatedHomeRetainsHistoryButOnlyReferencesAuthentication() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kaname-persistent-home-test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("source")
+        let persistent = root.appendingPathComponent("persistent")
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        try Data("authentication".utf8).write(to: source.appendingPathComponent("auth.json"))
+        try Data("must-not-copy".utf8).write(to: source.appendingPathComponent("config.toml"))
+
+        let isolated = try CodexEphemeralHome.create(sourceHome: source, persistentDirectory: persistent)
+        try isolated.cleanup()
+
+        #expect(FileManager.default.fileExists(atPath: persistent.path))
+        #expect(FileManager.default.fileExists(atPath: persistent.appendingPathComponent("auth.json").path))
+        #expect(!FileManager.default.fileExists(atPath: persistent.appendingPathComponent("config.toml").path))
+        #expect(try FileManager.default.destinationOfSymbolicLink(atPath: persistent.appendingPathComponent("auth.json").path)
+            == source.appendingPathComponent("auth.json").path)
+    }
+
+    @Test
+    func isolatedHomeEnvironmentUsesAFileSystemPathWhenItContainsSpaces() {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kaname codex home \(UUID().uuidString)")
+
+        let environment = CodexMCPIsolation.codexEnvironment(home: root)
+        let appServerEnvironment = CodexAppServerConnection.processEnvironment(codexHome: root)
+
+        #expect(environment["CODEX_HOME"] == root.path)
+        #expect(environment["CODEX_HOME"]?.contains("%20") == false)
+        #expect(appServerEnvironment["CODEX_HOME"] == root.path)
+        #expect(appServerEnvironment["CODEX_HOME"]?.contains("%20") == false)
     }
 
     @Test

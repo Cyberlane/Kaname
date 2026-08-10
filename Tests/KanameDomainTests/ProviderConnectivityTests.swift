@@ -8,6 +8,19 @@ import EventKit
 
 struct ProviderConnectivityTests {
     @Test
+    func providerChildPathKeepsTheResolvedRuntimeDirectoryInAppLaunches() {
+        let executable = URL(fileURLWithPath: "/opt/homebrew/bin/codex")
+        let path = LocalProcess.childSearchPath(
+            executableURL: executable,
+            environment: ["PATH": "/usr/bin:/bin"]
+        ).split(separator: ":").map(String.init)
+
+        #expect(path.first == "/opt/homebrew/bin")
+        #expect(path.contains("/usr/bin"))
+        #expect(path.filter { $0 == "/opt/homebrew/bin" }.count == 1)
+    }
+
+    @Test
     func providerInstanceKeepsDriverAndRoutingIdentitySeparate() {
         let driver = ProviderDriverKind(rawValue: "communityFork")
         let instanceID = ProviderInstanceID(rawValue: "communityFork_work")

@@ -35,7 +35,7 @@ enum CodexMCPIsolation {
     ) async throws -> [String] {
         let enforcedArguments = try enforcedLaunchArguments(baseArguments: baseArguments)
 
-        let environment = codexHome.map { ["CODEX_HOME": $0.path()] } ?? [:]
+        let environment = codexEnvironment(home: codexHome)
         let discovered = try await configuredServers(
             executable: executable,
             workingDirectory: workingDirectory,
@@ -47,6 +47,10 @@ enum CodexMCPIsolation {
             throw CodexLiveSessionError.mcpConfigurationPresent
         }
         return enforcedArguments
+    }
+
+    static func codexEnvironment(home: URL?) -> [String: String] {
+        home.map { ["CODEX_HOME": $0.path] } ?? [:]
     }
 
     static func enforcedLaunchArguments(baseArguments: [String]) throws -> [String] {
@@ -90,10 +94,17 @@ enum CodexMCPIsolation {
             environmentOverrides: environment,
             environmentRemovals: inheritedEnvironmentRemovals()
         )
-        guard result.exitStatus == 0,
-              let servers = try? JSONDecoder().decode([Server].self, from: Data(result.standardOutput.utf8))
-        else {
-            throw CodexLiveSessionError.mcpConfigurationPresent
+        guard result.exitStatus == 0 else {
+            let detail = result.standardError
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .split(separator: "\n")
+                .first
+                .map { String($0.prefix(240)) }
+                ?? "exit status \(result.exitStatus)"
+            throw CodexLiveSessionError.malformedResponse("Codex could not inspect the isolated MCP inventory: \(detail)")
+        }
+        guard let servers = try? JSONDecoder().decode([Server].self, from: Data(result.standardOutput.utf8)) else {
+            throw CodexLiveSessionError.malformedResponse("Codex returned an unreadable isolated MCP inventory")
         }
         return servers
     }

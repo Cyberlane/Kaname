@@ -43,6 +43,32 @@ public enum DesktopMessageRole: String, Codable, Equatable, Sendable {
     case system
 }
 
+public enum DesktopConversationTitleSource: String, Codable, Equatable, Sendable {
+    case placeholder
+    case provisional
+    case providerGenerated
+    case providerFallback
+    case manual
+}
+
+private struct DesktopThreadPayload: Decodable {
+    let id: String
+    let projectID: String?
+    let title: String
+    let summary: String
+    let kind: DesktopWorkKind
+    let attention: DesktopAttention
+    let provider: String
+    let model: String
+    let reasoningEffort: String?
+    let titleSource: DesktopConversationTitleSource?
+    let updatedAtUnixMillis: Int64
+    let unread: Bool
+    let messages: [DesktopMessage]
+    let plan: [DesktopPlanItem]
+    let evidence: [DesktopEvidence]
+}
+
 public struct DesktopMessage: Codable, Equatable, Identifiable, Sendable {
     public let id: String
     public let role: DesktopMessageRole
@@ -116,6 +142,8 @@ public struct DesktopThread: Codable, Equatable, Identifiable, Sendable {
     public var attention: DesktopAttention
     public var provider: String
     public var model: String
+    public var reasoningEffort: String
+    public var titleSource: DesktopConversationTitleSource
     public var updatedAtUnixMillis: Int64
     public var unread: Bool
     public var messages: [DesktopMessage]
@@ -131,6 +159,8 @@ public struct DesktopThread: Codable, Equatable, Identifiable, Sendable {
         attention: DesktopAttention,
         provider: String = "Local",
         model: String = "No provider selected",
+        reasoningEffort: String = "xhigh",
+        titleSource: DesktopConversationTitleSource = .manual,
         updatedAtUnixMillis: Int64,
         unread: Bool = false,
         messages: [DesktopMessage] = [],
@@ -145,11 +175,34 @@ public struct DesktopThread: Codable, Equatable, Identifiable, Sendable {
         self.attention = attention
         self.provider = provider
         self.model = model
+        self.reasoningEffort = reasoningEffort
+        self.titleSource = titleSource
         self.updatedAtUnixMillis = updatedAtUnixMillis
         self.unread = unread
         self.messages = messages
         self.plan = plan
         self.evidence = evidence
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let payload = try DesktopThreadPayload(from: decoder)
+        self.init(
+            id: payload.id,
+            projectID: payload.projectID,
+            title: payload.title,
+            summary: payload.summary,
+            kind: payload.kind,
+            attention: payload.attention,
+            provider: payload.provider,
+            model: payload.model,
+            reasoningEffort: payload.reasoningEffort ?? "xhigh",
+            titleSource: payload.titleSource ?? .manual,
+            updatedAtUnixMillis: payload.updatedAtUnixMillis,
+            unread: payload.unread,
+            messages: payload.messages,
+            plan: payload.plan,
+            evidence: payload.evidence
+        )
     }
 }
 
@@ -337,7 +390,7 @@ public struct DesktopPreferences: Codable, Equatable, Sendable {
 }
 
 public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
-    public static let currentVersion = 7
+    public static let currentVersion = 8
 
     public var version: Int
     public var projects: [DesktopProject]
@@ -493,7 +546,7 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
     }
 
     func migratedToCurrent(now: Int64) throws -> DesktopAppSnapshot {
-        guard (1...6).contains(version) else { throw DesktopModelError.unsupportedVersion }
+        guard (1...7).contains(version) else { throw DesktopModelError.unsupportedVersion }
         var migrated = self
         migrated.version = Self.currentVersion
         if migrated.domains == .empty {
@@ -758,49 +811,334 @@ public final class DesktopAppModel: ObservableObject {
             summary: "Ready for your first message.",
             kind: kind,
             attention: .queued,
+            provider: project(id: projectID)?.context.defaultProvider ?? "Codex",
+            model: project(id: projectID)?.context.defaultModel ?? "Use provider default",
+            titleSource: .placeholder,
             updatedAtUnixMillis: timestamp
         )
         mutate { $0.threads.append(thread) }
         return thread.id
     }
 
-    public func appendUserMessage(threadID: String, body: String) {
+    @discardableResult
+    public func appendUserMessage(threadID: String, body: String) -> String? {
         let cleanBody = body.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanBody.isEmpty, cleanBody.utf8.count <= 32_000 else { return }
+        guard !cleanBody.isEmpty, cleanBody.utf8.count <= 32_000 else { return nil }
         let timestamp = now()
+        let message = DesktopMessage(role: .user, body: cleanBody, createdAtUnixMillis: timestamp)
         mutate { snapshot in
             guard let index = snapshot.threads.firstIndex(where: { $0.id == threadID }) else { return }
             let shouldProjectTitle = snapshot.threads[index].title == snapshot.threads[index].kind.newConversationTitle
                 && !snapshot.threads[index].messages.contains { $0.role == .user }
-            snapshot.threads[index].messages.append(
-                DesktopMessage(role: .user, body: cleanBody, createdAtUnixMillis: timestamp)
-            )
+            snapshot.threads[index].messages.append(message)
             if shouldProjectTitle {
                 snapshot.threads[index].title = Self.provisionalConversationTitle(from: cleanBody)
+                snapshot.threads[index].titleSource = .provisional
             }
             snapshot.threads[index].summary = cleanBody
             snapshot.threads[index].attention = .queued
             snapshot.threads[index].updatedAtUnixMillis = timestamp
             snapshot.threads[index].unread = false
         }
+        return snapshot.threads.contains(where: { $0.id == threadID && $0.messages.contains(where: { $0.id == message.id }) })
+            ? message.id
+            : nil
+    }
+
+    public func renameThread(id: String, title: String) -> Bool {
+        let cleanTitle = Self.normalized(title)
+        guard !cleanTitle.isEmpty, cleanTitle.utf8.count <= 160 else { return false }
+        return mutateThread(id: id) { thread in
+            thread.title = cleanTitle
+            thread.titleSource = .manual
+            thread.updatedAtUnixMillis = now()
+        }
+    }
+
+    public func updateThreadRuntime(
+        id: String,
+        provider: String,
+        model: String,
+        reasoningEffort: String
+    ) -> Bool {
+        let cleanProvider = Self.normalized(provider)
+        let cleanModel = Self.normalized(model)
+        let cleanReasoning = Self.normalized(reasoningEffort).lowercased()
+        guard !cleanProvider.isEmpty, cleanProvider.utf8.count <= 120,
+              !cleanModel.isEmpty, cleanModel.utf8.count <= 200,
+              ["low", "medium", "high", "xhigh"].contains(cleanReasoning),
+              !snapshot.operations.providerRuns.contains(where: { $0.threadID == id && $0.state == .running }) else {
+            return false
+        }
+        return mutateThread(id: id) { thread in
+            thread.provider = cleanProvider
+            thread.model = cleanModel
+            thread.reasoningEffort = cleanReasoning
+            thread.updatedAtUnixMillis = now()
+        }
+    }
+
+    public func applyProviderGeneratedTitle(threadID: String, title: String) -> Bool {
+        let cleanTitle = Self.generatedConversationTitle(from: title)
+        guard !cleanTitle.isEmpty else { return false }
+        guard thread(id: threadID)?.titleSource == .provisional else { return false }
+        return mutateThread(id: threadID) { thread in
+            thread.title = cleanTitle
+            thread.titleSource = .providerGenerated
+            thread.updatedAtUnixMillis = now()
+        }
+    }
+
+    public func markProviderTitleFallback(threadID: String) {
+        guard thread(id: threadID)?.titleSource == .provisional else { return }
+        mutateThread(id: threadID) { thread in
+            thread.titleSource = .providerFallback
+        }
+    }
+
+    public func providerEvents(threadID: String) -> [DesktopProviderEventRecord] {
+        snapshot.operations.providerEvents
+            .filter { $0.threadID == threadID }
+            .sorted { $0.createdAtUnixMillis < $1.createdAtUnixMillis }
+    }
+
+    public func providerRuns(threadID: String) -> [DesktopProviderRunRecord] {
+        snapshot.operations.providerRuns
+            .filter { $0.threadID == threadID }
+            .sorted { $0.startedAtUnixMillis < $1.startedAtUnixMillis }
+    }
+
+    public func providerRun(id: String) -> DesktopProviderRunRecord? {
+        snapshot.operations.providerRuns.first { $0.id == id }
+    }
+
+    public func message(threadID: String, id: String) -> DesktopMessage? {
+        thread(id: threadID)?.messages.first { $0.id == id }
+    }
+
+    public func workspaceURL(threadID: String) -> URL? {
+        guard let thread = thread(id: threadID), let projectID = thread.projectID else { return nil }
+        if let path = project(id: projectID)?.path, !path.isEmpty {
+            return URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+        }
+        guard let path = snapshot.domains.gitWorkspaces.first(where: {
+            $0.projectID == projectID && $0.status == .ready
+        })?.localPath, !path.isEmpty else { return nil }
+        return URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+    }
+
+    @discardableResult
+    public func enqueueProviderRun(threadID: String, sourceMessageID: String) -> String? {
+        guard let thread = thread(id: threadID),
+              let message = thread.messages.first(where: { $0.id == sourceMessageID && $0.role == .user }) else {
+            return nil
+        }
+        let run = DesktopProviderRunRecord(
+            id: UUID().uuidString.lowercased(),
+            threadID: threadID,
+            sourceMessageID: sourceMessageID,
+            provider: thread.provider,
+            model: thread.model,
+            reasoningEffort: thread.reasoningEffort,
+            briefDigest: Self.stableLocalDigest(message.body),
+            contextReferenceCount: providerContextReferenceCount(for: thread),
+            tokenUsage: nil,
+            costSummary: "Pending",
+            state: .proposed,
+            startedAtUnixMillis: now(),
+            completedAtUnixMillis: nil
+        )
+        mutate { snapshot in
+            snapshot.operations.providerRuns.append(run)
+            guard let index = snapshot.threads.firstIndex(where: { $0.id == threadID }) else { return }
+            if !snapshot.operations.providerRuns.contains(where: {
+                $0.threadID == threadID && $0.id != run.id && $0.state == .running
+            }) {
+                snapshot.threads[index].attention = .queued
+            }
+            snapshot.threads[index].updatedAtUnixMillis = now()
+        }
+        return run.id
+    }
+
+    public func nextQueuedProviderRun(threadID: String) -> DesktopProviderRunRecord? {
+        snapshot.operations.providerRuns
+            .filter { $0.threadID == threadID && $0.state == .proposed }
+            .min { $0.startedAtUnixMillis < $1.startedAtUnixMillis }
+    }
+
+    public func beginProviderRun(id: String) -> DesktopProviderRunRecord? {
+        var selected: DesktopProviderRunRecord?
+        mutate { snapshot in
+            guard let index = snapshot.operations.providerRuns.firstIndex(where: {
+                $0.id == id && $0.state == .proposed
+            }) else { return }
+            snapshot.operations.providerRuns[index].state = .running
+            snapshot.operations.providerRuns[index].costSummary = "Running"
+            selected = snapshot.operations.providerRuns[index]
+            if let threadID = selected?.threadID,
+               let threadIndex = snapshot.threads.firstIndex(where: { $0.id == threadID }) {
+                snapshot.threads[threadIndex].attention = .running
+                snapshot.threads[threadIndex].updatedAtUnixMillis = now()
+            }
+        }
+        return selected
+    }
+
+    public func attachNativeProviderRun(id: String, nativeThreadID: String, nativeTurnID: String) {
+        mutate { snapshot in
+            guard let index = snapshot.operations.providerRuns.firstIndex(where: { $0.id == id }) else { return }
+            snapshot.operations.providerRuns[index].nativeThreadID = nativeThreadID
+            snapshot.operations.providerRuns[index].nativeTurnID = nativeTurnID
+        }
+    }
+
+    public func latestNativeThreadID(threadID: String) -> String? {
+        snapshot.operations.providerRuns
+            .filter { $0.threadID == threadID && $0.nativeThreadID != nil }
+            .max { $0.startedAtUnixMillis < $1.startedAtUnixMillis }?
+            .nativeThreadID
+    }
+
+    @discardableResult
+    public func recordProviderEvent(
+        _ event: DesktopProviderEventRecord,
+        assistantDelta: String? = nil
+    ) -> Bool {
+        guard event.detail.utf8.count <= 65_536,
+              event.rawPayloadBase64?.utf8.count ?? 0 <= 360_000 else { return false }
+        var inserted = false
+        mutate { snapshot in
+            guard !snapshot.operations.providerEvents.contains(where: { $0.id == event.id }) else { return }
+            snapshot.operations.providerEvents.append(event)
+            inserted = true
+            guard let delta = assistantDelta, !delta.isEmpty,
+                  let threadIndex = snapshot.threads.firstIndex(where: { $0.id == event.threadID }) else { return }
+            let messageID = "assistant-\(event.runID)"
+            if let messageIndex = snapshot.threads[threadIndex].messages.firstIndex(where: { $0.id == messageID }) {
+                let current = snapshot.threads[threadIndex].messages[messageIndex]
+                snapshot.threads[threadIndex].messages[messageIndex] = DesktopMessage(
+                    id: current.id,
+                    role: .assistant,
+                    body: String((current.body + delta).prefix(262_144)),
+                    createdAtUnixMillis: current.createdAtUnixMillis
+                )
+            } else {
+                snapshot.threads[threadIndex].messages.append(
+                    DesktopMessage(
+                        id: messageID,
+                        role: .assistant,
+                        body: String(delta.prefix(262_144)),
+                        createdAtUnixMillis: event.createdAtUnixMillis
+                    )
+                )
+            }
+            snapshot.threads[threadIndex].summary = "Kaname is responding…"
+            snapshot.threads[threadIndex].updatedAtUnixMillis = event.createdAtUnixMillis
+        }
+        return inserted
+    }
+
+    public func completeProviderRun(id: String, tokenUsage: Int? = nil) {
+        let timestamp = now()
+        mutate { snapshot in
+            guard let index = snapshot.operations.providerRuns.firstIndex(where: { $0.id == id }) else { return }
+            snapshot.operations.providerRuns[index].state = .completed
+            snapshot.operations.providerRuns[index].tokenUsage = tokenUsage
+            snapshot.operations.providerRuns[index].costSummary = tokenUsage.map { "\($0) tokens" } ?? "Usage not reported"
+            snapshot.operations.providerRuns[index].completedAtUnixMillis = timestamp
+            guard let threadID = snapshot.operations.providerRuns[index].threadID,
+                  let threadIndex = snapshot.threads.firstIndex(where: { $0.id == threadID }) else { return }
+            let assistant = snapshot.threads[threadIndex].messages.last(where: { $0.role == .assistant })?.body
+            snapshot.threads[threadIndex].summary = assistant.map(Self.provisionalConversationTitle) ?? "Provider completed."
+            snapshot.threads[threadIndex].attention = .needsResponse
+            snapshot.threads[threadIndex].unread = true
+            snapshot.threads[threadIndex].updatedAtUnixMillis = timestamp
+        }
+    }
+
+    public func stopProviderRun(id: String, interrupted: Bool, error: String) {
+        let timestamp = now()
+        mutate { snapshot in
+            guard let index = snapshot.operations.providerRuns.firstIndex(where: { $0.id == id }) else { return }
+            snapshot.operations.providerRuns[index].state = interrupted ? .interrupted : .failed
+            snapshot.operations.providerRuns[index].errorSummary = Self.normalized(error)
+            snapshot.operations.providerRuns[index].costSummary = interrupted ? "Interrupted" : "Failed"
+            snapshot.operations.providerRuns[index].completedAtUnixMillis = timestamp
+            guard let threadID = snapshot.operations.providerRuns[index].threadID,
+                  let threadIndex = snapshot.threads.firstIndex(where: { $0.id == threadID }) else { return }
+            snapshot.threads[threadIndex].summary = interrupted ? "Provider turn interrupted. You can retry it." : Self.normalized(error)
+            snapshot.threads[threadIndex].attention = interrupted ? .needsResponse : .failed
+            snapshot.threads[threadIndex].unread = true
+            snapshot.threads[threadIndex].updatedAtUnixMillis = timestamp
+        }
+    }
+
+    public func recoverOrphanedProviderRuns() {
+        guard snapshot.operations.providerRuns.contains(where: { $0.state == .running }) else { return }
+        let timestamp = now()
+        mutate { snapshot in
+            let orphaned = snapshot.operations.providerRuns.indices.filter {
+                snapshot.operations.providerRuns[$0].state == .running
+            }
+            for index in orphaned {
+                snapshot.operations.providerRuns[index].state = .interrupted
+                snapshot.operations.providerRuns[index].errorSummary = "The UI or provider stopped before completion. Resume or retry from the durable conversation."
+                snapshot.operations.providerRuns[index].costSummary = "Reconnect required"
+                snapshot.operations.providerRuns[index].completedAtUnixMillis = timestamp
+                if let threadID = snapshot.operations.providerRuns[index].threadID,
+                   let threadIndex = snapshot.threads.firstIndex(where: { $0.id == threadID }) {
+                    snapshot.threads[threadIndex].attention = .needsResponse
+                    snapshot.threads[threadIndex].summary = "A provider turn needs recovery. No message was duplicated."
+                }
+            }
+        }
+    }
+
+    @discardableResult
+    public func retryProviderRun(id: String) -> String? {
+        guard let run = providerRun(id: id), let threadID = run.threadID, let sourceMessageID = run.sourceMessageID,
+              [.failed, .interrupted].contains(run.state) else { return nil }
+        return enqueueProviderRun(threadID: threadID, sourceMessageID: sourceMessageID)
+    }
+
+    public func addProviderPlan(threadID: String, text: String, completed: Bool) {
+        let clean = Self.normalized(text)
+        guard !clean.isEmpty else { return }
+        mutate { snapshot in
+            guard let index = snapshot.threads.firstIndex(where: { $0.id == threadID }) else { return }
+            let item = DesktopPlanItem(
+                id: "provider-plan-\(Self.stableLocalDigest(clean).prefix(16))",
+                title: String(clean.prefix(2_000)),
+                state: completed ? .complete : .inProgress
+            )
+            if let itemIndex = snapshot.threads[index].plan.firstIndex(where: { $0.id == item.id }) {
+                snapshot.threads[index].plan[itemIndex] = item
+            } else {
+                snapshot.threads[index].plan.append(item)
+            }
+        }
+    }
+
+    private func providerContextReferenceCount(for thread: DesktopThread) -> Int {
+        guard let project = project(id: thread.projectID) else { return 0 }
+        return project.context.instructionReferences.count
+            + project.context.knowledgeSourceIDs.count
+            + project.context.skillIDs.count
     }
 
     public func setAttention(threadID: String, attention: DesktopAttention) {
-        mutate { snapshot in
-            guard let index = snapshot.threads.firstIndex(where: { $0.id == threadID }) else { return }
-            snapshot.threads[index].attention = attention
-            snapshot.threads[index].updatedAtUnixMillis = now()
+        mutateThread(id: threadID) { thread in
+            thread.attention = attention
+            thread.updatedAtUnixMillis = now()
             if attention == .completed || attention == .archived {
-                snapshot.threads[index].unread = false
+                thread.unread = false
             }
         }
     }
 
     public func markRead(threadID: String) {
-        mutate { snapshot in
-            guard let index = snapshot.threads.firstIndex(where: { $0.id == threadID }) else { return }
-            snapshot.threads[index].unread = false
-        }
+        mutateThread(id: threadID) { $0.unread = false }
     }
 
     @discardableResult
@@ -1326,6 +1664,18 @@ public final class DesktopAppModel: ObservableObject {
         }
     }
 
+    @discardableResult
+    private func mutateThread(id: String, change: (inout DesktopThread) -> Void) -> Bool {
+        var didFindThread = false
+        mutate { workspace in
+            let matches = workspace.threads.indices.filter { workspace.threads[$0].id == id }
+            guard let index = matches.first else { return }
+            change(&workspace.threads[index])
+            didFindThread = true
+        }
+        return didFindThread
+    }
+
     private func mutateDomainRecord<Record: Identifiable>(
         at keyPath: WritableKeyPath<DesktopDomainSnapshot, [Record]>,
         id: String,
@@ -1365,6 +1715,17 @@ public final class DesktopAppModel: ObservableObject {
         let maximumCharacters = 72
         guard collapsed.count > maximumCharacters else { return collapsed }
         return "\(String(collapsed.prefix(maximumCharacters)).trimmingCharacters(in: .whitespacesAndNewlines))…"
+    }
+
+    private static func generatedConversationTitle(from value: String) -> String {
+        var collapsed = value.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        collapsed = collapsed.trimmingCharacters(in: CharacterSet(charactersIn: "\"'`#* "))
+        if collapsed.lowercased().hasPrefix("title:") {
+            collapsed = String(collapsed.dropFirst(6)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let maximumCharacters = 80
+        guard collapsed.count > maximumCharacters else { return collapsed }
+        return String(collapsed.prefix(maximumCharacters)).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func sortedRecords<Record>(

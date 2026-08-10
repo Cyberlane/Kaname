@@ -38,6 +38,7 @@ public struct CodexLiveSessionConfiguration: Sendable {
     public let workspaceURL: URL
     public let timeout: Duration
     public let codexHome: URL?
+    public let persistentSessionDirectory: URL?
     public let launchArguments: [String]
 
     public init(
@@ -46,13 +47,13 @@ public struct CodexLiveSessionConfiguration: Sendable {
         workspaceURL: URL,
         timeout: Duration = .seconds(20),
         codexHome: URL? = nil,
+        persistentSessionDirectory: URL? = nil,
         launchArguments: [String] = []
     ) {
-        self.instance = instance
-        self.executable = executable
+        (self.instance, self.executable) = (instance, executable)
         self.workspaceURL = workspaceURL.standardizedFileURL
-        self.timeout = timeout
-        self.codexHome = codexHome
+        (self.timeout, self.codexHome) = (timeout, codexHome)
+        self.persistentSessionDirectory = persistentSessionDirectory?.standardizedFileURL
         self.launchArguments = launchArguments
     }
 }
@@ -74,10 +75,8 @@ public struct CodexCodingRequest: Sendable {
         reasoningEffort: String = "xhigh",
         sandbox: CodexSandboxPolicy = .readOnly
     ) {
-        self.prompt = prompt
-        self.model = model
-        self.reasoningEffort = reasoningEffort
-        self.sandbox = sandbox
+        (self.prompt, self.model, self.reasoningEffort, self.sandbox) =
+            (prompt, model, reasoningEffort, sandbox)
     }
 }
 
@@ -127,14 +126,10 @@ public struct CodexRunEvent: Equatable, Sendable {
         payload: Data? = nil,
         payloadWasTruncated: Bool = false
     ) {
-        self.kind = kind
-        self.nativeType = nativeType
-        self.threadID = threadID
-        self.turnID = turnID
-        self.approvalID = approvalID
-        self.text = text
-        self.payload = payload
-        self.payloadWasTruncated = payloadWasTruncated
+        (self.kind, self.nativeType, self.threadID, self.turnID) =
+            (kind, nativeType, threadID, turnID)
+        (self.approvalID, self.text, self.payload, self.payloadWasTruncated) =
+            (approvalID, text, payload, payloadWasTruncated)
     }
 }
 
@@ -145,10 +140,8 @@ public struct CodexLiveRun: Equatable, Sendable {
     public let reasoningEffort: String
 
     public init(nativeThreadID: String, nativeTurnID: String, model: String, reasoningEffort: String) {
-        self.nativeThreadID = nativeThreadID
-        self.nativeTurnID = nativeTurnID
-        self.model = model
-        self.reasoningEffort = reasoningEffort
+        (self.nativeThreadID, self.nativeTurnID, self.model, self.reasoningEffort) =
+            (nativeThreadID, nativeTurnID, model, reasoningEffort)
     }
 }
 
@@ -200,20 +193,18 @@ public actor CodexLiveSession {
 
     public func events() -> AsyncStream<CodexRunEvent> {
         let id = UUID()
-        let (stream, continuation) = AsyncStream.makeStream(
-            of: CodexRunEvent.self,
-            bufferingPolicy: .bufferingNewest(512)
-        )
-        continuations[id] = continuation
-        continuation.onTermination = { [weak self] _ in
-            _Concurrency.Task { await self?.removeContinuation(id) }
+        return AsyncStream(bufferingPolicy: .bufferingNewest(512)) { continuation in
+            continuations[id] = continuation
+            continuation.onTermination = { [weak self] _ in
+                _Concurrency.Task { await self?.removeContinuation(id) }
+            }
         }
-        return stream
     }
 
     public func start(
         _ request: CodexCodingRequest,
-        authorization: CodexWorkspaceAuthorization? = nil
+        authorization: CodexWorkspaceAuthorization? = nil,
+        resumingNativeThreadID: String? = nil
     ) async throws -> CodexLiveRun {
         guard configuration.instance.driver == .codex else {
             throw CodexLiveSessionError.wrongProvider
@@ -232,7 +223,10 @@ public actor CodexLiveSession {
 
         let isolatedHome: CodexEphemeralHome
         do {
-            isolatedHome = try CodexEphemeralHome.create(sourceHome: configuration.codexHome)
+            isolatedHome = try CodexEphemeralHome.create(
+                sourceHome: configuration.codexHome,
+                persistentDirectory: configuration.persistentSessionDirectory
+            )
         } catch {
             throw CodexLiveSessionError.isolatedHomeUnavailable
         }
@@ -281,22 +275,36 @@ public actor CodexLiveSession {
             ))
             try await attestRuntimeIsolation(on: startedConnection)
 
-            let threadResponse = try await Self.object(startedConnection.request(
-                method: "thread/start",
-                parameters: Self.threadStartParameters(configuration: configuration, request: request),
-                timeout: configuration.timeout
-            ))
+            let threadMethod = resumingNativeThreadID == nil ? "thread/start" : "thread/resume"
+            let threadResponse: [String: Any]
+            if let resumingNativeThreadID {
+                threadResponse = try await Self.object(startedConnection.request(
+                    method: threadMethod,
+                    parameters: Self.threadResumeParameters(
+                        configuration: configuration,
+                        request: request,
+                        threadID: resumingNativeThreadID
+                    ),
+                    timeout: configuration.timeout
+                ))
+            } else {
+                threadResponse = try await Self.object(startedConnection.request(
+                    method: threadMethod,
+                    parameters: Self.threadStartParameters(configuration: configuration, request: request),
+                    timeout: configuration.timeout
+                ))
+            }
             guard let thread = threadResponse["thread"] as? [String: Any],
                   let threadID = thread["id"] as? String,
                   !threadID.isEmpty
             else {
-                throw CodexLiveSessionError.malformedResponse("thread/start did not return thread.id")
+                throw CodexLiveSessionError.malformedResponse("\(threadMethod) did not return thread.id")
             }
             nativeThreadID = threadID
             try await attestRuntimeIsolation(on: startedConnection)
             emit(CodexRunEvent.fromResponse(
                 kind: .sessionStarted,
-                nativeType: "thread/start",
+                nativeType: threadMethod,
                 data: try JSONSerialization.data(withJSONObject: threadResponse),
                 fallbackThreadID: threadID
             ))
@@ -408,8 +416,23 @@ public actor CodexLiveSession {
             "model": request.model,
             "approvalPolicy": "on-request",
             "sandbox": request.sandbox.threadValue(),
-            "ephemeral": true,
+            "ephemeral": configuration.persistentSessionDirectory == nil,
             "threadSource": "kaname",
+        ]
+    }
+
+    static func threadResumeParameters(
+        configuration: CodexLiveSessionConfiguration,
+        request: CodexCodingRequest,
+        threadID: String
+    ) -> [String: Any] {
+        [
+            "threadId": threadID,
+            "cwd": configuration.workspaceURL.path,
+            "model": request.model,
+            "approvalPolicy": "on-request",
+            "sandbox": request.sandbox.threadValue(),
+            "excludeTurns": true,
         ]
     }
 
@@ -504,10 +527,11 @@ public actor CodexLiveSession {
     }
 
     private static func object(_ data: Data) throws -> [String: Any] {
-        guard let result = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw CodexLiveSessionError.malformedResponse("expected an object")
+        let decoded = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
+        if let object = decoded as? [String: Any] {
+            return object
         }
-        return result
+        throw CodexLiveSessionError.malformedResponse("expected an object")
     }
 
     private func receive(_ message: CodexAppServerIncomingMessage) async {

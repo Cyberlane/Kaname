@@ -67,6 +67,7 @@ struct DesktopAppModelTests {
         #expect(emptyConversation.projectID == projectID)
         #expect(emptyConversation.kind == .planning)
         #expect(emptyConversation.title == "New planning conversation")
+        #expect(emptyConversation.titleSource == .placeholder)
         #expect(emptyConversation.messages.isEmpty)
 
         clock += 1
@@ -77,6 +78,7 @@ struct DesktopAppModelTests {
         let titledConversation = try #require(model.thread(id: threadID))
 
         #expect(titledConversation.title == "Plan how Kaname can rebuild itself while a stable copy remains open.")
+        #expect(titledConversation.titleSource == .provisional)
         #expect(titledConversation.messages.count == 1)
         #expect(titledConversation.messages.first?.role == .user)
 
@@ -84,6 +86,94 @@ struct DesktopAppModelTests {
         model.appendUserMessage(threadID: threadID, body: "Do not replace the title with this follow-up.")
         let restored = DesktopAppModel(store: store, now: { 2_000 })
         #expect(restored.thread(id: threadID)?.title == titledConversation.title)
+    }
+
+    @Test
+    func unifiedProviderQueuePersistsEventsRecoveryAndTitleOwnership() throws {
+        let store = MemoryDesktopStateStore()
+        var clock: Int64 = 1_000
+        let model = DesktopAppModel(store: store, now: { clock })
+        let projectID = try #require(model.snapshot.projects.first?.id)
+        let threadID = model.createConversation(kind: .coding, projectID: projectID)
+        let messageID = try #require(model.appendUserMessage(threadID: threadID, body: "Explain the desktop runtime boundary."))
+        let runID = try #require(model.enqueueProviderRun(threadID: threadID, sourceMessageID: messageID))
+
+        #expect(model.nextQueuedProviderRun(threadID: threadID)?.id == runID)
+        #expect(model.beginProviderRun(id: runID)?.state == .running)
+        model.attachNativeProviderRun(id: runID, nativeThreadID: "native-thread", nativeTurnID: "native-turn")
+        let event = DesktopProviderEventRecord(
+            id: "event-1",
+            threadID: threadID,
+            runID: runID,
+            kind: .assistantText,
+            title: "Response",
+            detail: "A bounded delta",
+            nativeType: "item/agentMessage/delta",
+            nativeThreadID: "native-thread",
+            nativeTurnID: "native-turn",
+            approvalID: nil,
+            rawPayloadBase64: Data("private event".utf8).base64EncodedString(),
+            payloadWasTruncated: false,
+            createdAtUnixMillis: clock
+        )
+        #expect(model.recordProviderEvent(event, assistantDelta: "A bounded delta") == true)
+        #expect(model.recordProviderEvent(event, assistantDelta: "A bounded delta") == false)
+        clock += 1
+        model.completeProviderRun(id: runID, tokenUsage: 42)
+        #expect(model.applyProviderGeneratedTitle(threadID: threadID, title: "  Runtime Boundary  ") == true)
+
+        let restored = DesktopAppModel(store: store, now: { 2_000 })
+        #expect(restored.providerRun(id: runID)?.state == .completed)
+        #expect(restored.providerRun(id: runID)?.nativeThreadID == "native-thread")
+        #expect(restored.providerRun(id: runID)?.tokenUsage == 42)
+        #expect(restored.providerEvents(threadID: threadID).count == 1)
+        #expect(restored.thread(id: threadID)?.messages.last?.body == "A bounded delta")
+        #expect(restored.thread(id: threadID)?.title == "Runtime Boundary")
+        #expect(restored.thread(id: threadID)?.titleSource == .providerGenerated)
+    }
+
+    @Test
+    func orphanedRunBecomesRecoverableWithoutDuplicatingItsUserMessage() throws {
+        let model = DesktopAppModel(store: MemoryDesktopStateStore(), now: { 1_000 })
+        let projectID = try #require(model.snapshot.projects.first?.id)
+        let threadID = model.createConversation(kind: .planning, projectID: projectID)
+        let messageID = try #require(model.appendUserMessage(threadID: threadID, body: "Recover this exact turn."))
+        let runID = try #require(model.enqueueProviderRun(threadID: threadID, sourceMessageID: messageID))
+        _ = model.beginProviderRun(id: runID)
+
+        model.recoverOrphanedProviderRuns()
+
+        #expect(model.providerRun(id: runID)?.state == .interrupted)
+        #expect(model.thread(id: threadID)?.messages.filter { $0.role == .user }.count == 1)
+        let retryID = try #require(model.retryProviderRun(id: runID))
+        #expect(retryID != runID)
+        #expect(model.providerRun(id: retryID)?.sourceMessageID == messageID)
+        #expect(model.thread(id: threadID)?.messages.filter { $0.role == .user }.count == 1)
+    }
+
+    @Test
+    func versionSevenWorkspaceAddsConversationRuntimeDefaults() throws {
+        var snapshot = DesktopAppSnapshot.starter(now: 1_000)
+        var object = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot)) as? [String: Any]
+        )
+        object["version"] = 7
+        var threads = try #require(object["threads"] as? [[String: Any]])
+        for index in threads.indices {
+            threads[index].removeValue(forKey: "reasoningEffort")
+            threads[index].removeValue(forKey: "titleSource")
+        }
+        object["threads"] = threads
+        var operations = try #require(object["operations"] as? [String: Any])
+        operations.removeValue(forKey: "providerEvents")
+        object["operations"] = operations
+        let store = MemoryDesktopStateStore(data: try JSONSerialization.data(withJSONObject: object))
+
+        let model = DesktopAppModel(store: store, now: { 2_000 })
+
+        #expect(model.snapshot.version == DesktopAppSnapshot.currentVersion)
+        #expect(model.snapshot.threads.allSatisfy { $0.reasoningEffort == "xhigh" && $0.titleSource == .manual })
+        #expect(model.snapshot.operations.providerEvents.isEmpty)
     }
 
     @Test

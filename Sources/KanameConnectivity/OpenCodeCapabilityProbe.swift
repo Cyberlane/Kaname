@@ -7,19 +7,16 @@ import KanameDomain
 private final class RunningOpenCodeServer: @unchecked Sendable {
     let process: RunningLocalProcess
     let url: URL
-    private let outputDrain: _Concurrency.Task<Void, Never>
-    private let errorDrain: _Concurrency.Task<Void, Never>
+    private let drains: [_Concurrency.Task<Void, Never>]
 
     init(process: RunningLocalProcess, url: URL, outputDrain: _Concurrency.Task<Void, Never>, errorDrain: _Concurrency.Task<Void, Never>) {
         self.process = process
         self.url = url
-        self.outputDrain = outputDrain
-        self.errorDrain = errorDrain
+        drains = [outputDrain, errorDrain]
     }
 
     func shutdown() {
-        outputDrain.cancel()
-        errorDrain.cancel()
+        drains.forEach { $0.cancel() }
         process.standardOutput.readabilityHandler = nil
         process.standardError.readabilityHandler = nil
         process.terminate()
@@ -56,8 +53,11 @@ private enum OpenCodeLocalServer {
     }
 
     private static func waitForReadyURL(process: RunningLocalProcess, timeout: Duration) async throws -> URL {
-        try await withThrowingTaskGroup(of: URL.self) { group in
-            group.addTask {
+        try await LocalProcessRace.first(
+            timeout: timeout,
+            timeoutMessage: "Timed out waiting for OpenCode to start its local server.",
+            onTimeout: { process.terminate() },
+            operation: {
                 for await data in JSONLineStream.make(from: process.standardOutput) {
                     let line = String(decoding: data, as: UTF8.self)
                     if let url = Self.readyURL(in: line) {
@@ -71,18 +71,7 @@ private enum OpenCodeLocalServer {
                     detail: "OpenCode exited before reporting its local endpoint."
                 )
             }
-            group.addTask {
-                try await _Concurrency.Task.sleep(for: timeout)
-                process.terminate()
-                throw ProviderConnectivityError.processTimedOut("Timed out waiting for OpenCode to start its local server.")
-            }
-
-            guard let result = try await group.next() else {
-                throw ProviderConnectivityError.processTimedOut("Timed out waiting for OpenCode to start its local server.")
-            }
-            group.cancelAll()
-            return result
-        }
+        )
     }
 
     private static func readyURL(in line: String) -> URL? {

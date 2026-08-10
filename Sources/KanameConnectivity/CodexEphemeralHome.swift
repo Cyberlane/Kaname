@@ -20,34 +20,50 @@ final class CodexEphemeralHome: @unchecked Sendable {
     }
 
     let url: URL
+    private let removesOnCleanup: Bool
 
-    private init(url: URL) {
+    private init(url: URL, removesOnCleanup: Bool = true) {
         self.url = url
+        self.removesOnCleanup = removesOnCleanup
     }
 
-    static func create(sourceHome: URL?) throws -> CodexEphemeralHome {
+    static func create(sourceHome: URL?, persistentDirectory: URL? = nil) throws -> CodexEphemeralHome {
         let source = sourceHome ?? defaultSourceHome()
         let authentication = source.appending(path: "auth.json")
         guard FileManager.default.fileExists(atPath: authentication.path) else {
             throw Error.fileBackedAuthenticationUnavailable
         }
 
-        let root = FileManager.default.temporaryDirectory
+        let root = persistentDirectory?.standardizedFileURL ?? FileManager.default.temporaryDirectory
             .appending(path: "kaname-codex-isolation-\(UUID().uuidString)", directoryHint: .isDirectory)
         do {
-            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
-            try FileManager.default.createSymbolicLink(
-                atPath: root.appending(path: "auth.json").path,
-                withDestinationPath: authentication.path
+            try FileManager.default.createDirectory(
+                at: root,
+                withIntermediateDirectories: persistentDirectory != nil,
+                attributes: [.posixPermissions: 0o700]
             )
-            return CodexEphemeralHome(url: root)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
+            let authenticationReference = root.appending(path: "auth.json")
+            if FileManager.default.fileExists(atPath: authenticationReference.path) {
+                let destination = try FileManager.default.destinationOfSymbolicLink(atPath: authenticationReference.path)
+                guard URL(fileURLWithPath: destination).standardizedFileURL == authentication.standardizedFileURL else {
+                    throw Error.fileBackedAuthenticationUnavailable
+                }
+            } else {
+                try FileManager.default.createSymbolicLink(
+                    atPath: authenticationReference.path,
+                    withDestinationPath: authentication.path
+                )
+            }
+            return CodexEphemeralHome(url: root, removesOnCleanup: persistentDirectory == nil)
         } catch {
-            try? FileManager.default.removeItem(at: root)
+            if persistentDirectory == nil { try? FileManager.default.removeItem(at: root) }
             throw Error.fileBackedAuthenticationUnavailable
         }
     }
 
     func cleanup() throws {
+        guard removesOnCleanup else { return }
         guard url.lastPathComponent.hasPrefix("kaname-codex-isolation-") else {
             throw Error.cleanupFailed
         }

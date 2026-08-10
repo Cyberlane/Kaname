@@ -84,7 +84,8 @@ private struct NewConversationRequest: Identifiable {
 }
 
 struct KanameDesktopWorkspace: View {
-    @StateObject private var model = DesktopAppModel()
+    @StateObject private var model: DesktopAppModel
+    @StateObject private var conversationRuntime: DesktopConversationRuntime
     @StateObject private var personalIntegrations = DesktopPersonalIntegrationViewModel()
     @State private var destination: DesktopDestination
     @State private var selectedThreadID: String?
@@ -98,6 +99,9 @@ struct KanameDesktopWorkspace: View {
     @State private var navigationHistory: [DesktopNavigationLocation] = []
 
     init() {
+        let desktopModel = DesktopAppModel()
+        _model = StateObject(wrappedValue: desktopModel)
+        _conversationRuntime = StateObject(wrappedValue: DesktopConversationRuntime(model: desktopModel))
         let arguments = CommandLine.arguments
         let requestedDestination = arguments.firstIndex(of: "--desktop-destination")
             .flatMap { arguments.indices.contains($0 + 1) ? DesktopDestination(rawValue: arguments[$0 + 1]) : nil }
@@ -357,6 +361,7 @@ struct KanameDesktopWorkspace: View {
             case .threads:
                 DesktopThreadsView(
                     model: model,
+                    runtime: conversationRuntime,
                     searchText: searchText,
                     selectedThreadID: threadSelection
                 )
@@ -787,6 +792,7 @@ private struct DesktopHomeView: View {
 
 private struct DesktopThreadsView: View {
     @ObservedObject var model: DesktopAppModel
+    @ObservedObject var runtime: DesktopConversationRuntime
     let searchText: String
     @Binding var selectedThreadID: String?
 
@@ -817,7 +823,7 @@ private struct DesktopThreadsView: View {
             .frame(minWidth: 280, idealWidth: 350, maxWidth: 430)
 
             if let thread = model.thread(id: selectedThreadID) {
-                DesktopThreadConversation(model: model, thread: thread)
+                DesktopThreadConversation(model: model, runtime: runtime, thread: thread)
                     .id(thread.id)
             } else {
                 EmptyPanel(
@@ -901,9 +907,17 @@ private struct DesktopInboxView: View {
 
 private struct DesktopThreadConversation: View {
     @ObservedObject var model: DesktopAppModel
+    @ObservedObject var runtime: DesktopConversationRuntime
     let thread: DesktopThread
     @State private var draft = ""
+    @State private var questionAnswer = ""
     @State private var panel: Panel = .conversation
+    @State private var showsRename = false
+    @State private var renamedTitle = ""
+    @State private var showsRuntimeSettings = false
+    @State private var runtimeProvider = "Codex"
+    @State private var runtimeModel = "Use provider default"
+    @State private var runtimeReasoning = "xhigh"
 
     private enum Panel: String, CaseIterable, Identifiable {
         case conversation
@@ -926,6 +940,31 @@ private struct DesktopThreadConversation: View {
                             .lineLimit(2)
                     }
                     Spacer()
+                    if runtime.isRunning(threadID: thread.id) {
+                        Button("Interrupt", systemImage: "stop.circle") {
+                            runtime.interrupt(threadID: thread.id)
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    Button {
+                        renamedTitle = thread.title
+                        showsRename = true
+                    } label: {
+                        Image(systemName: "pencil")
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Rename conversation")
+                    Button {
+                        runtimeProvider = thread.provider
+                        runtimeModel = thread.model
+                        runtimeReasoning = thread.reasoningEffort
+                        showsRuntimeSettings = true
+                    } label: {
+                        Image(systemName: "slider.horizontal.3")
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(runtime.isRunning(threadID: thread.id))
+                    .accessibilityLabel("Conversation runtime settings")
                     AttentionPill(attention: thread.attention)
                 }
                 Picker("Thread panel", selection: $panel) {
@@ -948,6 +987,45 @@ private struct DesktopThreadConversation: View {
                 ThreadEvidenceView(items: thread.evidence)
             }
         }
+        .sheet(isPresented: $showsRename) {
+            DesktopRenameConversationSheet(
+                title: $renamedTitle,
+                cancel: { showsRename = false },
+                save: {
+                    if model.renameThread(id: thread.id, title: renamedTitle) { showsRename = false }
+                }
+            )
+        }
+        .sheet(isPresented: $showsRuntimeSettings) {
+            DesktopConversationRuntimeSheet(
+                provider: $runtimeProvider,
+                model: $runtimeModel,
+                reasoning: $runtimeReasoning,
+                cancel: { showsRuntimeSettings = false },
+                save: {
+                    if model.updateThreadRuntime(
+                        id: thread.id,
+                        provider: runtimeProvider,
+                        model: runtimeModel,
+                        reasoningEffort: runtimeReasoning
+                    ) { showsRuntimeSettings = false }
+                }
+            )
+        }
+    }
+
+    private var timeline: [DesktopConversationTimelineItem] {
+        let messages = thread.messages.map(DesktopConversationTimelineItem.message)
+        let events = model.providerEvents(threadID: thread.id)
+            .filter { $0.kind != .assistantText }
+            .map(DesktopConversationTimelineItem.event)
+        return (messages + events).sorted { $0.createdAtUnixMillis < $1.createdAtUnixMillis }
+    }
+
+    private var latestRecoverableRun: DesktopProviderRunRecord? {
+        guard let latest = model.providerRuns(threadID: thread.id).last,
+              latest.state == .failed || latest.state == .interrupted else { return nil }
+        return latest
     }
 
     private var conversation: some View {
@@ -955,31 +1033,65 @@ private struct DesktopThreadConversation: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 14) {
-                        if thread.messages.isEmpty {
+                        if timeline.isEmpty {
                             EmptyPanel(
                                 symbol: "text.bubble",
                                 title: "Start the conversation",
-                                detail: "Messages are saved locally until you deliberately choose an execution surface."
+                                detail: "Your first message is saved once, then sent through the project's provider and context boundary."
                             )
                         } else {
-                            ForEach(thread.messages) { message in
-                                DesktopMessageBubble(message: message)
-                                    .id(message.id)
+                            ForEach(timeline) { item in
+                                switch item {
+                                case let .message(message):
+                                    DesktopMessageBubble(message: message)
+                                        .id(item.id)
+                                case let .event(event):
+                                    DesktopProviderEventCard(
+                                        event: event,
+                                        questionAnswer: $questionAnswer,
+                                        answer: {
+                                            runtime.answerQuestion(
+                                                threadID: thread.id,
+                                                event: event,
+                                                answer: questionAnswer
+                                            )
+                                            questionAnswer = ""
+                                        }
+                                    )
+                                    .id(item.id)
+                                }
                             }
                         }
                     }
                     .padding(22)
                 }
-                .onChange(of: thread.messages.count) { _ in
-                    if let id = thread.messages.last?.id {
+                .onChange(of: timeline.count) { _ in
+                    if let id = timeline.last?.id {
                         withAnimation { proxy.scrollTo(id, anchor: .bottom) }
                     }
                 }
             }
 
             Divider()
+            if let run = latestRecoverableRun,
+               model.nextQueuedProviderRun(threadID: thread.id) == nil,
+               !runtime.isRunning(threadID: thread.id) {
+                HStack(spacing: 9) {
+                    Image(systemName: "arrow.clockwise.circle")
+                        .foregroundStyle(Nord.auroraOrange)
+                    Text(run.errorSummary ?? "This turn stopped before completion.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                    Spacer()
+                    Button("Retry turn") { runtime.retry(runID: run.id) }
+                        .buttonStyle(.bordered)
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 10)
+            }
             HStack(alignment: .bottom, spacing: 10) {
-                TextField("Add a local message or next instruction", text: $draft, axis: .vertical)
+                TextField("Message \(thread.provider)", text: $draft, axis: .vertical)
                     .textFieldStyle(.plain)
                     .lineLimit(1...6)
                     .padding(.horizontal, 12)
@@ -992,17 +1104,190 @@ private struct DesktopThreadConversation: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                .accessibilityLabel("Save local message")
+                .accessibilityLabel(runtime.isRunning(threadID: thread.id) ? "Queue follow-up" : "Send message")
             }
             .padding(14)
             .background(Nord.polarNight0)
+            HStack(spacing: 6) {
+                Image(systemName: runtime.isRunning(threadID: thread.id) ? "hourglass" : "lock.shield")
+                Text(runtime.isRunning(threadID: thread.id)
+                    ? "Codex is responding. New messages queue in order."
+                    : "\(thread.provider) · \(thread.model) · \(thread.reasoningEffort) · Read-only, network off")
+            }
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+            .padding(.horizontal, 16)
+            .padding(.bottom, 10)
         }
     }
 
     private func send() {
         let body = draft
         draft = ""
-        model.appendUserMessage(threadID: thread.id, body: body)
+        runtime.send(threadID: thread.id, body: body)
+    }
+}
+
+private enum DesktopConversationTimelineItem: Identifiable {
+    case message(DesktopMessage)
+    case event(DesktopProviderEventRecord)
+
+    var id: String {
+        switch self {
+        case let .message(message): "message-\(message.id)"
+        case let .event(event): "event-\(event.id)"
+        }
+    }
+
+    var createdAtUnixMillis: Int64 {
+        switch self {
+        case let .message(message): message.createdAtUnixMillis
+        case let .event(event): event.createdAtUnixMillis
+        }
+    }
+}
+
+private struct DesktopProviderEventCard: View {
+    let event: DesktopProviderEventRecord
+    @Binding var questionAnswer: String
+    let answer: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: symbol)
+                .foregroundStyle(tint)
+                .frame(width: 25)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text(event.title).font(.caption.weight(.semibold))
+                    Spacer()
+                    RelativeTime(unixMillis: event.createdAtUnixMillis)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+                if !event.detail.isEmpty {
+                    Text(event.detail)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                if event.kind == .question, event.approvalID != nil {
+                    HStack {
+                        TextField("Answer Codex", text: $questionAnswer)
+                            .textFieldStyle(.roundedBorder)
+                            .onSubmit(answer)
+                        Button("Answer", action: answer)
+                            .buttonStyle(.borderedProminent)
+                            .disabled(questionAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                }
+                if event.payloadWasTruncated {
+                    Label("Raw payload exceeded the evidence limit", systemImage: "exclamationmark.triangle")
+                        .font(.caption2)
+                        .foregroundStyle(Nord.auroraYellow)
+                }
+            }
+            Spacer(minLength: 42)
+        }
+        .padding(12)
+        .background(tint.opacity(0.09), in: RoundedRectangle(cornerRadius: 13))
+    }
+
+    private var symbol: String {
+        switch event.kind {
+        case .status: "circle.dotted"
+        case .reasoning: "list.bullet.clipboard"
+        case .tool: "wrench.and.screwdriver"
+        case .question: "questionmark.bubble"
+        case .approval: "checkmark.shield"
+        case .diff: "doc.badge.ellipsis"
+        case .usage: "gauge.with.dots.needle.50percent"
+        case .error: "exclamationmark.triangle"
+        case .native: "waveform.path.ecg"
+        case .assistantText: "sparkles"
+        }
+    }
+
+    private var tint: Color {
+        switch event.kind {
+        case .error: Nord.auroraRed
+        case .question, .approval: Nord.auroraYellow
+        case .diff: Nord.auroraPurple
+        case .tool, .reasoning: Nord.frost0
+        case .status, .usage, .native, .assistantText: Nord.frost1
+        }
+    }
+}
+
+private struct DesktopRenameConversationSheet: View {
+    @Binding var title: String
+    let cancel: () -> Void
+    let save: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Rename conversation").font(.title2.weight(.bold))
+            TextField("Conversation title", text: $title)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit(save)
+            Text("A manual title is never replaced by later provider turns.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                Button("Cancel", action: cancel).keyboardShortcut(.cancelAction)
+                Button("Save", action: save)
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(24)
+        .frame(width: 440)
+    }
+}
+
+private struct DesktopConversationRuntimeSheet: View {
+    @Binding var provider: String
+    @Binding var model: String
+    @Binding var reasoning: String
+    let cancel: () -> Void
+    let save: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Conversation runtime").font(.title2.weight(.bold))
+            Text("These overrides apply to future turns in this conversation. They never expand tool, network, or write authority.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Form {
+                Picker("Provider", selection: $provider) {
+                    Text("Codex").tag("Codex")
+                    Text("Claude · limited").tag("Claude")
+                    Text("OpenCode · limited").tag("OpenCode")
+                }
+                TextField("Model", text: $model)
+                Picker("Reasoning", selection: $reasoning) {
+                    Text("Low").tag("low")
+                    Text("Medium").tag("medium")
+                    Text("High").tag("high")
+                    Text("Extra high").tag("xhigh")
+                }
+            }
+            .formStyle(.grouped)
+            HStack {
+                Label("Standard conversation turns remain read-only with network off.", systemImage: "lock.shield")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Cancel", action: cancel).keyboardShortcut(.cancelAction)
+                Button("Save", action: save)
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 520)
     }
 }
 
@@ -2952,15 +3237,7 @@ private struct LocalProviderDescriptor: Identifiable {
     var id: String { executable }
 
     var executableURL: URL? {
-        let environmentPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
-        let candidates = environmentPath.split(separator: ":").map(String.init) + [
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin").path,
-        ]
-        return candidates.lazy
-            .map { URL(fileURLWithPath: $0, isDirectory: true).appendingPathComponent(executable) }
-            .first { FileManager.default.isExecutableFile(atPath: $0.path) }
+        ProviderExecutableLocator.url(named: executable)
     }
 }
 
@@ -5386,6 +5663,7 @@ private extension DesktopActionState {
         case .proposed, .awaitingApproval: Nord.auroraYellow
         case .approved, .running: Nord.frost1
         case .rejected, .failed: Nord.auroraRed
+        case .interrupted: Nord.auroraOrange
         case .completed, .reconciled: Nord.auroraGreen
         case .cancelled: Nord.polarNight3
         }
