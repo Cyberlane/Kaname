@@ -611,20 +611,32 @@ public enum GoogleAPIResponseParser {
 }
 
 #if os(macOS)
-private final class GoogleLoopbackReceiver: @unchecked Sendable {
-    let redirectURI: URL
+final class GoogleLoopbackReceiver: @unchecked Sendable {
     private let listener: NWListener
     private let lock = NSLock()
+    private var configuredRedirectURI: URL?
     private var continuation: CheckedContinuation<(URLComponents), Error>?
     private var pendingComponents: URLComponents?
 
-    private init(listener: NWListener, redirectURI: URL) {
+    var redirectURI: URL {
+        lock.withLock {
+            guard let configuredRedirectURI else {
+                preconditionFailure("Google loopback receiver is not ready")
+            }
+            return configuredRedirectURI
+        }
+    }
+
+    private init(listener: NWListener) {
         self.listener = listener
-        self.redirectURI = redirectURI
     }
 
     static func start() async throws -> GoogleLoopbackReceiver {
-        let listener = try NWListener(using: .tcp, on: .any)
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
+        let listener = try NWListener(using: parameters)
+        let receiver = GoogleLoopbackReceiver(listener: listener)
+        listener.newConnectionHandler = receiver.accept
         return try await withCheckedThrowingContinuation { continuation in
             listener.stateUpdateHandler = { state in
                 switch state {
@@ -636,8 +648,9 @@ private final class GoogleLoopbackReceiver: @unchecked Sendable {
                         continuation.resume(throwing: NativeGoogleIntegrationError.authorizationUnavailable)
                         return
                     }
-                    let receiver = GoogleLoopbackReceiver(listener: listener, redirectURI: redirect)
-                    listener.newConnectionHandler = receiver.accept
+                    receiver.lock.withLock {
+                        receiver.configuredRedirectURI = redirect
+                    }
                     continuation.resume(returning: receiver)
                 case .failed:
                     listener.stateUpdateHandler = nil

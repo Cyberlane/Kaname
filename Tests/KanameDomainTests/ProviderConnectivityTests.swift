@@ -211,6 +211,26 @@ struct ProviderConnectivityTests {
         #expect(query["scope"]?.contains("calendar.readonly") == true)
     }
 
+#if os(macOS)
+    @Test
+    func googleLoopbackReceiverBindsBeforeCompletingCallback() async throws {
+        let receiver = try await GoogleLoopbackReceiver.start()
+        let expectedState = "state-\(UUID().uuidString)"
+        let expectedCode = "code-\(UUID().uuidString)"
+        var callback = URLComponents(url: receiver.redirectURI, resolvingAgainstBaseURL: false)!
+        callback.queryItems = [
+            URLQueryItem(name: "code", value: expectedCode),
+            URLQueryItem(name: "state", value: expectedState),
+        ]
+
+        async let receivedCode = receiver.waitForCode(expectedState: expectedState)
+        let (_, response) = try await URLSession.shared.data(from: callback.url!)
+
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        #expect(try await receivedCode == expectedCode)
+    }
+#endif
+
     @Test
     func nativeGoogleResponsesPreserveAccountScopedCalendarAndMailFields() throws {
         let account = NativeGoogleAccountSnapshot(
