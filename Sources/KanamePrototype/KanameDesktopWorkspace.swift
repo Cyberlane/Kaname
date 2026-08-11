@@ -2087,6 +2087,8 @@ private struct DesktopThreadConversation: View {
     @State private var runtimeReasoning = "xhigh"
     @State private var runtimeMode: ConversationRuntimeMode = .approvalRequired
     @State private var runtimeNetworkAccess = false
+    @State private var expandedEventGroupIDs: Set<String> = []
+    @State private var timelineEntryLimit = DesktopConversationTimelinePresentation.defaultMaximumEntries
     @FocusState private var composerFocused: Bool
 #if os(macOS)
     @State private var sheetPreviousResponder: NSResponder?
@@ -2163,6 +2165,10 @@ private struct DesktopThreadConversation: View {
         }
         .onAppear(perform: applyComposerFocusRequest)
         .onChange(of: composerFocusRequest) { _ in applyComposerFocusRequest() }
+        .onChange(of: thread.id) { _ in
+            expandedEventGroupIDs.removeAll()
+            timelineEntryLimit = DesktopConversationTimelinePresentation.defaultMaximumEntries
+        }
         .onChange(of: thread.plan.count) { count in
             if count > 0 { panel = .plan }
         }
@@ -2227,12 +2233,23 @@ private struct DesktopThreadConversation: View {
         )
     }
 
-    private var timeline: [DesktopConversationTimelineItem] {
-        let messages = thread.messages.map(DesktopConversationTimelineItem.message)
-        let events = model.providerEvents(threadID: thread.id)
+    private var visibleProviderEvents: [DesktopProviderEventRecord] {
+        model.providerEvents(threadID: thread.id)
             .filter { $0.kind != .assistantText && $0.kind != .native }
-            .map(DesktopConversationTimelineItem.event)
-        return (messages + events).sorted { $0.createdAtUnixMillis < $1.createdAtUnixMillis }
+    }
+
+    private var timelinePage: DesktopConversationTimelinePage {
+        DesktopConversationTimelinePresentation.page(
+            messages: thread.messages,
+            providerEvents: visibleProviderEvents,
+            maximumEntries: timelineEntryLimit
+        )
+    }
+
+    private var timeline: [DesktopConversationTimelineRow] { timelinePage.rows }
+
+    private var timelineActivityCount: Int {
+        thread.messages.count + visibleProviderEvents.count
     }
 
     private var latestRecoverableRun: DesktopProviderRunRecord? {
@@ -2254,6 +2271,14 @@ private struct DesktopThreadConversation: View {
                                 detail: "Your first message is saved once, then sent through the project's provider and context boundary."
                             )
                         } else {
+                            if timelinePage.hiddenOlderEntryCount > 0 {
+                                Button("Show \(min(400, timelinePage.hiddenOlderEntryCount)) older items") {
+                                    timelineEntryLimit += 400
+                                }
+                                .buttonStyle(.bordered)
+                                .frame(maxWidth: .infinity)
+                                .accessibilityHint("Loads an earlier page without changing provider history")
+                            }
                             ForEach(timeline) { item in
                                 switch item {
                                 case let .message(message):
@@ -2263,14 +2288,15 @@ private struct DesktopThreadConversation: View {
                                     DesktopProviderEventCard(
                                         event: event,
                                         questionAnswer: $questionAnswer,
-                                        answer: {
-                                            runtime.answerQuestion(
-                                                threadID: thread.id,
-                                                event: event,
-                                                answer: questionAnswer
-                                            )
-                                            questionAnswer = ""
-                                        }
+                                        answer: { answerQuestion(event) }
+                                    )
+                                    .id(item.id)
+                                case let .eventGroup(group):
+                                    DesktopProviderEventGroupCard(
+                                        group: group,
+                                        isExpanded: eventGroupExpansionBinding(for: group.id),
+                                        questionAnswer: $questionAnswer,
+                                        answer: answerQuestion
                                     )
                                     .id(item.id)
                                 }
@@ -2279,13 +2305,12 @@ private struct DesktopThreadConversation: View {
                     }
                     .padding(22)
                 }
-                .onChange(of: timeline.count) { _ in
+                .onChange(of: timelineActivityCount) { _ in
                     if let id = timeline.last?.id {
-                        if reduceMotion {
-                            proxy.scrollTo(id, anchor: .bottom)
-                        } else {
-                            withAnimation { proxy.scrollTo(id, anchor: .bottom) }
-                        }
+                        // Provider bursts can arrive faster than SwiftUI finishes
+                        // an animation. A direct scroll avoids stacking layout
+                        // transactions while preserving follow-to-latest behavior.
+                        proxy.scrollTo(id, anchor: .bottom)
                     }
                 }
             }
@@ -2441,24 +2466,27 @@ private struct DesktopThreadConversation: View {
             model.updateComposerDraft(threadID: thread.id, body: "")
         }
     }
-}
 
-private enum DesktopConversationTimelineItem: Identifiable {
-    case message(DesktopMessage)
-    case event(DesktopProviderEventRecord)
-
-    var id: String {
-        switch self {
-        case let .message(message): "message-\(message.id)"
-        case let .event(event): "event-\(event.id)"
-        }
+    private func answerQuestion(_ event: DesktopProviderEventRecord) {
+        runtime.answerQuestion(
+            threadID: thread.id,
+            event: event,
+            answer: questionAnswer
+        )
+        questionAnswer = ""
     }
 
-    var createdAtUnixMillis: Int64 {
-        switch self {
-        case let .message(message): message.createdAtUnixMillis
-        case let .event(event): event.createdAtUnixMillis
-        }
+    private func eventGroupExpansionBinding(for groupID: String) -> Binding<Bool> {
+        Binding(
+            get: { expandedEventGroupIDs.contains(groupID) },
+            set: { isExpanded in
+                if isExpanded {
+                    expandedEventGroupIDs.insert(groupID)
+                } else {
+                    expandedEventGroupIDs.remove(groupID)
+                }
+            }
+        )
     }
 }
 
@@ -2602,6 +2630,87 @@ private struct DesktopCodingWorkflowBanner: View {
     }
 }
 
+private struct DesktopProviderEventGroupCard: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let group: DesktopProviderEventGroup
+    @Binding var isExpanded: Bool
+    @Binding var questionAnswer: String
+    let answer: (DesktopProviderEventRecord) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button(action: toggleExpansion) {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: group.kind.timelineSymbol)
+                        .foregroundStyle(group.kind.timelineTint)
+                        .frame(width: 25)
+                    VStack(alignment: .leading, spacing: 5) {
+                        LabeledContent {
+                            RelativeTime(unixMillis: group.latestCreatedAtUnixMillis)
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        } label: {
+                            Text(group.summaryTitle)
+                                .font(.caption.weight(.semibold))
+                        }
+                        if !group.latestSummary.isEmpty {
+                            Text(group.latestSummary)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                                .multilineTextAlignment(.leading)
+                        }
+                        if group.containsTruncatedPayload {
+                            Label("Some raw payloads exceeded the evidence limit", systemImage: "exclamationmark.triangle")
+                                .font(.caption2)
+                                .foregroundStyle(Nord.auroraYellow)
+                        }
+                    }
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                        .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: isExpanded)
+                        .frame(width: 14, height: 20)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityElement(children: .ignore)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityLabel(group.accessibilityLabel(isExpanded: isExpanded))
+            .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
+            .accessibilityHint(isExpanded ? "Collapse event group" : "Expand event group")
+            .accessibilityIdentifier("provider-event-group-\(group.id)")
+
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(group.events) { event in
+                        DesktopProviderEventCard(
+                            event: event,
+                            questionAnswer: $questionAnswer,
+                            answer: { answer(event) }
+                        )
+                    }
+                }
+                .padding(.leading, 18)
+            }
+        }
+        .padding(12)
+        .background(group.kind.timelineTint.opacity(0.09), in: RoundedRectangle(cornerRadius: 13))
+    }
+
+    private func toggleExpansion() {
+        if reduceMotion {
+            isExpanded.toggle()
+        } else {
+            withAnimation(.easeInOut(duration: 0.18)) {
+                isExpanded.toggle()
+            }
+        }
+    }
+}
+
 private struct DesktopProviderEventCard: View {
     let event: DesktopProviderEventRecord
     @Binding var questionAnswer: String
@@ -2609,9 +2718,13 @@ private struct DesktopProviderEventCard: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
-            Image(systemName: symbol)
-                .foregroundStyle(tint)
-                .frame(width: 25)
+            VStack {
+                Image(systemName: event.kind.timelineSymbol)
+                    .foregroundStyle(event.kind.timelineTint)
+                Spacer(minLength: 0)
+            }
+            .frame(width: 25)
+            .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Text(event.title).font(.caption.weight(.semibold))
@@ -2642,16 +2755,18 @@ private struct DesktopProviderEventCard: View {
                         .foregroundStyle(Nord.auroraYellow)
                 }
             }
-            Spacer(minLength: 42)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(12)
-        .background(tint.opacity(0.09), in: RoundedRectangle(cornerRadius: 13))
+        .background(event.kind.timelineTint.opacity(0.09), in: RoundedRectangle(cornerRadius: 13))
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(event.title). \(event.detail)")
     }
+}
 
-    private var symbol: String {
-        switch event.kind {
+private extension DesktopProviderEventKind {
+    var timelineSymbol: String {
+        switch self {
         case .status: "circle.dotted"
         case .reasoning: "list.bullet.clipboard"
         case .tool: "wrench.and.screwdriver"
@@ -2665,8 +2780,8 @@ private struct DesktopProviderEventCard: View {
         }
     }
 
-    private var tint: Color {
-        switch event.kind {
+    var timelineTint: Color {
+        switch self {
         case .error: Nord.auroraRed
         case .question, .approval: Nord.auroraYellow
         case .diff: Nord.auroraPurple

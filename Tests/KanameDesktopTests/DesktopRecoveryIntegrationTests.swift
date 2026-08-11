@@ -138,6 +138,57 @@ struct DesktopRecoveryIntegrationTests {
     }
 
     @Test
+    func versionFourteenMigrationCompactsOnlyTerminalProviderHistory() throws {
+        var legacy = DesktopAppSnapshot.starter(now: 1_000)
+        legacy.version = 14
+        let threadID = legacy.threads[0].id
+        legacy.operations.providerRuns = [
+            DesktopProviderRunRecord(
+                id: "terminal-run",
+                threadID: threadID,
+                provider: "Codex",
+                model: "provider-default",
+                briefDigest: "terminal",
+                contextReferenceCount: 0,
+                tokenUsage: nil,
+                costSummary: "Failed",
+                state: .failed,
+                startedAtUnixMillis: 1,
+                completedAtUnixMillis: 2
+            ),
+            DesktopProviderRunRecord(
+                id: "active-run",
+                threadID: threadID,
+                provider: "Codex",
+                model: "provider-default",
+                briefDigest: "active",
+                contextReferenceCount: 0,
+                tokenUsage: nil,
+                costSummary: "Running",
+                state: .running,
+                startedAtUnixMillis: 3,
+                completedAtUnixMillis: nil
+            ),
+        ]
+        legacy.operations.providerEvents = [
+            migrationEvent(id: "terminal-native", runID: "terminal-run", kind: .native),
+            migrationEvent(id: "terminal-text", runID: "terminal-run", kind: .assistantText),
+            migrationEvent(id: "terminal-error", runID: "terminal-run", kind: .error),
+            migrationEvent(id: "active-native", runID: "active-run", kind: .native),
+            migrationEvent(id: "active-question", runID: "active-run", kind: .question),
+        ]
+        let store = RecoveryMemoryStore(primary: try JSONEncoder().encode(legacy), recovery: nil)
+
+        let model = DesktopAppModel(store: store, now: { 2_000 })
+        let events = model.snapshot.operations.providerEvents
+
+        #expect(model.snapshot.version == DesktopAppSnapshot.currentVersion)
+        #expect(events.map(\.id) == ["terminal-error", "active-native", "active-question"])
+        #expect(events.first?.rawPayloadBase64 == nil)
+        #expect(events.dropFirst().allSatisfy { $0.rawPayloadBase64 == "cmF3" })
+    }
+
+    @Test
     func fileMigrationCreatesVerifiedPrivateBackupAndReceipt() throws {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -650,6 +701,28 @@ struct DesktopRecoveryIntegrationTests {
 
     private func temporaryDirectory() -> URL {
         FileManager.default.temporaryDirectory.appendingPathComponent("kaname-recovery-integration-\(UUID().uuidString)")
+    }
+
+    private func migrationEvent(
+        id: String,
+        runID: String,
+        kind: DesktopProviderEventKind
+    ) -> DesktopProviderEventRecord {
+        DesktopProviderEventRecord(
+            id: id,
+            threadID: "thread-desktop-dogfood",
+            runID: runID,
+            kind: kind,
+            title: "Event",
+            detail: "Detail",
+            nativeType: "test/event",
+            nativeThreadID: "native-thread",
+            nativeTurnID: "native-turn",
+            approvalID: nil,
+            rawPayloadBase64: "cmF3",
+            payloadWasTruncated: false,
+            createdAtUnixMillis: 1
+        )
     }
 
     private func regularFiles(below directory: URL) throws -> [URL] {

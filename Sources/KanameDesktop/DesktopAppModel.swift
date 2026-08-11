@@ -561,7 +561,7 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
     }
 
     func migratedToCurrent(now: Int64) throws -> DesktopAppSnapshot {
-        guard (1...13).contains(version) else { throw DesktopModelError.unsupportedVersion }
+        guard (1...14).contains(version) else { throw DesktopModelError.unsupportedVersion }
         var migrated = self
         while migrated.version < Self.currentVersion {
             switch migrated.version {
@@ -584,6 +584,23 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
                 }
             case 7, 8, 9, 10, 11, 12, 13:
                 break
+            case 14:
+                let terminalRunIDs = Set(migrated.operations.providerRuns.compactMap { run in
+                    switch run.state {
+                    case .completed, .failed, .interrupted, .rejected, .cancelled:
+                        run.id
+                    case .proposed, .awaitingApproval, .approved, .running, .reconciled:
+                        nil
+                    }
+                })
+                migrated.operations.providerEvents.removeAll { event in
+                    terminalRunIDs.contains(event.runID)
+                        && (event.kind == .assistantText || event.kind == .native)
+                }
+                for index in migrated.operations.providerEvents.indices
+                    where terminalRunIDs.contains(migrated.operations.providerEvents[index].runID) {
+                    migrated.operations.providerEvents[index].rawPayloadBase64 = nil
+                }
             default:
                 throw DesktopModelError.unsupportedVersion
             }

@@ -277,6 +277,109 @@ public enum CodexLiveSessionError: Error, Equatable, LocalizedError, Sendable {
     }
 }
 
+/// Collapses contiguous provider deltas before they enter the bounded public
+/// stream. The original JSON payloads remain available as bounded JSON Lines
+/// evidence, while ordinary consumers receive substantially fewer events.
+struct CodexProviderEventCoalescer {
+    private static let messageChunkBytes = 4 * 1_024
+    private static let messageChunkEvents = 32
+
+    private struct Pending {
+        var event: CodexRunEvent
+        var eventCount: Int
+        let key: String
+    }
+
+    private var pending: Pending?
+
+    mutating func ingest(_ event: CodexRunEvent) -> [CodexRunEvent] {
+        guard let key = Self.coalescingKey(for: event) else {
+            return flush() + [event]
+        }
+        guard var current = pending else {
+            pending = Pending(event: event, eventCount: 1, key: key)
+            return []
+        }
+        guard current.key == key else {
+            let flushed = flush()
+            pending = Pending(event: event, eventCount: 1, key: key)
+            return flushed
+        }
+        guard let combined = Self.combine(current.event, event) else {
+            let flushed = flush()
+            pending = Pending(event: event, eventCount: 1, key: key)
+            return flushed
+        }
+        current.event = combined
+        current.eventCount += 1
+        pending = current
+
+        let textBytes = combined.text?.utf8.count ?? 0
+        if event.kind == .messageDelta,
+           current.eventCount >= Self.messageChunkEvents || textBytes >= Self.messageChunkBytes {
+            return flush()
+        }
+        return []
+    }
+
+    mutating func flush() -> [CodexRunEvent] {
+        guard let pending else { return [] }
+        self.pending = nil
+        return [pending.event]
+    }
+
+    private static func coalescingKey(for event: CodexRunEvent) -> String? {
+        let isDelta = event.kind == .messageDelta
+            || (event.kind == .nativeProviderEvent
+                && event.nativeType.localizedCaseInsensitiveContains("delta"))
+        guard isDelta else { return nil }
+        let payloadObject = event.payload.flatMap { CodexRunEvent.object(from: $0) }
+        let itemID = payloadObject?["itemId"] as? String ?? ""
+        return [
+            event.kind.rawValue,
+            event.nativeType,
+            event.threadID ?? "",
+            event.turnID ?? "",
+            itemID,
+        ].joined(separator: "\u{1f}")
+    }
+
+    private static func combine(_ left: CodexRunEvent, _ right: CodexRunEvent) -> CodexRunEvent? {
+        let leftText = left.text ?? ""
+        let rightText = right.text ?? ""
+        guard leftText.utf8.count + rightText.utf8.count <= CodexRunEvent.maximumTextBytes else {
+            return nil
+        }
+        let payload = combinedPayload(left.payload, right.payload)
+        return CodexRunEvent(
+            kind: left.kind,
+            nativeType: left.nativeType,
+            threadID: left.threadID,
+            turnID: left.turnID,
+            approvalID: left.approvalID,
+            text: leftText + rightText,
+            payload: payload.data,
+            payloadWasTruncated: left.payloadWasTruncated || right.payloadWasTruncated || payload.wasTruncated
+        )
+    }
+
+    private static func combinedPayload(_ left: Data?, _ right: Data?) -> (data: Data?, wasTruncated: Bool) {
+        guard left != nil || right != nil else { return (nil, false) }
+        var result = Data()
+        var wasTruncated = false
+        for payload in [left, right].compactMap({ $0 }) {
+            let separatorBytes = result.isEmpty ? 0 : 1
+            guard result.count + separatorBytes + payload.count <= CodexRunEvent.maximumRetainedPayloadBytes else {
+                wasTruncated = true
+                continue
+            }
+            if !result.isEmpty { result.append(0x0a) }
+            result.append(payload)
+        }
+        return (result.isEmpty ? nil : result, wasTruncated)
+    }
+}
+
 /// A single long-lived app-server session.  It transports native events but does
 /// not make them product authority: the caller must later append accepted,
 /// normalized events through the Rust policy/journal boundary.
@@ -289,6 +392,7 @@ public actor CodexLiveSession {
     private var nativeThreadID: String?
     private var activeSandbox: CodexSandboxPolicy?
     private var pendingQuestions: [String: (CodexAppServerRequestID, Data)] = [:]
+    private var eventCoalescer = CodexProviderEventCoalescer()
     private var outputStreamOverflowed = false
     private var observedUnsafeMCPActivity = false
     private var ephemeralCodexHome: CodexEphemeralHome?
@@ -504,6 +608,9 @@ public actor CodexLiveSession {
         nativeThreadID = nil
         activeSandbox = nil
         pendingQuestions.removeAll()
+        for event in eventCoalescer.flush() {
+            deliver(event)
+        }
         let isolatedHome = ephemeralCodexHome
         ephemeralCodexHome = nil
         for continuation in continuations.values {
@@ -735,6 +842,12 @@ public actor CodexLiveSession {
     }
 
     private func emit(_ event: CodexRunEvent) {
+        for event in eventCoalescer.ingest(event) {
+            deliver(event)
+        }
+    }
+
+    private func deliver(_ event: CodexRunEvent) {
         guard !outputStreamOverflowed else { return }
         var dropped = false
         for continuation in continuations.values {

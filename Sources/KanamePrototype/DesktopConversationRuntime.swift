@@ -1061,7 +1061,12 @@ final class DesktopConversationRuntime: ObservableObject {
             nativeThreadID: event.threadID,
             nativeTurnID: event.turnID,
             approvalID: event.approvalID,
-            rawPayloadBase64: event.payload?.base64EncodedString(),
+            // Raw provider evidence is sealed separately by the worker. The
+            // workspace needs payload bytes only while a question can still be
+            // answered after its service event has been acknowledged.
+            rawPayloadBase64: event.kind == .questionRequested
+                ? event.payload?.base64EncodedString()
+                : nil,
             payloadWasTruncated: event.payloadWasTruncated,
             createdAtUnixMillis: createdAtUnixMillis
         )

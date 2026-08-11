@@ -495,6 +495,62 @@ struct CodexLiveSessionTests {
         #expect(retainedMetadata.contains("rawPayloadByteCount"))
     }
 
+    @Test
+    func commandOutputBurstIsCoalescedBeforeTheBoundedConsumerStream() throws {
+        var coalescer = CodexProviderEventCoalescer()
+        var delivered: [CodexRunEvent] = []
+        for ordinal in 0..<608 {
+            delivered += coalescer.ingest(try notification(
+                method: "item/commandExecution/outputDelta",
+                parameters: [
+                    "threadId": "native-thread",
+                    "turnId": "native-turn",
+                    "itemId": "command-1",
+                    "delta": "\(ordinal),",
+                ]
+            ))
+        }
+        delivered += coalescer.ingest(try notification(
+            method: "turn/completed",
+            parameters: [
+                "threadId": "native-thread",
+                "turn": ["id": "native-turn", "status": "completed"],
+            ]
+        ))
+
+        #expect(delivered.count == 2)
+        #expect(delivered[0].kind == .nativeProviderEvent)
+        #expect(delivered[0].text == (0..<608).map { "\($0)," }.joined())
+        #expect(delivered[0].payload?.split(separator: 0x0a).count == 608)
+        #expect(delivered[0].payloadWasTruncated == false)
+        #expect(delivered[1].kind == .providerCompleted)
+    }
+
+    @Test
+    func assistantDeltaBurstRemainsStreamingButCannotFillTheEventBuffer() throws {
+        var coalescer = CodexProviderEventCoalescer()
+        var delivered: [CodexRunEvent] = []
+        for _ in 0..<4_096 {
+            delivered += coalescer.ingest(try notification(
+                method: "item/agentMessage/delta",
+                parameters: [
+                    "threadId": "native-thread",
+                    "turnId": "native-turn",
+                    "itemId": "message-1",
+                    "delta": "x",
+                ]
+            ))
+        }
+        delivered += coalescer.flush()
+
+        #expect(delivered.count == 128)
+        #expect(delivered.allSatisfy { $0.kind == .messageDelta })
+        #expect(delivered.compactMap(\.text).joined().count == 4_096)
+        #expect(delivered.allSatisfy {
+            ($0.payload?.count ?? 0) <= CodexRunEvent.maximumRetainedPayloadBytes
+        })
+    }
+
     private func codexInstance() -> ProviderInstance {
         ProviderInstance(
             id: ProviderInstanceID(rawValue: "codexLocal")!,
