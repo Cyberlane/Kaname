@@ -2253,6 +2253,7 @@ private struct DesktopThreadConversation: View {
                 ForEach(Panel.allCases) { item in Text(item.label).tag(item) }
             }
             .pickerStyle(.segmented)
+            .labelsHidden()
         }
         .padding(22)
     }
