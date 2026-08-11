@@ -1,6 +1,7 @@
-# Kaname 0.17.4 build 34
+# Kaname 0.17.5 build 35
 
-- Keep long provider command-output bursts within the bounded live event stream without losing sealed raw evidence.
-- Group repeated timeline activity and page large histories so an active conversation remains responsive.
-- Preserve questions, approvals, errors, active-run state, and exact message reconstruction across event coalescing.
-- Compact completed legacy provider-event histories during the schema-15 workspace migration.
+- Keep Threads focused on the human conversation while compact run capsules summarize tool calls, reasoning, diffs, duration, and usage.
+- Open complete per-run activity in a searchable Summary, Timeline, and immutable Raw evidence inspector.
+- Review code in a dedicated Changes workspace with a filterable file list and bounded, syntax-colored per-file patches.
+- Jump through a conversation outline, search messages and deep activity together, and keep your reading position when background tools are busy.
+- Page extremely long conversations and activity histories without discarding provider evidence or changing the workspace schema.

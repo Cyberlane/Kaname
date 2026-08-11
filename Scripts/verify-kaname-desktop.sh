@@ -100,6 +100,14 @@ mkdir -p "$output_directory"
     --desktop-destination home \
     --desktop-window-size 1080x700 \
     --snapshot "$output_directory/home-compact.png"
+"$executable" \
+    --desktop-destination threads \
+    --desktop-window-size 1520x940 \
+    --snapshot "$output_directory/threads-wide.png"
+"$executable" \
+    --desktop-destination threads \
+    --desktop-window-size 1080x700 \
+    --snapshot "$output_directory/threads-compact.png"
 "$executable" --desktop-destination localCore --load-local-core --snapshot "$output_directory/local-core.png"
 "$executable" --desktop-destination email --snapshot "$output_directory/email.png"
 "$executable" --desktop-destination calendar --snapshot "$output_directory/calendar.png"
@@ -146,6 +154,8 @@ mkdir -p "$output_directory"
 for snapshot in \
     "$output_directory/home-wide.png" \
     "$output_directory/home-compact.png" \
+    "$output_directory/threads-wide.png" \
+    "$output_directory/threads-compact.png" \
     "$output_directory/local-core.png" \
     "$output_directory/email.png" \
     "$output_directory/calendar.png" \

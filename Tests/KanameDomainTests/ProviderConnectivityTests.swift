@@ -659,7 +659,19 @@ struct ProviderConnectivityTests {
         #expect(snapshot.branch == "kaname/fixture")
         #expect(snapshot.changedFiles.isEmpty)
 
+        try Data("foundation\nreviewed change\n".utf8).write(to: target.appending(path: "README.md"))
+        let refreshed = try await service.inspect(worktree: target, rootRepository: repository)
+        #expect(refreshed.changedFiles == ["README.md"])
+        let patch = try await service.diff(worktree: target, relativePath: "README.md")
+        #expect(patch.contains("+reviewed change"))
+        await #expect(throws: DesktopGitControlError.invalidTarget) {
+            try await service.diff(worktree: target, relativePath: "../README.md")
+        }
+        try Data("foundation\n".utf8).write(to: target.appending(path: "README.md"))
+
         try Data("dirty\n".utf8).write(to: target.appending(path: "dirty.txt"))
+        let untrackedPatch = try await service.diff(worktree: target, relativePath: "dirty.txt")
+        #expect(untrackedPatch.contains("+dirty"))
         await #expect(throws: DesktopGitControlError.worktreeDirty) {
             try await service.removeWorktree(
                 repository: repository,

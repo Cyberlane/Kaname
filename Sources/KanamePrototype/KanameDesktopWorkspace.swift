@@ -178,6 +178,8 @@ struct KanameDesktopWorkspace: View {
     @State private var navigationHistory: [DesktopNavigationLocation] = []
     @State private var pendingCreatedThreadID: String?
     @State private var composerFocusRequest: DesktopComposerFocusRequest?
+    @State private var selectedThreadRunID: String?
+    @State private var selectedConversationAnchorID: String?
     @State private var workspaceAnnouncement = ""
     @State private var searchNavigationRequest: DesktopSearchNavigationRequest?
     @State private var searchFallbackNotice: DesktopSearchFallbackNotice?
@@ -755,6 +757,8 @@ struct KanameDesktopWorkspace: View {
                     capabilities: personalIntegrations.providerCapabilities,
                     searchText: searchText,
                     selectedThreadID: threadSelection,
+                    selectedRunID: $selectedThreadRunID,
+                    conversationAnchorID: $selectedConversationAnchorID,
                     composerFocusRequest: composerFocusRequest
                 )
             case .inbox:
@@ -825,7 +829,12 @@ struct KanameDesktopWorkspace: View {
         if let project = model.project(id: selectedProjectID), destination == .projects {
             DesktopProjectInspector(model: model, project: project)
         } else if let thread = model.thread(id: selectedThreadID), [.home, .threads, .inbox].contains(destination) {
-            DesktopThreadInspector(model: model, thread: thread)
+            DesktopThreadInspector(
+                model: model,
+                thread: thread,
+                selectedRunID: $selectedThreadRunID,
+                conversationAnchorID: $selectedConversationAnchorID
+            )
         } else {
             DesktopContextInspector(destination: destination, model: model)
         }
@@ -874,6 +883,10 @@ struct KanameDesktopWorkspace: View {
 
     private func openThread(_ threadID: String, restoringComposerFocus: Bool = false) {
         guard acceptsNonRecoveryCommands else { return }
+        if selectedThreadID != threadID {
+            selectedThreadRunID = nil
+            selectedConversationAnchorID = nil
+        }
         visit(DesktopNavigationLocation(destination: .threads, selectedThreadID: threadID, selectedProjectID: nil))
         model.markRead(threadID: threadID)
         if restoringComposerFocus {
@@ -1952,6 +1965,8 @@ private struct DesktopThreadsView: View {
     let capabilities: [ProviderCapabilitySnapshot]
     let searchText: String
     @Binding var selectedThreadID: String?
+    @Binding var selectedRunID: String?
+    @Binding var conversationAnchorID: String?
     let composerFocusRequest: DesktopComposerFocusRequest?
 
     var body: some View {
@@ -1978,7 +1993,7 @@ private struct DesktopThreadsView: View {
                 }
                 .listStyle(.inset)
             }
-            .frame(minWidth: 280, idealWidth: 350, maxWidth: 430)
+            .frame(minWidth: 200, idealWidth: 300, maxWidth: 360)
 
             if let thread = model.thread(id: selectedThreadID) {
                 DesktopThreadConversation(
@@ -1986,9 +2001,12 @@ private struct DesktopThreadsView: View {
                     runtime: runtime,
                     capabilities: capabilities,
                     thread: thread,
+                    selectedRunID: $selectedRunID,
+                    conversationAnchorID: $conversationAnchorID,
                     composerFocusRequest: composerFocusRequest
                 )
                     .id(thread.id)
+                    .frame(minWidth: 340)
             } else {
                 EmptyPanel(
                     symbol: "bubble.left.and.bubble.right",
@@ -1999,6 +2017,10 @@ private struct DesktopThreadsView: View {
             }
         }
         .background(Nord.polarNight0)
+        .onChange(of: selectedThreadID) { _ in
+            selectedRunID = nil
+            conversationAnchorID = nil
+        }
     }
 }
 
@@ -2070,11 +2092,12 @@ private struct DesktopInboxView: View {
 }
 
 private struct DesktopThreadConversation: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var model: DesktopAppModel
     @ObservedObject var runtime: DesktopConversationRuntime
     let capabilities: [ProviderCapabilitySnapshot]
     let thread: DesktopThread
+    @Binding var selectedRunID: String?
+    @Binding var conversationAnchorID: String?
     let composerFocusRequest: DesktopComposerFocusRequest?
     @State private var draft = ""
     @State private var questionAnswer = ""
@@ -2087,8 +2110,10 @@ private struct DesktopThreadConversation: View {
     @State private var runtimeReasoning = "xhigh"
     @State private var runtimeMode: ConversationRuntimeMode = .approvalRequired
     @State private var runtimeNetworkAccess = false
-    @State private var expandedEventGroupIDs: Set<String> = []
-    @State private var timelineEntryLimit = DesktopConversationTimelinePresentation.defaultMaximumEntries
+    @State private var narrativeRowLimit = DesktopConversationNarrativePresentation.defaultMaximumRows
+    @State private var conversationSearch = ""
+    @State private var followsLatest = true
+    @State private var hasNewNarrativeContent = false
     @FocusState private var composerFocused: Bool
 #if os(macOS)
     @State private var sheetPreviousResponder: NSResponder?
@@ -2099,22 +2124,34 @@ private struct DesktopThreadConversation: View {
         runtime: DesktopConversationRuntime,
         capabilities: [ProviderCapabilitySnapshot],
         thread: DesktopThread,
+        selectedRunID: Binding<String?>,
+        conversationAnchorID: Binding<String?>,
         composerFocusRequest: DesktopComposerFocusRequest?
     ) {
         self.model = model
         self.runtime = runtime
         self.capabilities = capabilities
         self.thread = thread
+        _selectedRunID = selectedRunID
+        _conversationAnchorID = conversationAnchorID
         self.composerFocusRequest = composerFocusRequest
         _draft = State(initialValue: model.composerDraft(threadID: thread.id))
     }
 
     private enum Panel: String, CaseIterable, Identifiable {
         case conversation
+        case changes
         case plan
         case evidence
         var id: String { rawValue }
-        var label: String { self == .conversation ? "Chat" : rawValue.capitalized }
+        var label: String {
+            switch self {
+            case .conversation: "Chat"
+            case .changes: "Changes"
+            case .plan: "Plan"
+            case .evidence: "Evidence"
+            }
+        }
     }
 
     var body: some View {
@@ -2126,6 +2163,8 @@ private struct DesktopThreadConversation: View {
             switch panel {
             case .conversation:
                 conversation
+            case .changes:
+                DesktopThreadChangesView(model: model, thread: thread)
             case .plan:
                 ThreadPlanView(items: thread.plan)
             case .evidence:
@@ -2166,8 +2205,12 @@ private struct DesktopThreadConversation: View {
         .onAppear(perform: applyComposerFocusRequest)
         .onChange(of: composerFocusRequest) { _ in applyComposerFocusRequest() }
         .onChange(of: thread.id) { _ in
-            expandedEventGroupIDs.removeAll()
-            timelineEntryLimit = DesktopConversationTimelinePresentation.defaultMaximumEntries
+            narrativeRowLimit = DesktopConversationNarrativePresentation.defaultMaximumRows
+            conversationSearch = ""
+            selectedRunID = nil
+            conversationAnchorID = nil
+            followsLatest = true
+            hasNewNarrativeContent = false
         }
         .onChange(of: thread.plan.count) { count in
             if count > 0 { panel = .plan }
@@ -2233,23 +2276,23 @@ private struct DesktopThreadConversation: View {
         )
     }
 
-    private var visibleProviderEvents: [DesktopProviderEventRecord] {
-        model.providerEvents(threadID: thread.id)
-            .filter { $0.kind != .assistantText && $0.kind != .native }
-    }
-
-    private var timelinePage: DesktopConversationTimelinePage {
-        DesktopConversationTimelinePresentation.page(
+    private var narrativePage: DesktopConversationNarrativePage {
+        DesktopConversationNarrativePresentation.page(
             messages: thread.messages,
-            providerEvents: visibleProviderEvents,
-            maximumEntries: timelineEntryLimit
+            runs: model.providerRuns(threadID: thread.id),
+            events: model.providerEvents(threadID: thread.id),
+            maximumRows: narrativeRowLimit,
+            searchText: conversationSearch
         )
     }
 
-    private var timeline: [DesktopConversationTimelineRow] { timelinePage.rows }
+    private var narrative: [DesktopConversationNarrativeRow] { narrativePage.rows }
 
-    private var timelineActivityCount: Int {
-        thread.messages.count + visibleProviderEvents.count
+    private var narrativeActivityCount: Int {
+        thread.messages.reduce(0) { $0 + $1.body.utf8.count + 1 }
+            + model.providerRuns(threadID: thread.id).count
+            + model.providerRuns(threadID: thread.id).lazy.filter { $0.completedAtUnixMillis != nil }.count
+            + model.providerEvents(threadID: thread.id).lazy.filter(\.kind.isNarrativeCritical).count
     }
 
     private var latestRecoverableRun: DesktopProviderRunRecord? {
@@ -2261,56 +2304,121 @@ private struct DesktopThreadConversation: View {
 
     private var conversation: some View {
         VStack(spacing: 0) {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 14) {
-                        if timeline.isEmpty {
-                            EmptyPanel(
-                                symbol: "text.bubble",
-                                title: "Start the conversation",
-                                detail: "Your first message is saved once, then sent through the project's provider and context boundary."
-                            )
-                        } else {
-                            if timelinePage.hiddenOlderEntryCount > 0 {
-                                Button("Show \(min(400, timelinePage.hiddenOlderEntryCount)) older items") {
-                                    timelineEntryLimit += 400
-                                }
-                                .buttonStyle(.bordered)
-                                .frame(maxWidth: .infinity)
-                                .accessibilityHint("Loads an earlier page without changing provider history")
-                            }
-                            ForEach(timeline) { item in
-                                switch item {
-                                case let .message(message):
-                                    DesktopMessageBubble(message: message)
-                                        .id(item.id)
-                                case let .event(event):
-                                    DesktopProviderEventCard(
-                                        event: event,
-                                        questionAnswer: $questionAnswer,
-                                        answer: { answerQuestion(event) }
-                                    )
-                                    .id(item.id)
-                                case let .eventGroup(group):
-                                    DesktopProviderEventGroupCard(
-                                        group: group,
-                                        isExpanded: eventGroupExpansionBinding(for: group.id),
-                                        questionAnswer: $questionAnswer,
-                                        answer: answerQuestion
-                                    )
-                                    .id(item.id)
-                                }
-                            }
-                        }
+            HStack(spacing: 10) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                TextField("Find conversation or activity", text: $conversationSearch)
+                    .textFieldStyle(.plain)
+                if !conversationSearch.isEmpty {
+                    Text("\(narrative.count) result\(narrative.count == 1 ? "" : "s")")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button {
+                        conversationSearch = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
                     }
-                    .padding(22)
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Clear conversation search")
                 }
-                .onChange(of: timelineActivityCount) { _ in
-                    if let id = timeline.last?.id {
-                        // Provider bursts can arrive faster than SwiftUI finishes
-                        // an animation. A direct scroll avoids stacking layout
-                        // transactions while preserving follow-to-latest behavior.
-                        proxy.scrollTo(id, anchor: .bottom)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(Nord.polarNight1)
+
+            Divider()
+
+            ScrollViewReader { proxy in
+                ZStack(alignment: .bottomTrailing) {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 14) {
+                            if narrative.isEmpty {
+                                EmptyPanel(
+                                    symbol: conversationSearch.isEmpty ? "text.bubble" : "magnifyingglass",
+                                    title: conversationSearch.isEmpty ? "Start the conversation" : "Nothing matches",
+                                    detail: conversationSearch.isEmpty
+                                        ? "Your first message is saved once, then sent through the project's provider and context boundary."
+                                        : "Search includes messages and the full recorded activity behind every run."
+                                )
+                            } else {
+                                if narrativePage.hiddenOlderRowCount > 0 {
+                                    Button("Show \(min(120, narrativePage.hiddenOlderRowCount)) older conversation items") {
+                                        narrativeRowLimit += 120
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .frame(maxWidth: .infinity)
+                                    .accessibilityHint("Loads earlier conversation rows without expanding raw provider activity")
+                                }
+                                ForEach(narrative) { item in
+                                    switch item {
+                                    case let .message(message):
+                                        DesktopMessageBubble(message: message)
+                                            .id(item.id)
+                                    case let .criticalEvent(event):
+                                        DesktopProviderEventCard(
+                                            event: event,
+                                            questionAnswer: $questionAnswer,
+                                            answer: { answerQuestion(event) }
+                                        )
+                                        .id(item.id)
+                                    case let .runSummary(summary):
+                                        DesktopConversationRunCapsule(
+                                            summary: summary,
+                                            inspect: {
+                                                selectedRunID = summary.id
+                                            }
+                                        )
+                                        .id(item.id)
+                                    }
+                                }
+                            }
+
+                            Color.clear
+                                .frame(height: 1)
+                                .id("narrative-bottom")
+                                .onAppear {
+                                    followsLatest = true
+                                    hasNewNarrativeContent = false
+                                }
+                                .onDisappear { followsLatest = false }
+                        }
+                        .padding(22)
+                    }
+
+                    if hasNewNarrativeContent {
+                        Button {
+                            proxy.scrollTo("narrative-bottom", anchor: .bottom)
+                            followsLatest = true
+                            hasNewNarrativeContent = false
+                        } label: {
+                            Label("New response", systemImage: "arrow.down")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .padding(16)
+                        .shadow(radius: 8)
+                    }
+                }
+                .onChange(of: narrativeActivityCount) { _ in
+                    if followsLatest {
+                        proxy.scrollTo("narrative-bottom", anchor: .bottom)
+                    } else {
+                        hasNewNarrativeContent = true
+                    }
+                }
+                .onChange(of: conversationSearch) { _ in
+                    if followsLatest { proxy.scrollTo("narrative-bottom", anchor: .bottom) }
+                }
+                .onChange(of: conversationAnchorID) { anchorID in
+                    guard let anchorID else { return }
+                    panel = .conversation
+                    proxy.scrollTo("message-\(anchorID)", anchor: .center)
+                    followsLatest = false
+                    hasNewNarrativeContent = false
+                    conversationAnchorID = nil
+                }
+                .onAppear {
+                    DispatchQueue.main.async {
+                        proxy.scrollTo("narrative-bottom", anchor: .bottom)
                     }
                 }
             }
@@ -2476,17 +2584,168 @@ private struct DesktopThreadConversation: View {
         questionAnswer = ""
     }
 
-    private func eventGroupExpansionBinding(for groupID: String) -> Binding<Bool> {
-        Binding(
-            get: { expandedEventGroupIDs.contains(groupID) },
-            set: { isExpanded in
-                if isExpanded {
-                    expandedEventGroupIDs.insert(groupID)
-                } else {
-                    expandedEventGroupIDs.remove(groupID)
+}
+
+private struct DesktopThreadChangesView: View {
+    @ObservedObject var model: DesktopAppModel
+    let thread: DesktopThread
+    @StateObject private var changes = DesktopThreadChangesViewModel()
+
+    private var worktree: DesktopWorktreeRecord? {
+        model.snapshot.operations.worktrees
+            .filter { $0.threadID == thread.id && $0.state != .removed }
+            .max { $0.updatedAtUnixMillis < $1.updatedAtUnixMillis }
+    }
+
+    var body: some View {
+        Group {
+            if let worktree {
+                changesWorkspace(worktree)
+                    .onAppear { changes.load(worktree: worktree) }
+                    .onChange(of: worktree.updatedAtUnixMillis) { _ in
+                        changes.load(worktree: worktree, force: true)
+                    }
+            } else {
+                EmptyPanel(
+                    symbol: "doc.text.magnifyingglass",
+                    title: "No code changes for this thread",
+                    detail: "When an approved coding run creates an isolated worktree, its files and per-file patches appear here instead of filling the conversation."
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .background(Nord.polarNight0)
+    }
+
+    private func changesWorkspace(_ worktree: DesktopWorktreeRecord) -> some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Label("\(changes.snapshot?.changedFiles.count ?? worktree.changedFileCount) changed", systemImage: "doc.on.doc")
+                    .font(.caption.weight(.semibold))
+                Text(worktree.branch)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text(worktree.state.label)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(worktree.state == .failed ? Nord.auroraRed : Nord.frost1)
+                Button {
+                    changes.load(worktree: worktree, force: true)
+                } label: {
+                    Label("Refresh diff", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(changes.isLoading)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(Nord.polarNight1)
+
+            Divider()
+
+            HSplitView {
+                VStack(spacing: 0) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                        TextField("Filter files", text: $changes.searchText)
+                            .textFieldStyle(.plain)
+                    }
+                    .padding(11)
+                    Divider()
+
+                    if changes.filteredPaths.isEmpty {
+                        Text(changes.isLoading ? "Reading worktree…" : "Working tree is clean")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        List(changes.filteredPaths, id: \.self) { path in
+                            Button {
+                                changes.select(path: path, worktree: worktree)
+                            } label: {
+                                Label(path, systemImage: "doc.text")
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(Nord.frost1)
+                                    .lineLimit(2)
+                                    .multilineTextAlignment(.leading)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .buttonStyle(.plain)
+                            .listRowBackground(
+                                changes.selectedPath == path
+                                    ? Nord.frost1.opacity(0.12)
+                                    : Color.clear
+                            )
+                        }
+                        .listStyle(.inset)
+                    }
+                }
+                .frame(minWidth: 220, idealWidth: 280, maxWidth: 360)
+
+                diffPane
+            }
+        }
+    }
+
+    private var diffPane: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text(changes.selectedPath ?? "Select a file")
+                    .font(.system(.caption, design: .monospaced).weight(.semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+                if changes.isLoading { ProgressView().controlSize(.small) }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(Nord.polarNight1)
+
+            Divider()
+
+            if let message = changes.message {
+                EmptyPanel(symbol: "exclamationmark.triangle", title: "Diff unavailable", detail: message)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if changes.patch.isEmpty {
+                Text(changes.isLoading ? "Loading patch…" : "No textual patch for this file.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView([.horizontal, .vertical]) {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(changes.patch.split(separator: "\n", omittingEmptySubsequences: false).enumerated()), id: \.offset) { _, line in
+                            DesktopUnifiedDiffLine(text: String(line))
+                        }
+                    }
+                    .padding(.vertical, 8)
                 }
             }
-        )
+        }
+        .frame(minWidth: 340, maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+private struct DesktopUnifiedDiffLine: View {
+    let text: String
+
+    private var tint: Color {
+        if text.hasPrefix("+") && !text.hasPrefix("+++") { return Nord.auroraGreen }
+        if text.hasPrefix("-") && !text.hasPrefix("---") { return Nord.auroraRed }
+        if text.hasPrefix("@@") { return Nord.frost1 }
+        return .clear
+    }
+
+    var body: some View {
+        Text(text.isEmpty ? " " : text)
+            .font(.system(size: 11.5, design: .monospaced))
+            .foregroundStyle(text.hasPrefix("@@") ? Nord.frost1 : Color.primary)
+            .textSelection(.enabled)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 1)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(tint.opacity(0.13))
     }
 }
 
@@ -2626,6 +2885,95 @@ private struct DesktopCodingWorkflowBanner: View {
         case .planReview, .evidenceReview: Nord.auroraYellow
         case .planning, .preparing, .implementing: Nord.frost1
         case .discuss: Nord.frost0
+        }
+    }
+}
+
+private struct DesktopConversationRunCapsule: View {
+    let summary: DesktopConversationRunSummary
+    let inspect: () -> Void
+
+    var body: some View {
+        Grid(alignment: .topLeading, horizontalSpacing: 11) {
+            GridRow {
+                Image(systemName: summary.run.state.accessibilitySymbol)
+                    .foregroundStyle(summary.run.state.tint)
+                    .frame(width: 24)
+                DesktopConversationRunCapsuleDetails(summary: summary, inspect: inspect)
+            }
+        }
+        .padding(12)
+        .background(summary.run.state.tint.opacity(0.07), in: RoundedRectangle(cornerRadius: 13))
+        .overlay {
+            RoundedRectangle(cornerRadius: 13)
+                .strokeBorder(summary.run.state.tint.opacity(0.18), lineWidth: 1)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(summary.run.provider) run \(summary.run.state.label). \(summary.conciseActivityLabel)")
+    }
+}
+
+private struct DesktopConversationRunCapsuleDetails: View {
+    let summary: DesktopConversationRunSummary
+    let inspect: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            capsuleHeader
+            capsuleSummary
+            capsuleLatestActivity
+            capsuleActionLayout
+        }
+    }
+
+    private var runLabel: String {
+        let state = summary.run.state == .running
+            ? "Working"
+            : "Run \(summary.run.state.label.lowercased())"
+        return "\(state) · \(summary.run.provider)"
+    }
+
+    private var capsuleHeader: some View {
+        LabeledContent(runLabel) {
+            RelativeTime(unixMillis: summary.presentationTimeUnixMillis)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+        .font(.caption.weight(.semibold))
+    }
+
+    private var capsuleSummary: some View {
+        Text(summary.conciseActivityLabel)
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+            .lineLimit(2)
+    }
+
+    @ViewBuilder private var capsuleLatestActivity: some View {
+        if let latest = summary.latestActivity,
+           !latest.detail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            Text(latest.detail)
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+        }
+    }
+
+    private var capsuleActionLayout: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) { capsuleActions }
+            VStack(alignment: .leading, spacing: 6) { capsuleActions }
+        }
+    }
+
+    @ViewBuilder private var capsuleActions: some View {
+        Button("Open activity", systemImage: "list.bullet.rectangle", action: inspect)
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        if summary.payloadWasTruncated {
+            Label("Evidence payload capped", systemImage: "exclamationmark.triangle")
+                .font(.caption2)
+                .foregroundStyle(Nord.auroraYellow)
         }
     }
 }
@@ -8139,83 +8487,350 @@ private struct SettingsIntegrationCard<Actions: View, Details: View>: View {
 private struct DesktopThreadInspector: View {
     @ObservedObject var model: DesktopAppModel
     let thread: DesktopThread
+    @Binding var selectedRunID: String?
+    @Binding var conversationAnchorID: String?
+    @State private var panel: Panel = .outline
+    @State private var activityPanel: ActivityPanel = .summary
+    @State private var activitySearch = ""
+    @State private var activityEventLimit = 400
+
+    private enum Panel: String, CaseIterable, Identifiable {
+        case outline
+        case context
+        var id: String { rawValue }
+    }
+
+    private enum ActivityPanel: String, CaseIterable, Identifiable {
+        case summary
+        case timeline
+        case raw
+        var id: String { rawValue }
+    }
+
+    private var selectedSummary: DesktopConversationRunSummary? {
+        guard let selectedRunID,
+              let run = model.providerRun(id: selectedRunID),
+              run.threadID == thread.id else { return nil }
+        return DesktopConversationRunSummary(
+            run: run,
+            events: model.providerEvents(threadID: thread.id).filter { $0.runID == selectedRunID }
+        )
+    }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                InspectorTitle(title: "Thread context", symbol: "sidebar.right")
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(thread.title)
-                        .font(.headline)
-                    AttentionPill(attention: thread.attention)
-                    Divider()
-                    InspectorFact(label: "Kind", value: thread.kind.label)
-                    InspectorFact(label: "Provider", value: thread.provider)
-                    InspectorFact(label: "Model", value: thread.model)
-                    InspectorFact(
-                        label: "Project",
-                        value: model.project(id: thread.projectID)?.name ?? "Standalone"
-                    )
-                }
-                .panelStyle()
-
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Plan")
-                        .font(.headline)
-                    if thread.plan.isEmpty {
-                        Text("No plan recorded yet.")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(thread.plan) { item in
-                            HStack(alignment: .top, spacing: 8) {
-                                Image(systemName: item.state.symbol)
-                                    .foregroundStyle(item.state.tint)
-                                Text(item.title)
-                                    .font(.subheadline)
-                            }
-                        }
-                    }
-                }
-                .panelStyle()
-
-                let artifacts = model.snapshot.operations.artifacts.filter { $0.threadID == thread.id }
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Artifacts")
-                        .font(.headline)
-                    if artifacts.isEmpty {
-                        Text("No artifacts attached.")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(artifacts) { artifact in
-                            VStack(alignment: .leading, spacing: 3) {
-                                Label(artifact.name, systemImage: artifact.kind.symbol)
-                                    .font(.subheadline.weight(.semibold))
-                                Text(artifact.localPath)
-                                    .font(.system(.caption2, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                            }
-                        }
-                    }
-                }
-                .panelStyle()
-
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Thread actions")
-                        .font(.headline)
-                    Button("Mark complete") {
-                        model.setAttention(threadID: thread.id, attention: .completed)
-                    }
-                    .disabled(thread.attention == .completed)
-                    Button("Archive", role: .destructive) {
-                        model.setAttention(threadID: thread.id, attention: .archived)
-                    }
-                }
-                .panelStyle()
+        Group {
+            if let selectedSummary {
+                activityInspector(selectedSummary)
+            } else {
+                threadInspector
             }
-            .padding(18)
         }
+        .onChange(of: thread.id) { _ in
+            selectedRunID = nil
+            conversationAnchorID = nil
+        }
+        .onChange(of: selectedRunID) { _ in
+            activityPanel = .summary
+            activitySearch = ""
+            activityEventLimit = 400
+        }
+    }
+
+    private var threadInspector: some View {
+        VStack(spacing: 0) {
+            Picker("Thread inspector", selection: $panel) {
+                ForEach(Panel.allCases) { Text($0.rawValue.capitalized).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .padding(14)
+
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    switch panel {
+                    case .outline: outline
+                    case .context: context
+                    }
+                }
+                .padding(18)
+            }
+        }
+    }
+
+    @ViewBuilder private var outline: some View {
+        InspectorTitle(title: "Conversation outline", symbol: "list.bullet.indent")
+
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Thread brief").font(.headline)
+            if let goal = thread.messages.first(where: { $0.role == .user })?.body {
+                Text("Goal").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Text(goal).font(.subheadline).lineLimit(4)
+            }
+            Text("Current status").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            Text(thread.summary.isEmpty ? "No current summary." : thread.summary)
+                .font(.subheadline).foregroundStyle(.secondary)
+            Divider()
+            InspectorFact(label: "Messages", value: "\(thread.messages.count)")
+            InspectorFact(label: "Runs", value: "\(model.providerRuns(threadID: thread.id).count)")
+            InspectorFact(
+                label: "Recorded activity",
+                value: "\(model.providerEvents(threadID: thread.id).filter { !$0.kind.isTransportOnly }.count)"
+            )
+        }
+        .panelStyle()
+
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Turns").font(.headline)
+            let userMessages = thread.messages.filter { $0.role == .user }
+            if userMessages.isEmpty {
+                Text("No user turns yet.").foregroundStyle(.secondary)
+            } else {
+                ForEach(Array(userMessages.suffix(40).enumerated()), id: \.element.id) { index, message in
+                    Button {
+                        conversationAnchorID = message.id
+                    } label: {
+                        HStack(alignment: .top, spacing: 8) {
+                            Text("\(max(1, userMessages.count - min(40, userMessages.count) + index + 1))")
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(.tertiary)
+                                .frame(width: 22, alignment: .trailing)
+                            Text(message.body)
+                                .font(.caption)
+                                .lineLimit(2)
+                                .multilineTextAlignment(.leading)
+                            Spacer(minLength: 0)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.vertical, 3)
+                    .accessibilityHint("Jump to this turn in the conversation")
+                }
+            }
+        }
+        .panelStyle()
+
+        let runs = DesktopConversationNarrativePresentation.runSummaries(
+            runs: model.providerRuns(threadID: thread.id),
+            events: model.providerEvents(threadID: thread.id)
+        )
+        if !runs.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Recent runs").font(.headline)
+                ForEach(runs.suffix(12)) { summary in
+                    Button {
+                        selectedRunID = summary.id
+                    } label: {
+                        DesktopInspectorRunLabel(summary: summary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .panelStyle()
+        }
+    }
+
+    @ViewBuilder private var context: some View {
+        InspectorTitle(title: "Thread context", symbol: "sidebar.right")
+        VStack(alignment: .leading, spacing: 10) {
+            Text(thread.title).font(.headline)
+            AttentionPill(attention: thread.attention)
+            Divider()
+            InspectorFact(label: "Kind", value: thread.kind.label)
+            InspectorFact(label: "Provider", value: thread.provider)
+            InspectorFact(label: "Model", value: thread.model)
+            InspectorFact(label: "Project", value: model.project(id: thread.projectID)?.name ?? "Standalone")
+        }
+        .panelStyle()
+
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Plan").font(.headline)
+            if thread.plan.isEmpty {
+                Text("No plan recorded yet.").foregroundStyle(.secondary)
+            } else {
+                ForEach(thread.plan) { item in
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: item.state.symbol).foregroundStyle(item.state.tint)
+                        Text(item.title).font(.subheadline)
+                    }
+                }
+            }
+        }
+        .panelStyle()
+
+        let artifacts = model.snapshot.operations.artifacts.filter { $0.threadID == thread.id }
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Artifacts").font(.headline)
+            if artifacts.isEmpty {
+                Text("No artifacts attached.").foregroundStyle(.secondary)
+            } else {
+                ForEach(artifacts) { artifact in
+                    VStack(alignment: .leading, spacing: 3) {
+                        Label(artifact.name, systemImage: artifact.kind.symbol)
+                            .font(.subheadline.weight(.semibold))
+                        Text(artifact.localPath)
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+            }
+        }
+        .panelStyle()
+
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Thread actions").font(.headline)
+            Button("Mark complete") { model.setAttention(threadID: thread.id, attention: .completed) }
+                .disabled(thread.attention == .completed)
+            Button("Archive", role: .destructive) {
+                model.setAttention(threadID: thread.id, attention: .archived)
+            }
+        }
+        .panelStyle()
+    }
+
+    private func activityInspector(_ summary: DesktopConversationRunSummary) -> some View {
+        VStack(spacing: 0) {
+            Button {
+                selectedRunID = nil
+            } label: {
+                Label("Outline", systemImage: "chevron.left")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .overlay(alignment: .trailing) {
+                Text(summary.run.state.label)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(summary.run.state.tint)
+            }
+            .padding(14)
+
+            Picker("Run activity", selection: $activityPanel) {
+                ForEach(ActivityPanel.allCases) { Text($0.rawValue.capitalized).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 14)
+            .padding(.bottom, 14)
+
+            if activityPanel == .timeline {
+                DesktopInspectorSearchField(text: $activitySearch, placeholder: "Filter this run")
+                .padding(.horizontal, 14)
+                .padding(.bottom, 12)
+            }
+
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    InspectorTitle(title: "Run activity", symbol: "list.bullet.rectangle")
+                    switch activityPanel {
+                    case .summary: runSummary(summary)
+                    case .timeline: runTimeline(summary)
+                    case .raw: runRawEvidence(summary)
+                    }
+                }
+                .padding(18)
+            }
+        }
+    }
+
+    @ViewBuilder private func runSummary(_ summary: DesktopConversationRunSummary) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(summary.run.provider).font(.headline)
+            Text(summary.run.model).font(.subheadline).foregroundStyle(.secondary)
+            Divider()
+            InspectorFact(label: "Activity", value: "\(summary.activityCount)")
+            InspectorFact(label: "Tools", value: "\(summary.toolCount)")
+            InspectorFact(label: "Diff updates", value: "\(summary.diffCount)")
+            InspectorFact(label: "Reasoning", value: "\(summary.reasoningCount)")
+            if let duration = summary.durationLabel { InspectorFact(label: "Duration", value: duration) }
+            if let usage = summary.run.tokenUsage { InspectorFact(label: "Tokens", value: "\(usage)") }
+        }
+        .panelStyle()
+
+        if let error = summary.run.errorSummary, !error.isEmpty {
+            Label(error, systemImage: "exclamationmark.triangle.fill")
+                .font(.subheadline)
+                .foregroundStyle(Nord.auroraRed)
+                .textSelection(.enabled)
+                .panelStyle()
+        }
+    }
+
+    @ViewBuilder private func runTimeline(_ summary: DesktopConversationRunSummary) -> some View {
+        let query = activitySearch.trimmingCharacters(in: .whitespacesAndNewlines)
+        let matching = query.isEmpty ? summary.events : summary.events.filter {
+            $0.title.localizedCaseInsensitiveContains(query)
+                || $0.detail.localizedCaseInsensitiveContains(query)
+                || $0.nativeType.localizedCaseInsensitiveContains(query)
+        }
+        let visible = Array(matching.suffix(activityEventLimit))
+        if matching.isEmpty {
+            Text(query.isEmpty ? "No provider activity was recorded for this run." : "No activity matches this filter.")
+                .foregroundStyle(.secondary)
+        } else {
+            LazyVStack(alignment: .leading, spacing: 8) {
+                if matching.count > visible.count {
+                    Button("Show \(min(400, matching.count - visible.count)) older events") {
+                        activityEventLimit += 400
+                    }
+                    .buttonStyle(.bordered)
+                    .frame(maxWidth: .infinity)
+                }
+                ForEach(visible) { event in
+                    DesktopInspectorProviderEventRow(event: event)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private func runRawEvidence(_ summary: DesktopConversationRunSummary) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Provider identifiers").font(.headline)
+            InspectorFact(label: "Run", value: summary.run.id)
+            if let value = summary.run.nativeThreadID { InspectorFact(label: "Native thread", value: value) }
+            if let value = summary.run.nativeTurnID { InspectorFact(label: "Native turn", value: value) }
+            InspectorFact(label: "Brief digest", value: summary.run.briefDigest)
+        }
+        .textSelection(.enabled)
+        .panelStyle()
+
+        let evidenceArtifacts = model.snapshot.operations.artifacts.filter {
+            $0.threadID == thread.id && $0.localPath.contains(summary.run.id)
+        }
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Immutable evidence").font(.headline)
+            if evidenceArtifacts.isEmpty {
+                Text(summary.run.state == .running
+                    ? "The sealed evidence log appears when this run finishes."
+                    : "No sealed evidence artifact is registered for this run.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(evidenceArtifacts) { artifact in
+                    VStack(alignment: .leading, spacing: 3) {
+                        Label(artifact.name, systemImage: "doc.badge.gearshape")
+                            .font(.caption.weight(.semibold))
+                        Text(artifact.localPath)
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                        Text("SHA-256 \(artifact.digest)")
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+            if summary.payloadWasTruncated {
+                Label("One or more in-workspace payloads were capped; the sealed evidence log remains authoritative.", systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(Nord.auroraYellow)
+            }
+        }
+        .panelStyle()
     }
 }
 
@@ -8322,15 +8937,102 @@ private struct DesktopContextInspector: View {
     }
 }
 
+private struct DesktopInspectorRunLabel: View {
+    let summary: DesktopConversationRunSummary
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            DesktopInspectorRunTitle(summary: summary)
+            DesktopInspectorRunActivity(summary: summary)
+        }
+    }
+}
+
+private struct DesktopInspectorRunTitle: View {
+    let summary: DesktopConversationRunSummary
+
+    var body: some View {
+        Label(summary.run.provider, systemImage: summary.run.state.accessibilitySymbol)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(summary.run.state.tint)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .overlay(alignment: .trailing) {
+                Image(systemName: "chevron.right")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+    }
+}
+
+private struct DesktopInspectorRunActivity: View {
+    let summary: DesktopConversationRunSummary
+
+    var body: some View {
+        Text(summary.conciseActivityLabel)
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .padding(.leading, 24)
+    }
+}
+
+private struct DesktopInspectorProviderEventRow: View {
+    let event: DesktopProviderEventRecord
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            DesktopInspectorProviderEventTitle(event: event)
+            DesktopInspectorProviderEventDetail(event: event)
+        }
+        .padding(8)
+        .background(event.kind.timelineTint.opacity(0.07), in: RoundedRectangle(cornerRadius: 9))
+    }
+}
+
+private struct DesktopInspectorProviderEventTitle: View {
+    let event: DesktopProviderEventRecord
+
+    var body: some View {
+        Text(event.title)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(event.kind.timelineTint)
+            .padding(.leading, 26)
+            .overlay(alignment: .leading) {
+                Image(systemName: event.kind.timelineSymbol)
+                    .frame(width: 18)
+            }
+            .overlay(alignment: .trailing) {
+                RelativeTime(unixMillis: event.createdAtUnixMillis)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+    }
+}
+
+private struct DesktopInspectorProviderEventDetail: View {
+    let event: DesktopProviderEventRecord
+
+    @ViewBuilder var body: some View {
+        if !event.detail.isEmpty {
+            Text(event.detail)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .padding(.leading, 26)
+        }
+    }
+}
+
 private struct DesktopInspectorSearchField: View {
     @Binding var text: String
+    var placeholder = "Search Kaname"
 
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(.secondary)
 
-            TextField("Search Kaname", text: $text)
+            TextField(placeholder, text: $text)
                 .textFieldStyle(.plain)
 
             if !text.isEmpty {

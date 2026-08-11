@@ -1,5 +1,19 @@
 import Foundation
 
+enum DesktopConversationOrdering {
+    static func stable<Value>(
+        _ values: [Value],
+        createdAt: (Value) -> Int64
+    ) -> [Value] {
+        values.enumerated().sorted { left, right in
+            let leftTime = createdAt(left.element)
+            let rightTime = createdAt(right.element)
+            if leftTime != rightTime { return leftTime < rightTime }
+            return left.offset < right.offset
+        }.map(\.element)
+    }
+}
+
 public enum DesktopConversationTimelineEntry: Equatable, Identifiable, Sendable {
     case message(DesktopMessage)
     case event(DesktopProviderEventRecord)
@@ -115,12 +129,7 @@ public enum DesktopConversationTimelinePresentation {
             + providerEvents
                 .filter(\.kind.isVisibleInConversationTimeline)
                 .map(DesktopConversationTimelineEntry.event)
-        let orderedEntries = entries.enumerated().sorted { left, right in
-            if left.element.createdAtUnixMillis != right.element.createdAtUnixMillis {
-                return left.element.createdAtUnixMillis < right.element.createdAtUnixMillis
-            }
-            return left.offset < right.offset
-        }.map(\.element)
+        let orderedEntries = DesktopConversationOrdering.stable(entries, createdAt: \.createdAtUnixMillis)
         let retainedCount = min(max(1, maximumEntries), orderedEntries.count)
         let hiddenCount = orderedEntries.count - retainedCount
         return DesktopConversationTimelinePage(

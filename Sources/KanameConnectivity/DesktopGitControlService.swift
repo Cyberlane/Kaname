@@ -93,6 +93,42 @@ public actor DesktopGitControlService {
         )
     }
 
+    /// Reads one file's patch on demand. Keeping this file-scoped avoids
+    /// loading an enormous repository diff into the conversation process.
+    public func diff(worktree: URL, relativePath: String) async throws -> String {
+        let path = worktree.standardizedFileURL
+        guard Self.isSafeRelativePath(relativePath),
+              (try? await git(["rev-parse", "--is-inside-work-tree"], at: path)) == "true" else {
+            throw DesktopGitControlError.invalidTarget
+        }
+        let isTracked = (try? await git(["ls-files", "--error-unmatch", "--", relativePath], at: path)) != nil
+        let arguments = isTracked
+            ? ["diff", "--no-ext-diff", "--no-color", "--unified=3", "HEAD", "--", relativePath]
+            : ["diff", "--no-index", "--no-color", "--unified=3", "--", "/dev/null", relativePath]
+        do {
+            let output = try await LocalProcess.capture(
+                executable: "git",
+                arguments: arguments,
+                workingDirectory: path,
+                timeout: timeout,
+                environmentRemovals: CodexMCPIsolation.inheritedEnvironmentRemovals(),
+                maximumOutputBytes: 2_097_152
+            )
+            guard (output.exitStatus == 0 || output.exitStatus == 1),
+                  !output.standardOutputWasTruncated,
+                  !output.standardErrorWasTruncated else {
+                let detail = output.standardError.trimmingCharacters(in: .whitespacesAndNewlines)
+                throw DesktopGitControlError.commandFailed(
+                    detail.isEmpty ? "The selected patch exceeded Kaname's 2 MB review limit." : detail
+                )
+            }
+            return output.standardOutput
+        } catch {
+            if let controlError = error as? DesktopGitControlError { throw controlError }
+            throw DesktopGitControlError.commandFailed(error.localizedDescription)
+        }
+    }
+
     public func createWorktree(
         repository: URL,
         target: URL,
