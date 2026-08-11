@@ -112,7 +112,8 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
     private var readinessObserver: NSObjectProtocol?
     private var mouseBackMonitor: Any?
 
-    func applicationDidFinishLaunching(_ notification: Notification) {
+    override init() {
+        super.init()
         readinessObserver = NotificationCenter.default.addObserver(
             forName: .kanameDesktopReady,
             object: nil,
@@ -120,6 +121,9 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.writeHealthHandshake() }
         }
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
         mouseBackMonitor = NSEvent.addLocalMonitorForEvents(matching: .otherMouseUp) { event in
             guard event.buttonNumber == 3 else { return event }
             let handled = DesktopBackCommandRouter.shared.performBack()
