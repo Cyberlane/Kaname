@@ -192,6 +192,11 @@ struct DesktopAppModelTests {
             diffSummary: "Ready",
             state: .ready
         )
+        model.replaceProviderPlan(
+            threadID: threadID,
+            steps: [("Add the regression", "in_progress"), ("Run verification", "pending")],
+            explanation: nil
+        )
         let runID = try #require(model.enqueueProviderRun(
             threadID: threadID,
             sourceMessageID: messageID,
@@ -201,11 +206,13 @@ struct DesktopAppModelTests {
             networkAccessOverride: false
         ))
         _ = model.beginProviderRun(id: runID)
+        #expect(model.thread(id: threadID)?.summary == "Implementing the approved plan in an isolated worktree…")
         clock += 1
         model.completeProviderRun(id: runID)
         #expect(model.thread(id: threadID)?.attention == .running)
 
         clock += 1
+        let verificationOutput = String(repeating: "build output\n", count: 3_000) + "FINAL RESULT: passed"
         model.recordCodingEvidence(
             threadID: threadID,
             worktreeID: worktreeID,
@@ -214,13 +221,17 @@ struct DesktopAppModelTests {
             diffCheckPassed: true,
             verificationCommand: "swift test",
             verificationExitStatus: 0,
-            verificationOutput: "All tests passed",
+            verificationOutput: verificationOutput,
             artifactPaths: ["Sources/Flow.swift"],
             digest: String(repeating: "a", count: 64)
         )
         #expect(model.thread(id: threadID)?.attention == .needsApproval)
         #expect(model.thread(id: threadID)?.evidence.allSatisfy { $0.state == .passed } == true)
-        #expect(model.snapshot.operations.worktrees.first(where: { $0.id == worktreeID })?.state == .review)
+        #expect(model.thread(id: threadID)?.plan.allSatisfy { $0.state == .complete } == true)
+        let reviewWorktree = try #require(model.snapshot.operations.worktrees.first(where: { $0.id == worktreeID }))
+        #expect(reviewWorktree.state == .review)
+        #expect(reviewWorktree.testSummary.hasSuffix("FINAL RESULT: passed"))
+        #expect(reviewWorktree.testSummary.count <= 32_000)
 
         clock += 1
         model.recordCodingReview(threadID: threadID, worktreeID: worktreeID, accepted: true)

@@ -321,7 +321,15 @@ final class DesktopConversationRuntime: ObservableObject {
         }
     }
 
+    func recheckImplementation(threadID: String) {
+        refreshImplementationEvidence(threadID: threadID, accepted: nil)
+    }
+
     func reviewImplementation(threadID: String, accepted: Bool) {
+        refreshImplementationEvidence(threadID: threadID, accepted: accepted)
+    }
+
+    private func refreshImplementationEvidence(threadID: String, accepted: Bool?) {
         guard !codingWorkflowBusyThreadIDs.contains(threadID),
               let thread = model.thread(id: threadID),
               let projectID = thread.projectID,
@@ -337,8 +345,12 @@ final class DesktopConversationRuntime: ObservableObject {
                 let evidence = try await CodingWorkspaceInspector.collectEvidence(
                     workspaceURL: URL(fileURLWithPath: worktree.worktreePath, isDirectory: true)
                 )
-                guard !accepted || evidence.passed else {
+                guard accepted != true || evidence.passed else {
                     throw CodingWorkspaceInspectorError.unavailable("Acceptance is disabled because the latest independent evidence does not pass.")
+                }
+                guard let accepted else {
+                    persistCodingEvidence(evidence, threadID: threadID, worktreeID: worktree.id)
+                    return
                 }
                 _ = try await Phase2ControlPlane.recordReview(
                     runner: runner,

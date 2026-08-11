@@ -1706,6 +1706,14 @@ public final class DesktopAppModel: ObservableObject {
             if let threadID = selected?.threadID,
                let threadIndex = snapshot.threads.firstIndex(where: { $0.id == threadID }) {
                 snapshot.threads[threadIndex].attention = .running
+                switch selected?.purpose {
+                case .codingPlan:
+                    snapshot.threads[threadIndex].summary = "Creating a read-only implementation plan…"
+                case .codingImplementation:
+                    snapshot.threads[threadIndex].summary = "Implementing the approved plan in an isolated worktree…"
+                case .conversation, nil:
+                    snapshot.threads[threadIndex].summary = "Kaname is responding…"
+                }
                 snapshot.threads[threadIndex].updatedAtUnixMillis = now()
             }
         }
@@ -2063,12 +2071,17 @@ public final class DesktopAppModel: ObservableObject {
             snapshot.threads[threadIndex].summary = evidencePassed
                 ? "Evidence is ready. Review and accept or reject the implementation."
                 : "Evidence found a failure. Review it before deciding what to do."
+            if evidencePassed {
+                for index in snapshot.threads[threadIndex].plan.indices {
+                    snapshot.threads[threadIndex].plan[index].state = .complete
+                }
+            }
             snapshot.threads[threadIndex].updatedAtUnixMillis = timestamp
             snapshot.operations.worktrees[worktreeIndex].headRevision = revision
             snapshot.operations.worktrees[worktreeIndex].changedFileCount = artifactPaths.count
             snapshot.operations.worktrees[worktreeIndex].diffSummary = String(diffStat.prefix(32_000))
             snapshot.operations.worktrees[worktreeIndex].testCommand = verificationCommand
-            snapshot.operations.worktrees[worktreeIndex].testSummary = String(verificationOutput.prefix(32_000))
+            snapshot.operations.worktrees[worktreeIndex].testSummary = String(verificationOutput.suffix(32_000))
             snapshot.operations.worktrees[worktreeIndex].diagnosticSummary = "Evidence digest \(digest)"
             snapshot.operations.worktrees[worktreeIndex].state = .review
             snapshot.operations.worktrees[worktreeIndex].updatedAtUnixMillis = timestamp

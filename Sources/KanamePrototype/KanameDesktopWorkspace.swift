@@ -2218,7 +2218,10 @@ private struct DesktopThreadConversation: View {
                 panel = .plan
                 runtime.approvePlanAndImplement(threadID: thread.id)
             },
-            reviewEvidence: { panel = .evidence },
+            recheckEvidence: {
+                panel = .evidence
+                runtime.recheckImplementation(threadID: thread.id)
+            },
             accept: { runtime.reviewImplementation(threadID: thread.id, accepted: true) },
             reject: { runtime.reviewImplementation(threadID: thread.id, accepted: false) }
         )
@@ -2465,7 +2468,7 @@ private struct DesktopCodingWorkflowBanner: View {
     let evidencePassed: Bool
     let error: String?
     let approvePlan: () -> Void
-    let reviewEvidence: () -> Void
+    let recheckEvidence: () -> Void
     let accept: () -> Void
     let reject: () -> Void
 
@@ -2539,7 +2542,7 @@ private struct DesktopCodingWorkflowBanner: View {
                     ? "Create an isolated worktree and authorize one network-denied implementation turn"
                     : "Choose Codex to use Kaname's signed isolated implementation flow")
         case .evidenceReview:
-            Button("Review evidence", action: reviewEvidence).buttonStyle(.bordered)
+            Button("Re-run checks", systemImage: "arrow.clockwise", action: recheckEvidence).buttonStyle(.bordered)
             Button("Reject", role: .destructive, action: reject).buttonStyle(.bordered)
             Button("Accept", action: accept)
                 .buttonStyle(.borderedProminent)
