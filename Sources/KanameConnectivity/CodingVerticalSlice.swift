@@ -393,7 +393,7 @@ public enum CodingWorkspaceInspector {
     }
 }
 
-public struct CodexWorkspaceAuthorization: Equatable, Sendable {
+public struct CodexWorkspaceAuthorization: Codable, Equatable, Sendable {
     public let approvalID: String
     public let workspace: URL
     public let targetRevision: String
@@ -403,6 +403,40 @@ public struct CodexWorkspaceAuthorization: Equatable, Sendable {
     public let fingerprint: Data
     public let expiresAt: Date
     public let storePosition: UInt64
+
+    public init(
+        approvalID: String,
+        workspace: URL,
+        targetRevision: String,
+        promptDigest: String,
+        model: String,
+        reasoningEffort: String,
+        fingerprint: Data,
+        expiresAt: Date,
+        storePosition: UInt64
+    ) {
+        (
+            self.approvalID,
+            self.workspace,
+            self.targetRevision,
+            self.promptDigest,
+            self.model,
+            self.reasoningEffort,
+            self.fingerprint,
+            self.expiresAt,
+            self.storePosition
+        ) = (
+            approvalID,
+            workspace.standardizedFileURL,
+            targetRevision,
+            promptDigest,
+            model,
+            reasoningEffort,
+            fingerprint,
+            expiresAt,
+            storePosition
+        )
+    }
 
     func validates(request: CodexCodingRequest, workspaceURL: URL, now: Date = Date()) -> Bool {
         workspace.standardizedFileURL == workspaceURL.standardizedFileURL

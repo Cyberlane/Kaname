@@ -195,6 +195,50 @@ public struct CodexRunEvent: Equatable, Sendable {
     }
 }
 
+public struct CodexPlanEntry: Equatable, Sendable {
+    public let step: String
+    public let status: String
+
+    public init(step: String, status: String) {
+        self.step = step
+        self.status = status
+    }
+}
+
+public struct CodexPlanUpdate: Equatable, Sendable {
+    public let explanation: String?
+    public let entries: [CodexPlanEntry]
+
+    public init(explanation: String?, entries: [CodexPlanEntry]) {
+        self.explanation = explanation
+        self.entries = entries
+    }
+}
+
+public extension CodexRunEvent {
+    var planUpdate: CodexPlanUpdate? {
+        guard kind == .planUpdated,
+              let payload,
+              let object = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
+              let rawEntries = object["plan"] as? [[String: Any]] else { return nil }
+        let entries = rawEntries.prefix(128).compactMap { entry -> CodexPlanEntry? in
+            guard let rawStep = entry["step"] as? String else { return nil }
+            let step = rawStep.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !step.isEmpty else { return nil }
+            return CodexPlanEntry(
+                step: String(step.prefix(2_000)),
+                status: (entry["status"] as? String) ?? "pending"
+            )
+        }
+        guard !entries.isEmpty else { return nil }
+        let explanation = (object["explanation"] as? String).flatMap { value -> String? in
+            let clean = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return clean.isEmpty ? nil : String(clean.prefix(8_000))
+        }
+        return CodexPlanUpdate(explanation: explanation, entries: entries)
+    }
+}
+
 public struct CodexLiveRun: Equatable, Sendable {
     public let nativeThreadID: String
     public let nativeTurnID: String
@@ -853,7 +897,7 @@ extension CodexRunEvent {
         let item = object?["item"] as? [String: Any]
         let thread = object?["thread"] as? [String: Any]
         let text = string(
-            object?["delta"] ?? item?["text"] ?? turn?["error"] ?? object?["error"]
+            object?["delta"] ?? object?["diff"] ?? item?["text"] ?? turn?["error"] ?? object?["error"]
         )
         let boundedText = text.flatMap { text in
             String(data: Data(text.utf8.prefix(maximumTextBytes)), encoding: .utf8)

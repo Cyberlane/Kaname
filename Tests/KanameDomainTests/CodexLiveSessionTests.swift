@@ -6,6 +6,32 @@ import Testing
 
 struct CodexLiveSessionTests {
     @Test
+    func structuredPlanUpdatePreservesEveryVisibleStepAndStatus() throws {
+        let event = try notification(
+            method: "turn/plan/updated",
+            parameters: [
+                "turnId": "turn-plan",
+                "explanation": "Plan before implementation.",
+                "plan": [
+                    ["step": "Inspect the existing runtime", "status": "completed"],
+                    ["step": "Add the approval gate", "status": "inProgress"],
+                    ["step": "Collect independent evidence", "status": "pending"],
+                ],
+            ]
+        )
+
+        let update = try #require(event.planUpdate)
+        #expect(event.kind == .planUpdated)
+        #expect(update.explanation == "Plan before implementation.")
+        #expect(update.entries.map(\.step) == [
+            "Inspect the existing runtime",
+            "Add the approval gate",
+            "Collect independent evidence",
+        ])
+        #expect(update.entries.map(\.status) == ["completed", "inProgress", "pending"])
+    }
+
+    @Test
     func initializeHandshakeIsOneImmediateOrderedJSONLSequence() throws {
         let data = try CodexAppServerConnection.encodedRequestSequence(
             method: "initialize",

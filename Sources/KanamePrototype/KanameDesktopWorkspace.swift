@@ -2112,47 +2112,12 @@ private struct DesktopThreadConversation: View {
         case plan
         case evidence
         var id: String { rawValue }
-        var label: String { rawValue.capitalized }
+        var label: String { self == .conversation ? "Chat" : rawValue.capitalized }
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack(alignment: .firstTextBaseline) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(thread.title)
-                            .font(.title2.weight(.bold))
-                        Text(thread.summary)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                    }
-                    Spacer()
-                    if runtime.isRunning(threadID: thread.id) {
-                        Button("Interrupt", systemImage: "stop.circle") {
-                            runtime.interrupt(threadID: thread.id)
-                        }
-                        .buttonStyle(.bordered)
-                    }
-                    Button {
-                        captureSheetFocus()
-                        renamedTitle = thread.title
-                        showsRename = true
-                    } label: {
-                        Image(systemName: "pencil")
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Rename conversation")
-                    AttentionPill(attention: thread.attention)
-                }
-                Picker("Thread panel", selection: $panel) {
-                    ForEach(Panel.allCases) { item in
-                        Text(item.label).tag(item)
-                    }
-                }
-                .pickerStyle(.segmented)
-            }
-            .padding(22)
+            threadHeader
 
             Divider()
 
@@ -2182,6 +2147,7 @@ private struct DesktopThreadConversation: View {
                 runtimeMode: $runtimeMode,
                 networkAccess: $runtimeNetworkAccess,
                 capabilities: capabilities,
+                stagedCoding: thread.kind == .coding,
                 cancel: { showsRuntimeSettings = false },
                 save: {
                     if model.updateThreadRuntime(
@@ -2197,18 +2163,78 @@ private struct DesktopThreadConversation: View {
         }
         .onAppear(perform: applyComposerFocusRequest)
         .onChange(of: composerFocusRequest) { _ in applyComposerFocusRequest() }
+        .onChange(of: thread.plan.count) { count in
+            if count > 0 { panel = .plan }
+        }
+        .onChange(of: thread.evidence.count) { count in
+            if count > 0 { panel = .evidence }
+        }
+    }
+
+    private var threadHeader: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(thread.title).font(.title2.weight(.bold))
+                    Text(thread.summary)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                Spacer()
+                if runtime.isRunning(threadID: thread.id) {
+                    Button("Interrupt", systemImage: "stop.circle") {
+                        runtime.interrupt(threadID: thread.id)
+                    }
+                    .buttonStyle(.bordered)
+                }
+                Button {
+                    captureSheetFocus()
+                    renamedTitle = thread.title
+                    showsRename = true
+                } label: {
+                    Image(systemName: "pencil")
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Rename conversation")
+                AttentionPill(attention: thread.attention)
+            }
+            if thread.kind == .coding { codingWorkflowBanner }
+            Picker("Thread panel", selection: $panel) {
+                ForEach(Panel.allCases) { item in Text(item.label).tag(item) }
+            }
+            .pickerStyle(.segmented)
+        }
+        .padding(22)
+    }
+
+    private var codingWorkflowBanner: some View {
+        DesktopCodingWorkflowBanner(
+            stage: runtime.codingStage(threadID: thread.id),
+            provider: thread.provider,
+            evidencePassed: !thread.evidence.isEmpty && thread.evidence.allSatisfy { $0.state == .passed },
+            error: runtime.codingWorkflowErrors[thread.id],
+            approvePlan: {
+                panel = .plan
+                runtime.approvePlanAndImplement(threadID: thread.id)
+            },
+            reviewEvidence: { panel = .evidence },
+            accept: { runtime.reviewImplementation(threadID: thread.id, accepted: true) },
+            reject: { runtime.reviewImplementation(threadID: thread.id, accepted: false) }
+        )
     }
 
     private var timeline: [DesktopConversationTimelineItem] {
         let messages = thread.messages.map(DesktopConversationTimelineItem.message)
         let events = model.providerEvents(threadID: thread.id)
-            .filter { $0.kind != .assistantText }
+            .filter { $0.kind != .assistantText && $0.kind != .native }
             .map(DesktopConversationTimelineItem.event)
         return (messages + events).sorted { $0.createdAtUnixMillis < $1.createdAtUnixMillis }
     }
 
     private var latestRecoverableRun: DesktopProviderRunRecord? {
         guard let latest = model.providerRuns(threadID: thread.id).last,
+              latest.purpose != .codingImplementation,
               latest.state == .failed || latest.state == .interrupted else { return nil }
         return latest
     }
@@ -2287,6 +2313,7 @@ private struct DesktopThreadConversation: View {
                     .padding(.top, 11)
                     .padding(.bottom, 8)
                     .focused($composerFocused)
+                    .disabled(!canSendMessage)
                     .onSubmit(send)
                     .onChange(of: draft) { model.updateComposerDraft(threadID: thread.id, body: $0) }
                     .accessibilityLabel("Message composer for \(thread.title)")
@@ -2366,7 +2393,8 @@ private struct DesktopThreadConversation: View {
             DesktopComposerRuntimeControls(
                 thread: thread,
                 capabilities: capabilities,
-                isLocked: runtime.isRunning(threadID: thread.id),
+                isLocked: runtime.isRunning(threadID: thread.id)
+                    || runtime.codingWorkflowBusyThreadIDs.contains(thread.id),
                 compact: compact,
                 editDetails: openRuntimeSettings,
                 update: updateRuntime
@@ -2391,14 +2419,21 @@ private struct DesktopThreadConversation: View {
                     )
             }
             .buttonStyle(.plain)
-            .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .disabled(!canSendMessage || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             .accessibilityLabel(runtime.isRunning(threadID: thread.id) ? "Queue follow-up" : "Send message")
         }
     }
 
+    private var canSendMessage: Bool {
+        guard thread.kind == .coding else { return true }
+        return ![.planning, .preparing, .implementing, .evidenceReview].contains(
+            runtime.codingStage(threadID: thread.id)
+        )
+    }
+
     private func send() {
         let body = draft
-        if runtime.send(threadID: thread.id, body: body) {
+        if canSendMessage, runtime.send(threadID: thread.id, body: body) {
             draft = ""
             model.updateComposerDraft(threadID: thread.id, body: "")
         }
@@ -2420,6 +2455,146 @@ private enum DesktopConversationTimelineItem: Identifiable {
         switch self {
         case let .message(message): message.createdAtUnixMillis
         case let .event(event): event.createdAtUnixMillis
+        }
+    }
+}
+
+private struct DesktopCodingWorkflowBanner: View {
+    let stage: DesktopCodingWorkflowStage
+    let provider: String
+    let evidencePassed: Bool
+    let error: String?
+    let approvePlan: () -> Void
+    let reviewEvidence: () -> Void
+    let accept: () -> Void
+    let reject: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            ViewThatFits(in: .horizontal) {
+                Text(Self.workflowPath).lineLimit(1)
+                Text(progressLabel).lineLimit(1)
+            }
+            .font(.caption2.weight(.medium))
+            .foregroundStyle(.secondary)
+            .help(Self.workflowPath)
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .center, spacing: 10) {
+                    statusContent
+                    actions
+                }
+                VStack(alignment: .leading, spacing: 9) {
+                    statusContent
+                    HStack(spacing: 7) { actions }
+                }
+            }
+            if let error {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(Nord.auroraRed)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(12)
+        .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12).strokeBorder(tint.opacity(0.25), lineWidth: 1)
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    private var statusContent: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: symbol).foregroundStyle(tint)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.subheadline.weight(.semibold))
+                Text(detail).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    private static let workflowPath = "Discuss → Plan → Approve → Implement → Review evidence → Accept → Update knowledge"
+
+    private var progressLabel: String {
+        switch stage {
+        case .discuss: "Stage 1 of 7 · Discuss"
+        case .planning: "Stage 2 of 7 · Plan"
+        case .planReview: "Stage 3 of 7 · Approve"
+        case .preparing, .implementing: "Stage 4 of 7 · Implement"
+        case .evidenceReview: "Stage 5 of 7 · Review evidence"
+        case .rejected: "Stage 6 of 7 · Rejected"
+        case .accepted: "Stage 7 of 7 · Knowledge update proposed"
+        case .failed: "Stopped safely · no accepted result"
+        }
+    }
+
+    @ViewBuilder private var actions: some View {
+        switch stage {
+        case .planReview:
+            Button("Approve plan & implement", action: approvePlan)
+                .buttonStyle(.borderedProminent)
+                .disabled(provider.caseInsensitiveCompare("Codex") != .orderedSame)
+                .help(provider.caseInsensitiveCompare("Codex") == .orderedSame
+                    ? "Create an isolated worktree and authorize one network-denied implementation turn"
+                    : "Choose Codex to use Kaname's signed isolated implementation flow")
+        case .evidenceReview:
+            Button("Review evidence", action: reviewEvidence).buttonStyle(.bordered)
+            Button("Reject", role: .destructive, action: reject).buttonStyle(.bordered)
+            Button("Accept", action: accept)
+                .buttonStyle(.borderedProminent)
+                .disabled(!evidencePassed)
+                .help(evidencePassed ? "Record local acceptance" : "All independent evidence must pass before acceptance")
+        default:
+            EmptyView()
+        }
+    }
+
+    private var title: String {
+        switch stage {
+        case .discuss: "Discuss the task"
+        case .planning: "Planning read-only"
+        case .planReview: "Plan needs your approval"
+        case .preparing: "Preparing the next guarded stage"
+        case .implementing: "Implementing in an isolated worktree"
+        case .evidenceReview: "Evidence needs your review"
+        case .accepted: "Accepted locally"
+        case .rejected: "Rejected; isolated changes retained"
+        case .failed: "Stopped safely"
+        }
+    }
+
+    private var detail: String {
+        switch stage {
+        case .discuss: "Your next message starts a read-only planning turn. It cannot write code."
+        case .planning: "No write authority or network access is available. The structured plan will appear in the Plan tab."
+        case .planReview: "Review or revise the plan. Implementation cannot start until you press the approval button."
+        case .preparing: "Kaname is creating or checking the isolated worktree and signed evidence boundary."
+        case .implementing: "One approved, network-denied turn may write only inside the linked worktree."
+        case .evidenceReview: "Provider completion is not acceptance. Inspect the diff and verification evidence, then accept or reject."
+        case .accepted: "The reviewed result is accepted. Nothing was committed, pushed, published, or merged."
+        case .rejected: "The changes remain isolated and recoverable. Send revision guidance to request a fresh plan."
+        case .failed: "No result was accepted. Inspect the error, then send a revised request or retry the planning turn."
+        }
+    }
+
+    private var symbol: String {
+        switch stage {
+        case .accepted: "checkmark.seal.fill"
+        case .failed, .rejected: "exclamationmark.shield.fill"
+        case .planning, .preparing, .implementing: "hourglass"
+        case .planReview, .evidenceReview: "person.crop.circle.badge.questionmark"
+        case .discuss: "text.bubble"
+        }
+    }
+
+    private var tint: Color {
+        switch stage {
+        case .accepted: Nord.auroraGreen
+        case .failed, .rejected: Nord.auroraRed
+        case .planReview, .evidenceReview: Nord.auroraYellow
+        case .planning, .preparing, .implementing: Nord.frost1
+        case .discuss: Nord.frost0
         }
     }
 }
@@ -2533,48 +2708,69 @@ private struct DesktopConversationRuntimeSheet: View {
     @Binding var runtimeMode: ConversationRuntimeMode
     @Binding var networkAccess: Bool
     let capabilities: [ProviderCapabilitySnapshot]
+    let stagedCoding: Bool
     let cancel: () -> Void
     let save: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text("Conversation runtime").font(.title2.weight(.bold))
-            Text("These settings apply to future turns in this conversation. Change them whenever no turn is running.")
+            runtimeHeading
+            runtimeForm
+            runtimeActions
+        }
+        .padding(24)
+        .desktopAdaptiveSheet(idealWidth: 520)
+    }
+
+    private var runtimeHeading: some View {
+        Group {
+            Label("Conversation runtime", systemImage: "slider.horizontal.3")
+                .font(.title2.weight(.bold))
+            Text(stagedCoding
+                ? "Provider, model, and thinking apply to future turns. Coding authority is staged separately: read-only plan first, then one explicitly approved isolated implementation."
+                : "These settings apply to future turns in this conversation. Change them whenever no turn is running.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
-            Form {
-                ConversationRuntimeEditor(
-                    provider: $provider,
-                    model: $model,
-                    reasoning: $reasoning,
-                    runtimeMode: $runtimeMode,
-                    networkAccess: $networkAccess,
-                    capabilities: capabilities
-                )
-            }
-            .formStyle(.grouped)
-            HStack {
-                Label(
-                    ConversationRuntimeCatalog.boundarySummary(
+        }
+    }
+
+    private var runtimeForm: some View {
+        Form {
+            ConversationRuntimeEditor(
+                provider: $provider,
+                model: $model,
+                reasoning: $reasoning,
+                runtimeMode: $runtimeMode,
+                networkAccess: $networkAccess,
+                capabilities: capabilities,
+                stagedCoding: stagedCoding
+            )
+        }
+        .formStyle(.grouped)
+    }
+
+    private var runtimeActions: some View {
+        HStack {
+            Label(
+                stagedCoding
+                    ? "Plan first · read-only · network disabled · explicit isolated implementation approval"
+                    : ConversationRuntimeCatalog.boundarySummary(
                         provider: provider,
                         runtimeMode: runtimeMode,
                         networkAccess: networkAccess
                     ),
-                    systemImage: runtimeMode == .fullAccess ? "exclamationmark.shield" : "lock.shield"
-                )
-                    .font(.caption)
-                    .foregroundStyle(runtimeMode == .fullAccess ? Nord.auroraYellow : .secondary)
-                Spacer()
-                Button("Cancel", action: cancel).keyboardShortcut(.cancelAction)
-                Button("Save", action: save)
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        || reasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
+                systemImage: stagedCoding ? "checkmark.shield.fill" : (runtimeMode == .fullAccess ? "exclamationmark.shield" : "lock.shield")
+            )
+                .font(.caption)
+                .foregroundStyle(!stagedCoding && runtimeMode == .fullAccess ? Nord.auroraYellow : .secondary)
+            Spacer()
+            Button("Cancel", action: cancel).keyboardShortcut(.cancelAction)
+            Button("Save", action: save)
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || reasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
-        .padding(24)
-        .desktopAdaptiveSheet(idealWidth: 520)
     }
 }
 
@@ -2894,43 +3090,62 @@ private struct DesktopComposerRuntimeControls: View {
     }
 
     private func authorityMenu(compact: Bool) -> some View {
-        Menu {
-            Picker("Access", selection: authoritySelection) {
-                ForEach(ConversationRuntimeMode.allCases, id: \.self) { mode in
-                    Text(mode.label).tag(mode)
+        Group {
+            if thread.kind == .coding {
+                Menu {
+                    Text("Coding always starts with a read-only, network-disabled plan.")
+                    Text("Your explicit plan approval grants one network-disabled turn inside a new isolated worktree.")
+                    Divider()
+                    Button("Runtime details…", systemImage: "info.circle", action: editDetails)
+                } label: {
+                    ComposerRuntimeControlLabel(
+                        title: "Plan first",
+                        systemImage: "checkmark.shield.fill",
+                        compact: compact
+                    )
                 }
-            }
-            Divider()
-            if ConversationRuntimeCatalog.managesNetwork(thread.provider) {
-                Toggle("Network access", isOn: networkSelection)
-                    .disabled(thread.runtimeMode == .fullAccess)
-                if thread.runtimeMode == .fullAccess {
-                    Text("Network is required by Full access")
-                }
+                .accessibilityLabel("Access, plan first with explicit isolated implementation approval")
+                .help("Read-only plan first; isolated implementation only after explicit approval")
             } else {
-                Text("Network controlled by \(thread.provider)")
+                Menu {
+                    Picker("Access", selection: authoritySelection) {
+                        ForEach(ConversationRuntimeMode.allCases, id: \.self) { mode in
+                            Text(mode.label).tag(mode)
+                        }
+                    }
+                    Divider()
+                    if ConversationRuntimeCatalog.managesNetwork(thread.provider) {
+                        Toggle("Network access", isOn: networkSelection)
+                            .disabled(thread.runtimeMode == .fullAccess)
+                        if thread.runtimeMode == .fullAccess {
+                            Text("Network is required by Full access")
+                        }
+                    } else {
+                        Text("Network controlled by \(thread.provider)")
+                    }
+                    Divider()
+                    Button("Runtime details…", systemImage: "info.circle", action: editDetails)
+                } label: {
+                    ComposerRuntimeControlLabel(
+                        title: thread.runtimeMode.label,
+                        systemImage: thread.runtimeMode == .fullAccess
+                            ? "exclamationmark.shield.fill"
+                            : "checkmark.shield",
+                        compact: compact
+                    )
+                    .foregroundStyle(thread.runtimeMode == .fullAccess ? Nord.auroraYellow : .secondary)
+                }
+                .accessibilityLabel(
+                    "Access, \(ConversationRuntimeCatalog.boundarySummary(provider: thread.provider, runtimeMode: thread.runtimeMode, networkAccess: thread.networkAccess))"
+                )
+                .help(ConversationRuntimeCatalog.boundarySummary(
+                    provider: thread.provider,
+                    runtimeMode: thread.runtimeMode,
+                    networkAccess: thread.networkAccess
+                ))
             }
-            Divider()
-            Button("Runtime details…", systemImage: "info.circle", action: editDetails)
-        } label: {
-            ComposerRuntimeControlLabel(
-                title: thread.runtimeMode.label,
-                systemImage: thread.runtimeMode == .fullAccess
-                    ? "exclamationmark.shield.fill"
-                    : "checkmark.shield",
-                compact: compact
-            )
-            .foregroundStyle(thread.runtimeMode == .fullAccess ? Nord.auroraYellow : .secondary)
         }
         .disabled(isLocked)
-        .accessibilityLabel(
-            "Access, \(ConversationRuntimeCatalog.boundarySummary(provider: thread.provider, runtimeMode: thread.runtimeMode, networkAccess: thread.networkAccess))"
-        )
-        .help(ConversationRuntimeCatalog.boundarySummary(
-            provider: thread.provider,
-            runtimeMode: thread.runtimeMode,
-            networkAccess: thread.networkAccess
-        ))
     }
 }
 
@@ -2969,6 +3184,7 @@ private struct ConversationRuntimeEditor: View {
     @Binding var runtimeMode: ConversationRuntimeMode
     @Binding var networkAccess: Bool
     let capabilities: [ProviderCapabilitySnapshot]
+    let stagedCoding: Bool
 
     private var advertisedModels: [ProviderModel] {
         ConversationRuntimeCatalog.models(for: provider, capabilities: capabilities)
@@ -3043,27 +3259,35 @@ private struct ConversationRuntimeEditor: View {
         }
 
         Section("Authority") {
-            Picker("Permission mode", selection: $runtimeMode) {
-                ForEach(ConversationRuntimeMode.allCases, id: \.self) { mode in
-                    Text(mode.label).tag(mode)
-                }
-            }
-            Text(runtimeMode.detail)
-                .font(.caption)
-                .foregroundStyle(runtimeMode == .fullAccess ? Nord.auroraYellow : .secondary)
-            if ConversationRuntimeCatalog.managesNetwork(provider) {
-                Toggle("Allow network access", isOn: $networkAccess)
-                    .disabled(runtimeMode == .fullAccess)
-                if runtimeMode == .fullAccess {
-                    Text("Codex full access is unsandboxed, so network access is necessarily on.")
-                        .font(.caption)
-                        .foregroundStyle(Nord.auroraYellow)
-                }
-            } else {
-                LabeledContent("Network", value: "Provider controlled")
-                Text("\(provider) does not expose a separate enforceable network switch through Kaname's current adapter. Its native permission mode remains authoritative.")
+            if stagedCoding {
+                LabeledContent("Planning", value: "Read-only · network disabled")
+                LabeledContent("Implementation", value: "Explicit approval · isolated worktree · network disabled")
+                Text("Coding authority is not a free-running runtime preference. Kaname stops after the plan and again after evidence collection so you can make each decision deliberately.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            } else {
+                Picker("Permission mode", selection: $runtimeMode) {
+                    ForEach(ConversationRuntimeMode.allCases, id: \.self) { mode in
+                        Text(mode.label).tag(mode)
+                    }
+                }
+                Text(runtimeMode.detail)
+                    .font(.caption)
+                    .foregroundStyle(runtimeMode == .fullAccess ? Nord.auroraYellow : .secondary)
+                if ConversationRuntimeCatalog.managesNetwork(provider) {
+                    Toggle("Allow network access", isOn: $networkAccess)
+                        .disabled(runtimeMode == .fullAccess)
+                    if runtimeMode == .fullAccess {
+                        Text("Codex full access is unsandboxed, so network access is necessarily on.")
+                            .font(.caption)
+                            .foregroundStyle(Nord.auroraYellow)
+                    }
+                } else {
+                    LabeledContent("Network", value: "Provider controlled")
+                    Text("\(provider) does not expose a separate enforceable network switch through Kaname's current adapter. Its native permission mode remains authoritative.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .onChange(of: provider) { newProvider in
@@ -8885,21 +9109,26 @@ private struct NewDesktopThreadSheet: View {
                     reasoning: $reasoning,
                     runtimeMode: $runtimeMode,
                     networkAccess: $networkAccess,
-                    capabilities: capabilities
+                    capabilities: capabilities,
+                    stagedCoding: kind == .coding
                 )
                 Section {
                     Label("No subject required", systemImage: "sparkles")
                     Text("Kaname opens a blank conversation and names it automatically from your first message.")
                         .foregroundStyle(.secondary)
                     Label(
-                        ConversationRuntimeCatalog.boundarySummary(
-                            provider: provider,
-                            runtimeMode: runtimeMode,
-                            networkAccess: networkAccess
-                        ),
-                        systemImage: runtimeMode == .fullAccess ? "exclamationmark.shield" : "lock.shield"
+                        kind == .coding
+                            ? "Plan first · read-only · network disabled · explicit isolated implementation approval"
+                            : ConversationRuntimeCatalog.boundarySummary(
+                                provider: provider,
+                                runtimeMode: runtimeMode,
+                                networkAccess: networkAccess
+                            ),
+                        systemImage: kind == .coding
+                            ? "checkmark.shield.fill"
+                            : (runtimeMode == .fullAccess ? "exclamationmark.shield" : "lock.shield")
                     )
-                    .foregroundStyle(runtimeMode == .fullAccess ? Nord.auroraYellow : .secondary)
+                    .foregroundStyle(kind != .coding && runtimeMode == .fullAccess ? Nord.auroraYellow : .secondary)
                 }
             }
             .formStyle(.grouped)
@@ -9628,17 +9857,12 @@ private struct ThreadPlanView: View {
                     EmptyPanel(symbol: "list.bullet.clipboard", title: "No plan yet", detail: "A provider plan remains separate from write approval.")
                 } else {
                     ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                        HStack(alignment: .top, spacing: 12) {
-                            Text("\(index + 1)")
-                                .font(.caption.weight(.bold))
+                        VStack(alignment: .leading, spacing: 5) {
+                            (Text("\(index + 1). ").foregroundColor(item.state.tint) + Text(item.title))
+                                .font(.subheadline.weight(.medium))
+                            Text(item.state.label)
+                                .font(.caption.weight(.medium))
                                 .foregroundStyle(item.state.tint)
-                                .frame(width: 25, height: 25)
-                                .background(item.state.tint.opacity(0.12), in: Circle())
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(item.title).font(.headline)
-                                Text(item.state.label).font(.caption).foregroundStyle(item.state.tint)
-                            }
-                            Spacer()
                         }
                         .padding(15)
                         .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))

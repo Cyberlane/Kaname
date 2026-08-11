@@ -313,6 +313,12 @@ public struct DesktopGitStackLayer: Codable, Equatable, Identifiable, Sendable {
     public var dependsOnLayerID: String?
 }
 
+public enum DesktopProviderRunPurpose: String, Codable, Equatable, Sendable {
+    case conversation
+    case codingPlan
+    case codingImplementation
+}
+
 private struct DesktopProviderRunPayload: Decodable {
     let id: String
     let threadID: String?
@@ -334,6 +340,7 @@ private struct DesktopProviderRunPayload: Decodable {
     let completedAtUnixMillis: Int64?
     let usesProjectContext: Bool?
     let workspacePathOverride: String?
+    let purpose: DesktopProviderRunPurpose?
 }
 
 public struct DesktopProviderRunRecord: Codable, Equatable, Identifiable, Sendable {
@@ -357,6 +364,7 @@ public struct DesktopProviderRunRecord: Codable, Equatable, Identifiable, Sendab
     public var completedAtUnixMillis: Int64?
     public var usesProjectContext: Bool? = nil
     public var workspacePathOverride: String? = nil
+    public var purpose: DesktopProviderRunPurpose = .conversation
 
     public init(
         id: String,
@@ -378,7 +386,8 @@ public struct DesktopProviderRunRecord: Codable, Equatable, Identifiable, Sendab
         startedAtUnixMillis: Int64,
         completedAtUnixMillis: Int64?,
         usesProjectContext: Bool? = nil,
-        workspacePathOverride: String? = nil
+        workspacePathOverride: String? = nil,
+        purpose: DesktopProviderRunPurpose = .conversation
     ) {
         self.id = id
         self.threadID = threadID
@@ -400,6 +409,7 @@ public struct DesktopProviderRunRecord: Codable, Equatable, Identifiable, Sendab
         self.completedAtUnixMillis = completedAtUnixMillis
         self.usesProjectContext = usesProjectContext
         self.workspacePathOverride = workspacePathOverride
+        self.purpose = purpose
     }
 
     public init(from decoder: any Decoder) throws {
@@ -424,6 +434,7 @@ public struct DesktopProviderRunRecord: Codable, Equatable, Identifiable, Sendab
         completedAtUnixMillis = payload.completedAtUnixMillis
         usesProjectContext = payload.usesProjectContext
         workspacePathOverride = payload.workspacePathOverride
+        purpose = payload.purpose ?? .conversation
     }
 }
 

@@ -19,6 +19,8 @@ public struct KanameConversationServiceRequest: Codable, Equatable, Sendable {
     public let resumableNativeThreadID: String?
     public let localCoreMachService: String
     public let localCoreRequirement: String
+    public let workspaceAuthorization: CodexWorkspaceAuthorization?
+    public let isCodingPlan: Bool
     public let createdAtUnixMillis: Int64
 
     public init(
@@ -36,6 +38,8 @@ public struct KanameConversationServiceRequest: Codable, Equatable, Sendable {
         resumableNativeThreadID: String?,
         localCoreMachService: String,
         localCoreRequirement: String,
+        workspaceAuthorization: CodexWorkspaceAuthorization? = nil,
+        isCodingPlan: Bool = false,
         createdAtUnixMillis: Int64
     ) {
         (self.runID, self.threadID, self.projectID) = (runID, threadID, projectID)
@@ -45,13 +49,15 @@ public struct KanameConversationServiceRequest: Codable, Equatable, Sendable {
         (self.resumableNativeThreadID, self.localCoreMachService, self.localCoreRequirement) = (
             resumableNativeThreadID, localCoreMachService, localCoreRequirement
         )
+        self.workspaceAuthorization = workspaceAuthorization
+        self.isCodingPlan = isCodingPlan
         self.createdAtUnixMillis = createdAtUnixMillis
     }
 
     private enum CodingKeys: String, CodingKey {
         case runID, threadID, projectID, provider, model, reasoningEffort
         case runtimeMode, networkAccess, prompt, workspacePath, providerStatePath
-        case resumableNativeThreadID, localCoreMachService, localCoreRequirement, createdAtUnixMillis
+        case resumableNativeThreadID, localCoreMachService, localCoreRequirement, workspaceAuthorization, isCodingPlan, createdAtUnixMillis
     }
 
     public init(from decoder: any Decoder) throws {
@@ -72,7 +78,40 @@ public struct KanameConversationServiceRequest: Codable, Equatable, Sendable {
         resumableNativeThreadID = try container.decodeIfPresent(String.self, forKey: .resumableNativeThreadID)
         localCoreMachService = try container.decode(String.self, forKey: .localCoreMachService)
         localCoreRequirement = try container.decode(String.self, forKey: .localCoreRequirement)
+        workspaceAuthorization = try container.decodeIfPresent(CodexWorkspaceAuthorization.self, forKey: .workspaceAuthorization)
+        isCodingPlan = try container.decodeIfPresent(Bool.self, forKey: .isCodingPlan) ?? false
         createdAtUnixMillis = try container.decode(Int64.self, forKey: .createdAtUnixMillis)
+    }
+}
+
+public extension KanameConversationServiceRequest {
+    func codexCodingRequest() -> CodexCodingRequest {
+        if workspaceAuthorization != nil {
+            return CodexCodingRequest(
+                prompt: prompt,
+                model: model,
+                reasoningEffort: reasoningEffort,
+                sandbox: .workspaceWrite,
+                networkAccess: false
+            )
+        }
+        if isCodingPlan {
+            return CodexCodingRequest(
+                prompt: prompt,
+                model: model,
+                reasoningEffort: reasoningEffort,
+                sandbox: .readOnly,
+                networkAccess: false,
+                approvalPolicy: .never
+            )
+        }
+        return CodexCodingRequest.conversation(
+            prompt: prompt,
+            model: model,
+            reasoningEffort: reasoningEffort,
+            runtimeMode: runtimeMode,
+            networkAccess: networkAccess
+        )
     }
 }
 
@@ -284,7 +323,7 @@ public struct KanameConversationServiceStore: Sendable {
     }
 
     public func isWorkerAlive(threadID: String) -> Bool {
-        guard let state = workerState(threadID: threadID) else { return false }
+        guard let state = workerState(threadID: threadID), state.runID != nil else { return false }
 #if os(macOS)
         return Darwin.kill(state.processIdentifier, 0) == 0
 #else
@@ -393,7 +432,12 @@ public enum KanameConversationWorkerLauncher {
         var pid: pid_t = 0
         let result = posix_spawn(&pid, executableURL.path, nil, nil, &argv, environ)
         guard result == 0 else { throw KanameConversationServiceError.launchFailed(result) }
-        return pid
+        let childPID = pid
+        DispatchQueue.global(qos: .utility).async {
+            var status: Int32 = 0
+            while Darwin.waitpid(childPID, &status, 0) == -1 && errno == EINTR {}
+        }
+        return childPID
 #else
         throw KanameConversationServiceError.workerUnavailable
 #endif

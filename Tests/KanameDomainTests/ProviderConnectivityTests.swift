@@ -333,8 +333,85 @@ struct ProviderConnectivityTests {
         let answer = try #require(store.consumeAnswer(threadID: "thread-1", runID: "run-1"))
         #expect(answer.0 == "question-request")
         #expect(answer.1 == ["question-1": ["Proceed"]])
+        try store.writeWorkerState(KanameConversationWorkerState.record(
+            threadID: "thread-1",
+            runID: nil,
+            processIdentifier: ProcessInfo.processInfo.processIdentifier,
+            updatedAtUnixMillis: 1_002
+        ))
+        #expect(store.isWorkerAlive(threadID: "thread-1") == false)
         try store.finishRequest(at: queued[0].0, threadID: "thread-1")
         #expect(try store.pendingRequests(threadID: "thread-1").isEmpty)
+    }
+
+    @Test
+    func durableConversationRequestPreservesExactWorkspaceAuthorization() throws {
+        let workspace = URL(fileURLWithPath: "/private/tmp/kaname-authorized-worktree", isDirectory: true)
+        let authorization = CodexWorkspaceAuthorization(
+            approvalID: "approval-exact",
+            workspace: workspace,
+            targetRevision: "head:digest",
+            promptDigest: CodingWorkspaceInspector.digest(Data("Approved prompt".utf8)),
+            model: "gpt-5.6-sol",
+            reasoningEffort: "high",
+            fingerprint: Data([1, 2, 3, 4]),
+            expiresAt: Date(timeIntervalSince1970: 4_000),
+            storePosition: 42
+        )
+        let request = KanameConversationServiceRequest(
+            runID: "run-authorized",
+            threadID: "thread-authorized",
+            projectID: "project-authorized",
+            provider: "Codex",
+            model: "gpt-5.6-sol",
+            reasoningEffort: "high",
+            runtimeMode: .autoAcceptEdits,
+            networkAccess: false,
+            prompt: "Approved prompt",
+            workspacePath: workspace.path,
+            providerStatePath: "/private/tmp/provider-state",
+            resumableNativeThreadID: "native-thread",
+            localCoreMachService: "service",
+            localCoreRequirement: "requirement",
+            workspaceAuthorization: authorization,
+            createdAtUnixMillis: 1_000
+        )
+
+        let decoded = try JSONDecoder().decode(
+            KanameConversationServiceRequest.self,
+            from: JSONEncoder().encode(request)
+        )
+        #expect(decoded == request)
+        #expect(decoded.workspaceAuthorization == authorization)
+        #expect(decoded.networkAccess == false)
+    }
+
+    @Test
+    func codingPlanServiceRequestUsesReadOnlyNetworkDeniedNonInteractiveAuthority() {
+        let request = KanameConversationServiceRequest(
+            runID: "run-plan",
+            threadID: "thread-plan",
+            projectID: "project-plan",
+            provider: "Codex",
+            model: "gpt-5.6-sol",
+            reasoningEffort: "high",
+            runtimeMode: .fullAccess,
+            networkAccess: true,
+            prompt: "Plan only",
+            workspacePath: "/private/tmp/workspace",
+            providerStatePath: "/private/tmp/provider-state",
+            resumableNativeThreadID: nil,
+            localCoreMachService: "service",
+            localCoreRequirement: "requirement",
+            isCodingPlan: true,
+            createdAtUnixMillis: 1_000
+        )
+
+        let coding = request.codexCodingRequest()
+        #expect(coding.sandbox == .readOnly)
+        #expect(coding.networkAccess == false)
+        #expect(coding.approvalPolicy == .never)
+        #expect(coding.runtimeAuthority == .workflowApprovalRequired)
     }
 
     @Test

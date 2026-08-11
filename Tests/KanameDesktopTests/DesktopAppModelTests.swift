@@ -126,6 +126,110 @@ struct DesktopAppModelTests {
     }
 
     @Test
+    func codingPlanOverridesFullAccessAndStopsForExplicitApproval() throws {
+        let store = MemoryDesktopStateStore()
+        let model = DesktopAppModel(store: store, now: { 1_000 })
+        let projectID = try #require(model.snapshot.projects.first?.id)
+        let threadID = model.createConversation(
+            kind: .coding,
+            projectID: projectID,
+            provider: "Codex",
+            runtimeMode: .fullAccess,
+            networkAccess: true
+        )
+        let messageID = try #require(model.appendUserMessage(threadID: threadID, body: "Add the guarded flow."))
+        let runID = try #require(model.enqueueProviderRun(
+            threadID: threadID,
+            sourceMessageID: messageID,
+            purpose: .codingPlan,
+            runtimeModeOverride: .approvalRequired,
+            networkAccessOverride: false
+        ))
+        model.replaceProviderPlan(
+            threadID: threadID,
+            steps: [
+                ("Inspect the flow", "completed"),
+                ("Implement after approval", "pending"),
+            ],
+            explanation: "A bounded plan"
+        )
+        model.finalizeCodingPlanForApproval(threadID: threadID)
+        _ = model.beginProviderRun(id: runID)
+        model.completeProviderRun(id: runID)
+
+        let restored = DesktopAppModel(store: store, now: { 2_000 })
+        let run = try #require(restored.providerRun(id: runID))
+        let thread = try #require(restored.thread(id: threadID))
+        #expect(run.purpose == .codingPlan)
+        #expect(run.runtimeMode == .approvalRequired)
+        #expect(run.networkAccess == false)
+        #expect(thread.plan.map(\.title) == ["Inspect the flow", "Implement after approval"])
+        #expect(thread.plan.map(\.state) == [.pending, .pending])
+        #expect(thread.attention == .needsApproval)
+        #expect(thread.summary == "Plan ready for review. No implementation authority has been granted.")
+    }
+
+    @Test
+    func codingImplementationRequiresEvidenceAndSeparateAcceptance() throws {
+        let store = MemoryDesktopStateStore()
+        var clock: Int64 = 1_000
+        let model = DesktopAppModel(store: store, now: { clock })
+        let projectID = try #require(model.snapshot.projects.first?.id)
+        let threadID = model.createConversation(kind: .coding, projectID: projectID)
+        let messageID = try #require(model.appendUserMessage(threadID: threadID, body: "Implement the approved plan."))
+        let worktreeID = try #require(model.proposeWorktree(
+            projectID: projectID,
+            threadID: threadID,
+            rootWorkspacePath: "/tmp/root",
+            worktreePath: "/tmp/worktree",
+            branch: "kaname/test",
+            baseRevision: "base"
+        ))
+        model.updateWorktree(
+            id: worktreeID,
+            headRevision: "base",
+            changedFileCount: 0,
+            diffSummary: "Ready",
+            state: .ready
+        )
+        let runID = try #require(model.enqueueProviderRun(
+            threadID: threadID,
+            sourceMessageID: messageID,
+            workspacePathOverride: "/tmp/worktree",
+            purpose: .codingImplementation,
+            runtimeModeOverride: .autoAcceptEdits,
+            networkAccessOverride: false
+        ))
+        _ = model.beginProviderRun(id: runID)
+        clock += 1
+        model.completeProviderRun(id: runID)
+        #expect(model.thread(id: threadID)?.attention == .running)
+
+        clock += 1
+        model.recordCodingEvidence(
+            threadID: threadID,
+            worktreeID: worktreeID,
+            revision: "base:diff",
+            diffStat: "1 file changed",
+            diffCheckPassed: true,
+            verificationCommand: "swift test",
+            verificationExitStatus: 0,
+            verificationOutput: "All tests passed",
+            artifactPaths: ["Sources/Flow.swift"],
+            digest: String(repeating: "a", count: 64)
+        )
+        #expect(model.thread(id: threadID)?.attention == .needsApproval)
+        #expect(model.thread(id: threadID)?.evidence.allSatisfy { $0.state == .passed } == true)
+        #expect(model.snapshot.operations.worktrees.first(where: { $0.id == worktreeID })?.state == .review)
+
+        clock += 1
+        model.recordCodingReview(threadID: threadID, worktreeID: worktreeID, accepted: true)
+        let restored = DesktopAppModel(store: store, now: { 2_000 })
+        #expect(restored.thread(id: threadID)?.attention == .completed)
+        #expect(restored.snapshot.operations.worktrees.first(where: { $0.id == worktreeID })?.state == .accepted)
+    }
+
+    @Test
     func unifiedProviderQueuePersistsEventsRecoveryAndTitleOwnership() throws {
         let store = MemoryDesktopStateStore()
         var clock: Int64 = 1_000

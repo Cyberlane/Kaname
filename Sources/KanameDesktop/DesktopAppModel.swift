@@ -1641,34 +1641,43 @@ public final class DesktopAppModel: ObservableObject {
         threadID: String,
         sourceMessageID: String,
         usesProjectContext: Bool = true,
-        workspacePathOverride: String? = nil
+        workspacePathOverride: String? = nil,
+        purpose: DesktopProviderRunPurpose = .conversation,
+        runtimeModeOverride: ConversationRuntimeMode? = nil,
+        networkAccessOverride: Bool? = nil
     ) -> String? {
         guard let thread = thread(id: threadID),
               let message = thread.messages.first(where: { $0.id == sourceMessageID && $0.role == .user }) else {
             return nil
         }
-        var run = DesktopProviderRunRecord(
+        let run = DesktopProviderRunRecord(
             id: UUID().uuidString.lowercased(),
             threadID: threadID,
             sourceMessageID: sourceMessageID,
             provider: thread.provider,
             model: thread.model,
             reasoningEffort: thread.reasoningEffort,
-            runtimeMode: thread.runtimeMode,
-            networkAccess: thread.networkAccess,
+            runtimeMode: runtimeModeOverride ?? thread.runtimeMode,
+            networkAccess: networkAccessOverride ?? thread.networkAccess,
             briefDigest: Self.stableLocalDigest(message.body),
             contextReferenceCount: providerContextReferenceCount(for: thread),
             tokenUsage: nil,
             costSummary: "Pending",
             state: .proposed,
             startedAtUnixMillis: now(),
-            completedAtUnixMillis: nil
+            completedAtUnixMillis: nil,
+            usesProjectContext: usesProjectContext,
+            workspacePathOverride: workspacePathOverride,
+            purpose: purpose
         )
-        run.usesProjectContext = usesProjectContext
-        run.workspacePathOverride = workspacePathOverride
         let persisted = mutate { snapshot in
             snapshot.operations.providerRuns.append(run)
             guard let index = snapshot.threads.firstIndex(where: { $0.id == threadID }) else { return }
+            if purpose == .codingPlan {
+                snapshot.threads[index].plan.removeAll()
+                snapshot.threads[index].evidence.removeAll()
+                snapshot.threads[index].summary = "Creating a read-only implementation plan…"
+            }
             if !snapshot.operations.providerRuns.contains(where: {
                 $0.threadID == threadID && $0.id != run.id && $0.state == .running
             }) {
@@ -1854,8 +1863,17 @@ public final class DesktopAppModel: ObservableObject {
                 sessionState = .ready
                 let threadID = snapshot.operations.providerRuns[index].threadID
                 let assistant = snapshot.threads.first(where: { $0.id == threadID })?.messages.last(where: { $0.role == .assistant })?.body
-                threadSummary = assistant.map(Self.provisionalConversationTitle) ?? "Provider completed."
-                attention = .needsResponse
+                switch snapshot.operations.providerRuns[index].purpose {
+                case .codingPlan:
+                    attention = .needsApproval
+                    threadSummary = "Plan ready for review. No implementation authority has been granted."
+                case .codingImplementation:
+                    attention = .running
+                    threadSummary = "Implementation finished. Kaname is collecting independent evidence."
+                case .conversation:
+                    attention = .needsResponse
+                    threadSummary = assistant.map(Self.provisionalConversationTitle) ?? "Provider completed."
+                }
             case let .stopped(interrupted, error):
                 snapshot.operations.providerRuns[index].state = interrupted ? .interrupted : .failed
                 snapshot.operations.providerRuns[index].errorSummary = error
@@ -1920,8 +1938,16 @@ public final class DesktopAppModel: ObservableObject {
     @discardableResult
     public func retryProviderRun(id: String) -> String? {
         guard let run = providerRun(id: id), let threadID = run.threadID, let sourceMessageID = run.sourceMessageID,
-              [.failed, .interrupted].contains(run.state) else { return nil }
-        return enqueueProviderRun(threadID: threadID, sourceMessageID: sourceMessageID)
+              [.failed, .interrupted].contains(run.state), run.purpose != .codingImplementation else { return nil }
+        return enqueueProviderRun(
+            threadID: threadID,
+            sourceMessageID: sourceMessageID,
+            usesProjectContext: run.usesProjectContext ?? true,
+            workspacePathOverride: run.workspacePathOverride,
+            purpose: run.purpose,
+            runtimeModeOverride: run.runtimeMode,
+            networkAccessOverride: run.networkAccess
+        )
     }
 
     public func addProviderPlan(threadID: String, text: String, completed: Bool) {
@@ -1939,6 +1965,129 @@ public final class DesktopAppModel: ObservableObject {
             } else {
                 snapshot.threads[index].plan.append(item)
             }
+        }
+    }
+
+    public func replaceProviderPlan(
+        threadID: String,
+        steps: [(title: String, status: String)],
+        explanation: String?
+    ) {
+        let items = steps.enumerated().map { index, entry in
+            let status = entry.status.lowercased().replacingOccurrences(of: "_", with: "")
+            let state: DesktopPlanItem.State = switch status {
+            case "completed", "complete": .complete
+            case "inprogress": .inProgress
+            default: .pending
+            }
+            return DesktopPlanItem(
+                id: "provider-plan-\(index)-\(Self.stableLocalDigest(entry.title).prefix(16))",
+                title: entry.title,
+                state: state
+            )
+        }
+        guard !items.isEmpty else { return }
+        mutate { snapshot in
+            guard let index = snapshot.threads.firstIndex(where: { $0.id == threadID }) else { return }
+            snapshot.threads[index].plan = items
+            if let explanation {
+                snapshot.threads[index].summary = explanation
+            }
+            snapshot.threads[index].updatedAtUnixMillis = now()
+        }
+    }
+
+    public func markCodingPlanUnavailable(threadID: String) {
+        mutateThread(id: threadID) { thread in
+            thread.attention = .failed
+            thread.summary = "The planning turn completed without a readable plan. No implementation authority was granted."
+            thread.updatedAtUnixMillis = now()
+        }
+    }
+
+    public func finalizeCodingPlanForApproval(threadID: String) {
+        mutateThread(id: threadID) { thread in
+            for index in thread.plan.indices { thread.plan[index].state = .pending }
+            thread.updatedAtUnixMillis = now()
+        }
+    }
+
+    public func recordCodingEvidence(
+        threadID: String,
+        worktreeID: String,
+        revision: String,
+        diffStat: String,
+        diffCheckPassed: Bool,
+        verificationCommand: String,
+        verificationExitStatus: Int32,
+        verificationOutput: String,
+        artifactPaths: [String],
+        digest: String
+    ) {
+        let changedFilesState: DesktopEvidence.State = artifactPaths.isEmpty ? .failed : .passed
+        let testState: DesktopEvidence.State = verificationExitStatus == 0 ? .passed : .failed
+        let diffState: DesktopEvidence.State = diffCheckPassed ? .passed : .failed
+        let evidencePassed = diffCheckPassed && verificationExitStatus == 0 && !artifactPaths.isEmpty
+        let items = [
+            DesktopEvidence(
+                id: "coding-diff-\(worktreeID)",
+                label: "Diff integrity",
+                detail: diffStat.isEmpty ? "No changed files were found." : diffStat,
+                state: diffState
+            ),
+            DesktopEvidence(
+                id: "coding-tests-\(worktreeID)",
+                label: verificationCommand,
+                detail: String((verificationOutput.isEmpty ? "No command output." : verificationOutput).suffix(4_000)),
+                state: testState
+            ),
+            DesktopEvidence(
+                id: "coding-files-\(worktreeID)",
+                label: "Changed files",
+                detail: artifactPaths.isEmpty ? "No implementation changes were produced." : artifactPaths.joined(separator: ", "),
+                state: changedFilesState
+            ),
+            DesktopEvidence(
+                id: "coding-revision-\(worktreeID)",
+                label: "Evidence digest",
+                detail: digest,
+                state: evidencePassed ? .passed : .failed
+            ),
+        ]
+        let timestamp = now()
+        mutate { snapshot in
+            guard let threadIndex = snapshot.threads.firstIndex(where: { $0.id == threadID }),
+                  let worktreeIndex = snapshot.operations.worktrees.firstIndex(where: { $0.id == worktreeID }) else { return }
+            snapshot.threads[threadIndex].evidence = items
+            snapshot.threads[threadIndex].attention = .needsApproval
+            snapshot.threads[threadIndex].summary = evidencePassed
+                ? "Evidence is ready. Review and accept or reject the implementation."
+                : "Evidence found a failure. Review it before deciding what to do."
+            snapshot.threads[threadIndex].updatedAtUnixMillis = timestamp
+            snapshot.operations.worktrees[worktreeIndex].headRevision = revision
+            snapshot.operations.worktrees[worktreeIndex].changedFileCount = artifactPaths.count
+            snapshot.operations.worktrees[worktreeIndex].diffSummary = String(diffStat.prefix(32_000))
+            snapshot.operations.worktrees[worktreeIndex].testCommand = verificationCommand
+            snapshot.operations.worktrees[worktreeIndex].testSummary = String(verificationOutput.prefix(32_000))
+            snapshot.operations.worktrees[worktreeIndex].diagnosticSummary = "Evidence digest \(digest)"
+            snapshot.operations.worktrees[worktreeIndex].state = .review
+            snapshot.operations.worktrees[worktreeIndex].updatedAtUnixMillis = timestamp
+        }
+    }
+
+    public func recordCodingReview(threadID: String, worktreeID: String, accepted: Bool) {
+        let timestamp = now()
+        mutate { snapshot in
+            guard let threadIndex = snapshot.threads.firstIndex(where: { $0.id == threadID }),
+                  let worktreeIndex = snapshot.operations.worktrees.firstIndex(where: { $0.id == worktreeID }) else { return }
+            snapshot.operations.worktrees[worktreeIndex].state = accepted ? .accepted : .dirty
+            snapshot.operations.worktrees[worktreeIndex].updatedAtUnixMillis = timestamp
+            snapshot.threads[threadIndex].attention = accepted ? .completed : .needsResponse
+            snapshot.threads[threadIndex].summary = accepted
+                ? "Implementation accepted locally. Nothing was pushed or published."
+                : "Implementation rejected. The isolated changes remain available for revision."
+            snapshot.threads[threadIndex].unread = false
+            snapshot.threads[threadIndex].updatedAtUnixMillis = timestamp
         }
     }
 

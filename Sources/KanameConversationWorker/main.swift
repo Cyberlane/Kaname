@@ -206,18 +206,19 @@ private enum KanameConversationWorker {
         }
         var didStartSession = false
         do {
-            let codingRequest = CodexCodingRequest.conversation(
-                prompt: request.prompt,
-                model: request.model,
-                reasoningEffort: request.reasoningEffort,
-                runtimeMode: request.runtimeMode,
-                networkAccess: request.networkAccess
-            )
+            let codingRequest = request.codexCodingRequest()
             let liveRun: CodexLiveRun
             if continueExistingSession {
-                liveRun = try await session.continueRun(codingRequest)
+                liveRun = try await session.continueRun(
+                    codingRequest,
+                    authorization: request.workspaceAuthorization
+                )
             } else {
-                liveRun = try await session.start(codingRequest, resumingNativeThreadID: request.resumableNativeThreadID)
+                liveRun = try await session.start(
+                    codingRequest,
+                    authorization: request.workspaceAuthorization,
+                    resumingNativeThreadID: request.resumableNativeThreadID
+                )
             }
             didStartSession = true
             try await writer.append(
