@@ -524,7 +524,7 @@ struct KanameDesktopWorkspace: View {
                     .frame(minWidth: 500, maxWidth: .infinity, maxHeight: .infinity)
 
                 inspectorColumn
-                    .frame(minWidth: 280, idealWidth: 340, maxWidth: 440)
+                    .frame(minWidth: 280, idealWidth: 340, maxWidth: 380)
             }
         } else {
             centerColumn
@@ -1993,7 +1993,7 @@ private struct DesktopThreadsView: View {
                 }
                 .listStyle(.inset)
             }
-            .frame(minWidth: 200, idealWidth: 300, maxWidth: 360)
+            .frame(minWidth: 200, idealWidth: 280, maxWidth: 320)
 
             if let thread = model.thread(id: selectedThreadID) {
                 DesktopThreadConversation(
@@ -2147,9 +2147,9 @@ private struct DesktopThreadConversation: View {
         var label: String {
             switch self {
             case .conversation: "Chat"
-            case .changes: "Changes"
+            case .changes: "Diff"
             case .plan: "Plan"
-            case .evidence: "Evidence"
+            case .evidence: "Checks"
             }
         }
     }
@@ -2250,7 +2250,9 @@ private struct DesktopThreadConversation: View {
             }
             if thread.kind == .coding { codingWorkflowBanner }
             Picker("Thread panel", selection: $panel) {
-                ForEach(Panel.allCases) { item in Text(item.label).tag(item) }
+                ForEach(Panel.allCases) { item in
+                    Text(item.label).tag(item)
+                }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
