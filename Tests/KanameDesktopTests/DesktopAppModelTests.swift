@@ -6,6 +6,35 @@ import Testing
 @MainActor
 struct DesktopAppModelTests {
     @Test
+    func projectCreationPersistsReviewedContextAndRejectsCanonicalDuplicateFolders() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "kaname-project-model-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let folder = root.appending(path: "Workspace", directoryHint: .isDirectory)
+        let alias = root.appending(path: "Workspace Alias", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: folder)
+        let model = DesktopAppModel(store: MemoryDesktopStateStore(), now: { 1_000 })
+        let context = DesktopProjectContext(
+            instructionReferences: [" AGENTS.md ", "AGENTS.md"],
+            defaultKind: .research
+        )
+
+        let projectID = try #require(model.createProject(
+            name: "Reviewed workspace",
+            path: alias.path,
+            summary: "Deliberate local scope",
+            context: context
+        ))
+        let project = try #require(model.project(id: projectID))
+
+        #expect(project.path == folder.path)
+        #expect(project.context.instructionReferences == ["AGENTS.md"])
+        #expect(project.context.defaultKind == .research)
+        #expect(model.createProject(name: "Duplicate", path: folder.path, summary: "") == nil)
+    }
+
+    @Test
     func desktopBackCommandRouterRetainsTheActiveHandlerUntilRemoval() {
         let router = DesktopBackCommandRouter()
         var calls = 0

@@ -1,7 +1,7 @@
-# Kaname 0.17.5 build 35
+# Kaname 0.18.0 build 36
 
-- Keep Threads focused on the human conversation while compact run capsules summarize tool calls, reasoning, diffs, duration, and usage.
-- Open complete per-run activity in a searchable Summary, Timeline, and immutable Raw evidence inspector.
-- Review code in a dedicated Changes workspace with a filterable file list and bounded, syntax-colored per-file patches.
-- Jump through a conversation outline, search messages and deep activity together, and keep your reading position when background tools are busy.
-- Page extremely long conversations and activity histories without discarding provider evidence or changing the workspace schema.
+- Add projects from a searchable, keyboard-friendly source palette without leaving the workspace.
+- Choose a local folder and review its canonical path, Git root, branch, working state, and detected instructions before saving.
+- Clone a GitHub repository or validated HTTPS/SSH Git URL into an explicitly chosen destination, with cancellable private staging and failed-clone cleanup.
+- Create planning, research, coding, or personal projects that deliberately have no folder.
+- Prevent symlink aliases from creating duplicate project boundaries and open every new project directly on its overview.

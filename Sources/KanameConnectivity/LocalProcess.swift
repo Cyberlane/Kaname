@@ -68,6 +68,7 @@ final class RunningLocalProcess: @unchecked Sendable {
     let standardOutput: FileHandle
     let standardError: FileHandle
     fileprivate let exitLatch: ProcessExitLatch
+    private let terminationLock = NSLock()
 
     fileprivate init(
         process: Process,
@@ -84,6 +85,8 @@ final class RunningLocalProcess: @unchecked Sendable {
     }
 
     func terminate() {
+        terminationLock.lock()
+        defer { terminationLock.unlock() }
         if process.isRunning {
             process.terminate()
         }
@@ -209,22 +212,28 @@ enum LocalProcess {
             readBounded(running.standardError, maximumBytes: maximumOutputBytes)
         }
 
-        do {
-            let status = try await waitForExit(of: running, timeout: timeout, command: executable)
-            let output = await outputTask.value
-            let error = await errorTask.value
-            return CapturedProcessOutput(
-                standardOutput: String(decoding: output.data, as: UTF8.self),
-                standardError: String(decoding: error.data, as: UTF8.self),
-                exitStatus: status,
-                standardOutputWasTruncated: output.truncated,
-                standardErrorWasTruncated: error.truncated
-            )
-        } catch {
-            running.terminate()
-            _ = await outputTask.value
-            _ = await errorTask.value
-            throw error
+        return try await withTaskCancellationHandler {
+            do {
+                let status = try await waitForExit(of: running, timeout: timeout, command: executable)
+                let output = await outputTask.value
+                let error = await errorTask.value
+                return CapturedProcessOutput(
+                    standardOutput: String(decoding: output.data, as: UTF8.self),
+                    standardError: String(decoding: error.data, as: UTF8.self),
+                    exitStatus: status,
+                    standardOutputWasTruncated: output.truncated,
+                    standardErrorWasTruncated: error.truncated
+                )
+            } catch {
+                running.terminate()
+                _ = await outputTask.value
+                _ = await errorTask.value
+                throw error
+            }
+        } onCancel: {
+            DispatchQueue.global(qos: .userInitiated).async {
+                running.terminate()
+            }
         }
     }
 

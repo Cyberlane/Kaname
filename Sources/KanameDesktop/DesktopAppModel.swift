@@ -2143,18 +2143,57 @@ public final class DesktopAppModel: ObservableObject {
     }
 
     @discardableResult
-    public func createProject(name: String, path: String?, summary: String) -> String? {
+    public func createProject(
+        name: String,
+        path: String?,
+        summary: String,
+        context: DesktopProjectContext = .empty
+    ) -> String? {
         let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanName.isEmpty, cleanName.utf8.count <= 120 else { return nil }
+        let cleanSummary = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanName.isEmpty, cleanName.utf8.count <= 120,
+              cleanSummary.utf8.count <= 2_000 else { return nil }
         let cleanPath = path?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let storedPath = cleanPath?.isEmpty == false ? Self.canonicalProjectPath(cleanPath!) : nil
+        guard storedPath?.utf8.count ?? 0 <= 4_096,
+              !snapshot.projects.contains(where: { project in
+                  guard let existing = project.path else { return false }
+                  return Self.canonicalProjectPath(existing) == storedPath
+              }) else { return nil }
+        let instructionReferences = Self.uniqueNormalized(
+            context.instructionReferences,
+            maximumCount: 24,
+            maximumBytes: 1_024
+        )
+        let knowledgeIDs = Set(snapshot.domains.knowledgeSources.map(\.id))
+        let skillIDs = Set(snapshot.domains.skills.map(\.id))
+        let provider = Self.normalized(context.defaultProvider)
+        let model = Self.normalized(context.defaultModel)
+        guard !provider.isEmpty, provider.utf8.count <= 120,
+              !model.isEmpty, model.utf8.count <= 200 else { return nil }
         let project = DesktopProject(
             name: cleanName,
-            path: cleanPath?.isEmpty == false ? cleanPath : nil,
-            summary: summary.trimmingCharacters(in: .whitespacesAndNewlines),
+            path: storedPath,
+            summary: cleanSummary,
+            context: DesktopProjectContext(
+                instructionReferences: instructionReferences,
+                knowledgeSourceIDs: Self.unique(context.knowledgeSourceIDs.filter(knowledgeIDs.contains)),
+                skillIDs: Self.unique(context.skillIDs.filter(skillIDs.contains)),
+                defaultKind: context.defaultKind,
+                defaultProvider: provider,
+                defaultModel: model
+            ),
             createdAtUnixMillis: now()
         )
         mutate { $0.projects.append(project) }
         return project.id
+    }
+
+    private static func canonicalProjectPath(_ path: String) -> String {
+        URL(fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true)
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+            .path
     }
 
     @discardableResult

@@ -8,6 +8,107 @@ import EventKit
 
 struct ProviderConnectivityTests {
     @Test
+    func projectIntakeParsesGitHubHTTPSAndSSHReferencesWithoutEmbeddedCredentials() throws {
+        let slug = try DesktopProjectIntakeService.parseRemoteReference("Cyberlane/Kaname")
+        let suffixedSlug = try DesktopProjectIntakeService.parseRemoteReference("Cyberlane/Kaname.git")
+        let https = try DesktopProjectIntakeService.parseRemoteReference("https://code.example.com/team/tool.git")
+        let ssh = try DesktopProjectIntakeService.parseRemoteReference("git@github.com:Cyberlane/Kaname.git")
+
+        #expect(slug.cloneURL == "https://github.com/Cyberlane/Kaname.git")
+        #expect(slug.suggestedName == "Kaname")
+        #expect(suffixedSlug.cloneURL == "https://github.com/Cyberlane/Kaname.git")
+        #expect(suffixedSlug.suggestedName == "Kaname")
+        #expect(https.suggestedName == "tool")
+        #expect(ssh.suggestedName == "Kaname")
+        #expect(throws: DesktopProjectIntakeError.self) {
+            try DesktopProjectIntakeService.parseRemoteReference("https://user:secret@example.com/team/tool.git")
+        }
+        #expect(throws: DesktopProjectIntakeError.self) {
+            try DesktopProjectIntakeService.parseRemoteReference("file:///tmp/private")
+        }
+        #expect(throws: DesktopProjectIntakeError.self) {
+            try DesktopProjectIntakeService.parseRemoteReference("https://example.com/team/../tool.git")
+        }
+    }
+
+    @Test
+    func projectIntakeCanonicalizesSelectionAndFindsRepositoryInstructions() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "kaname-project-intake-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let repository = root.appending(path: "Repository", directoryHint: .isDirectory)
+        let selected = repository.appending(path: "Sources", directoryHint: .isDirectory)
+        let alias = root.appending(path: "Alias", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: selected, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: selected.appending(path: ".cursor/rules", directoryHint: .isDirectory),
+            withIntermediateDirectories: true
+        )
+        try Data("# Instructions".utf8).write(to: repository.appending(path: "AGENTS.md"))
+        try runGit(["init"], at: repository)
+        try runGit(["config", "user.email", "kaname@example.invalid"], at: repository)
+        try runGit(["config", "user.name", "Kaname Tests"], at: repository)
+        try runGit(["add", "AGENTS.md"], at: repository)
+        try runGit(["commit", "-m", "fixture"], at: repository)
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: selected)
+
+        let snapshot = try await DesktopProjectIntakeService().inspectLocalDirectory(path: alias.path)
+
+        #expect(snapshot.canonicalSelectedPath == selected.path)
+        #expect(snapshot.repository?.root.hasSuffix("/Repository") == true)
+        #expect(snapshot.isRepositorySubfolder)
+        #expect(snapshot.instructionReferences == ["AGENTS.md", "Sources/.cursor/rules"])
+        #expect(snapshot.selectedInstructionReferences == [".cursor/rules"])
+    }
+
+    @Test
+    func projectIntakeClonesThroughPrivateStagingAndCleansUpFailures() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "kaname-project-clone-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let origin = root.appending(path: "origin.git", directoryHint: .isDirectory)
+        let destinationParent = root.appending(path: "Checkouts", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destinationParent, withIntermediateDirectories: true)
+        try runGit(["init", "--bare", origin.path], at: root)
+        let service = DesktopProjectIntakeService()
+        let valid = DesktopRemoteProjectReference(
+            cloneURL: origin.path,
+            suggestedName: "cloned-project",
+            displayName: "local fixture"
+        )
+
+        let snapshot = try await service.cloneRemote(reference: valid, parentDirectory: destinationParent.path)
+
+        #expect(snapshot.canonicalSelectedPath.hasSuffix("/Checkouts/cloned-project"))
+        #expect(snapshot.repository != nil)
+        #expect(snapshot.repository?.head == "No commits")
+        #expect(snapshot.repository?.branch == "main" || snapshot.repository?.branch == "master")
+        let invalid = DesktopRemoteProjectReference(
+            cloneURL: root.appending(path: "missing.git").path,
+            suggestedName: "failed-project",
+            displayName: "missing fixture"
+        )
+        await #expect(throws: Error.self) {
+            _ = try await service.cloneRemote(reference: invalid, parentDirectory: destinationParent.path)
+        }
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: destinationParent.path)
+        #expect(!leftovers.contains(where: { $0.hasPrefix(".kaname-clone-") }))
+        #expect(!FileManager.default.fileExists(atPath: destinationParent.appending(path: "failed-project").path))
+    }
+
+    private func runGit(_ arguments: [String], at directory: URL) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = ["-C", directory.path] + arguments
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        #expect(process.terminationStatus == 0)
+    }
+
+    @Test
     func providerChildPathKeepsTheResolvedRuntimeDirectoryInAppLaunches() {
         let executable = URL(fileURLWithPath: "/opt/homebrew/bin/codex")
         let path = LocalProcess.childSearchPath(
@@ -182,6 +283,7 @@ struct ProviderConnectivityTests {
         }
         #expect(DesktopLocalReadService.branch(from: "## main...origin/main [ahead 2]") == "main")
         #expect(DesktopLocalReadService.branch(from: "## feature/work") == "feature/work")
+        #expect(DesktopLocalReadService.branch(from: "## No commits yet on main...origin/main [gone]") == "main")
     }
 
     @Test

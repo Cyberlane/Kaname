@@ -255,8 +255,8 @@ struct KanameDesktopWorkspace: View {
         ZStack {
             navigationLayout
                 .background(Nord.polarNight0)
-                .allowsHitTesting(!showsSettings && !showsGlobalSearch && !model.isRecoveryReadOnly)
-                .disabled(showsSettings || showsGlobalSearch || model.isRecoveryReadOnly)
+                .allowsHitTesting(!showsSettings && !showsGlobalSearch && !showsNewProject && !model.isRecoveryReadOnly)
+                .disabled(showsSettings || showsGlobalSearch || showsNewProject || model.isRecoveryReadOnly)
                 .dropDestination(for: URL.self) { urls, _ in
                     prepareImport(urls: urls)
                 }
@@ -273,22 +273,28 @@ struct KanameDesktopWorkspace: View {
             }
 
             if showsGlobalSearch {
-                ZStack {
-                    Color.black.opacity(0.46)
-                        .ignoresSafeArea()
-                        .contentShape(Rectangle())
-                        .onTapGesture { dismissGlobalSearch(restoringFocus: true) }
-
+                DesktopModalBackdrop(dismiss: { dismissGlobalSearch(restoringFocus: true) }) {
                     DesktopGlobalSearchPalette(
                         snapshot: model.snapshot,
                         initialQuery: initialGlobalSearchQuery,
                         dismiss: { dismissGlobalSearch(restoringFocus: true) },
                         open: openSearchResult
                     )
-                    .padding(24)
                 }
                 .transition(reduceMotion ? .identity : .opacity.combined(with: .scale(scale: 0.985)))
                 .zIndex(2)
+            }
+
+            if showsNewProject {
+                DesktopModalBackdrop(dismiss: { dismissNewProject(restoringFocus: true) }) {
+                    DesktopProjectCreationPalette(
+                        model: model,
+                        dismiss: { dismissNewProject(restoringFocus: true) },
+                        created: finishProjectCreation
+                    )
+                }
+                .transition(reduceMotion ? .identity : .opacity.combined(with: .scale(scale: 0.985)))
+                .zIndex(3)
             }
 
             if !workspaceAnnouncement.isEmpty {
@@ -319,10 +325,6 @@ struct KanameDesktopWorkspace: View {
                 pendingCreatedThreadID = threadID
             }
             .environment(\.desktopQALargeText, usesQALargeText)
-        }
-        .sheet(isPresented: $showsNewProject, onDismiss: restoreModalFocus) {
-            NewDesktopProjectSheet(model: model)
-                .environment(\.desktopQALargeText, usesQALargeText)
         }
         .sheet(item: $portableTransfer.importReview, onDismiss: finishImportPresentation) { _ in
             DesktopImportReviewSheet(transfer: portableTransfer, model: model)
@@ -922,6 +924,19 @@ struct KanameDesktopWorkspace: View {
         showsNewProject = true
     }
 
+    private func dismissNewProject(restoringFocus: Bool) {
+        showsNewProject = false
+        if restoringFocus { restoreModalFocus() }
+    }
+
+    private func finishProjectCreation(_ projectID: String) {
+        showsNewProject = false
+#if os(macOS)
+        modalPreviousResponder = nil
+#endif
+        openProject(projectID)
+    }
+
     private func presentSettings() {
         guard acceptsNonRecoveryCommands, !showsSettings else { return }
         captureModalFocus()
@@ -1341,6 +1356,26 @@ struct KanameDesktopWorkspace: View {
     }
 }
 
+private struct DesktopModalBackdrop<Content: View>: View {
+    let dismiss: () -> Void
+    @ViewBuilder let content: Content
+
+    init(dismiss: @escaping () -> Void, @ViewBuilder content: () -> Content) {
+        self.dismiss = dismiss
+        self.content = content()
+    }
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.46)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture(perform: dismiss)
+            content.padding(24)
+        }
+    }
+}
+
 #if os(macOS)
 @MainActor
 private func currentDesktopResponder() -> NSResponder? {
@@ -1521,7 +1556,7 @@ private struct DesktopGlobalSearchPalette: View {
         }
         .background {
 #if os(macOS)
-            DesktopGlobalSearchKeyMonitor { direction in
+            DesktopPaletteKeyMonitor { direction in
                 guard !isSearching else { return }
                 selection.move(direction, in: sections)
             }
@@ -1731,7 +1766,7 @@ private struct DesktopGlobalSearchPalette: View {
 }
 
 #if os(macOS)
-private struct DesktopGlobalSearchKeyMonitor: NSViewRepresentable {
+struct DesktopPaletteKeyMonitor: NSViewRepresentable {
     let move: (DesktopGlobalSearchSelectionDirection) -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -9990,76 +10025,6 @@ private struct NewDesktopThreadSheet: View {
                 Text(kind.label).tag(kind)
             }
         }
-    }
-}
-
-private struct NewDesktopProjectSheet: View {
-    @ObservedObject var model: DesktopAppModel
-    @Environment(\.dismiss) private var dismiss
-    @State private var name = ""
-    @State private var path = ""
-    @State private var summary = ""
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("Project") {
-                    TextField("Name", text: $name)
-                    ViewThatFits(in: .horizontal) {
-                        HStack {
-                            TextField("Local path (optional)", text: $path)
-                            Button("Choose…", action: chooseDirectory)
-                        }
-                        VStack(alignment: .leading, spacing: 8) {
-                            TextField("Local path (optional)", text: $path)
-                            Button("Choose folder…", action: chooseDirectory)
-                        }
-                    }
-                    TextField("Purpose", text: $summary, axis: .vertical)
-                        .lineLimit(2...4)
-                }
-                Section("Boundary") {
-                    Text("Adding a project records local context only. Kaname will inspect instructions, Git state, and worktree policy before any provider run.")
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .formStyle(.grouped)
-            .padding(12)
-            .desktopAdaptiveSheet(idealWidth: 540, idealHeight: 380)
-            .navigationTitle("New project")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Create") {
-                        if model.createProject(name: name, path: path, summary: summary) != nil {
-                            dismiss()
-                        }
-                    }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-            }
-        }
-    }
-
-    private func chooseDirectory() {
-#if os(macOS)
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.canCreateDirectories = false
-        panel.prompt = "Choose project"
-        if panel.runModal() == .OK {
-            path = panel.url?.standardizedFileURL.path ?? path
-            if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-               let selectedName = panel.url?.lastPathComponent {
-                name = selectedName
-            }
-        }
-#endif
     }
 }
 

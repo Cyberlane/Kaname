@@ -1,5 +1,19 @@
 import Foundation
 
+enum LocalDirectoryValidator {
+    static func validate(_ path: String, errorDetail: String) throws -> URL {
+        let expanded = (path as NSString).expandingTildeInPath
+        let url = URL(fileURLWithPath: expanded, isDirectory: true).standardizedFileURL
+        var isDirectory: ObjCBool = false
+        guard url.path.hasPrefix("/"),
+              FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            throw DesktopLocalReadError.invalidScope(errorDetail)
+        }
+        return url
+    }
+}
+
 enum VaultRelativePathValidator {
     enum ValidationError: Error { case invalid }
 
@@ -70,7 +84,7 @@ public actor DesktopLocalReadService {
     public func inspectGitWorkspace(path: String) async throws -> LocalGitInspection {
         let directory = try Self.validatedDirectory(path)
         async let rootResult = Self.git(["rev-parse", "--show-toplevel"], directory: directory)
-        async let headResult = Self.git(["rev-parse", "--short=12", "HEAD"], directory: directory)
+        async let headResult = Self.gitAllowingFailure(["rev-parse", "--verify", "--short=12", "HEAD"], directory: directory)
         async let statusResult = Self.git(["status", "--short", "--branch"], directory: directory)
         let (root, head, status) = try await (rootResult, headResult, statusResult)
 
@@ -79,7 +93,9 @@ public actor DesktopLocalReadService {
         return LocalGitInspection(
             root: root.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines),
             branch: branch,
-            head: head.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines),
+            head: head.exitStatus == 0
+                ? head.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+                : "No commits",
             changedPaths: Array(statusLines.dropFirst()),
             wasTruncated: root.standardOutputWasTruncated
                 || head.standardOutputWasTruncated
@@ -97,24 +113,32 @@ public actor DesktopLocalReadService {
 
     static func branch(from statusHeader: String?) -> String {
         guard let statusHeader, statusHeader.hasPrefix("## ") else { return "Unknown" }
+        let unbornPrefix = "## No commits yet on "
+        if statusHeader.hasPrefix(unbornPrefix) {
+            let value = String(statusHeader.dropFirst(unbornPrefix.count)).components(separatedBy: "...").first ?? "Unknown"
+            return value.split(separator: " ").first.map(String.init) ?? value
+        }
         let value = String(statusHeader.dropFirst(3)).components(separatedBy: "...").first ?? "Unknown"
         return value.split(separator: " ").first.map(String.init) ?? value
     }
 
     private static func validatedDirectory(_ path: String) throws -> URL {
-        let expanded = (path as NSString).expandingTildeInPath
-        let url = URL(fileURLWithPath: expanded, isDirectory: true).standardizedFileURL
-        var isDirectory: ObjCBool = false
-        guard url.path.hasPrefix("/"),
-              FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
-              isDirectory.boolValue else {
-            throw DesktopLocalReadError.invalidScope("Git inspection requires an existing local directory.")
-        }
-        return url
+        try LocalDirectoryValidator.validate(
+            path,
+            errorDetail: "Git inspection requires an existing local directory."
+        )
     }
 
     private static func git(_ arguments: [String], directory: URL) async throws -> CapturedProcessOutput {
-        let result = try await LocalProcess.capture(
+        let result = try await gitAllowingFailure(arguments, directory: directory)
+        guard result.exitStatus == 0 else {
+            throw DesktopLocalReadError.commandFailed(failureDetail(command: "git", output: result))
+        }
+        return result
+    }
+
+    private static func gitAllowingFailure(_ arguments: [String], directory: URL) async throws -> CapturedProcessOutput {
+        try await LocalProcess.capture(
             executable: "/usr/bin/git",
             arguments: ["-C", directory.path] + arguments,
             workingDirectory: directory,
@@ -122,10 +146,6 @@ public actor DesktopLocalReadService {
             environmentRemovals: hostEnvironmentRemovals(),
             maximumOutputBytes: 131_072
         )
-        guard result.exitStatus == 0 else {
-            throw DesktopLocalReadError.commandFailed(failureDetail(command: "git", output: result))
-        }
-        return result
     }
 
     private static func failureDetail(command: String, output: CapturedProcessOutput) -> String {
