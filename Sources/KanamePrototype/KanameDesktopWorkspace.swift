@@ -2143,20 +2143,6 @@ private struct DesktopThreadConversation: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Rename conversation")
-                    Button {
-                        captureSheetFocus()
-                        runtimeProvider = thread.provider
-                        runtimeModel = thread.model
-                        runtimeReasoning = thread.reasoningEffort
-                        runtimeMode = thread.runtimeMode
-                        runtimeNetworkAccess = thread.networkAccess
-                        showsRuntimeSettings = true
-                    } label: {
-                        Image(systemName: "slider.horizontal.3")
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(runtime.isRunning(threadID: thread.id))
-                    .accessibilityLabel("Conversation runtime settings")
                     AttentionPill(attention: thread.attention)
                 }
                 Picker("Thread panel", selection: $panel) {
@@ -2293,38 +2279,33 @@ private struct DesktopThreadConversation: View {
                 .padding(.horizontal, 14)
                 .padding(.top, 10)
             }
-            HStack(alignment: .bottom, spacing: 10) {
+            VStack(alignment: .leading, spacing: 0) {
                 TextField("Message \(thread.provider)", text: $draft, axis: .vertical)
                     .textFieldStyle(.plain)
                     .lineLimit(1...6)
                     .padding(.horizontal, 12)
-                    .padding(.vertical, 10)
-                    .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
+                    .padding(.top, 11)
+                    .padding(.bottom, 8)
                     .focused($composerFocused)
                     .onSubmit(send)
                     .onChange(of: draft) { model.updateComposerDraft(threadID: thread.id, body: $0) }
                     .accessibilityLabel("Message composer for \(thread.title)")
-                Button(action: send) {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.title2)
+
+                GeometryReader { geometry in
+                    composerAccessoryRow(compact: geometry.size.width < 360)
                 }
-                .buttonStyle(.plain)
-                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                .accessibilityLabel(runtime.isRunning(threadID: thread.id) ? "Queue follow-up" : "Send message")
+                .frame(height: 25)
+                .padding(.leading, 7)
+                .padding(.trailing, 8)
+                .padding(.bottom, 8)
+            }
+            .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(Nord.polarNight3.opacity(0.55), lineWidth: 1)
             }
             .padding(14)
             .background(Nord.polarNight0)
-            HStack(spacing: 6) {
-                Image(systemName: runtime.isRunning(threadID: thread.id) ? "hourglass" : "lock.shield")
-                Text(runtime.isRunning(threadID: thread.id)
-                    ? "\(thread.provider) is responding. New messages queue in order."
-                    : "\(thread.provider) · \(thread.model) · \(thread.reasoningEffort) · \(ConversationRuntimeCatalog.boundarySummary(provider: thread.provider, runtimeMode: thread.runtimeMode, networkAccess: thread.networkAccess))")
-            }
-            .font(.caption2)
-            .foregroundStyle(.tertiary)
-            .padding(.horizontal, 16)
-            .padding(.bottom, 10)
-            .accessibilityElement(children: .combine)
             .onChange(of: runtime.isRunning(threadID: thread.id)) { isRunning in
                 postDesktopAccessibilityAnnouncement(
                     isRunning ? "\(thread.provider) is responding" : "\(thread.provider) finished responding"
@@ -2351,6 +2332,68 @@ private struct DesktopThreadConversation: View {
         sheetPreviousResponder = nil
         restoreDesktopResponder(responder)
 #endif
+    }
+
+    private func openRuntimeSettings() {
+        captureSheetFocus()
+        runtimeProvider = thread.provider
+        runtimeModel = thread.model
+        runtimeReasoning = thread.reasoningEffort
+        runtimeMode = thread.runtimeMode
+        runtimeNetworkAccess = thread.networkAccess
+        showsRuntimeSettings = true
+    }
+
+    private func updateRuntime(
+        provider: String,
+        runtimeModel: String,
+        reasoning: String,
+        runtimeMode: ConversationRuntimeMode,
+        networkAccess: Bool
+    ) {
+        _ = model.updateThreadRuntime(
+            id: thread.id,
+            provider: provider,
+            model: runtimeModel,
+            reasoningEffort: reasoning,
+            runtimeMode: runtimeMode,
+            networkAccess: networkAccess
+        )
+    }
+
+    private func composerAccessoryRow(compact: Bool) -> some View {
+        HStack(spacing: 4) {
+            DesktopComposerRuntimeControls(
+                thread: thread,
+                capabilities: capabilities,
+                isLocked: runtime.isRunning(threadID: thread.id),
+                compact: compact,
+                editDetails: openRuntimeSettings,
+                update: updateRuntime
+            )
+
+            Spacer(minLength: 8)
+
+            if runtime.isRunning(threadID: thread.id) {
+                ProgressView()
+                    .controlSize(.small)
+                    .help("\(thread.provider) is responding. New messages queue in order.")
+                    .accessibilityLabel("\(thread.provider) is responding; new messages queue in order")
+            }
+
+            Button(action: send) {
+                Image(systemName: "arrow.up.circle.fill")
+                    .font(.title2)
+                    .foregroundStyle(
+                        draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            ? Color.secondary
+                            : Nord.frost1
+                    )
+            }
+            .buttonStyle(.plain)
+            .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .accessibilityLabel(runtime.isRunning(threadID: thread.id) ? "Queue follow-up" : "Send message")
+        }
     }
 
     private func send() {
@@ -2636,6 +2679,284 @@ private extension ConversationRuntimeMode {
         case .auto: "Allow routine work and review risky escalation automatically."
         case .fullAccess: "Allow commands, files, and network without prompts."
         }
+    }
+}
+
+private struct DesktopComposerRuntimeControls: View {
+    let thread: DesktopThread
+    let capabilities: [ProviderCapabilitySnapshot]
+    let isLocked: Bool
+    let compact: Bool
+    let editDetails: () -> Void
+    let update: (String, String, String, ConversationRuntimeMode, Bool) -> Void
+
+    private var advertisedModels: [ProviderModel] {
+        ConversationRuntimeCatalog.models(for: thread.provider, capabilities: capabilities)
+    }
+
+    private var modelTitle: String {
+        if thread.model == "Use provider default" { return "Provider default" }
+        return advertisedModels.first(where: { $0.id == thread.model })?.displayName ?? thread.model
+    }
+
+    private var thinkingTitle: String {
+        thread.reasoningEffort == "xhigh" ? "Extra high" : thread.reasoningEffort.capitalized
+    }
+
+    private var providerSelection: Binding<String> {
+        Binding(
+            get: { thread.provider },
+            set: { provider in
+                let selectedModel = ConversationRuntimeCatalog.selectedModel(
+                    provider: provider,
+                    requested: "Use provider default",
+                    capabilities: capabilities
+                )
+                let reasoning = ConversationRuntimeCatalog.selectedReasoning(
+                    provider: provider,
+                    model: selectedModel,
+                    capabilities: capabilities
+                )
+                update(
+                    provider,
+                    selectedModel,
+                    reasoning,
+                    thread.runtimeMode,
+                    ConversationRuntimeCatalog.managesNetwork(provider) ? thread.networkAccess : false
+                )
+            }
+        )
+    }
+
+    private var modelSelection: Binding<String> {
+        Binding(
+            get: { thread.model },
+            set: { selectedModel in
+                update(
+                    thread.provider,
+                    selectedModel,
+                    ConversationRuntimeCatalog.selectedReasoning(
+                        provider: thread.provider,
+                        model: selectedModel,
+                        current: thread.reasoningEffort,
+                        capabilities: capabilities
+                    ),
+                    thread.runtimeMode,
+                    thread.networkAccess
+                )
+            }
+        )
+    }
+
+    private var reasoningSelection: Binding<String> {
+        Binding(
+            get: { thread.reasoningEffort },
+            set: {
+                update(
+                    thread.provider,
+                    thread.model,
+                    $0,
+                    thread.runtimeMode,
+                    thread.networkAccess
+                )
+            }
+        )
+    }
+
+    private var authoritySelection: Binding<ConversationRuntimeMode> {
+        Binding(
+            get: { thread.runtimeMode },
+            set: {
+                update(
+                    thread.provider,
+                    thread.model,
+                    thread.reasoningEffort,
+                    $0,
+                    $0 == .fullAccess ? true : thread.networkAccess
+                )
+            }
+        )
+    }
+
+    private var networkSelection: Binding<Bool> {
+        Binding(
+            get: { thread.runtimeMode == .fullAccess ? true : thread.networkAccess },
+            set: {
+                update(
+                    thread.provider,
+                    thread.model,
+                    thread.reasoningEffort,
+                    thread.runtimeMode,
+                    $0
+                )
+            }
+        )
+    }
+
+    var body: some View {
+        controlRow(compact: compact)
+            .controlSize(.small)
+    }
+
+    private func controlRow(compact: Bool) -> some View {
+        HStack(spacing: 3) {
+            providerAndModelMenu(compact: compact)
+            thinkingMenu(compact: compact)
+            authorityMenu(compact: compact)
+        }
+    }
+
+    private func providerAndModelMenu(compact: Bool) -> some View {
+        runtimeMenu(
+            title: "\(thread.provider) · \(modelTitle)",
+            systemImage: "cpu",
+            compact: compact,
+            maximumWidth: 220,
+            accessibilityLabel: "Provider and model, \(thread.provider), \(modelTitle)",
+            unlockedHelp: "Choose provider and model"
+        ) {
+            Section("Provider") {
+                Picker("Provider", selection: providerSelection) {
+                    ForEach(ConversationRuntimeCatalog.providers, id: \.self) { provider in
+                        Text(provider).tag(provider)
+                    }
+                }
+            }
+            Section("Model") {
+                Picker("Model", selection: modelSelection) {
+                    Text("Use provider default").tag("Use provider default")
+                    ForEach(advertisedModels, id: \.id) { model in
+                        Text(model.displayName).tag(model.id)
+                    }
+                    if thread.model != "Use provider default",
+                       !advertisedModels.contains(where: { $0.id == thread.model }) {
+                        Text("\(thread.model) (custom)").tag(thread.model)
+                    }
+                }
+            }
+            Button("Custom model or provider…", systemImage: "slider.horizontal.3", action: editDetails)
+        }
+    }
+
+    private func thinkingMenu(compact: Bool) -> some View {
+        runtimeMenu(
+            title: thinkingTitle,
+            systemImage: "brain.head.profile",
+            compact: compact,
+            accessibilityLabel: "Thinking, \(thinkingTitle)",
+            unlockedHelp: "Choose thinking level"
+        ) {
+            Picker("Thinking", selection: reasoningSelection) {
+                ForEach(
+                    ConversationRuntimeCatalog.reasoningEfforts(
+                        provider: thread.provider,
+                        model: thread.model,
+                        capabilities: capabilities
+                    ),
+                    id: \.self
+                ) { effort in
+                    Text(effort == "xhigh" ? "Extra high" : effort.capitalized).tag(effort)
+                }
+                let choices = ConversationRuntimeCatalog.reasoningEfforts(
+                    provider: thread.provider,
+                    model: thread.model,
+                    capabilities: capabilities
+                )
+                if !choices.contains(thread.reasoningEffort) {
+                    Text("\(thinkingTitle) (custom)").tag(thread.reasoningEffort)
+                }
+            }
+            Divider()
+            Button("Custom thinking or variant…", systemImage: "slider.horizontal.3", action: editDetails)
+        }
+    }
+
+    private func runtimeMenu<Content: View>(
+        title: String,
+        systemImage: String,
+        compact: Bool,
+        maximumWidth: CGFloat? = nil,
+        accessibilityLabel: String,
+        unlockedHelp: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        Menu(content: content) {
+            ComposerRuntimeControlLabel(
+                title: title,
+                systemImage: systemImage,
+                compact: compact
+            )
+            .frame(maxWidth: compact ? nil : maximumWidth, alignment: .leading)
+        }
+        .disabled(isLocked)
+        .accessibilityLabel(accessibilityLabel)
+        .help(isLocked ? "Runtime controls unlock when the current turn finishes." : unlockedHelp)
+    }
+
+    private func authorityMenu(compact: Bool) -> some View {
+        Menu {
+            Picker("Access", selection: authoritySelection) {
+                ForEach(ConversationRuntimeMode.allCases, id: \.self) { mode in
+                    Text(mode.label).tag(mode)
+                }
+            }
+            Divider()
+            if ConversationRuntimeCatalog.managesNetwork(thread.provider) {
+                Toggle("Network access", isOn: networkSelection)
+                    .disabled(thread.runtimeMode == .fullAccess)
+                if thread.runtimeMode == .fullAccess {
+                    Text("Network is required by Full access")
+                }
+            } else {
+                Text("Network controlled by \(thread.provider)")
+            }
+            Divider()
+            Button("Runtime details…", systemImage: "info.circle", action: editDetails)
+        } label: {
+            ComposerRuntimeControlLabel(
+                title: thread.runtimeMode.label,
+                systemImage: thread.runtimeMode == .fullAccess
+                    ? "exclamationmark.shield.fill"
+                    : "checkmark.shield",
+                compact: compact
+            )
+            .foregroundStyle(thread.runtimeMode == .fullAccess ? Nord.auroraYellow : .secondary)
+        }
+        .disabled(isLocked)
+        .accessibilityLabel(
+            "Access, \(ConversationRuntimeCatalog.boundarySummary(provider: thread.provider, runtimeMode: thread.runtimeMode, networkAccess: thread.networkAccess))"
+        )
+        .help(ConversationRuntimeCatalog.boundarySummary(
+            provider: thread.provider,
+            runtimeMode: thread.runtimeMode,
+            networkAccess: thread.networkAccess
+        ))
+    }
+}
+
+private struct ComposerRuntimeControlLabel: View {
+    let title: String
+    let systemImage: String
+    let compact: Bool
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: systemImage)
+            if !compact {
+                Text(title)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .font(.caption.weight(.medium))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, compact ? 7 : 8)
+        .frame(height: 25)
+        .background(Nord.polarNight2.opacity(0.72), in: Capsule())
+        .contentShape(Capsule())
     }
 }
 
