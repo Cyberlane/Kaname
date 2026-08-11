@@ -3181,6 +3181,7 @@ private final class DesktopUpdateViewModel: ObservableObject {
                     discoveryStatus = .skipped
                     message = "Build \(update.build) is skipped on this Mac."
                 } else if let update,
+                          !manual,
                           preferences.deferredIdentity == update.identity,
                           (preferences.deferredUntilUnixMillis ?? 0) > now {
                     discoveryStatus = .deferred
@@ -6708,7 +6709,9 @@ private struct DesktopSettingsShell: View {
                             Button("Unskip", systemImage: "arrow.uturn.backward") { updates.unskipAvailableUpdate() }
                         }
                     }
-                    if let update = updates.availableUpdate {
+                    if let update = updates.availableUpdate,
+                       updates.discoveryStatus != .deferred,
+                       updates.discoveryStatus != .skipped {
                         VStack(alignment: .leading, spacing: 10) {
                             Label("Kaname \(update.version) (\(update.build))", systemImage: "shippingbox.fill")
                                 .font(.headline)
