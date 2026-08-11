@@ -36,6 +36,86 @@ public enum KanameUpdateDiscoveryStatus: String, Equatable, Sendable {
     case rolledBack
 }
 
+public enum KanameUpdateNoticePhase: String, Equatable, Sendable {
+    case available
+    case retry
+    case preparing
+    case readyToInstall
+}
+
+public struct KanameUpdateNotice: Equatable, Sendable {
+    public let identity: String
+    public let phase: KanameUpdateNoticePhase
+    public let version: String
+    public let build: String
+
+    public var isDismissible: Bool { phase == .available }
+}
+
+public enum KanameUpdateNoticeProjection {
+    public static func notice(
+        channel: KanameDesktopEnvironment.Channel,
+        discoveryStatus: KanameUpdateDiscoveryStatus,
+        availableUpdate: KanameAvailableUpdate?,
+        receipt: KanameUpdateReceipt
+    ) -> KanameUpdateNotice? {
+        guard channel == .stable else { return nil }
+        if receipt.status == .staged,
+           let version = receipt.version,
+           let build = receipt.build {
+            return KanameUpdateNotice(
+                identity: "staged:\(version):\(build):\(receipt.bundleDigest ?? "unknown")",
+                phase: .readyToInstall,
+                version: version,
+                build: build
+            )
+        }
+        guard let availableUpdate else { return nil }
+        switch discoveryStatus {
+        case .available:
+            return KanameUpdateNotice(
+                identity: availableUpdate.identity,
+                phase: .available,
+                version: availableUpdate.version,
+                build: availableUpdate.build
+            )
+        case .failed:
+            return KanameUpdateNotice(
+                identity: availableUpdate.identity,
+                phase: .retry,
+                version: availableUpdate.version,
+                build: availableUpdate.build
+            )
+        case .verifying:
+            return KanameUpdateNotice(
+                identity: availableUpdate.identity,
+                phase: .preparing,
+                version: availableUpdate.version,
+                build: availableUpdate.build
+            )
+        case .notChecked, .checking, .upToDate, .deferred, .skipped, .staged, .rolledBack:
+            return nil
+        }
+    }
+
+    public static func isVisible(_ notice: KanameUpdateNotice?, dismissedIdentity: String?) -> Bool {
+        guard let notice else { return false }
+        return !(notice.isDismissible && notice.identity == dismissedIdentity)
+    }
+}
+
+public enum KanameUpdateAutomaticCheckPolicy {
+    public static let startupDelaySeconds: UInt64 = 15
+    public static let intervalSeconds: UInt64 = 4 * 60
+    public static let intervalMillis: Int64 = Int64(intervalSeconds) * 1_000
+
+    public static func permitsCheck(lastAttemptAtUnixMillis: Int64?, nowUnixMillis: Int64) -> Bool {
+        guard let lastAttemptAtUnixMillis else { return true }
+        guard nowUnixMillis >= lastAttemptAtUnixMillis else { return true }
+        return nowUnixMillis - lastAttemptAtUnixMillis >= intervalMillis
+    }
+}
+
 public struct KanameAvailableUpdate: Equatable, Sendable {
     public let sourceIdentifier: String
     public let sourceLabel: String

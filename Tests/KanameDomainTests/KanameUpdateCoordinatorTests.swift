@@ -336,6 +336,97 @@ struct KanameUpdateCoordinatorTests {
         #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
     }
 
+    @Test
+    func updateNoticeProjectsOnlyActionableStableStates() {
+        let update = KanameAvailableUpdate(
+            sourceIdentifier: "local-dogfood",
+            sourceLabel: "Local dogfood",
+            channel: .stable,
+            version: "0.17.1",
+            build: "30",
+            bundleIdentifier: "com.cyberlane.kaname.desktop",
+            publishedAtUnixMillis: 1,
+            releaseNotes: "Visible local proof",
+            minimumWorkspaceSchema: 1,
+            maximumWorkspaceSchema: KanameDesktopStateSchema.currentVersion,
+            artifactURL: URL(fileURLWithPath: "/private/tmp/Kaname.app"),
+            bundleDigest: String(repeating: "a", count: 64)
+        )
+        let idleReceipt = KanameUpdateReceipt(status: .idle, detail: "Idle", updatedAtUnixMillis: 0)
+
+        let available = KanameUpdateNoticeProjection.notice(
+            channel: .stable,
+            discoveryStatus: .available,
+            availableUpdate: update,
+            receipt: idleReceipt
+        )
+        #expect(available?.phase == .available)
+        #expect(available?.isDismissible == true)
+        #expect(KanameUpdateNoticeProjection.isVisible(available, dismissedIdentity: nil))
+        #expect(!KanameUpdateNoticeProjection.isVisible(available, dismissedIdentity: update.identity))
+
+        let retry = KanameUpdateNoticeProjection.notice(
+            channel: .stable,
+            discoveryStatus: .failed,
+            availableUpdate: update,
+            receipt: idleReceipt
+        )
+        #expect(retry?.phase == .retry)
+        #expect(retry?.isDismissible == false)
+        #expect(KanameUpdateNoticeProjection.isVisible(retry, dismissedIdentity: update.identity))
+
+        let preparing = KanameUpdateNoticeProjection.notice(
+            channel: .stable,
+            discoveryStatus: .verifying,
+            availableUpdate: update,
+            receipt: idleReceipt
+        )
+        #expect(preparing?.phase == .preparing)
+        #expect(preparing?.isDismissible == false)
+
+        let stagedReceipt = KanameUpdateReceipt(
+            status: .staged,
+            version: "0.17.1",
+            build: "30",
+            bundleDigest: String(repeating: "b", count: 64),
+            detail: "Ready",
+            updatedAtUnixMillis: 2
+        )
+        let ready = KanameUpdateNoticeProjection.notice(
+            channel: .stable,
+            discoveryStatus: .staged,
+            availableUpdate: update,
+            receipt: stagedReceipt
+        )
+        #expect(ready?.phase == .readyToInstall)
+        #expect(ready?.version == "0.17.1")
+        #expect(ready?.build == "30")
+        #expect(ready?.isDismissible == false)
+
+        #expect(KanameUpdateNoticeProjection.notice(
+            channel: .candidate,
+            discoveryStatus: .available,
+            availableUpdate: update,
+            receipt: idleReceipt
+        ) == nil)
+        #expect(KanameUpdateNoticeProjection.notice(
+            channel: .stable,
+            discoveryStatus: .deferred,
+            availableUpdate: update,
+            receipt: idleReceipt
+        ) == nil)
+    }
+
+    @Test
+    func automaticUpdateCheckPolicyUsesFourMinuteBoundaryAndRecoversFromClockRollback() {
+        #expect(KanameUpdateAutomaticCheckPolicy.startupDelaySeconds == 15)
+        #expect(KanameUpdateAutomaticCheckPolicy.intervalSeconds == 240)
+        #expect(KanameUpdateAutomaticCheckPolicy.permitsCheck(lastAttemptAtUnixMillis: nil, nowUnixMillis: 1))
+        #expect(!KanameUpdateAutomaticCheckPolicy.permitsCheck(lastAttemptAtUnixMillis: 1_000, nowUnixMillis: 240_999))
+        #expect(KanameUpdateAutomaticCheckPolicy.permitsCheck(lastAttemptAtUnixMillis: 1_000, nowUnixMillis: 241_000))
+        #expect(KanameUpdateAutomaticCheckPolicy.permitsCheck(lastAttemptAtUnixMillis: 5_000, nowUnixMillis: 4_000))
+    }
+
     private func temporaryRoot(_ label: String) -> URL {
         FileManager.default.temporaryDirectory
             .appending(path: "kaname-\(label)-\(UUID().uuidString)", directoryHint: .isDirectory)

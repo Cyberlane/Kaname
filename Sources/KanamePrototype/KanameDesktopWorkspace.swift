@@ -181,6 +181,8 @@ struct KanameDesktopWorkspace: View {
     @State private var workspaceAnnouncement = ""
     @State private var searchNavigationRequest: DesktopSearchNavigationRequest?
     @State private var searchFallbackNotice: DesktopSearchFallbackNotice?
+    @State private var dismissedUpdateIdentity: String?
+    @State private var showsUpdateInstallConfirmation = false
 #if os(macOS)
     @State private var searchPreviousResponder: NSResponder?
     @State private var modalPreviousResponder: NSResponder?
@@ -351,6 +353,15 @@ struct KanameDesktopWorkspace: View {
         } message: {
             Text(portableTransfer.message ?? "The local file action finished.")
         }
+        .alert(
+            updateInstallConfirmationTitle,
+            isPresented: $showsUpdateInstallConfirmation
+        ) {
+            Button("Cancel", role: .cancel) {}
+            Button("Install and relaunch") { updates.switchAndRelaunch(model: model) }
+        } message: {
+            Text("Kaname will checkpoint the current UI, install the verified staged build, and relaunch. An active approval or a workspace persistence error blocks the switch, and a failed health check automatically restores the previous app.")
+        }
     }
 
     private var lifecycleWorkspace: some View {
@@ -360,6 +371,7 @@ struct KanameDesktopWorkspace: View {
             personalIntegrations.startMonitoring(model: model)
             await _Concurrency.Task<Never, Never>.yield()
             NotificationCenter.default.post(name: .kanameDesktopReady, object: nil)
+            updates.startAutomaticChecks()
         }
         .onChange(of: model.isRecoveryReadOnly) { isReadOnly in
             if isReadOnly {
@@ -368,6 +380,7 @@ struct KanameDesktopWorkspace: View {
             }
             personalIntegrations.startMonitoring(model: model)
             NotificationCenter.default.post(name: .kanameDesktopReady, object: nil)
+            updates.startAutomaticChecks()
         }
         .onChange(of: destination) { _ in persistUIRestoreState() }
         .onChange(of: selectedThreadID) { _ in persistUIRestoreState() }
@@ -458,7 +471,6 @@ struct KanameDesktopWorkspace: View {
         }
         .onAppear {
             DesktopBackCommandRouter.shared.install(handleBack)
-            updates.checkForUpdates(manual: false)
         }
 #if os(macOS)
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
@@ -484,6 +496,12 @@ struct KanameDesktopWorkspace: View {
             selectedProjectID: selectedProjectID,
             showsInspector: showsInspector
         ))
+    }
+
+    private var updateInstallConfirmationTitle: String {
+        let version = updates.receipt.version ?? "the staged update"
+        let build = updates.receipt.build.map { " (\($0))" } ?? ""
+        return "Install Kaname \(version)\(build)?"
     }
 
     @ViewBuilder
@@ -641,6 +659,34 @@ struct KanameDesktopWorkspace: View {
             .listStyle(.sidebar)
 
             Divider()
+            if let notice = updates.sidebarNotice,
+               KanameUpdateNoticeProjection.isVisible(
+                   notice,
+                   dismissedIdentity: dismissedUpdateIdentity
+               ) {
+                DesktopUpdateNotificationPill(
+                    notice: notice,
+                    releaseNotes: updates.availableUpdate?.releaseNotes,
+                    failureMessage: notice.phase == .retry ? updates.message : nil,
+                    primaryAction: {
+                        switch notice.phase {
+                        case .available, .retry:
+                            updates.verifyAndStageAvailable()
+                        case .readyToInstall:
+                            showsUpdateInstallConfirmation = true
+                        case .preparing:
+                            break
+                        }
+                    },
+                    dismiss: notice.isDismissible ? {
+                        dismissedUpdateIdentity = notice.identity
+                    } : nil
+                )
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+
+                Divider()
+            }
             Button {
                 presentSettings()
             } label: {
@@ -3376,6 +3422,99 @@ private final class DesktopLocalReadViewModel: ObservableObject {
     }
 }
 
+private struct DesktopUpdateNotificationPill: View {
+    let notice: KanameUpdateNotice
+    let releaseNotes: String?
+    let failureMessage: String?
+    let primaryAction: () -> Void
+    let dismiss: (() -> Void)?
+
+    private var title: String {
+        switch notice.phase {
+        case .available: "Update available"
+        case .retry: "Retry update"
+        case .preparing: "Preparing update…"
+        case .readyToInstall: "Restart to update"
+        }
+    }
+
+    private var symbol: String {
+        switch notice.phase {
+        case .available, .retry: "arrow.down.circle.fill"
+        case .preparing: "arrow.triangle.2.circlepath"
+        case .readyToInstall: "arrow.clockwise.circle.fill"
+        }
+    }
+
+    private var helpText: String {
+        var parts = ["Kaname \(notice.version) (\(notice.build))."]
+        if let failureMessage, !failureMessage.isEmpty {
+            parts.append(failureMessage)
+        } else if let releaseNotes, !releaseNotes.isEmpty {
+            parts.append(String(releaseNotes.prefix(600)))
+        }
+        return parts.joined(separator: " ")
+    }
+
+    private var accessibilityAction: String {
+        switch notice.phase {
+        case .available: "Download update."
+        case .retry: "Retry preparing update."
+        case .preparing: "Verification and private staging are in progress."
+        case .readyToInstall: "Install and relaunch."
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Button(action: primaryAction) {
+                HStack(spacing: 9) {
+                    if notice.phase == .preparing {
+                        ProgressView()
+                            .controlSize(.small)
+                            .frame(width: 16, height: 16)
+                    } else {
+                        Image(systemName: symbol)
+                            .frame(width: 16)
+                    }
+                    (
+                        Text(title).font(.caption.weight(.semibold))
+                            + Text("\nKaname \(notice.version) (\(notice.build))")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                    )
+                    .lineLimit(2)
+                    Spacer(minLength: 4)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(notice.phase == .preparing)
+            .help(helpText)
+            .accessibilityLabel("Kaname \(notice.version) build \(notice.build). \(accessibilityAction)")
+
+            if let dismiss {
+                Button(action: dismiss) {
+                    Image(systemName: "xmark")
+                        .font(.caption2.weight(.bold))
+                        .frame(width: 20, height: 20)
+                }
+                .buttonStyle(.plain)
+                .help("Dismiss until next launch")
+                .accessibilityLabel("Dismiss update until next launch")
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .foregroundStyle(Nord.snowStorm0)
+        .background(Nord.frost1.opacity(0.14), in: RoundedRectangle(cornerRadius: 10))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Nord.frost1.opacity(0.38), lineWidth: 1)
+        }
+    }
+}
+
 @MainActor
 private final class DesktopUpdateViewModel: ObservableObject {
     let environment: KanameDesktopEnvironment
@@ -3392,8 +3531,9 @@ private final class DesktopUpdateViewModel: ObservableObject {
     private let catalog: KanameLocalDogfoodUpdateCatalog
     private let preferenceStore: KanameUpdateDiscoveryPreferencesStore
     private var helperProcess: Process?
+    private var automaticCheckTask: _Concurrency.Task<Void, Never>?
     private var hasLoadedDiscoveryPreferences = false
-    private static let automaticCheckIntervalMillis: Int64 = 6 * 60 * 60 * 1_000
+    private var workspaceIsReady = false
     private static let deferIntervalMillis: Int64 = 24 * 60 * 60 * 1_000
 
     init(environment: KanameDesktopEnvironment = .current) {
@@ -3411,6 +3551,10 @@ private final class DesktopUpdateViewModel: ObservableObject {
         _Concurrency.Task { await refresh() }
     }
 
+    deinit {
+        automaticCheckTask?.cancel()
+    }
+
     var currentVersionLabel: String {
         let versionValue = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString")
         let buildValue = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion")
@@ -3419,14 +3563,36 @@ private final class DesktopUpdateViewModel: ObservableObject {
         return "\(version) (\(build))"
     }
 
+    var sidebarNotice: KanameUpdateNotice? {
+        KanameUpdateNoticeProjection.notice(
+            channel: environment.channel,
+            discoveryStatus: discoveryStatus,
+            availableUpdate: availableUpdate,
+            receipt: receipt
+        )
+    }
+
+    func startAutomaticChecks() {
+        workspaceIsReady = true
+        beginAutomaticChecksIfReady()
+    }
+
     func checkForUpdates(manual: Bool) {
-        guard environment.channel == .stable, !isChecking else { return }
+        checkForUpdates(manual: manual, ignoresAutomaticInterval: false)
+    }
+
+    private func checkForUpdates(manual: Bool, ignoresAutomaticInterval: Bool) {
+        guard environment.channel == .stable, !isChecking, !isBusy else { return }
+        guard receipt.status != .staged, receipt.status != .switching else { return }
         guard manual || hasLoadedDiscoveryPreferences else { return }
         let now = Int64(Date().timeIntervalSince1970 * 1_000)
         if !manual {
             guard discoveryPreferences.automaticChecksEnabled else { return }
-            if let lastAttempt = discoveryPreferences.lastAttemptAtUnixMillis,
-               now - lastAttempt < Self.automaticCheckIntervalMillis {
+            if !ignoresAutomaticInterval,
+               !KanameUpdateAutomaticCheckPolicy.permitsCheck(
+                   lastAttemptAtUnixMillis: discoveryPreferences.lastAttemptAtUnixMillis,
+                   nowUnixMillis: now
+               ) {
                 return
             }
         }
@@ -3473,6 +3639,9 @@ private final class DesktopUpdateViewModel: ObservableObject {
         preferences.automaticChecksEnabled = enabled
         discoveryPreferences = preferences
         _Concurrency.Task { try? await preferenceStore.save(preferences) }
+        if enabled {
+            checkForUpdates(manual: false, ignoresAutomaticInterval: true)
+        }
     }
 
     func deferAvailableUpdate() {
@@ -3528,7 +3697,7 @@ private final class DesktopUpdateViewModel: ObservableObject {
                 let artifactURL = try await catalog.verifiedArtifactURL(for: update)
                 receipt = try await coordinator.stage(bundleURL: artifactURL)
                 discoveryStatus = .staged
-                message = "Update ready. Your current Kaname remains active until you choose Switch and relaunch."
+                message = "Update downloaded and verified. Your current Kaname remains active until you choose Install and relaunch."
             } catch {
                 discoveryStatus = .failed
                 message = error.localizedDescription
@@ -3623,7 +3792,28 @@ private final class DesktopUpdateViewModel: ObservableObject {
         discoveryPreferences = await preferenceStore.load()
         hasLoadedDiscoveryPreferences = true
         await refreshRollbackAvailability()
-        checkForUpdates(manual: false)
+        beginAutomaticChecksIfReady()
+    }
+
+    private func beginAutomaticChecksIfReady() {
+        guard environment.channel == .stable,
+              workspaceIsReady,
+              hasLoadedDiscoveryPreferences,
+              automaticCheckTask == nil else { return }
+        automaticCheckTask = _Concurrency.Task { [weak self] in
+            try? await _Concurrency.Task.sleep(
+                for: .seconds(KanameUpdateAutomaticCheckPolicy.startupDelaySeconds)
+            )
+            guard !_Concurrency.Task.isCancelled else { return }
+            self?.checkForUpdates(manual: false, ignoresAutomaticInterval: true)
+            while !_Concurrency.Task.isCancelled {
+                try? await _Concurrency.Task.sleep(
+                    for: .seconds(KanameUpdateAutomaticCheckPolicy.intervalSeconds)
+                )
+                guard !_Concurrency.Task.isCancelled else { return }
+                self?.checkForUpdates(manual: false, ignoresAutomaticInterval: false)
+            }
+        }
     }
 
     private func refreshRollbackAvailability() async {
@@ -6629,6 +6819,7 @@ private struct DesktopSettingsShell: View {
     @Binding var draft: DesktopPreferences
     let dismiss: () -> Void
     @State private var category: Category = .general
+    @State private var showsUpdateInstallConfirmation = false
     @StateObject private var recoveryActions = DesktopRecoveryViewModel()
     @FocusState private var focusedCategory: Category?
 
@@ -6690,6 +6881,15 @@ private struct DesktopSettingsShell: View {
         .onChange(of: category) { selected in
             if selected == .updates { updates.checkForUpdates(manual: false) }
         }
+        .alert(
+            updateInstallConfirmationTitle,
+            isPresented: $showsUpdateInstallConfirmation
+        ) {
+            Button("Cancel", role: .cancel) {}
+            Button("Install and relaunch") { updates.switchAndRelaunch(model: model) }
+        } message: {
+            Text("Kaname will checkpoint the current UI, install the verified staged build, and relaunch. An active approval or a workspace persistence error blocks the switch, and a failed health check automatically restores the previous app.")
+        }
     }
 
     private var categoryRail: some View {
@@ -6741,6 +6941,12 @@ private struct DesktopSettingsShell: View {
         .padding(.horizontal, 20)
         .padding(.vertical, 10)
         .frame(minHeight: 58)
+    }
+
+    private var updateInstallConfirmationTitle: String {
+        let version = updates.receipt.version ?? "the staged update"
+        let build = updates.receipt.build.map { " (\($0))" } ?? ""
+        return "Install Kaname \(version)\(build)?"
     }
 
     private var footerStatus: some View {
@@ -6954,7 +7160,7 @@ private struct DesktopSettingsShell: View {
                         get: { updates.discoveryPreferences.automaticChecksEnabled },
                         set: { updates.setAutomaticChecksEnabled($0) }
                     ))
-                    Text("Automatic checks run after launch, when Kaname becomes active, and when you open Updates, at most once every six hours.")
+                    Text("Automatic checks run 15 seconds after launch and every four minutes while stable Kaname remains open. Activation and opening Updates check when the four-minute interval has elapsed.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     if let checkedAt = updates.discoveryPreferences.lastSuccessAtUnixMillis {
@@ -6986,7 +7192,7 @@ private struct DesktopSettingsShell: View {
                                 .foregroundStyle(.secondary)
                                 .textSelection(.enabled)
                             HStack {
-                                Button("Verify and stage", systemImage: "checkmark.shield") {
+                                Button("Download update", systemImage: "arrow.down.circle") {
                                     updates.verifyAndStageAvailable()
                                 }
                                 .buttonStyle(.borderedProminent)
@@ -7037,8 +7243,8 @@ private struct DesktopSettingsShell: View {
                         GridRow {
                             Button("Choose update manually…", systemImage: "folder") { updates.chooseAndStage() }
                                 .disabled(updates.isBusy)
-                            Button("Switch and relaunch", systemImage: "arrow.clockwise") {
-                                updates.switchAndRelaunch(model: model)
+                            Button("Install and relaunch", systemImage: "arrow.clockwise") {
+                                showsUpdateInstallConfirmation = true
                             }
                             .disabled(updates.isBusy || updates.receipt.status != .staged)
                             Button("Rollback", systemImage: "arrow.uturn.backward") { updates.rollback(model: model) }
