@@ -186,11 +186,15 @@ struct ProviderConnectivityTests {
 
     @Test
     func desktopGitInspectionIsBoundedAndReadOnly() async throws {
+        let expectedRoot = URL(
+            fileURLWithPath: FileManager.default.currentDirectoryPath,
+            isDirectory: true
+        ).standardizedFileURL.path
         let inspection = try await DesktopLocalReadService().inspectGitWorkspace(
             path: FileManager.default.currentDirectoryPath
         )
 
-        #expect(inspection.root.hasSuffix("coding-ade"))
+        #expect(inspection.root == expectedRoot)
         #expect(!inspection.branch.isEmpty)
         #expect(inspection.head.count == 12)
         #expect(!inspection.wasTruncated)
