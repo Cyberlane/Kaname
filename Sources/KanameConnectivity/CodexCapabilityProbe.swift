@@ -526,10 +526,14 @@ enum CodexCapabilityProbe {
             let entries = response["data"] as? [[String: Any]] ?? []
             models.append(contentsOf: entries.compactMap { entry in
                 guard let id = entry["model"] as? String else { return nil }
+                let efforts = (entry["supportedReasoningEfforts"] as? [[String: Any]] ?? [])
+                    .compactMap { $0["reasoningEffort"] as? String }
                 return ProviderModel(
                     id: id,
                     displayName: entry["displayName"] as? String ?? id,
-                    isDefault: entry["isDefault"] as? Bool ?? false
+                    isDefault: entry["isDefault"] as? Bool ?? false,
+                    supportedReasoningEfforts: efforts.isEmpty ? nil : efforts,
+                    defaultReasoningEffort: entry["defaultReasoningEffort"] as? String
                 )
             })
             cursor = response["nextCursor"] as? String

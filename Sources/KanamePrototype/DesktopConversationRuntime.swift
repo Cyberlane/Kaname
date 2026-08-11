@@ -192,10 +192,14 @@ final class DesktopConversationRuntime: ObservableObject {
             provider: run.provider,
             model: resolvedModel(provider: run.provider, value: run.model),
             reasoningEffort: run.reasoningEffort,
+            runtimeMode: run.runtimeMode,
+            networkAccess: run.networkAccess,
             prompt: providerPrompt(
                 thread: thread,
                 userMessage: message.body,
-                includeProjectContext: run.usesProjectContext ?? true
+                includeProjectContext: run.usesProjectContext ?? true,
+                runtimeMode: run.runtimeMode,
+                networkAccess: run.networkAccess
             ),
             workspacePath: workspace.path,
             providerStatePath: environment.providerStateDirectory.path,
@@ -570,6 +574,8 @@ final class DesktopConversationRuntime: ObservableObject {
                 workspace: workspace,
                 model: nil,
                 reasoningEffort: "low",
+                runtimeMode: .approvalRequired,
+                networkAccess: false,
                 resumableSessionID: nil
             ))
             var title = ""
@@ -619,12 +625,23 @@ final class DesktopConversationRuntime: ObservableObject {
         }
     }
 
-    private func providerPrompt(thread: DesktopThread, userMessage: String, includeProjectContext: Bool) -> String {
+    private func providerPrompt(
+        thread: DesktopThread,
+        userMessage: String,
+        includeProjectContext: Bool,
+        runtimeMode: ConversationRuntimeMode,
+        networkAccess: Bool
+    ) -> String {
+        let boundary = authorityBoundary(
+            provider: thread.provider,
+            runtimeMode: runtimeMode,
+            networkAccess: networkAccess
+        )
         guard includeProjectContext else {
             return """
             Respond inside Kaname's unified \(thread.kind.label.lowercased()) conversation.
 
-            Authority boundary: this scheduled turn uses only its frozen prompt and workspace. It is read-only with network disabled. Do not modify files, commit, push, access accounts, or request broader authority.
+            Authority boundary: this scheduled turn uses only its frozen prompt and workspace. \(boundary)
 
             User message:
             \(userMessage)
@@ -642,7 +659,7 @@ final class DesktopConversationRuntime: ObservableObject {
         Selected knowledge sources: \(knowledge)
         Selected skills and tools: \(skills)
 
-        Authority boundary: this turn is read-only with network disabled. Do not modify files, commit, push, access accounts, or request broader authority. If the request needs an effect, explain the proposed action and exact approval required.
+        Authority boundary: \(boundary)
 
         User message:
         \(userMessage)
@@ -651,7 +668,27 @@ final class DesktopConversationRuntime: ObservableObject {
 
     private func resolvedModel(provider: String, value: String) -> String {
         guard value == "Use provider default" else { return value }
-        return provider.caseInsensitiveCompare("Codex") == .orderedSame ? "gpt-5.6-terra" : value
+        return provider.caseInsensitiveCompare("Codex") == .orderedSame ? "gpt-5.6-sol" : value
+    }
+
+    private func authorityBoundary(
+        provider: String,
+        runtimeMode: ConversationRuntimeMode,
+        networkAccess: Bool
+    ) -> String {
+        let network = provider.caseInsensitiveCompare("Codex") == .orderedSame
+            ? (networkAccess ? "Network access is enabled." : "Network access is disabled.")
+            : "Network access follows \(provider)'s native tool policy."
+        switch runtimeMode {
+        case .approvalRequired:
+            return "Work read-only and ask before any action requiring broader authority. \(network)"
+        case .autoAcceptEdits:
+            return "Workspace edits are allowed; ask before commands or broader actions. \(network)"
+        case .auto:
+            return "Routine workspace actions may proceed automatically; escalate risky actions for review. \(network)"
+        case .fullAccess:
+            return "Full local command and file authority is enabled without approval prompts. Network access is enabled."
+        }
     }
 
     private func providerEventRecord(

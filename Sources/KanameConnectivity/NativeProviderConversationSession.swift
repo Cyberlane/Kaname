@@ -1,4 +1,5 @@
 @preconcurrency import Foundation
+import KanameDomain
 
 public enum NativeConversationDriver: String, Codable, CaseIterable, Sendable {
     case claude
@@ -26,6 +27,8 @@ public struct NativeConversationRequest: Sendable {
     public let workspace: URL
     public let model: String?
     public let reasoningEffort: String
+    public let runtimeMode: ConversationRuntimeMode
+    public let networkAccess: Bool
     public let resumableSessionID: String?
 
     public init(
@@ -34,6 +37,8 @@ public struct NativeConversationRequest: Sendable {
         workspace: URL,
         model: String?,
         reasoningEffort: String,
+        runtimeMode: ConversationRuntimeMode = .approvalRequired,
+        networkAccess: Bool = false,
         resumableSessionID: String?
     ) {
         self.driver = driver
@@ -41,6 +46,8 @@ public struct NativeConversationRequest: Sendable {
         self.workspace = workspace.standardizedFileURL
         self.model = model
         self.reasoningEffort = reasoningEffort
+        self.runtimeMode = runtimeMode
+        self.networkAccess = runtimeMode == .fullAccess ? true : networkAccess
         self.resumableSessionID = resumableSessionID
     }
 }
@@ -131,12 +138,19 @@ public actor NativeProviderConversationSession {
     static func arguments(for request: NativeConversationRequest) -> [String] {
         switch request.driver {
         case .claude:
+            let permissionMode: String
+            switch request.runtimeMode {
+            case .approvalRequired: permissionMode = "plan"
+            case .autoAcceptEdits: permissionMode = "acceptEdits"
+            case .auto: permissionMode = "auto"
+            case .fullAccess: permissionMode = "bypassPermissions"
+            }
             var arguments = [
                 "--print",
                 "--output-format", "stream-json",
                 "--verbose",
                 "--include-partial-messages",
-                "--permission-mode", "plan",
+                "--permission-mode", permissionMode,
                 "--max-budget-usd", "2",
                 "--effort", request.reasoningEffort,
             ]
@@ -151,13 +165,17 @@ public actor NativeProviderConversationSession {
             arguments.append(request.prompt)
             return arguments
         case .openCode:
+            let agent = request.runtimeMode == .approvalRequired ? "plan" : "build"
             var arguments = [
                 "run",
                 "--format", "json",
-                "--agent", "plan",
+                "--agent", agent,
                 "--dir", request.workspace.path,
                 "--variant", request.reasoningEffort,
             ]
+            if request.runtimeMode == .auto || request.runtimeMode == .fullAccess {
+                arguments.append("--auto")
+            }
             if let model = request.model, !model.isEmpty, model != "Use provider default" {
                 arguments += ["--model", model]
             }

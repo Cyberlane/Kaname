@@ -307,7 +307,11 @@ struct KanameDesktopWorkspace: View {
     private var presentedWorkspace: some View {
         workspaceStack
         .sheet(item: $newConversationRequest, onDismiss: finishNewConversationPresentation) { request in
-            NewDesktopThreadSheet(model: model, projectID: request.projectID) { threadID in
+            NewDesktopThreadSheet(
+                model: model,
+                projectID: request.projectID,
+                capabilities: personalIntegrations.providerCapabilities
+            ) { threadID in
                 pendingCreatedThreadID = threadID
             }
             .environment(\.desktopQALargeText, usesQALargeText)
@@ -702,6 +706,7 @@ struct KanameDesktopWorkspace: View {
                 DesktopThreadsView(
                     model: model,
                     runtime: conversationRuntime,
+                    capabilities: personalIntegrations.providerCapabilities,
                     searchText: searchText,
                     selectedThreadID: threadSelection,
                     composerFocusRequest: composerFocusRequest
@@ -1898,6 +1903,7 @@ private struct DesktopHomeView: View {
 private struct DesktopThreadsView: View {
     @ObservedObject var model: DesktopAppModel
     @ObservedObject var runtime: DesktopConversationRuntime
+    let capabilities: [ProviderCapabilitySnapshot]
     let searchText: String
     @Binding var selectedThreadID: String?
     let composerFocusRequest: DesktopComposerFocusRequest?
@@ -1932,6 +1938,7 @@ private struct DesktopThreadsView: View {
                 DesktopThreadConversation(
                     model: model,
                     runtime: runtime,
+                    capabilities: capabilities,
                     thread: thread,
                     composerFocusRequest: composerFocusRequest
                 )
@@ -2020,6 +2027,7 @@ private struct DesktopThreadConversation: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var model: DesktopAppModel
     @ObservedObject var runtime: DesktopConversationRuntime
+    let capabilities: [ProviderCapabilitySnapshot]
     let thread: DesktopThread
     let composerFocusRequest: DesktopComposerFocusRequest?
     @State private var draft = ""
@@ -2031,6 +2039,8 @@ private struct DesktopThreadConversation: View {
     @State private var runtimeProvider = "Codex"
     @State private var runtimeModel = "Use provider default"
     @State private var runtimeReasoning = "xhigh"
+    @State private var runtimeMode: ConversationRuntimeMode = .approvalRequired
+    @State private var runtimeNetworkAccess = false
     @FocusState private var composerFocused: Bool
 #if os(macOS)
     @State private var sheetPreviousResponder: NSResponder?
@@ -2039,11 +2049,13 @@ private struct DesktopThreadConversation: View {
     init(
         model: DesktopAppModel,
         runtime: DesktopConversationRuntime,
+        capabilities: [ProviderCapabilitySnapshot],
         thread: DesktopThread,
         composerFocusRequest: DesktopComposerFocusRequest?
     ) {
         self.model = model
         self.runtime = runtime
+        self.capabilities = capabilities
         self.thread = thread
         self.composerFocusRequest = composerFocusRequest
         _draft = State(initialValue: model.composerDraft(threadID: thread.id))
@@ -2090,6 +2102,8 @@ private struct DesktopThreadConversation: View {
                         runtimeProvider = thread.provider
                         runtimeModel = thread.model
                         runtimeReasoning = thread.reasoningEffort
+                        runtimeMode = thread.runtimeMode
+                        runtimeNetworkAccess = thread.networkAccess
                         showsRuntimeSettings = true
                     } label: {
                         Image(systemName: "slider.horizontal.3")
@@ -2133,13 +2147,18 @@ private struct DesktopThreadConversation: View {
                 provider: $runtimeProvider,
                 model: $runtimeModel,
                 reasoning: $runtimeReasoning,
+                runtimeMode: $runtimeMode,
+                networkAccess: $runtimeNetworkAccess,
+                capabilities: capabilities,
                 cancel: { showsRuntimeSettings = false },
                 save: {
                     if model.updateThreadRuntime(
                         id: thread.id,
                         provider: runtimeProvider,
                         model: runtimeModel,
-                        reasoningEffort: runtimeReasoning
+                        reasoningEffort: runtimeReasoning,
+                        runtimeMode: runtimeMode,
+                        networkAccess: runtimeNetworkAccess
                     ) { showsRuntimeSettings = false }
                 }
             )
@@ -2253,7 +2272,7 @@ private struct DesktopThreadConversation: View {
                 Image(systemName: runtime.isRunning(threadID: thread.id) ? "hourglass" : "lock.shield")
                 Text(runtime.isRunning(threadID: thread.id)
                     ? "\(thread.provider) is responding. New messages queue in order."
-                    : "\(thread.provider) · \(thread.model) · \(thread.reasoningEffort) · Read-only, network off")
+                    : "\(thread.provider) · \(thread.model) · \(thread.reasoningEffort) · \(ConversationRuntimeCatalog.boundarySummary(provider: thread.provider, runtimeMode: thread.runtimeMode, networkAccess: thread.networkAccess))")
             }
             .font(.caption2)
             .foregroundStyle(.tertiary)
@@ -2422,43 +2441,288 @@ private struct DesktopConversationRuntimeSheet: View {
     @Binding var provider: String
     @Binding var model: String
     @Binding var reasoning: String
+    @Binding var runtimeMode: ConversationRuntimeMode
+    @Binding var networkAccess: Bool
+    let capabilities: [ProviderCapabilitySnapshot]
     let cancel: () -> Void
     let save: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("Conversation runtime").font(.title2.weight(.bold))
-            Text("These overrides apply to future turns in this conversation. They never expand tool, network, or write authority.")
+            Text("These settings apply to future turns in this conversation. Change them whenever no turn is running.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             Form {
-                Picker("Provider", selection: $provider) {
-                    Text("Codex").tag("Codex")
-                    Text("Claude").tag("Claude")
-                    Text("OpenCode").tag("OpenCode")
-                }
-                TextField("Model", text: $model)
-                Picker("Reasoning", selection: $reasoning) {
-                    Text("Low").tag("low")
-                    Text("Medium").tag("medium")
-                    Text("High").tag("high")
-                    Text("Extra high").tag("xhigh")
-                }
+                ConversationRuntimeEditor(
+                    provider: $provider,
+                    model: $model,
+                    reasoning: $reasoning,
+                    runtimeMode: $runtimeMode,
+                    networkAccess: $networkAccess,
+                    capabilities: capabilities
+                )
             }
             .formStyle(.grouped)
             HStack {
-                Label("Standard conversation turns remain read-only with network off.", systemImage: "lock.shield")
+                Label(
+                    ConversationRuntimeCatalog.boundarySummary(
+                        provider: provider,
+                        runtimeMode: runtimeMode,
+                        networkAccess: networkAccess
+                    ),
+                    systemImage: runtimeMode == .fullAccess ? "exclamationmark.shield" : "lock.shield"
+                )
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(runtimeMode == .fullAccess ? Nord.auroraYellow : .secondary)
                 Spacer()
                 Button("Cancel", action: cancel).keyboardShortcut(.cancelAction)
                 Button("Save", action: save)
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
+                    .disabled(model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || reasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
         .padding(24)
         .desktopAdaptiveSheet(idealWidth: 520)
+    }
+}
+
+private enum ConversationRuntimeCatalog {
+    static let providers = ["Codex", "Claude", "OpenCode"]
+
+    static func snapshot(
+        for provider: String,
+        capabilities: [ProviderCapabilitySnapshot]
+    ) -> ProviderCapabilitySnapshot? {
+        let driver: ProviderDriverKind? = switch provider.lowercased() {
+        case "codex": .codex
+        case "claude": .claudeAgent
+        case "opencode", "open code": .openCode
+        default: nil
+        }
+        return capabilities.first { $0.instance.driver == driver }
+    }
+
+    static func models(
+        for provider: String,
+        capabilities: [ProviderCapabilitySnapshot]
+    ) -> [ProviderModel] {
+        snapshot(for: provider, capabilities: capabilities)?.models ?? []
+    }
+
+    static func selectedModel(
+        provider: String,
+        requested: String,
+        capabilities: [ProviderCapabilitySnapshot]
+    ) -> String {
+        guard requested == "Use provider default" else { return requested }
+        let models = models(for: provider, capabilities: capabilities)
+        return models.first(where: \.isDefault)?.id ?? models.first?.id ?? requested
+    }
+
+    static func reasoningEfforts(
+        provider: String,
+        model: String,
+        capabilities: [ProviderCapabilitySnapshot]
+    ) -> [String] {
+        if let advertised = models(for: provider, capabilities: capabilities)
+            .first(where: { $0.id == model })?.supportedReasoningEfforts,
+           !advertised.isEmpty {
+            return advertised
+        }
+        switch provider.lowercased() {
+        case "codex": return ["minimal", "low", "medium", "high", "xhigh"]
+        case "claude": return ["low", "medium", "high", "xhigh", "max"]
+        default: return ["minimal", "low", "medium", "high", "max"]
+        }
+    }
+
+    static func selectedReasoning(
+        provider: String,
+        model: String,
+        current: String? = nil,
+        capabilities: [ProviderCapabilitySnapshot]
+    ) -> String {
+        if let advertised = models(for: provider, capabilities: capabilities).first(where: { $0.id == model }),
+           let effort = advertised.defaultReasoningEffort {
+            return effort
+        }
+        let choices = reasoningEfforts(provider: provider, model: model, capabilities: capabilities)
+        if let current, choices.contains(current) { return current }
+        return choices.contains("medium") ? "medium" : choices.first ?? "medium"
+    }
+
+    static func managesNetwork(_ provider: String) -> Bool {
+        provider.caseInsensitiveCompare("Codex") == .orderedSame
+    }
+
+    static func boundarySummary(
+        provider: String,
+        runtimeMode: ConversationRuntimeMode,
+        networkAccess: Bool
+    ) -> String {
+        if runtimeMode == .fullAccess {
+            return "Full local access, no approval prompts, network on"
+        }
+        let network = managesNetwork(provider)
+            ? (networkAccess ? "network on" : "network off")
+            : "network follows \(provider)"
+        return "\(runtimeMode.label), \(network)"
+    }
+}
+
+private extension ConversationRuntimeMode {
+    var label: String {
+        switch self {
+        case .approvalRequired: "Supervised"
+        case .autoAcceptEdits: "Auto-accept edits"
+        case .auto: "Auto"
+        case .fullAccess: "Full access"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .approvalRequired: "Read-only by default; stop for broader actions."
+        case .autoAcceptEdits: "Allow workspace edits; ask before other escalation."
+        case .auto: "Allow routine work and review risky escalation automatically."
+        case .fullAccess: "Allow commands, files, and network without prompts."
+        }
+    }
+}
+
+private struct ConversationRuntimeEditor: View {
+    private static let customChoice = "__kaname_custom_choice__"
+
+    @Binding var provider: String
+    @Binding var model: String
+    @Binding var reasoning: String
+    @Binding var runtimeMode: ConversationRuntimeMode
+    @Binding var networkAccess: Bool
+    let capabilities: [ProviderCapabilitySnapshot]
+
+    private var advertisedModels: [ProviderModel] {
+        ConversationRuntimeCatalog.models(for: provider, capabilities: capabilities)
+    }
+
+    private var reasoningChoices: [String] {
+        ConversationRuntimeCatalog.reasoningEfforts(
+            provider: provider,
+            model: model,
+            capabilities: capabilities
+        )
+    }
+
+    private var modelSelection: Binding<String> {
+        Binding(
+            get: {
+                model == "Use provider default" || advertisedModels.contains(where: { $0.id == model })
+                    ? model
+                    : Self.customChoice
+            },
+            set: { model = $0 == Self.customChoice ? "" : $0 }
+        )
+    }
+
+    private var reasoningSelection: Binding<String> {
+        Binding(
+            get: { reasoningChoices.contains(reasoning) ? reasoning : Self.customChoice },
+            set: { reasoning = $0 == Self.customChoice ? "" : $0 }
+        )
+    }
+
+    private var usesCustomModel: Bool {
+        model != "Use provider default" && !advertisedModels.contains(where: { $0.id == model })
+    }
+
+    private var usesCustomReasoning: Bool {
+        !reasoningChoices.contains(reasoning)
+    }
+
+    var body: some View {
+        Section("Provider & model") {
+            Picker("Provider", selection: $provider) {
+                ForEach(ConversationRuntimeCatalog.providers, id: \.self) { name in
+                    Text(name).tag(name)
+                }
+            }
+            if let snapshot = ConversationRuntimeCatalog.snapshot(for: provider, capabilities: capabilities) {
+                LabeledContent("Status", value: snapshot.state == .ready ? "Ready" : snapshot.state.rawValue.capitalized)
+            }
+            Picker("Model", selection: modelSelection) {
+                Text("Use provider default").tag("Use provider default")
+                ForEach(advertisedModels, id: \.id) { option in
+                    Text(option.displayName).tag(option.id)
+                }
+                Text("Custom…").tag(Self.customChoice)
+            }
+            if usesCustomModel {
+                TextField("Custom model ID", text: $model)
+            }
+            Picker("Thinking", selection: reasoningSelection) {
+                ForEach(reasoningChoices, id: \.self) { effort in
+                    Text(effort == "xhigh" ? "Extra high" : effort.capitalized).tag(effort)
+                }
+                Text("Custom…").tag(Self.customChoice)
+            }
+            if usesCustomReasoning {
+                TextField("Custom thinking / variant ID", text: $reasoning)
+            }
+            Text("Lists come from the provider when available. Choose Custom to enter another model or thinking identifier supported by that provider.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+
+        Section("Authority") {
+            Picker("Permission mode", selection: $runtimeMode) {
+                ForEach(ConversationRuntimeMode.allCases, id: \.self) { mode in
+                    Text(mode.label).tag(mode)
+                }
+            }
+            Text(runtimeMode.detail)
+                .font(.caption)
+                .foregroundStyle(runtimeMode == .fullAccess ? Nord.auroraYellow : .secondary)
+            if ConversationRuntimeCatalog.managesNetwork(provider) {
+                Toggle("Allow network access", isOn: $networkAccess)
+                    .disabled(runtimeMode == .fullAccess)
+                if runtimeMode == .fullAccess {
+                    Text("Codex full access is unsandboxed, so network access is necessarily on.")
+                        .font(.caption)
+                        .foregroundStyle(Nord.auroraYellow)
+                }
+            } else {
+                LabeledContent("Network", value: "Provider controlled")
+                Text("\(provider) does not expose a separate enforceable network switch through Kaname's current adapter. Its native permission mode remains authoritative.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .onChange(of: provider) { newProvider in
+            model = ConversationRuntimeCatalog.selectedModel(
+                provider: newProvider,
+                requested: "Use provider default",
+                capabilities: capabilities
+            )
+            reasoning = ConversationRuntimeCatalog.selectedReasoning(
+                provider: newProvider,
+                model: model,
+                capabilities: capabilities
+            )
+            if !ConversationRuntimeCatalog.managesNetwork(newProvider) { networkAccess = false }
+        }
+        .onChange(of: model) { newModel in
+            reasoning = ConversationRuntimeCatalog.selectedReasoning(
+                provider: provider,
+                model: newModel,
+                current: reasoning,
+                capabilities: capabilities
+            )
+        }
+        .onChange(of: runtimeMode) { newMode in
+            if newMode == .fullAccess { networkAccess = true }
+        }
     }
 }
 
@@ -8017,15 +8281,40 @@ private struct NewDesktopThreadSheet: View {
     @Environment(\.desktopQALargeText) private var usesQALargeText
     @ObservedObject var model: DesktopAppModel
     let projectID: String?
+    let capabilities: [ProviderCapabilitySnapshot]
     let created: (String) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var kind: DesktopWorkKind = .coding
+    @State private var provider: String
+    @State private var runtimeModel: String
+    @State private var reasoning: String
+    @State private var runtimeMode: ConversationRuntimeMode = .approvalRequired
+    @State private var networkAccess = false
 
-    init(model: DesktopAppModel, projectID: String?, created: @escaping (String) -> Void) {
+    init(
+        model: DesktopAppModel,
+        projectID: String?,
+        capabilities: [ProviderCapabilitySnapshot],
+        created: @escaping (String) -> Void
+    ) {
         self.model = model
         self.projectID = projectID
+        self.capabilities = capabilities
         self.created = created
         _kind = State(initialValue: model.project(id: projectID)?.context.defaultKind ?? .coding)
+        let initialProvider = model.project(id: projectID)?.context.defaultProvider ?? "Codex"
+        let initialModel = ConversationRuntimeCatalog.selectedModel(
+            provider: initialProvider,
+            requested: model.project(id: projectID)?.context.defaultModel ?? "Use provider default",
+            capabilities: capabilities
+        )
+        _provider = State(initialValue: initialProvider)
+        _runtimeModel = State(initialValue: initialModel)
+        _reasoning = State(initialValue: ConversationRuntimeCatalog.selectedReasoning(
+            provider: initialProvider,
+            model: initialModel,
+            capabilities: capabilities
+        ))
     }
 
     private var project: DesktopProject? {
@@ -8063,15 +8352,31 @@ private struct NewDesktopThreadSheet: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                ConversationRuntimeEditor(
+                    provider: $provider,
+                    model: $runtimeModel,
+                    reasoning: $reasoning,
+                    runtimeMode: $runtimeMode,
+                    networkAccess: $networkAccess,
+                    capabilities: capabilities
+                )
                 Section {
                     Label("No subject required", systemImage: "sparkles")
                     Text("Kaname opens a blank conversation and names it automatically from your first message.")
                         .foregroundStyle(.secondary)
+                    Label(
+                        ConversationRuntimeCatalog.boundarySummary(
+                            provider: provider,
+                            runtimeMode: runtimeMode,
+                            networkAccess: networkAccess
+                        ),
+                        systemImage: runtimeMode == .fullAccess ? "exclamationmark.shield" : "lock.shield"
+                    )
+                    .foregroundStyle(runtimeMode == .fullAccess ? Nord.auroraYellow : .secondary)
                 }
             }
             .formStyle(.grouped)
             .padding(12)
-            .desktopAdaptiveSheet(idealWidth: 540, idealHeight: 390)
             .navigationTitle("New conversation")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -8079,14 +8384,25 @@ private struct NewDesktopThreadSheet: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Start conversation") {
-                        let id = model.createConversation(kind: kind, projectID: projectID)
+                        let id = model.createConversation(
+                            kind: kind,
+                            projectID: projectID,
+                            provider: provider,
+                            model: runtimeModel,
+                            reasoningEffort: reasoning,
+                            runtimeMode: runtimeMode,
+                            networkAccess: networkAccess
+                        )
                         created(id)
                         dismiss()
                     }
                     .keyboardShortcut(.defaultAction)
+                    .disabled(runtimeModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || reasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
         }
+        .desktopAdaptiveSheet(idealWidth: 620, idealHeight: 720)
     }
 
     private var kindPicker: some View {

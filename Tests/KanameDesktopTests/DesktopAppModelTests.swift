@@ -1,5 +1,6 @@
 import Foundation
 @testable import KanameDesktop
+@testable import KanameDomain
 import Testing
 
 @MainActor
@@ -69,6 +70,10 @@ struct DesktopAppModelTests {
         #expect(emptyConversation.title == "New planning conversation")
         #expect(emptyConversation.titleSource == .placeholder)
         #expect(emptyConversation.messages.isEmpty)
+        #expect(emptyConversation.provider == "Codex")
+        #expect(emptyConversation.reasoningEffort == "medium")
+        #expect(emptyConversation.runtimeMode == .approvalRequired)
+        #expect(emptyConversation.networkAccess == false)
 
         clock += 1
         model.appendUserMessage(
@@ -86,6 +91,38 @@ struct DesktopAppModelTests {
         model.appendUserMessage(threadID: threadID, body: "Do not replace the title with this follow-up.")
         let restored = DesktopAppModel(store: store, now: { 2_000 })
         #expect(restored.thread(id: threadID)?.title == titledConversation.title)
+    }
+
+    @Test
+    func conversationRuntimeChoicesPersistAndFlowIntoTheQueuedRun() throws {
+        let store = MemoryDesktopStateStore()
+        let model = DesktopAppModel(store: store, now: { 1_000 })
+        let projectID = try #require(model.snapshot.projects.first?.id)
+        let threadID = model.createConversation(
+            kind: .coding,
+            projectID: projectID,
+            provider: "Claude",
+            model: "claude-opus-4-1",
+            reasoningEffort: "max",
+            runtimeMode: .fullAccess,
+            networkAccess: false
+        )
+        let messageID = try #require(model.appendUserMessage(threadID: threadID, body: "Run the configured task."))
+        let runID = try #require(model.enqueueProviderRun(threadID: threadID, sourceMessageID: messageID))
+
+        let restored = DesktopAppModel(store: store, now: { 2_000 })
+        let thread = try #require(restored.thread(id: threadID))
+        let run = try #require(restored.providerRun(id: runID))
+        #expect(thread.provider == "Claude")
+        #expect(thread.model == "claude-opus-4-1")
+        #expect(thread.reasoningEffort == "max")
+        #expect(thread.runtimeMode == .fullAccess)
+        #expect(thread.networkAccess)
+        #expect(run.provider == thread.provider)
+        #expect(run.model == thread.model)
+        #expect(run.reasoningEffort == thread.reasoningEffort)
+        #expect(run.runtimeMode == thread.runtimeMode)
+        #expect(run.networkAccess)
     }
 
     @Test
@@ -167,7 +204,7 @@ struct DesktopAppModelTests {
 
     @Test
     func versionSevenWorkspaceAddsConversationRuntimeDefaults() throws {
-        var snapshot = DesktopAppSnapshot.starter(now: 1_000)
+        let snapshot = DesktopAppSnapshot.starter(now: 1_000)
         var object = try #require(
             JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot)) as? [String: Any]
         )
@@ -175,6 +212,8 @@ struct DesktopAppModelTests {
         var threads = try #require(object["threads"] as? [[String: Any]])
         for index in threads.indices {
             threads[index].removeValue(forKey: "reasoningEffort")
+            threads[index].removeValue(forKey: "runtimeMode")
+            threads[index].removeValue(forKey: "networkAccess")
             threads[index].removeValue(forKey: "titleSource")
         }
         object["threads"] = threads
@@ -186,7 +225,12 @@ struct DesktopAppModelTests {
         let model = DesktopAppModel(store: store, now: { 2_000 })
 
         #expect(model.snapshot.version == DesktopAppSnapshot.currentVersion)
-        #expect(model.snapshot.threads.allSatisfy { $0.reasoningEffort == "xhigh" && $0.titleSource == .manual })
+        #expect(model.snapshot.threads.allSatisfy {
+            $0.reasoningEffort == "xhigh"
+                && $0.runtimeMode == .approvalRequired
+                && $0.networkAccess == false
+                && $0.titleSource == .manual
+        })
         #expect(model.snapshot.operations.providerEvents.isEmpty)
     }
 

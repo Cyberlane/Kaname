@@ -4,7 +4,17 @@ import Foundation
 /// compatibility checks. Keeping this in KanameDomain prevents an updater from
 /// duplicating a security-sensitive version number owned by the desktop model.
 public enum KanameDesktopStateSchema {
-    public static let currentVersion = 13
+    public static let currentVersion = 14
+}
+
+/// A provider-neutral description of how much autonomy one conversation has.
+/// Adapters translate these stable product modes into their native permission
+/// and sandbox controls rather than leaking one provider's flags into storage.
+public enum ConversationRuntimeMode: String, Codable, CaseIterable, Equatable, Sendable {
+    case approvalRequired
+    case autoAcceptEdits
+    case auto
+    case fullAccess
 }
 
 public struct Thread: Codable, Equatable, Sendable {

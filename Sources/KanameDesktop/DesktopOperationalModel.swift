@@ -1,4 +1,5 @@
 import Foundation
+import KanameDomain
 
 public enum DesktopActionState: String, Codable, CaseIterable, Equatable, Sendable {
     case proposed
@@ -319,6 +320,8 @@ private struct DesktopProviderRunPayload: Decodable {
     let provider: String
     let model: String
     let reasoningEffort: String?
+    let runtimeMode: ConversationRuntimeMode?
+    let networkAccess: Bool?
     let briefDigest: String
     let contextReferenceCount: Int
     let nativeThreadID: String?
@@ -340,6 +343,8 @@ public struct DesktopProviderRunRecord: Codable, Equatable, Identifiable, Sendab
     public var provider: String
     public var model: String
     public var reasoningEffort: String
+    public var runtimeMode: ConversationRuntimeMode
+    public var networkAccess: Bool
     public var briefDigest: String
     public var contextReferenceCount: Int
     public var nativeThreadID: String?
@@ -360,6 +365,8 @@ public struct DesktopProviderRunRecord: Codable, Equatable, Identifiable, Sendab
         provider: String,
         model: String,
         reasoningEffort: String = "xhigh",
+        runtimeMode: ConversationRuntimeMode = .approvalRequired,
+        networkAccess: Bool = false,
         briefDigest: String,
         contextReferenceCount: Int,
         nativeThreadID: String? = nil,
@@ -379,6 +386,8 @@ public struct DesktopProviderRunRecord: Codable, Equatable, Identifiable, Sendab
         self.provider = provider
         self.model = model
         self.reasoningEffort = reasoningEffort
+        self.runtimeMode = runtimeMode
+        self.networkAccess = networkAccess
         self.briefDigest = briefDigest
         self.contextReferenceCount = contextReferenceCount
         self.nativeThreadID = nativeThreadID
@@ -401,6 +410,8 @@ public struct DesktopProviderRunRecord: Codable, Equatable, Identifiable, Sendab
         provider = payload.provider
         model = payload.model
         reasoningEffort = payload.reasoningEffort ?? "xhigh"
+        runtimeMode = payload.runtimeMode ?? .approvalRequired
+        networkAccess = payload.networkAccess ?? false
         briefDigest = payload.briefDigest
         contextReferenceCount = payload.contextReferenceCount
         nativeThreadID = payload.nativeThreadID

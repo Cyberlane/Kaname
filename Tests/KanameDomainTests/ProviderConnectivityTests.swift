@@ -32,43 +32,41 @@ struct ProviderConnectivityTests {
     }
 
     @Test
-    func unknownDriverIsAnExplicitUnsupportedSnapshot() async {
-        let instance = ProviderInstance(
-            id: ProviderInstanceID(rawValue: "communityFork")!,
+    func unknownAndMissingDriversProduceDistinctFailureSnapshots() async {
+        let unsupported = await capabilitySnapshot(
+            id: "communityFork",
             driver: ProviderDriverKind(rawValue: "communityFork")!,
-            displayName: "Community Fork"
+            displayName: "Community Fork",
+            executable: "not-used"
         )
-        let configuration = ProviderProbeConfiguration(
-            instance: instance,
-            executable: "not-used",
-            workingDirectory: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let unavailable = await capabilitySnapshot(
+            id: "codexLocal",
+            driver: .codex,
+            displayName: "Codex local",
+            executable: "kaname-definitely-missing-codex"
         )
 
-        let snapshot = await ProviderCapabilityProber().probe(configuration)
-
-        #expect(snapshot.state == .unsupported)
-        #expect(snapshot.installed == false)
-        #expect(snapshot.authentication == .unknown)
+        #expect(unsupported.state == .unsupported)
+        #expect(unavailable.state == .unavailable)
+        #expect([unsupported, unavailable].allSatisfy { !$0.installed && $0.authentication == .unknown })
     }
 
-    @Test
-    func missingNativeConnectorProducesAnUnavailableSnapshot() async {
+    private func capabilitySnapshot(
+        id: String,
+        driver: ProviderDriverKind,
+        displayName: String,
+        executable: String
+    ) async -> ProviderCapabilitySnapshot {
         let instance = ProviderInstance(
-            id: ProviderInstanceID(rawValue: "codexLocal")!,
-            driver: .codex,
-            displayName: "Codex local"
+            id: ProviderInstanceID(rawValue: id)!,
+            driver: driver,
+            displayName: displayName
         )
-        let configuration = ProviderProbeConfiguration(
+        return await ProviderCapabilityProber().probe(ProviderProbeConfiguration(
             instance: instance,
-            executable: "kaname-definitely-missing-codex",
+            executable: executable,
             workingDirectory: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-        )
-
-        let snapshot = await ProviderCapabilityProber().probe(configuration)
-
-        #expect(snapshot.state == .unavailable)
-        #expect(snapshot.installed == false)
-        #expect(snapshot.authentication == .unknown)
+        ))
     }
 
     @Test
@@ -282,6 +280,8 @@ struct ProviderConnectivityTests {
             provider: "Codex",
             model: "gpt-5.6-terra",
             reasoningEffort: "xhigh",
+            runtimeMode: .auto,
+            networkAccess: true,
             prompt: "Read-only check",
             workspacePath: "/tmp/workspace",
             providerStatePath: "/tmp/provider",
@@ -293,6 +293,8 @@ struct ProviderConnectivityTests {
         try store.enqueue(request)
         let queued = try store.pendingRequests(threadID: "thread-1")
         #expect(queued.map(\.1) == [request])
+        #expect(queued.first?.1.runtimeMode == .auto)
+        #expect(queued.first?.1.networkAccess == true)
         #expect((try FileManager.default.attributesOfItem(atPath: root.path)[.posixPermissions] as? NSNumber)?.intValue == 0o700)
 
         let event = KanameConversationServiceEvent.record(
@@ -373,6 +375,33 @@ struct ProviderConnectivityTests {
         #expect(openCodeArguments.contains("plan"))
         #expect(openCodeArguments.contains("--session"))
         #expect(!openCodeArguments.contains("--auto"))
+
+        let claudeFullAccess = NativeConversationRequest(
+            driver: .claude,
+            prompt: "Implement",
+            workspace: workspace,
+            model: "claude-opus-4-1",
+            reasoningEffort: "max",
+            runtimeMode: .fullAccess,
+            resumableSessionID: nil
+        )
+        let claudeFullAccessArguments = NativeProviderConversationSession.arguments(for: claudeFullAccess)
+        #expect(claudeFullAccessArguments.contains("bypassPermissions"))
+        #expect(claudeFullAccessArguments.contains("claude-opus-4-1"))
+        #expect(claudeFullAccessArguments.contains("max"))
+
+        let openCodeAuto = NativeConversationRequest(
+            driver: .openCode,
+            prompt: "Implement",
+            workspace: workspace,
+            model: "openai/gpt-5",
+            reasoningEffort: "high",
+            runtimeMode: .auto,
+            resumableSessionID: nil
+        )
+        let openCodeAutoArguments = NativeProviderConversationSession.arguments(for: openCodeAuto)
+        #expect(openCodeAutoArguments.contains("build"))
+        #expect(openCodeAutoArguments.contains("--auto"))
         var openCodeParser = NativeProviderStreamParser(driver: .openCode)
         let text = Data(#"{"type":"text","sessionID":"oc-session","part":{"type":"text","text":"Ready"}}"#.utf8)
         #expect(openCodeParser.consume(line: text).contains { $0.kind == .messageDelta && $0.text == "Ready" })

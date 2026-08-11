@@ -66,6 +66,8 @@ private struct DesktopThreadPayload: Decodable {
     let provider: String
     let model: String
     let reasoningEffort: String?
+    let runtimeMode: ConversationRuntimeMode?
+    let networkAccess: Bool?
     let titleSource: DesktopConversationTitleSource?
     let updatedAtUnixMillis: Int64
     let unread: Bool
@@ -148,6 +150,8 @@ public struct DesktopThread: Codable, Equatable, Identifiable, Sendable {
     public var provider: String
     public var model: String
     public var reasoningEffort: String
+    public var runtimeMode: ConversationRuntimeMode
+    public var networkAccess: Bool
     public var titleSource: DesktopConversationTitleSource
     public var updatedAtUnixMillis: Int64
     public var unread: Bool
@@ -165,6 +169,8 @@ public struct DesktopThread: Codable, Equatable, Identifiable, Sendable {
         provider: String = "Local",
         model: String = "No provider selected",
         reasoningEffort: String = "xhigh",
+        runtimeMode: ConversationRuntimeMode = .approvalRequired,
+        networkAccess: Bool = false,
         titleSource: DesktopConversationTitleSource = .manual,
         updatedAtUnixMillis: Int64,
         unread: Bool = false,
@@ -181,6 +187,8 @@ public struct DesktopThread: Codable, Equatable, Identifiable, Sendable {
         self.provider = provider
         self.model = model
         self.reasoningEffort = reasoningEffort
+        self.runtimeMode = runtimeMode
+        self.networkAccess = networkAccess
         self.titleSource = titleSource
         self.updatedAtUnixMillis = updatedAtUnixMillis
         self.unread = unread
@@ -201,6 +209,8 @@ public struct DesktopThread: Codable, Equatable, Identifiable, Sendable {
             provider: payload.provider,
             model: payload.model,
             reasoningEffort: payload.reasoningEffort ?? "xhigh",
+            runtimeMode: payload.runtimeMode ?? .approvalRequired,
+            networkAccess: payload.networkAccess ?? false,
             titleSource: payload.titleSource ?? .manual,
             updatedAtUnixMillis: payload.updatedAtUnixMillis,
             unread: payload.unread,
@@ -551,7 +561,7 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
     }
 
     func migratedToCurrent(now: Int64) throws -> DesktopAppSnapshot {
-        guard (1...12).contains(version) else { throw DesktopModelError.unsupportedVersion }
+        guard (1...13).contains(version) else { throw DesktopModelError.unsupportedVersion }
         var migrated = self
         while migrated.version < Self.currentVersion {
             switch migrated.version {
@@ -572,7 +582,7 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
                         skillIDs: ["skill-mori-review", "skill-obsidian"]
                     )
                 }
-            case 7, 8, 9, 10, 11, 12:
+            case 7, 8, 9, 10, 11, 12, 13:
                 break
             default:
                 throw DesktopModelError.unsupportedVersion
@@ -1468,16 +1478,29 @@ public final class DesktopAppModel: ObservableObject {
         return thread.id
     }
 
-    public func createConversation(kind: DesktopWorkKind, projectID: String?) -> String {
+    public func createConversation(
+        kind: DesktopWorkKind,
+        projectID: String?,
+        provider: String? = nil,
+        model: String? = nil,
+        reasoningEffort: String = "medium",
+        runtimeMode: ConversationRuntimeMode = .approvalRequired,
+        networkAccess: Bool = false
+    ) -> String {
         let timestamp = now()
+        let selectedProvider = provider ?? project(id: projectID)?.context.defaultProvider ?? "Codex"
+        let selectedModel = model ?? project(id: projectID)?.context.defaultModel ?? "Use provider default"
         let thread = DesktopThread(
             projectID: projectID,
             title: kind.newConversationTitle,
             summary: "Ready for your first message.",
             kind: kind,
             attention: .queued,
-            provider: project(id: projectID)?.context.defaultProvider ?? "Codex",
-            model: project(id: projectID)?.context.defaultModel ?? "Use provider default",
+            provider: selectedProvider,
+            model: selectedModel,
+            reasoningEffort: reasoningEffort,
+            runtimeMode: runtimeMode,
+            networkAccess: runtimeMode == .fullAccess ? true : networkAccess,
             titleSource: .placeholder,
             updatedAtUnixMillis: timestamp
         )
@@ -1524,14 +1547,16 @@ public final class DesktopAppModel: ObservableObject {
         id: String,
         provider: String,
         model: String,
-        reasoningEffort: String
+        reasoningEffort: String,
+        runtimeMode: ConversationRuntimeMode,
+        networkAccess: Bool
     ) -> Bool {
         let cleanProvider = Self.normalized(provider)
         let cleanModel = Self.normalized(model)
         let cleanReasoning = Self.normalized(reasoningEffort).lowercased()
         guard !cleanProvider.isEmpty, cleanProvider.utf8.count <= 120,
               !cleanModel.isEmpty, cleanModel.utf8.count <= 200,
-              ["low", "medium", "high", "xhigh"].contains(cleanReasoning),
+              Self.isBoundedProviderIdentifier(cleanReasoning),
               !snapshot.operations.providerRuns.contains(where: { $0.threadID == id && $0.state == .running }) else {
             return false
         }
@@ -1539,6 +1564,8 @@ public final class DesktopAppModel: ObservableObject {
             thread.provider = cleanProvider
             thread.model = cleanModel
             thread.reasoningEffort = cleanReasoning
+            thread.runtimeMode = runtimeMode
+            thread.networkAccess = runtimeMode == .fullAccess ? true : networkAccess
             thread.updatedAtUnixMillis = now()
         }
     }
@@ -1627,6 +1654,8 @@ public final class DesktopAppModel: ObservableObject {
             provider: thread.provider,
             model: thread.model,
             reasoningEffort: thread.reasoningEffort,
+            runtimeMode: thread.runtimeMode,
+            networkAccess: thread.networkAccess,
             briefDigest: Self.stableLocalDigest(message.body),
             contextReferenceCount: providerContextReferenceCount(for: thread),
             tokenUsage: nil,
@@ -3805,6 +3834,10 @@ public final class DesktopAppModel: ObservableObject {
 
     private static func normalized(_ value: String) -> String {
         value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func isBoundedProviderIdentifier(_ value: String) -> Bool {
+        value.range(of: #"^[A-Za-z0-9._-]{1,128}$"#, options: .regularExpression) != nil
     }
 
     private static func unique(_ values: [String]) -> [String] {

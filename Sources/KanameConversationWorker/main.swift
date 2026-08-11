@@ -206,11 +206,12 @@ private enum KanameConversationWorker {
         }
         var didStartSession = false
         do {
-            let codingRequest = CodexCodingRequest(
+            let codingRequest = CodexCodingRequest.conversation(
                 prompt: request.prompt,
                 model: request.model,
                 reasoningEffort: request.reasoningEffort,
-                sandbox: .readOnly
+                runtimeMode: request.runtimeMode,
+                networkAccess: request.networkAccess
             )
             let liveRun: CodexLiveRun
             if continueExistingSession {
@@ -269,6 +270,8 @@ private enum KanameConversationWorker {
             workspace: URL(fileURLWithPath: request.workspacePath),
             model: request.model,
             reasoningEffort: request.reasoningEffort,
+            runtimeMode: request.runtimeMode,
+            networkAccess: request.networkAccess,
             resumableSessionID: request.resumableNativeThreadID
         ))
         try? await writer.append(

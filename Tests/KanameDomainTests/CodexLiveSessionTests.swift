@@ -105,6 +105,82 @@ struct CodexLiveSessionTests {
     }
 
     @Test
+    func conversationModesMapToCodexAuthorityAndNetworkExactly() throws {
+        let workspace = URL(fileURLWithPath: "/private/tmp/kaname-conversation")
+        let configuration = CodexLiveSessionConfiguration(instance: codexInstance(), workspaceURL: workspace)
+
+        let supervised = CodexCodingRequest.conversation(
+            prompt: "Inspect",
+            model: "gpt-5.6-sol",
+            reasoningEffort: "medium",
+            runtimeMode: .approvalRequired,
+            networkAccess: false
+        )
+        #expect(supervised.sandbox == .readOnly)
+        #expect(supervised.approvalPolicy == .untrusted)
+        #expect(supervised.approvalsReviewer == .user)
+        #expect(supervised.runtimeAuthority == .userConfiguredConversation)
+        let supervisedSandbox = try #require(
+            CodexLiveSession.turnStartParameters(
+                configuration: configuration,
+                request: supervised,
+                threadID: "thread"
+            )["sandboxPolicy"] as? [String: Any]
+        )
+        #expect(supervisedSandbox["type"] as? String == "readOnly")
+        #expect(supervisedSandbox["networkAccess"] as? Bool == false)
+
+        let edits = CodexCodingRequest.conversation(
+            prompt: "Edit",
+            model: "gpt-5.6-sol",
+            reasoningEffort: "high",
+            runtimeMode: .autoAcceptEdits,
+            networkAccess: true
+        )
+        #expect(edits.sandbox == .workspaceWrite)
+        #expect(edits.approvalPolicy == .onRequest)
+        #expect(edits.approvalsReviewer == .user)
+        let editsSandbox = try #require(
+            CodexLiveSession.turnStartParameters(
+                configuration: configuration,
+                request: edits,
+                threadID: "thread"
+            )["sandboxPolicy"] as? [String: Any]
+        )
+        #expect(editsSandbox["networkAccess"] as? Bool == true)
+        #expect(editsSandbox["writableRoots"] as? [String] == [workspace.path])
+
+        let automatic = CodexCodingRequest.conversation(
+            prompt: "Work",
+            model: "gpt-5.6-sol",
+            reasoningEffort: "xhigh",
+            runtimeMode: .auto,
+            networkAccess: false
+        )
+        #expect(automatic.sandbox == .workspaceWrite)
+        #expect(automatic.approvalsReviewer == .autoReview)
+
+        let full = CodexCodingRequest.conversation(
+            prompt: "Work",
+            model: "gpt-5.6-sol",
+            reasoningEffort: "xhigh",
+            runtimeMode: .fullAccess,
+            networkAccess: false
+        )
+        #expect(full.sandbox == .dangerFullAccess)
+        #expect(full.approvalPolicy == .never)
+        #expect(full.networkAccess)
+        let fullSandbox = try #require(
+            CodexLiveSession.turnStartParameters(
+                configuration: configuration,
+                request: full,
+                threadID: "thread"
+            )["sandboxPolicy"] as? [String: Any]
+        )
+        #expect(fullSandbox["type"] as? String == "dangerFullAccess")
+    }
+
+    @Test
     func persistentIsolatedHomeRetainsHistoryButOnlyReferencesAuthentication() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("kaname-persistent-home-test-\(UUID().uuidString)")

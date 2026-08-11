@@ -105,6 +105,7 @@ mkdir -p "$output_directory"
 "$executable" --desktop-destination calendar --snapshot "$output_directory/calendar.png"
 "$executable" --desktop-destination automations --snapshot "$output_directory/automations.png"
 "$executable" --desktop-destination projects --snapshot "$output_directory/projects.png"
+"$executable" --desktop-new-conversation --snapshot "$output_directory/new-conversation.png"
 "$executable" --desktop-destination projects --desktop-project-id project-kaname --snapshot "$output_directory/project-overview.png"
 "$executable" --desktop-destination knowledge --snapshot "$output_directory/knowledge.png"
 "$executable" --desktop-destination liveCodex --snapshot "$output_directory/coding.png"
@@ -150,6 +151,7 @@ for snapshot in \
     "$output_directory/calendar.png" \
     "$output_directory/automations.png" \
     "$output_directory/projects.png" \
+    "$output_directory/new-conversation.png" \
     "$output_directory/project-overview.png" \
     "$output_directory/knowledge.png" \
     "$output_directory/coding.png" \

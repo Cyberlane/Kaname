@@ -73,11 +73,10 @@ public struct ProviderModel: Codable, Equatable, Sendable {
     public let id: String
     public let displayName: String
     public let isDefault: Bool
-
-    public init(id: String, displayName: String, isDefault: Bool = false) {
-        self.id = id
-        self.displayName = displayName
-        self.isDefault = isDefault
+    public let supportedReasoningEfforts: [String]?
+    public let defaultReasoningEffort: String?
+    public init(id: String, displayName: String, isDefault: Bool = false, supportedReasoningEfforts: [String]? = nil, defaultReasoningEffort: String? = nil) {
+        (self.id, self.displayName, self.isDefault, self.supportedReasoningEfforts, self.defaultReasoningEffort) = (id, displayName, isDefault, supportedReasoningEfforts, defaultReasoningEffort)
     }
 }
 
@@ -107,12 +106,10 @@ public struct ProviderCapabilitySnapshot: Codable, Equatable, Sendable {
         detail: String? = nil
     ) {
         self.instance = instance
-        self.state = state
-        self.installed = installed
+        (self.state, self.installed) = (state, installed)
         self.version = version
         self.authentication = authentication
-        self.models = models
-        self.skills = skills
+        (self.models, self.skills) = (models, skills)
         self.checkedAt = checkedAt
         self.detail = detail
     }

@@ -2,6 +2,7 @@
 import Darwin
 #endif
 import Foundation
+import KanameDomain
 
 public struct KanameConversationServiceRequest: Codable, Equatable, Sendable {
     public let runID: String
@@ -10,6 +11,8 @@ public struct KanameConversationServiceRequest: Codable, Equatable, Sendable {
     public let provider: String
     public let model: String
     public let reasoningEffort: String
+    public let runtimeMode: ConversationRuntimeMode
+    public let networkAccess: Bool
     public let prompt: String
     public let workspacePath: String
     public let providerStatePath: String
@@ -25,6 +28,8 @@ public struct KanameConversationServiceRequest: Codable, Equatable, Sendable {
         provider: String,
         model: String,
         reasoningEffort: String,
+        runtimeMode: ConversationRuntimeMode = .approvalRequired,
+        networkAccess: Bool = false,
         prompt: String,
         workspacePath: String,
         providerStatePath: String,
@@ -35,11 +40,39 @@ public struct KanameConversationServiceRequest: Codable, Equatable, Sendable {
     ) {
         (self.runID, self.threadID, self.projectID) = (runID, threadID, projectID)
         (self.provider, self.model, self.reasoningEffort) = (provider, model, reasoningEffort)
+        (self.runtimeMode, self.networkAccess) = (runtimeMode, runtimeMode == .fullAccess ? true : networkAccess)
         (self.prompt, self.workspacePath, self.providerStatePath) = (prompt, workspacePath, providerStatePath)
         (self.resumableNativeThreadID, self.localCoreMachService, self.localCoreRequirement) = (
             resumableNativeThreadID, localCoreMachService, localCoreRequirement
         )
         self.createdAtUnixMillis = createdAtUnixMillis
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case runID, threadID, projectID, provider, model, reasoningEffort
+        case runtimeMode, networkAccess, prompt, workspacePath, providerStatePath
+        case resumableNativeThreadID, localCoreMachService, localCoreRequirement, createdAtUnixMillis
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        runID = try container.decode(String.self, forKey: .runID)
+        threadID = try container.decode(String.self, forKey: .threadID)
+        projectID = try container.decode(String.self, forKey: .projectID)
+        provider = try container.decode(String.self, forKey: .provider)
+        model = try container.decode(String.self, forKey: .model)
+        reasoningEffort = try container.decode(String.self, forKey: .reasoningEffort)
+        runtimeMode = try container.decodeIfPresent(ConversationRuntimeMode.self, forKey: .runtimeMode) ?? .approvalRequired
+        networkAccess = runtimeMode == .fullAccess
+            ? true
+            : try container.decodeIfPresent(Bool.self, forKey: .networkAccess) ?? false
+        prompt = try container.decode(String.self, forKey: .prompt)
+        workspacePath = try container.decode(String.self, forKey: .workspacePath)
+        providerStatePath = try container.decode(String.self, forKey: .providerStatePath)
+        resumableNativeThreadID = try container.decodeIfPresent(String.self, forKey: .resumableNativeThreadID)
+        localCoreMachService = try container.decode(String.self, forKey: .localCoreMachService)
+        localCoreRequirement = try container.decode(String.self, forKey: .localCoreRequirement)
+        createdAtUnixMillis = try container.decode(Int64.self, forKey: .createdAtUnixMillis)
     }
 }
 

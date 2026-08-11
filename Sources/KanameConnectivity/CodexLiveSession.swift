@@ -1,33 +1,54 @@
 import Foundation
 import KanameDomain
 
-/// The sandbox requested from Codex for a single Kaname turn.  `workspaceWrite`
-/// is deliberately limited to the selected worktree and never implies a network
-/// grant.  Approval callbacks are still declined until the control plane owns a
-/// durable approval flow.
+/// The sandbox requested from Codex for a single Kaname turn. `workspaceWrite`
+/// is limited to the selected worktree; network access remains an independent
+/// per-conversation choice.
 public enum CodexSandboxPolicy: String, Codable, Equatable, Sendable {
     case readOnly
     case workspaceWrite
+    case dangerFullAccess
 
     fileprivate func threadValue() -> String {
         switch self {
         case .readOnly: "read-only"
         case .workspaceWrite: "workspace-write"
+        case .dangerFullAccess: "danger-full-access"
         }
     }
 
-    fileprivate func turnValue(workspaceURL: URL) -> [String: Any] {
+    fileprivate func turnValue(workspaceURL: URL, networkAccess: Bool) -> [String: Any] {
         switch self {
         case .readOnly:
-            ["type": "readOnly", "networkAccess": false]
+            ["type": "readOnly", "networkAccess": networkAccess]
         case .workspaceWrite:
             [
                 "type": "workspaceWrite",
-                "networkAccess": false,
+                "networkAccess": networkAccess,
                 "writableRoots": [workspaceURL.standardizedFileURL.path],
+                "excludeTmpdirEnvVar": false,
+                "excludeSlashTmp": false,
             ]
+        case .dangerFullAccess:
+            ["type": "dangerFullAccess"]
         }
     }
+}
+
+public enum CodexApprovalPolicy: String, Codable, Equatable, Sendable {
+    case untrusted
+    case onRequest = "on-request"
+    case never
+}
+
+public enum CodexApprovalsReviewer: String, Codable, Equatable, Sendable {
+    case user
+    case autoReview = "auto_review"
+}
+
+public enum CodexRuntimeAuthority: Equatable, Sendable {
+    case workflowApprovalRequired
+    case userConfiguredConversation
 }
 
 /// Process and workspace settings belong to the device, not to the durable
@@ -58,9 +79,8 @@ public struct CodexLiveSessionConfiguration: Sendable {
     }
 }
 
-/// Explicit per-run selection.  The Phase 2 default records Justin's chosen
-/// GPT-5.6 Terra / Extra High configuration, but callers can render and select
-/// other advertised choices without changing the provider-neutral identity.
+/// Explicit per-run selection. Legacy Phase 2 callers retain their pinned
+/// defaults while ordinary conversations provide every value explicitly.
 public struct CodexCodingRequest: Sendable {
     public static let maximumPromptBytes = 32 * 1024
 
@@ -68,15 +88,57 @@ public struct CodexCodingRequest: Sendable {
     public let model: String
     public let reasoningEffort: String
     public let sandbox: CodexSandboxPolicy
+    public let networkAccess: Bool
+    public let approvalPolicy: CodexApprovalPolicy
+    public let approvalsReviewer: CodexApprovalsReviewer
+    public let runtimeAuthority: CodexRuntimeAuthority
 
     public init(
         prompt: String,
         model: String = "gpt-5.6-terra",
         reasoningEffort: String = "xhigh",
-        sandbox: CodexSandboxPolicy = .readOnly
+        sandbox: CodexSandboxPolicy = .readOnly,
+        networkAccess: Bool = false,
+        approvalPolicy: CodexApprovalPolicy = .onRequest,
+        approvalsReviewer: CodexApprovalsReviewer = .user,
+        runtimeAuthority: CodexRuntimeAuthority = .workflowApprovalRequired
     ) {
         (self.prompt, self.model, self.reasoningEffort, self.sandbox) =
             (prompt, model, reasoningEffort, sandbox)
+        self.networkAccess = sandbox == .dangerFullAccess ? true : networkAccess
+        self.approvalPolicy = approvalPolicy
+        self.approvalsReviewer = approvalsReviewer
+        self.runtimeAuthority = runtimeAuthority
+    }
+
+    public static func conversation(
+        prompt: String,
+        model: String,
+        reasoningEffort: String,
+        runtimeMode: ConversationRuntimeMode,
+        networkAccess: Bool
+    ) -> Self {
+        let settings: (CodexSandboxPolicy, CodexApprovalPolicy, CodexApprovalsReviewer)
+        switch runtimeMode {
+        case .approvalRequired:
+            settings = (.readOnly, .untrusted, .user)
+        case .autoAcceptEdits:
+            settings = (.workspaceWrite, .onRequest, .user)
+        case .auto:
+            settings = (.workspaceWrite, .onRequest, .autoReview)
+        case .fullAccess:
+            settings = (.dangerFullAccess, .never, .user)
+        }
+        return Self(
+            prompt: prompt,
+            model: model,
+            reasoningEffort: reasoningEffort,
+            sandbox: settings.0,
+            networkAccess: runtimeMode == .fullAccess ? true : networkAccess,
+            approvalPolicy: settings.1,
+            approvalsReviewer: settings.2,
+            runtimeAuthority: .userConfiguredConversation
+        )
     }
 }
 
@@ -414,7 +476,8 @@ public actor CodexLiveSession {
         [
             "cwd": configuration.workspaceURL.path,
             "model": request.model,
-            "approvalPolicy": "on-request",
+            "approvalPolicy": request.approvalPolicy.rawValue,
+            "approvalsReviewer": request.approvalsReviewer.rawValue,
             "sandbox": request.sandbox.threadValue(),
             "ephemeral": configuration.persistentSessionDirectory == nil,
             "threadSource": "kaname",
@@ -430,7 +493,8 @@ public actor CodexLiveSession {
             "threadId": threadID,
             "cwd": configuration.workspaceURL.path,
             "model": request.model,
-            "approvalPolicy": "on-request",
+            "approvalPolicy": request.approvalPolicy.rawValue,
+            "approvalsReviewer": request.approvalsReviewer.rawValue,
             "sandbox": request.sandbox.threadValue(),
             "excludeTurns": true,
         ]
@@ -446,8 +510,12 @@ public actor CodexLiveSession {
             "input": [["type": "text", "text": request.prompt]],
             "model": request.model,
             "effort": request.reasoningEffort,
-            "approvalPolicy": "on-request",
-            "sandboxPolicy": request.sandbox.turnValue(workspaceURL: configuration.workspaceURL),
+            "approvalPolicy": request.approvalPolicy.rawValue,
+            "approvalsReviewer": request.approvalsReviewer.rawValue,
+            "sandboxPolicy": request.sandbox.turnValue(
+                workspaceURL: configuration.workspaceURL,
+                networkAccess: request.networkAccess
+            ),
         ]
     }
 
@@ -469,7 +537,13 @@ public actor CodexLiveSession {
         request: CodexCodingRequest,
         authorization: CodexWorkspaceAuthorization?
     ) async throws {
-        guard request.sandbox == .workspaceWrite else { return }
+        guard request.sandbox != .readOnly else { return }
+        if request.runtimeAuthority == .userConfiguredConversation { return }
+        guard request.sandbox == .workspaceWrite else {
+            throw CodexLiveSessionError.invalidRequest(
+                "full-access turns require an explicit user-configured conversation mode"
+            )
+        }
         guard let authorization,
               authorization.validates(request: request, workspaceURL: configuration.workspaceURL) else {
             throw CodexLiveSessionError.invalidRequest(
