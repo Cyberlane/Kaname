@@ -454,7 +454,13 @@ struct KanameDesktopWorkspace: View {
         }
         .onAppear {
             DesktopBackCommandRouter.shared.install(handleBack)
+            updates.checkForUpdates(manual: false)
         }
+#if os(macOS)
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            updates.checkForUpdates(manual: false)
+        }
+#endif
         .onDisappear {
             DesktopBackCommandRouter.shared.removeHandler()
         }
@@ -3110,16 +3116,27 @@ private final class DesktopLocalReadViewModel: ObservableObject {
 private final class DesktopUpdateViewModel: ObservableObject {
     let environment: KanameDesktopEnvironment
     @Published private(set) var receipt: KanameUpdateReceipt
+    @Published private(set) var discoveryStatus: KanameUpdateDiscoveryStatus = .notChecked
+    @Published private(set) var availableUpdate: KanameAvailableUpdate?
+    @Published private(set) var discoveryPreferences = KanameUpdateDiscoveryPreferences()
     @Published private(set) var isBusy = false
+    @Published private(set) var isChecking = false
     @Published private(set) var canRollback = false
     @Published private(set) var message: String?
 
     private let coordinator: KanameUpdateCoordinator
+    private let catalog: KanameLocalDogfoodUpdateCatalog
+    private let preferenceStore: KanameUpdateDiscoveryPreferencesStore
     private var helperProcess: Process?
+    private var hasLoadedDiscoveryPreferences = false
+    private static let automaticCheckIntervalMillis: Int64 = 6 * 60 * 60 * 1_000
+    private static let deferIntervalMillis: Int64 = 24 * 60 * 60 * 1_000
 
     init(environment: KanameDesktopEnvironment = .current) {
         self.environment = environment
         coordinator = KanameUpdateCoordinator(environment: environment)
+        catalog = KanameLocalDogfoodUpdateCatalog(environment: environment)
+        preferenceStore = KanameUpdateDiscoveryPreferencesStore(environment: environment)
         receipt = KanameUpdateReceipt(
             status: .idle,
             detail: environment.channel == .stable
@@ -3128,6 +3145,132 @@ private final class DesktopUpdateViewModel: ObservableObject {
             updatedAtUnixMillis: 0
         )
         _Concurrency.Task { await refresh() }
+    }
+
+    var currentVersionLabel: String {
+        let versionValue = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString")
+        let buildValue = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion")
+        let version = (versionValue as? String) ?? "Unknown"
+        let build = (buildValue as? String) ?? "—"
+        return "\(version) (\(build))"
+    }
+
+    func checkForUpdates(manual: Bool) {
+        guard environment.channel == .stable, !isChecking else { return }
+        guard manual || hasLoadedDiscoveryPreferences else { return }
+        let now = Int64(Date().timeIntervalSince1970 * 1_000)
+        if !manual {
+            guard discoveryPreferences.automaticChecksEnabled else { return }
+            if let lastAttempt = discoveryPreferences.lastAttemptAtUnixMillis,
+               now - lastAttempt < Self.automaticCheckIntervalMillis {
+                return
+            }
+        }
+        isChecking = true
+        discoveryStatus = .checking
+        message = manual ? "Checking the private local dogfood catalog…" : nil
+        _Concurrency.Task {
+            var preferences = await preferenceStore.load()
+            preferences.lastAttemptAtUnixMillis = now
+            preferences.lastSourceIdentifier = KanameLocalDogfoodUpdateCatalog.sourceIdentifier
+            do {
+                let update = try await catalog.latestUpdate()
+                preferences.lastSuccessAtUnixMillis = now
+                availableUpdate = update
+                if let update, preferences.skippedIdentity == update.identity {
+                    discoveryStatus = .skipped
+                    message = "Build \(update.build) is skipped on this Mac."
+                } else if let update,
+                          preferences.deferredIdentity == update.identity,
+                          (preferences.deferredUntilUnixMillis ?? 0) > now {
+                    discoveryStatus = .deferred
+                    message = "Build \(update.build) is deferred for 24 hours."
+                } else if let update {
+                    discoveryStatus = .available
+                    message = "Kaname \(update.version) (\(update.build)) is available from \(update.sourceLabel)."
+                } else {
+                    discoveryStatus = .upToDate
+                    message = manual ? "This Kaname build is up to date." : nil
+                }
+                try await preferenceStore.save(preferences)
+            } catch {
+                discoveryStatus = .failed
+                message = error.localizedDescription
+                try? await preferenceStore.save(preferences)
+            }
+            discoveryPreferences = preferences
+            isChecking = false
+        }
+    }
+
+    func setAutomaticChecksEnabled(_ enabled: Bool) {
+        var preferences = discoveryPreferences
+        preferences.automaticChecksEnabled = enabled
+        discoveryPreferences = preferences
+        _Concurrency.Task { try? await preferenceStore.save(preferences) }
+    }
+
+    func deferAvailableUpdate() {
+        guard let update = availableUpdate else { return }
+        var preferences = discoveryPreferences
+        preferences.deferredIdentity = update.identity
+        preferences.deferredUntilUnixMillis = Int64(Date().timeIntervalSince1970 * 1_000) + Self.deferIntervalMillis
+        discoveryPreferences = preferences
+        discoveryStatus = .deferred
+        message = "Build \(update.build) is deferred for 24 hours."
+        _Concurrency.Task { try? await preferenceStore.save(preferences) }
+    }
+
+    func reviewAvailableUpdate() {
+        var preferences = discoveryPreferences
+        preferences.deferredIdentity = nil
+        preferences.deferredUntilUnixMillis = nil
+        applyAvailableState(preferences)
+    }
+
+    func skipAvailableUpdate() {
+        guard let update = availableUpdate else { return }
+        var preferences = discoveryPreferences
+        preferences.skippedIdentity = update.identity
+        preferences.deferredIdentity = nil
+        preferences.deferredUntilUnixMillis = nil
+        discoveryPreferences = preferences
+        discoveryStatus = .skipped
+        message = "Build \(update.build) is skipped on this Mac."
+        _Concurrency.Task { try? await preferenceStore.save(preferences) }
+    }
+
+    func unskipAvailableUpdate() {
+        var preferences = discoveryPreferences
+        preferences.skippedIdentity = nil
+        applyAvailableState(preferences)
+    }
+
+    private func applyAvailableState(_ preferences: KanameUpdateDiscoveryPreferences) {
+        discoveryPreferences = preferences
+        discoveryStatus = availableUpdate == nil ? .upToDate : .available
+        message = availableUpdate.map { "Kaname \($0.version) (\($0.build)) is available from \($0.sourceLabel)." }
+        _Concurrency.Task { try? await preferenceStore.save(preferences) }
+    }
+
+    func verifyAndStageAvailable() {
+        guard let update = availableUpdate, !isBusy else { return }
+        isBusy = true
+        discoveryStatus = .verifying
+        message = "Rechecking the digest and same-signer trust before staging…"
+        _Concurrency.Task {
+            do {
+                let artifactURL = try await catalog.verifiedArtifactURL(for: update)
+                receipt = try await coordinator.stage(bundleURL: artifactURL)
+                discoveryStatus = .staged
+                message = "Update ready. Your current Kaname remains active until you choose Switch and relaunch."
+            } catch {
+                discoveryStatus = .failed
+                message = error.localizedDescription
+            }
+            isBusy = false
+            await refreshRollbackAvailability()
+        }
     }
 
     func chooseAndStage() {
@@ -3212,7 +3355,10 @@ private final class DesktopUpdateViewModel: ObservableObject {
 
     private func refresh() async {
         receipt = await coordinator.receipt()
+        discoveryPreferences = await preferenceStore.load()
+        hasLoadedDiscoveryPreferences = true
         await refreshRollbackAvailability()
+        checkForUpdates(manual: false)
     }
 
     private func refreshRollbackAvailability() async {
@@ -6274,6 +6420,10 @@ private struct DesktopSettingsShell: View {
         .accessibilityLabel("Kaname settings")
         .onAppear {
             DispatchQueue.main.async { focusedCategory = category }
+            if category == .updates { updates.checkForUpdates(manual: false) }
+        }
+        .onChange(of: category) { selected in
+            if selected == .updates { updates.checkForUpdates(manual: false) }
         }
     }
 
@@ -6531,6 +6681,64 @@ private struct DesktopSettingsShell: View {
 
     private var updatesPage: some View {
         VStack(spacing: 14) {
+            SettingsSection(title: "Update availability", symbol: "arrow.down.circle.fill") {
+                LabeledContent("Installed", value: updates.currentVersionLabel)
+                LabeledContent("Discovery", value: updates.discoveryStatus.rawValue.capitalized)
+                if updates.environment.channel == .stable {
+                    Toggle("Check the private local catalog automatically", isOn: Binding(
+                        get: { updates.discoveryPreferences.automaticChecksEnabled },
+                        set: { updates.setAutomaticChecksEnabled($0) }
+                    ))
+                    Text("Automatic checks run after launch, when Kaname becomes active, and when you open Updates, at most once every six hours.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if let checkedAt = updates.discoveryPreferences.lastSuccessAtUnixMillis {
+                        LabeledContent(
+                            "Last successful check",
+                            value: Date(timeIntervalSince1970: Double(checkedAt) / 1_000).formatted(date: .abbreviated, time: .shortened)
+                        )
+                    }
+                    HStack {
+                        Button("Check now", systemImage: "arrow.clockwise") { updates.checkForUpdates(manual: true) }
+                            .disabled(updates.isChecking || updates.isBusy)
+                        if updates.discoveryStatus == .deferred {
+                            Button("Review now", systemImage: "eye") { updates.reviewAvailableUpdate() }
+                        }
+                        if updates.discoveryStatus == .skipped {
+                            Button("Unskip", systemImage: "arrow.uturn.backward") { updates.unskipAvailableUpdate() }
+                        }
+                    }
+                    if let update = updates.availableUpdate {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Label("Kaname \(update.version) (\(update.build))", systemImage: "shippingbox.fill")
+                                .font(.headline)
+                            LabeledContent("Source", value: update.sourceLabel)
+                            LabeledContent("Published", value: Date(timeIntervalSince1970: Double(update.publishedAtUnixMillis) / 1_000).formatted(date: .abbreviated, time: .shortened))
+                            Text(update.releaseNotes)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                            HStack {
+                                Button("Verify and stage", systemImage: "checkmark.shield") {
+                                    updates.verifyAndStageAvailable()
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(updates.isBusy || updates.discoveryStatus == .skipped)
+                                Button("Remind me in 24 hours", systemImage: "clock") { updates.deferAvailableUpdate() }
+                                    .disabled(updates.isBusy)
+                            }
+                            Button("Skip this exact build", systemImage: "forward.end") { updates.skipAvailableUpdate() }
+                                .disabled(updates.isBusy)
+                        }
+                        .padding(12)
+                        .background(Nord.polarNight2.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
+                    }
+                } else {
+                    Label("Candidate never reads, publishes, or stages the stable update catalog.", systemImage: "testtube.2")
+                        .font(.caption)
+                        .foregroundStyle(Nord.frost1)
+                }
+            }
             SettingsSection(title: "Update continuity", symbol: "arrow.triangle.2.circlepath.circle.fill") {
                 LabeledContent("Channel", value: updates.environment.displayName)
                 LabeledContent("State", value: updates.receipt.status.rawValue.capitalized)
@@ -6558,15 +6766,17 @@ private struct DesktopSettingsShell: View {
                     }
                 }
                 if updates.environment.channel == .stable {
-                    HStack {
-                        Button("Choose verified update…", systemImage: "shippingbox") { updates.chooseAndStage() }
-                            .disabled(updates.isBusy)
-                        Button("Switch and relaunch", systemImage: "arrow.clockwise") {
-                            updates.switchAndRelaunch(model: model)
+                    Grid(horizontalSpacing: 8) {
+                        GridRow {
+                            Button("Choose update manually…", systemImage: "folder") { updates.chooseAndStage() }
+                                .disabled(updates.isBusy)
+                            Button("Switch and relaunch", systemImage: "arrow.clockwise") {
+                                updates.switchAndRelaunch(model: model)
+                            }
+                            .disabled(updates.isBusy || updates.receipt.status != .staged)
+                            Button("Rollback", systemImage: "arrow.uturn.backward") { updates.rollback(model: model) }
+                                .disabled(updates.isBusy || !updates.canRollback)
                         }
-                        .disabled(updates.isBusy || updates.receipt.status != .staged)
-                        Button("Rollback", systemImage: "arrow.uturn.backward") { updates.rollback(model: model) }
-                            .disabled(updates.isBusy || !updates.canRollback)
                     }
                 } else {
                     Label("Candidate state is isolated. Qualify here, then stage a stable-identity build from stable Kaname.", systemImage: "testtube.2")

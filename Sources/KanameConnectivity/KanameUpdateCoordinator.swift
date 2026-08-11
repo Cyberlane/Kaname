@@ -64,6 +64,13 @@ public struct KanameUpdateLaunchRequest: Equatable, Sendable {
     public let arguments: [String]
 }
 
+public struct KanameValidatedUpdateBundle: Equatable, Sendable {
+    public let bundleURL: URL
+    public let manifest: KanameUpdateManifest
+    public let bundleDigest: String
+    public let signerDigest: String
+}
+
 public enum KanameUpdateError: Error, Equatable, LocalizedError, Sendable {
     case stableChannelRequired
     case invalidBundle
@@ -131,6 +138,33 @@ public actor KanameUpdateCoordinator {
     }
 
     public func stage(bundleURL: URL) async throws -> KanameUpdateReceipt {
+        let validated = try await validate(bundleURL: bundleURL)
+        let source = validated.bundleURL
+
+        try preparePrivateDirectory(environment.updateDirectory)
+        let stagedParent = stagedBundleURL.deletingLastPathComponent()
+        try preparePrivateDirectory(stagedParent)
+        if fileManager.fileExists(atPath: stagedBundleURL.path) {
+            try fileManager.removeItem(at: stagedBundleURL)
+        }
+        try fileManager.copyItem(at: source, to: stagedBundleURL)
+        let stagedDigest = try Self.bundleDigest(at: stagedBundleURL, fileManager: fileManager)
+        guard stagedDigest == validated.bundleDigest else { throw KanameUpdateError.stagedBundleChanged }
+        let receipt = KanameUpdateReceipt(
+            status: .staged,
+            version: validated.manifest.version,
+            build: validated.manifest.build,
+            bundleDigest: stagedDigest,
+            signerDigest: validated.signerDigest,
+            releaseNotes: validated.manifest.releaseNotes,
+            detail: "Update ready. Kaname will checkpoint local UI state before switching.",
+            updatedAtUnixMillis: now()
+        )
+        try save(receipt)
+        return receipt
+    }
+
+    public func validate(bundleURL: URL) async throws -> KanameValidatedUpdateBundle {
         guard environment.channel == .stable else { throw KanameUpdateError.stableChannelRequired }
         let source = bundleURL.standardizedFileURL
         try Self.validateDistinctBundlePaths(
@@ -165,28 +199,12 @@ public actor KanameUpdateCoordinator {
         }
         try Self.validateForwardUpdate(currentBundleURL: currentBundleURL, candidateBundleURL: source)
         let sourceDigest = try Self.bundleDigest(at: source, fileManager: fileManager)
-
-        try preparePrivateDirectory(environment.updateDirectory)
-        let stagedParent = stagedBundleURL.deletingLastPathComponent()
-        try preparePrivateDirectory(stagedParent)
-        if fileManager.fileExists(atPath: stagedBundleURL.path) {
-            try fileManager.removeItem(at: stagedBundleURL)
-        }
-        try fileManager.copyItem(at: source, to: stagedBundleURL)
-        let stagedDigest = try Self.bundleDigest(at: stagedBundleURL, fileManager: fileManager)
-        guard stagedDigest == sourceDigest else { throw KanameUpdateError.stagedBundleChanged }
-        let receipt = KanameUpdateReceipt(
-            status: .staged,
-            version: Self.bundleValue("CFBundleShortVersionString", at: stagedBundleURL),
-            build: Self.bundleValue("CFBundleVersion", at: stagedBundleURL),
-            bundleDigest: stagedDigest,
-            signerDigest: Self.sha256(candidateIdentity),
-            releaseNotes: manifest.releaseNotes,
-            detail: "Update ready. Kaname will checkpoint local UI state before switching.",
-            updatedAtUnixMillis: now()
+        return KanameValidatedUpdateBundle(
+            bundleURL: source,
+            manifest: manifest,
+            bundleDigest: sourceDigest,
+            signerDigest: Self.sha256(candidateIdentity)
         )
-        try save(receipt)
-        return receipt
     }
 
     public func switchRequest(
@@ -351,7 +369,7 @@ public actor KanameUpdateCoordinator {
         try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: receiptURL.path)
     }
 
-    private static func bundleValue(_ key: String, at bundleURL: URL) -> String? {
+    static func bundleValue(_ key: String, at bundleURL: URL) -> String? {
         guard let bundle = Bundle(url: bundleURL) else { return nil }
         return bundle.object(forInfoDictionaryKey: key) as? String
     }
@@ -499,11 +517,11 @@ public actor KanameUpdateCoordinator {
     }
 }
 
-struct KanameBundleVersion: Comparable, Sendable {
+public struct KanameBundleVersion: Comparable, Sendable {
     let components: [Int]
     let build: Int
 
-    init?(version: String?, build: String?) {
+    public init?(version: String?, build: String?) {
         guard let version, let build, let parsedBuild = Int(build), parsedBuild >= 0 else { return nil }
         let parsed = version.split(separator: ".", omittingEmptySubsequences: false).compactMap { Int($0) }
         guard !parsed.isEmpty,
@@ -513,7 +531,7 @@ struct KanameBundleVersion: Comparable, Sendable {
         self.build = parsedBuild
     }
 
-    static func < (lhs: Self, rhs: Self) -> Bool {
+    public static func < (lhs: Self, rhs: Self) -> Bool {
         let count = max(lhs.components.count, rhs.components.count)
         for index in 0..<count {
             let left = index < lhs.components.count ? lhs.components[index] : 0

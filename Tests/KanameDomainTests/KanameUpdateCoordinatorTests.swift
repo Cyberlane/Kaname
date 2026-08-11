@@ -230,6 +230,149 @@ struct KanameUpdateCoordinatorTests {
         }
     }
 
+    @Test
+    func localDogfoodCatalogSelectsHighestCompatibleStableBuild() async throws {
+        let root = temporaryRoot("catalog-selection")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let environment = KanameDesktopEnvironment(channel: .stable, applicationSupportDirectory: root)
+        let installed = try makeBundle(root: root, name: "Installed", version: "0.15.0", build: "24")
+        let artifacts = environment.dogfoodUpdateDirectory.appending(path: "Artifacts", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: artifacts, withIntermediateDirectories: true)
+        let build25 = try makeBundle(root: artifacts, name: "Kaname-25", version: "0.15.0", build: "25")
+        let build26 = try makeBundle(root: artifacts, name: "Kaname-26", version: "0.15.0", build: "26")
+        try writeCatalog([
+            try release(for: build25, relativePath: "Artifacts/Kaname-25.app", notes: "First"),
+            try release(for: build26, relativePath: "Artifacts/Kaname-26.app", notes: "Latest"),
+        ], environment: environment)
+
+        let catalog = KanameLocalDogfoodUpdateCatalog(environment: environment, currentBundleURL: installed)
+        let update = try #require(try await catalog.latestUpdate())
+        #expect(update.version == "0.15.0")
+        #expect(update.build == "26")
+        #expect(update.releaseNotes == "Latest")
+        #expect(try await catalog.verifiedArtifactURL(for: update) == build26)
+    }
+
+    @Test
+    func candidateDoesNotReadStableDogfoodCatalog() async throws {
+        let root = temporaryRoot("catalog-candidate")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let stableEnvironment = KanameDesktopEnvironment(channel: .stable, applicationSupportDirectory: root)
+        let candidateEnvironment = KanameDesktopEnvironment(channel: .candidate, applicationSupportDirectory: root)
+        let installed = try makeBundle(root: root, name: "Candidate", version: "0.15.0", build: "24")
+        let artifacts = stableEnvironment.dogfoodUpdateDirectory.appending(path: "Artifacts", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: artifacts, withIntermediateDirectories: true)
+        let update = try makeBundle(root: artifacts, name: "Kaname-25", version: "0.15.0", build: "25")
+        try writeCatalog([try release(for: update, relativePath: "Artifacts/Kaname-25.app")], environment: stableEnvironment)
+
+        let catalog = KanameLocalDogfoodUpdateCatalog(environment: candidateEnvironment, currentBundleURL: installed)
+        #expect(try await catalog.latestUpdate() == nil)
+    }
+
+    @Test
+    func localDogfoodCatalogRejectsInvalidAndEscapingEntries() async throws {
+        let root = temporaryRoot("catalog-invalid")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let environment = KanameDesktopEnvironment(channel: .stable, applicationSupportDirectory: root)
+        let installed = try makeBundle(root: root, name: "Installed", version: "0.15.0", build: "24")
+        let outside = try makeBundle(root: root, name: "Outside", version: "0.15.0", build: "25")
+        var escaping = try release(for: outside, relativePath: "Artifacts/../Outside.app")
+        escaping.bundleDigest = String(repeating: "a", count: 64)
+        try writeCatalog([escaping], environment: environment)
+        let catalog = KanameLocalDogfoodUpdateCatalog(environment: environment, currentBundleURL: installed)
+        await #expect(throws: KanameUpdateDiscoveryError.unsafeArtifactPath) {
+            try await catalog.latestUpdate()
+        }
+
+        var first = escaping
+        first.artifactRelativePath = "Artifacts/First.app"
+        var duplicate = first
+        duplicate.artifactRelativePath = "Artifacts/Other.app"
+        try writeCatalog([first, duplicate], environment: environment)
+        await #expect(throws: KanameUpdateDiscoveryError.invalidCatalog) {
+            try await catalog.latestUpdate()
+        }
+    }
+
+    @Test
+    func localDogfoodArtifactDigestIsRecheckedBeforeStaging() async throws {
+        let root = temporaryRoot("catalog-digest")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let environment = KanameDesktopEnvironment(channel: .stable, applicationSupportDirectory: root)
+        let installed = try makeBundle(root: root, name: "Installed", version: "0.15.0", build: "24")
+        let artifacts = environment.dogfoodUpdateDirectory.appending(path: "Artifacts", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: artifacts, withIntermediateDirectories: true)
+        let artifact = try makeBundle(root: artifacts, name: "Kaname-25", version: "0.15.0", build: "25")
+        try Data("original".utf8).write(to: artifact.appending(path: "Contents/MacOS/Kaname"))
+        try writeCatalog([try release(for: artifact, relativePath: "Artifacts/Kaname-25.app")], environment: environment)
+        let catalog = KanameLocalDogfoodUpdateCatalog(environment: environment, currentBundleURL: installed)
+        let update = try #require(try await catalog.latestUpdate())
+
+        try Data("changed".utf8).write(to: artifact.appending(path: "Contents/MacOS/Kaname"))
+        await #expect(throws: KanameUpdateDiscoveryError.artifactDigestMismatch) {
+            try await catalog.verifiedArtifactURL(for: update)
+        }
+    }
+
+    @Test
+    func updateDiscoveryPreferencesDefaultAndRoundTripPrivately() async throws {
+        let root = temporaryRoot("catalog-preferences")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let environment = KanameDesktopEnvironment(channel: .stable, applicationSupportDirectory: root)
+        let store = KanameUpdateDiscoveryPreferencesStore(environment: environment)
+        #expect(await store.load() == KanameUpdateDiscoveryPreferences())
+        let expected = KanameUpdateDiscoveryPreferences(
+            automaticChecksEnabled: false,
+            lastAttemptAtUnixMillis: 10,
+            lastSuccessAtUnixMillis: 9,
+            deferredIdentity: "deferred",
+            deferredUntilUnixMillis: 11,
+            skippedIdentity: "skipped",
+            lastSourceIdentifier: "local-dogfood"
+        )
+        try await store.save(expected)
+        #expect(await store.load() == expected)
+        let attributes = try FileManager.default.attributesOfItem(atPath: environment.dogfoodUpdatePreferencesURL.path)
+        #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
+    }
+
+    private func temporaryRoot(_ label: String) -> URL {
+        FileManager.default.temporaryDirectory
+            .appending(path: "kaname-\(label)-\(UUID().uuidString)", directoryHint: .isDirectory)
+    }
+
+    private func release(
+        for bundle: URL,
+        relativePath: String,
+        notes: String = "Dogfood update"
+    ) throws -> KanameLocalDogfoodCatalogDocument.Release {
+        KanameLocalDogfoodCatalogDocument.Release(
+            version: try #require(Bundle(url: bundle)?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String),
+            build: try #require(Bundle(url: bundle)?.object(forInfoDictionaryKey: "CFBundleVersion") as? String),
+            bundleIdentifier: "com.cyberlane.kaname.desktop",
+            publishedAtUnixMillis: 1,
+            releaseNotes: notes,
+            minimumWorkspaceSchema: 1,
+            maximumWorkspaceSchema: KanameDesktopStateSchema.currentVersion,
+            artifactRelativePath: relativePath,
+            bundleDigest: try KanameUpdateCoordinator.bundleDigest(at: bundle)
+        )
+    }
+
+    private func writeCatalog(
+        _ releases: [KanameLocalDogfoodCatalogDocument.Release],
+        environment: KanameDesktopEnvironment
+    ) throws {
+        try FileManager.default.createDirectory(at: environment.dogfoodUpdateDirectory, withIntermediateDirectories: true)
+        let document = KanameLocalDogfoodCatalogDocument(
+            schemaVersion: 1,
+            channel: "stable",
+            generatedAtUnixMillis: 1,
+            releases: releases
+        )
+        try JSONEncoder().encode(document).write(to: environment.dogfoodUpdateCatalogURL, options: .atomic)
+    }
+
     private func makeBundle(root: URL, name: String, version: String, build: String) throws -> URL {
         let bundle = root.appending(path: "\(name).app", directoryHint: .isDirectory)
         let contents = bundle.appending(path: "Contents", directoryHint: .isDirectory)

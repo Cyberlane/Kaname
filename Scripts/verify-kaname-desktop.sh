@@ -3,8 +3,8 @@
 set -euo pipefail
 
 app_path="${1:-$HOME/Applications/Kaname.app}"
-expected_version="${KANAME_APP_VERSION:-0.14.0}"
-expected_build="${KANAME_APP_BUILD:-23}"
+expected_version="${KANAME_APP_VERSION:-0.15.0}"
+expected_build="${KANAME_APP_BUILD:-24}"
 executable="$app_path/Contents/MacOS/KanamePrototype"
 info="$app_path/Contents/Info.plist"
 channel="$(plutil -extract KanameDesktopChannel raw "$info")"
@@ -132,6 +132,10 @@ mkdir -p "$output_directory"
     --desktop-settings-category providers \
     --snapshot "$output_directory/settings-providers.png"
 "$executable" \
+    --desktop-destination settings \
+    --desktop-settings-category updates \
+    --snapshot "$output_directory/settings-updates.png"
+"$executable" \
     --desktop-destination calendar \
     --desktop-back-target home \
     --post-mouse-back \
@@ -155,6 +159,7 @@ for snapshot in \
     "$output_directory/settings.png" \
     "$output_directory/settings-integrations.png" \
     "$output_directory/settings-providers.png" \
+    "$output_directory/settings-updates.png" \
     "$output_directory/mouse-back.png"
 do
     [[ -s "$snapshot" ]]
