@@ -1,0 +1,180 @@
+{
+  "completionSummary": "The declared terminal node completes after review, validation, and any correlated follow-up.",
+  "contextSummary": "Use frozen current input, verified knowledge, declared artifacts, and explicit negative constraints.",
+  "correlationSummary": "Use a package-defined correlation token and require review when it is ambiguous.",
+  "datasets": [
+    {
+      "id": "case-index",
+      "indexPointers": [
+        "/status"
+      ],
+      "maximumRows": 10000,
+      "name": "Case index",
+      "rowSchema": "{\"type\":\"object\",\"required\":[\"id\",\"status\"],\"properties\":{\"id\":{\"type\":\"string\"},\"status\":{\"type\":\"string\"}},\"additionalProperties\":false}",
+      "scope": "installation",
+      "uniqueKeyPointers": [
+        "/id"
+      ]
+    }
+  ],
+  "icon": "point.3.connected.trianglepath.dotted",
+  "id": "org.example.generic-case-review",
+  "license": "MIT",
+  "name": "Generic case review",
+  "permissions": {
+    "accountIDs": [],
+    "capabilityIDs": [
+      "kaname.model.structured",
+      "kaname.validation.run"
+    ],
+    "dataClassesLeavingDevice": [
+      "Synthetic case text"
+    ],
+    "filesystemScopes": [],
+    "networkDestinations": [],
+    "permissions": [
+      "emailRead",
+      "modelEgress"
+    ]
+  },
+  "schemaVersion": 2,
+  "source": "Kaname synthetic example",
+  "steps": [
+    {
+      "blocking": true,
+      "capabilityID": "kaname.model.structured",
+      "executionPolicy": {
+        "maximumAttempts": 2,
+        "maximumItems": 100,
+        "maximumOutputBytes": 1048576,
+        "timeoutSeconds": 120
+      },
+      "id": "prepare",
+      "isIdempotent": true,
+      "kind": "structuredModel",
+      "name": "Prepare structured proposal",
+      "retryLimit": 1,
+      "transitions": [
+        {
+          "outcome": "succeeded",
+          "predicates": [],
+          "targetStepID": "review"
+        }
+      ]
+    },
+    {
+      "blocking": true,
+      "id": "review",
+      "isIdempotent": true,
+      "kind": "humanReview",
+      "name": "Review proposal",
+      "retryLimit": 0,
+      "reviewContract": {
+        "actions": [
+          {
+            "id": "reject",
+            "isPrimary": false,
+            "kind": "reject",
+            "label": "Reject"
+          },
+          {
+            "id": "approve",
+            "isPrimary": true,
+            "kind": "approve",
+            "label": "Approve"
+          },
+          {
+            "id": "edit",
+            "isPrimary": false,
+            "kind": "edit",
+            "label": "Save edits"
+          }
+        ],
+        "inputSchema": "{\"type\":\"object\",\"required\":[\"id\",\"status\"],\"properties\":{\"id\":{\"type\":\"string\"},\"status\":{\"type\":\"string\"}},\"additionalProperties\":false}",
+        "invalidateValidationOnEdit": true,
+        "outputSchema": "{\"type\":\"object\",\"required\":[\"id\",\"status\"],\"properties\":{\"id\":{\"type\":\"string\"},\"status\":{\"type\":\"string\"}},\"additionalProperties\":false}",
+        "presentationHints": {
+          "status": "segmented"
+        },
+        "summary": "Confirm or edit the structured case proposal before validation.",
+        "title": "Review case proposal"
+      },
+      "transitions": [
+        {
+          "outcome": "approved",
+          "predicates": [],
+          "targetStepID": "validate"
+        },
+        {
+          "outcome": "edited",
+          "predicates": [],
+          "targetStepID": "validate"
+        },
+        {
+          "outcome": "rejected",
+          "predicates": [],
+          "targetStepID": "complete"
+        }
+      ]
+    },
+    {
+      "blocking": true,
+      "capabilityID": "kaname.validation.run",
+      "id": "validate",
+      "isIdempotent": true,
+      "kind": "validate",
+      "name": "Validate exact result",
+      "retryLimit": 0,
+      "transitions": [
+        {
+          "outcome": "succeeded",
+          "predicates": [],
+          "targetStepID": "wait"
+        }
+      ]
+    },
+    {
+      "blocking": true,
+      "id": "wait",
+      "isIdempotent": true,
+      "kind": "waitForEmail",
+      "name": "Wait for correlated follow-up",
+      "retryLimit": 0,
+      "transitions": [
+        {
+          "outcome": "succeeded",
+          "predicates": [],
+          "targetStepID": "complete"
+        },
+        {
+          "outcome": "timedOut",
+          "predicates": [],
+          "targetStepID": "complete"
+        }
+      ],
+      "waitContract": {
+        "accountPointer": "/accountID",
+        "connectorID": "kaname.gmail",
+        "conversationPointer": "/conversationID",
+        "correlationPointer": "/correlation",
+        "source": "gmail",
+        "supersedePrior": true,
+        "timeoutSeconds": 604800
+      }
+    },
+    {
+      "blocking": true,
+      "id": "complete",
+      "isIdempotent": true,
+      "kind": "complete",
+      "name": "Complete",
+      "retryLimit": 0
+    }
+  ],
+  "summary": "A domain-neutral v2 package demonstrating typed routing, structured review, datasets, and resumable waits.",
+  "triggers": [
+    "email",
+    "manual"
+  ],
+  "version": "2.0.0"
+}

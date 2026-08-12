@@ -37,7 +37,8 @@ public enum DesktopWorkflowCapabilityInvocationResult: Equatable, Sendable {
         output: Data,
         artifactIDs: [String],
         commitProposal: DesktopWorkflowCapabilityCommitProposal = .init(),
-        artifactMetadata: [DesktopWorkflowStoredArtifact] = []
+        artifactMetadata: [DesktopWorkflowStoredArtifact] = [],
+        executionEvidence: DesktopWorkflowCapabilityExecutionEvidence = .init()
     )
     case waiting(reason: String)
 }
@@ -150,7 +151,12 @@ public struct DesktopWorkflowInstalledCapabilityInvoker: DesktopWorkflowCapabili
             }
             return .completed(
                 output: result.output, artifactIDs: result.artifacts.map(\.sha256),
-                commitProposal: result.commitProposal, artifactMetadata: metadata
+                commitProposal: result.commitProposal, artifactMetadata: metadata,
+                executionEvidence: .init(
+                    standardOutput: result.standardOutput,
+                    standardError: result.standardError,
+                    elapsedMilliseconds: result.elapsedMilliseconds
+                )
             )
         }
     }
@@ -222,6 +228,9 @@ public final class DesktopWorkflowRuntime {
         }
         if step.kind == .requestApproval {
             guard let attemptID = model.beginWorkflowStep(runID: runID, stepID: step.id, inputDigest: inputDigest),
+                  revision.schemaVersion < 2 || model.recordWorkflowTransition(
+                      runID: runID, fromStepID: step.id, outcome: .approved, value: input
+                  ) != nil,
                   model.completeWorkflowStep(attemptID: attemptID, outputDigest: inputDigest) else {
                 return .failed(stepID: step.id, reason: "Kaname could not commit the approval barrier.")
             }
@@ -231,6 +240,22 @@ public final class DesktopWorkflowRuntime {
             let reason = waitingReason(for: step.kind)
             guard let attemptID = model.beginWorkflowStep(runID: runID, stepID: step.id, inputDigest: inputDigest) else {
                 return .failed(stepID: step.id, reason: "Kaname could not persist the waiting stage.")
+            }
+            if step.kind == .humanReview, step.reviewContract != nil,
+               model.createWorkflowReviewRequest(runID: runID, stepID: step.id, proposedValue: input) == nil {
+                _ = model.completeWorkflowStep(
+                    attemptID: attemptID, outputDigest: nil,
+                    error: "Kaname could not create the schema-driven review request."
+                )
+                return .failed(stepID: step.id, reason: "Kaname could not create the schema-driven review request.")
+            }
+            if step.kind == .waitForEmail, step.waitContract != nil,
+               model.createWorkflowWaitSubscription(runID: runID, stepID: step.id, input: input) == nil {
+                _ = model.completeWorkflowStep(
+                    attemptID: attemptID, outputDigest: nil,
+                    error: "Kaname could not create the durable event subscription."
+                )
+                return .failed(stepID: step.id, reason: "Kaname could not create the durable event subscription.")
             }
             _ = model.interruptWorkflowStepForHost(attemptID: attemptID, reason: reason)
             return .waiting(stepID: step.id, reason: reason)
@@ -243,6 +268,9 @@ public final class DesktopWorkflowRuntime {
             declaredInputs = try workflowInputs(step: step, workItem: workItem, run: run)
         } catch {
             let reason = String(error.localizedDescription.prefix(8_192))
+            if let failureValue = model.routeWorkflowStepFailure(attemptID: attemptID, error: reason) {
+                return .completedStep(stepID: step.id, output: failureValue)
+            }
             _ = model.completeWorkflowStep(attemptID: attemptID, outputDigest: nil, error: reason)
             return .failed(stepID: step.id, reason: reason)
         }
@@ -259,6 +287,24 @@ public final class DesktopWorkflowRuntime {
                 let reason = "The step has no registered capability binding."
                 _ = model.completeWorkflowStep(attemptID: attemptID, outputDigest: nil, error: reason)
                 return .failed(stepID: step.id, reason: reason)
+            }
+            if revision.schemaVersion >= 2 {
+                let outcome: DesktopWorkflowTransitionOutcome
+                if step.kind == .branch {
+                    outcome = DesktopWorkflowGraphResolver.transition(from: step, outcome: .matched, value: input) == nil
+                        ? .notMatched : .matched
+                } else {
+                    outcome = .succeeded
+                }
+                guard model.recordWorkflowTransition(
+                    runID: runID, fromStepID: step.id, outcome: outcome, value: input
+                ) != nil else {
+                    _ = model.completeWorkflowStep(
+                        attemptID: attemptID, outputDigest: nil,
+                        error: "No declared graph transition matched this structured value."
+                    )
+                    return .failed(stepID: step.id, reason: "No declared graph transition matched this structured value.")
+                }
             }
             _ = model.completeWorkflowStep(attemptID: attemptID, outputDigest: inputDigest)
             return .completedStep(stepID: step.id, output: input)
@@ -290,7 +336,10 @@ public final class DesktopWorkflowRuntime {
                 installation: installation
             )
             switch result {
-            case let .completed(output, artifactIDs, commitProposal, artifactMetadata):
+            case let .completed(output, artifactIDs, commitProposal, artifactMetadata, executionEvidence):
+                if let policy = step.executionPolicy, output.count > policy.maximumOutputBytes {
+                    throw DesktopWorkflowCapabilityError.outputInvalid
+                }
                 let digest = SHA256.hash(data: output).map { String(format: "%02x", $0) }.joined()
                 var durableArtifactIDs = artifactIDs
                 var durableArtifactMetadata = artifactMetadata
@@ -305,6 +354,16 @@ public final class DesktopWorkflowRuntime {
                     durableArtifactIDs.append(stored.sha256)
                     durableArtifactMetadata.append(stored)
                 }
+                if revision.schemaVersion >= 2,
+                   model.recordWorkflowTransition(
+                       runID: runID, fromStepID: step.id, outcome: .succeeded, value: output
+                   ) == nil {
+                    _ = model.completeWorkflowStep(
+                        attemptID: attemptID, outputDigest: nil,
+                        error: "No declared graph transition matched the capability output."
+                    )
+                    return .failed(stepID: step.id, reason: "No declared graph transition matched the capability output.")
+                }
                 guard model.completeWorkflowStep(
                     attemptID: attemptID,
                     outputDigest: digest,
@@ -318,6 +377,10 @@ public final class DesktopWorkflowRuntime {
                     )
                     return .failed(stepID: step.id, reason: "Kaname could not commit the capability receipt.")
                 }
+                _ = model.recordWorkflowExecutionReceipt(
+                    attemptID: attemptID, capabilityID: capabilityID, outputDigest: digest,
+                    artifactDigests: durableArtifactIDs, evidence: executionEvidence
+                )
                 return .completedStep(stepID: step.id, output: output)
             case let .waiting(reason):
                 _ = model.interruptWorkflowStepForHost(attemptID: attemptID, reason: reason)
@@ -325,6 +388,9 @@ public final class DesktopWorkflowRuntime {
             }
         } catch {
             let reason = String(error.localizedDescription.prefix(8_192))
+            if let failureValue = model.routeWorkflowStepFailure(attemptID: attemptID, error: reason) {
+                return .completedStep(stepID: step.id, output: failureValue)
+            }
             _ = model.completeWorkflowStep(attemptID: attemptID, outputDigest: nil, error: reason)
             return .failed(stepID: step.id, reason: reason)
         }

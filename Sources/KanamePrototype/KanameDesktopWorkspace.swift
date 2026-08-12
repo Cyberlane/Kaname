@@ -6270,14 +6270,15 @@ private func seedSyntheticWorkflowFixture(model: DesktopAppModel, manifestPath: 
         "kaname.context.compile", "kaname.model.structured", "kaname.artifact.register",
         "kaname.validation.run", "kaname.email.read", "kaname.email.draft", "kaname.email.send"
     ]
-    guard (try? model.installWorkflowPackage(
+    guard let manifest = try? DesktopWorkflowPackageCodec.decode(data, registeredCapabilityIDs: capabilities),
+    (try? model.installWorkflowPackage(
         manifestData: data, registeredCapabilityIDs: capabilities, enable: false
     )) != nil,
-    model.setWorkflowEnabled(id: "org.example.document-revision", enabled: true),
+    model.setWorkflowEnabled(id: manifest.id, enabled: true),
     let workID = model.createWorkflowWorkItem(
-        workflowID: "org.example.document-revision",
-        title: "Northstar document revision",
-        goal: "Deliver a corrected fictional brief with traceable evidence."
+        workflowID: manifest.id,
+        title: "Northstar case review",
+        goal: "Resolve a fictional case with traceable decisions and evidence."
     ),
     let firstEvent = model.observeWorkflowExternalEvent(
         source: "gmail", accountID: "fixture-account", conversationID: "fixture-thread-a",
@@ -6292,11 +6293,11 @@ private func seedSyntheticWorkflowFixture(model: DesktopAppModel, manifestPath: 
     )
     guard let firstEpisode = model.createWorkflowEpisode(
         workItemID: workID, sourceEventID: firstEvent, sourceMessageID: "fixture-message-1",
-        intent: .request, summary: "Create the first revision from the attached fictional brief.",
+        intent: .request, summary: "Prepare the first structured proposal for the fictional case.",
         deltaSummary: "Initial request"
     ),
     let oldFact = model.recordWorkflowFact(
-        workItemID: workID, episodeID: firstEpisode, key: "Output format", value: "PDF",
+        workItemID: workID, episodeID: firstEpisode, key: "Case status", value: "Draft",
         state: .verified, sourceReferenceIDs: ["fixture-message-1"], verifiedBy: "Synthetic validator"
     ),
     let correctionEvent = model.observeWorkflowExternalEvent(
@@ -6306,22 +6307,22 @@ private func seedSyntheticWorkflowFixture(model: DesktopAppModel, manifestPath: 
     ),
     let correctionEpisode = model.createWorkflowEpisode(
         workItemID: workID, sourceEventID: correctionEvent, sourceMessageID: "fixture-message-2",
-        intent: .correction, summary: "Use an editable DOCX and replace the previous PDF requirement.",
-        deltaSummary: "Output format changed from PDF to DOCX"
+        intent: .correction, summary: "Move the case to review and replace the earlier draft status.",
+        deltaSummary: "Case status changed from Draft to Needs review"
     ) else { return }
     _ = model.recordWorkflowFact(
-        workItemID: workID, episodeID: correctionEpisode, key: "Output format", value: "DOCX",
+        workItemID: workID, episodeID: correctionEpisode, key: "Case status", value: "Needs review",
         state: .verified, sourceReferenceIDs: ["fixture-message-2"], verifiedBy: "Synthetic validator",
         supersedesFactID: oldFact
     )
     _ = model.recordWorkflowFact(
-        workItemID: workID, episodeID: correctionEpisode, key: "Delivery preference",
-        value: "Include a concise change summary beside the editable document.",
+        workItemID: workID, episodeID: correctionEpisode, key: "Review note",
+        value: "Include a concise summary of the changed fields.",
         state: .proposed, sourceReferenceIDs: ["fixture-message-2"], verifiedBy: nil
     )
     guard let contextID = model.compileWorkflowContext(
         workItemID: workID, episodeID: correctionEpisode,
-        request: "Create the corrected fictional document.",
+        request: "Prepare the corrected fictional case proposal.",
         references: [
             DesktopWorkflowContextReference.reference(
                 id: "fixture-message-2", kind: "email-message", label: "Latest correction",
@@ -6334,15 +6335,15 @@ private func seedSyntheticWorkflowFixture(model: DesktopAppModel, manifestPath: 
                 reason: "Superseded by the latest correction", estimatedTokens: 160
             )
         ],
-        negativeConstraints: ["Do not use the superseded PDF requirement"]
+        negativeConstraints: ["Do not use the superseded Draft status"]
     ),
     let runID = model.queueWorkflowRun(
         workItemID: workID, episodeID: correctionEpisode, contextSnapshotID: contextID
     ) else { return }
     _ = model.recordWorkflowValidation(
         workItemID: workID, episodeID: correctionEpisode, runID: runID,
-        validatorID: "fixture.document-contract", validatorRevision: "1", targetID: "fixture-output-docx",
-        severity: .blocking, outcome: .passed, summary: "Format and required headings passed."
+        validatorID: "fixture.case-contract", validatorRevision: "1", targetID: "fixture-case-output",
+        severity: .blocking, outcome: .passed, summary: "Required identifiers and status fields passed."
     )
 }
 
@@ -7170,11 +7171,36 @@ private struct WorkflowWorkItemCard: View {
         }
     }
 
+    private var pendingStructuredReviews: [DesktopWorkflowReviewRequestRecord] {
+        model.pendingWorkflowReviews.filter { $0.workItemID == item.id }
+    }
+
+    private var activeWaits: [DesktopWorkflowWaitSubscriptionRecord] {
+        model.activeWorkflowWaits.filter { $0.workItemID == item.id }
+    }
+
+    private var authorityGrants: [DesktopWorkflowAuthorityGrantRecord] {
+        model.snapshot.operations.workflows.authorityGrants.filter { $0.workflowID == item.workflowID }
+            .sorted { ($0.state.rawValue, $0.effectKind, $0.id) < ($1.state.rawValue, $1.effectKind, $1.id) }
+    }
+
+    private var datasetDefinitions: [DesktopWorkflowDatasetDefinition] {
+        guard let revisionID = definition?.currentRevisionID else { return [] }
+        return model.snapshot.operations.workflows.revisions.first { $0.id == revisionID }?.datasetDefinitions ?? []
+    }
+
+    private var executionReceipts: [DesktopWorkflowExecutionReceiptRecord] {
+        let runIDs = Set(model.snapshot.operations.workflows.runs.filter { $0.workItemID == item.id }.map(\.id))
+        return model.snapshot.operations.workflows.executionReceipts.filter { runIDs.contains($0.runID) }
+            .sorted { ($0.createdAtUnixMillis, $0.id) > ($1.createdAtUnixMillis, $1.id) }
+    }
+
     private var waitingHumanReviews: [(runID: String, step: DesktopWorkflowStepDefinition)] {
         model.snapshot.operations.workflows.runs.compactMap { run in
             guard run.workItemID == item.id, run.state == .waiting,
                   let revision = model.snapshot.operations.workflows.revisions.first(where: { $0.id == run.workflowRevisionID }),
-                  let step = revision.steps.first(where: { $0.id == run.currentStepID && $0.kind == .humanReview }) else {
+                  let step = revision.steps.first(where: { $0.id == run.currentStepID && $0.kind == .humanReview }),
+                  !pendingStructuredReviews.contains(where: { $0.runID == run.id && $0.stepID == step.id }) else {
                 return nil
             }
             return (run.id, step)
@@ -7257,6 +7283,18 @@ private struct WorkflowWorkItemCard: View {
                             )
                         }
                     }
+                    if !pendingStructuredReviews.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Decisions").font(.subheadline.weight(.semibold))
+                            ForEach(pendingStructuredReviews) { request in
+                                WorkflowStructuredReviewRow(request: request) { actionID, value in
+                                    model.resolveWorkflowReview(
+                                        id: request.id, actionID: actionID, value: value, reviewer: "Kaname user"
+                                    )
+                                }
+                            }
+                        }
+                    }
                     if !artifactRoles.isEmpty {
                         DisclosureGroup("Artifacts · \(artifactRoles.count)") {
                             VStack(alignment: .leading, spacing: 7) {
@@ -7270,6 +7308,75 @@ private struct WorkflowWorkItemCard: View {
                             VStack(alignment: .leading, spacing: 7) {
                                 ForEach(stateRecords) { record in
                                     WorkflowStateRecordRow(record: record)
+                                }
+                            }
+                            .padding(.top, 8)
+                        }
+                    }
+                    if !datasetDefinitions.isEmpty {
+                        DisclosureGroup("Datasets · \(datasetDefinitions.count)") {
+                            VStack(alignment: .leading, spacing: 7) {
+                                ForEach(datasetDefinitions) { dataset in
+                                    let count = model.snapshot.operations.workflows.datasetRows.filter {
+                                        $0.workflowID == item.workflowID && $0.datasetID == dataset.id
+                                    }.count
+                                    WorkflowDatasetSummaryRow(definition: dataset, rowCount: count)
+                                }
+                            }
+                            .padding(.top, 8)
+                        }
+                    }
+                    if !executionReceipts.isEmpty {
+                        DisclosureGroup("Execution evidence · \(executionReceipts.count)") {
+                            VStack(alignment: .leading, spacing: 8) {
+                                ForEach(executionReceipts) { receipt in
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        LabeledContent {
+                                            Text("\(receipt.elapsedMilliseconds) ms")
+                                                .font(.caption2).foregroundStyle(.secondary)
+                                        } label: {
+                                            Label(receipt.capabilityID, systemImage: "doc.text.magnifyingglass")
+                                                .font(.caption.weight(.semibold))
+                                        }
+                                        Text("Input \(receipt.inputDigest.prefix(12)) · Output \(receipt.outputDigest?.prefix(12) ?? "none")")
+                                            .font(.caption2.monospaced()).foregroundStyle(.secondary)
+                                        if !receipt.standardOutput.isEmpty || !receipt.standardError.isEmpty {
+                                            DisclosureGroup("Privacy-filtered logs") {
+                                                VStack(alignment: .leading, spacing: 4) {
+                                                    if !receipt.standardOutput.isEmpty {
+                                                        Text(receipt.standardOutput).textSelection(.enabled)
+                                                    }
+                                                    if !receipt.standardError.isEmpty {
+                                                        Text(receipt.standardError).foregroundStyle(Nord.auroraYellow).textSelection(.enabled)
+                                                    }
+                                                }
+                                                .font(.caption2.monospaced()).padding(.top, 4)
+                                            }
+                                            .font(.caption2)
+                                        }
+                                    }
+                                    .padding(9)
+                                    .background(Nord.polarNight1.opacity(0.7), in: RoundedRectangle(cornerRadius: 9))
+                                }
+                            }
+                            .padding(.top, 8)
+                        }
+                    }
+                    if !activeWaits.isEmpty {
+                        DisclosureGroup("Waiting subscriptions · \(activeWaits.count)") {
+                            VStack(alignment: .leading, spacing: 7) {
+                                ForEach(activeWaits) { WorkflowWaitRow(wait: $0) }
+                            }
+                            .padding(.top, 8)
+                        }
+                    }
+                    if !authorityGrants.isEmpty {
+                        DisclosureGroup("Standing authority · \(authorityGrants.count)") {
+                            VStack(alignment: .leading, spacing: 7) {
+                                ForEach(authorityGrants) { grant in
+                                    WorkflowAuthorityGrantRow(grant: grant) { requestedState in
+                                        _ = model.setWorkflowAuthorityGrantState(id: grant.id, state: requestedState)
+                                    }
                                 }
                             }
                             .padding(.top, 8)
@@ -7290,18 +7397,26 @@ private struct WorkflowWorkItemCard: View {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("External effects").font(.subheadline.weight(.semibold))
                             ForEach(pendingEffects) { effect in
+                                let preview = model.snapshot.operations.workflows.effectPreviews.first { $0.effectID == effect.id }
                                 let approval = effect.approvalID.flatMap { id in
                                     model.snapshot.operations.approvals.first { $0.id == id }
                                 }
                                 HStack(alignment: .top, spacing: 10) {
-                                    Image(systemName: effect.kind == "gmail-send" ? "paperplane.fill" : "envelope.badge")
+                                    Image(systemName: effect.kind == "gmail-send" ? "paperplane.fill" : "bolt.horizontal.circle")
                                         .foregroundStyle(Nord.auroraYellow)
                                         .frame(width: 20)
                                     VStack(alignment: .leading, spacing: 3) {
-                                        Text(effect.kind == "gmail-send" ? "Send email" : "Create Gmail draft")
+                                        Text(preview?.title ?? effect.kind)
                                             .font(.caption.weight(.semibold))
+                                        if let summary = preview?.summary {
+                                            Text(summary).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+                                        }
                                         Text(effect.exactTarget).font(.caption2).foregroundStyle(.secondary)
                                             .lineLimit(2).textSelection(.enabled)
+                                        if let preview {
+                                            Text("\(preview.itemCount) item\(preview.itemCount == 1 ? "" : "s") · \(preview.reversible ? "reversible" : "not reversible")")
+                                                .font(.caption2).foregroundStyle(.secondary)
+                                        }
                                     }
                                     Spacer()
                                     if effect.approvalID == nil {
@@ -7351,34 +7466,87 @@ private struct WorkflowEpisodeRow: View {
 
     private var runs: [DesktopWorkflowRunRecord] { model.workflowRuns(episodeID: episode.id) }
     private var validations: [DesktopWorkflowValidationRecord] { model.workflowValidations(episodeID: episode.id) }
+    private var reports: [DesktopWorkflowValidatorReportRecord] {
+        let validationIDs = Set(validations.map(\.id))
+        return model.snapshot.operations.workflows.validatorReports.filter { validationIDs.contains($0.validationID) }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            HStack {
-                Image(systemName: episode.state == .superseded ? "arrow.uturn.forward.circle" : "circle.inset.filled")
-                    .foregroundStyle(episode.state.tint)
-                Text("Episode \(episode.ordinal) · \(episode.intent.label)").font(.caption.weight(.semibold))
-                Spacer()
+            LabeledContent {
                 Text(episode.state.label).font(.caption2).foregroundStyle(.secondary)
+            } label: {
+                Label(
+                    "Episode \(episode.ordinal) · \(episode.intent.label)",
+                    systemImage: episode.state == .superseded ? "arrow.uturn.forward.circle" : "circle.inset.filled"
+                )
+                .font(.caption.weight(.semibold)).foregroundStyle(episode.state.tint)
             }
             Text(episode.summary).font(.caption).foregroundStyle(.secondary).lineLimit(3)
-            HStack(spacing: 12) {
-                Label("\(runs.count) run\(runs.count == 1 ? "" : "s")", systemImage: "waveform.path.ecg")
-                Label("\(validations.filter { $0.outcome == .passed }.count) passed", systemImage: "checkmark.circle")
-                let blocking = validations.filter { $0.severity == .blocking && $0.outcome != .passed }.count
-                if blocking > 0 {
-                    Label("\(blocking) blocking", systemImage: "exclamationmark.triangle")
-                        .foregroundStyle(Nord.auroraYellow)
-                }
-            }
-            .font(.caption2).foregroundStyle(.secondary)
+            WorkflowEpisodeMetrics(runs: runs, validations: validations)
             if episode.state == .superseded {
                 Text("Superseded by a later episode; retained as evidence and excluded from current truth by default.")
                     .font(.caption2).foregroundStyle(Nord.auroraYellow)
             }
+            if !validations.isEmpty {
+                WorkflowValidationEvidence(validations: validations, reports: reports)
+            }
         }
         .padding(10)
         .background(Nord.polarNight1.opacity(0.72), in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+private struct WorkflowEpisodeMetrics: View {
+    let runs: [DesktopWorkflowRunRecord]
+    let validations: [DesktopWorkflowValidationRecord]
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Label("\(runs.count) run\(runs.count == 1 ? "" : "s")", systemImage: "waveform.path.ecg")
+            Label("\(validations.filter { $0.outcome == .passed }.count) passed", systemImage: "checkmark.circle")
+            let blocking = validations.filter { $0.severity == .blocking && $0.outcome != .passed }.count
+            if blocking > 0 {
+                Label("\(blocking) blocking", systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(Nord.auroraYellow)
+            }
+        }
+        .font(.caption2).foregroundStyle(.secondary)
+    }
+}
+
+private struct WorkflowValidationEvidence: View {
+    let validations: [DesktopWorkflowValidationRecord]
+    let reports: [DesktopWorkflowValidatorReportRecord]
+
+    var body: some View {
+        DisclosureGroup("Validation evidence · \(validations.count)") {
+            VStack(alignment: .leading, spacing: 7) {
+                ForEach(validations) { validation in
+                    let matchingReports = reports.filter { $0.validationID == validation.id }
+                    VStack(alignment: .leading, spacing: 3) {
+                        LabeledContent {
+                            Text(validation.outcome.label)
+                                .foregroundStyle(validation.outcome == .passed ? Nord.auroraGreen : Nord.auroraYellow)
+                        } label: {
+                            Text(validation.validatorID).fontWeight(.semibold)
+                        }
+                        Text(validation.summary).foregroundStyle(.secondary)
+                        ForEach(matchingReports) { report in
+                            Text("Validator \(report.validatorVersion) · subject \(report.subjectDigest.prefix(12))")
+                                .font(.caption2.monospaced()).foregroundStyle(.secondary)
+                            ForEach(report.findings) { finding in
+                                Label(finding.summary, systemImage: finding.severity == .blocking
+                                    ? "exclamationmark.triangle.fill" : "info.circle")
+                                Text(finding.evidence).foregroundStyle(.secondary).textSelection(.enabled)
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(.top, 6)
+        }
+        .font(.caption2)
     }
 }
 
@@ -7448,10 +7616,10 @@ private struct WorkflowDefinitionCard: View {
                     .padding(.top, 8)
                 } label: {
                     HStack {
-                        Label("Migration readiness", systemImage: readiness.isReady ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                        Label("Host readiness", systemImage: readiness.isReady ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
                             .foregroundStyle(readiness.isReady ? Nord.auroraGreen : Nord.auroraYellow)
                         Spacer()
-                        Text(readiness.isReady ? "Ready for observe-only migration" : "\(readiness.blockedCount) blocked")
+                        Text(readiness.isReady ? "Ready to configure" : "\(readiness.blockedCount) blocked")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -7470,6 +7638,17 @@ private struct WorkflowDefinitionCard: View {
                                         Text("Declared inputs · \(artifactCount) artifact role\(artifactCount == 1 ? "" : "s") · \(stateCount) state value\(stateCount == 1 ? "" : "s")")
                                             .font(.caption2).foregroundStyle(.secondary)
                                     }
+                                    if let transitions = step.transitions, !transitions.isEmpty {
+                                        Text("Routes · " + transitions.map { "\($0.outcome.rawValue) → \($0.targetStepID)" }.joined(separator: " · "))
+                                            .font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+                                    }
+                                    if step.reviewContract != nil {
+                                        Text("Schema-driven human decision").font(.caption2).foregroundStyle(Nord.auroraYellow)
+                                    } else if step.waitContract != nil {
+                                        Text("Durable resumable subscription").font(.caption2).foregroundStyle(Nord.frost0)
+                                    } else if step.agentPolicy != nil {
+                                        Text("Bounded agent · no direct effects").font(.caption2).foregroundStyle(Nord.frost0)
+                                    }
                                 }
                                 Spacer()
                                 if !step.isIdempotent { Text("No automatic retry").font(.caption2).foregroundStyle(Nord.auroraYellow) }
@@ -7485,6 +7664,18 @@ private struct WorkflowDefinitionCard: View {
                         }
                         LabeledContent("Manifest digest", value: String(revision.manifestDigest.prefix(20)) + "…")
                             .font(.caption2).foregroundStyle(.secondary)
+                        if let datasets = revision.datasetDefinitions, !datasets.isEmpty {
+                            Divider()
+                            Text("Declared datasets").font(.caption.weight(.semibold))
+                            ForEach(datasets) { dataset in
+                                WorkflowDatasetSummaryRow(
+                                    definition: dataset,
+                                    rowCount: model.snapshot.operations.workflows.datasetRows.filter {
+                                        $0.workflowID == definition.id && $0.datasetID == dataset.id
+                                    }.count
+                                )
+                            }
+                        }
                     }
                     .padding(.top, 8)
                 }
@@ -7678,6 +7869,8 @@ private extension DesktopWorkflowStepKind {
         case .registerArtifact: "doc.badge.plus"
         case .validate: "checkmark.shield"
         case .branch: "arrow.triangle.branch"
+        case .agent: "brain.head.profile"
+        case .effect: "bolt.horizontal.circle"
         case .humanReview: "person.crop.circle.badge.questionmark"
         case .requestApproval: "hand.raised"
         case .createEmailDraft: "square.and.pencil"
@@ -7699,6 +7892,7 @@ private extension DesktopWorkflowPermission {
         case .fileWrite: "doc.badge.arrow.up"
         case .modelEgress: "brain"
         case .network: "network"
+        case .externalEffects: "bolt.horizontal.circle"
         }
     }
 }

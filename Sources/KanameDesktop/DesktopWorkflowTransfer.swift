@@ -33,7 +33,7 @@ public struct DesktopWorkflowInstallationArtifact: Codable, Equatable, Sendable 
 }
 
 public struct DesktopWorkflowInstallationPayload: Codable, Equatable, Sendable {
-    public static let currentSchemaVersion = 1
+    public static let currentSchemaVersion = 2
 
     public var schemaVersion = Self.currentSchemaVersion
     public let exportedAtUnixMillis: Int64
@@ -232,6 +232,14 @@ public extension DesktopAppModel {
             state.operations.workflows.artifactEdges.append(contentsOf: imported.artifactEdges)
             state.operations.workflows.stateRecords.append(contentsOf: imported.stateRecords)
             state.operations.workflows.artifactRoles.append(contentsOf: imported.artifactRoles)
+            state.operations.workflows.transitionRecords.append(contentsOf: imported.transitionRecords)
+            state.operations.workflows.reviewRequests.append(contentsOf: imported.reviewRequests)
+            state.operations.workflows.waitSubscriptions.append(contentsOf: imported.waitSubscriptions)
+            state.operations.workflows.datasetRows.append(contentsOf: imported.datasetRows)
+            state.operations.workflows.validatorReports.append(contentsOf: imported.validatorReports)
+            state.operations.workflows.executionReceipts.append(contentsOf: imported.executionReceipts)
+            state.operations.workflows.authorityGrants.append(contentsOf: imported.authorityGrants)
+            state.operations.workflows.effectPreviews.append(contentsOf: imported.effectPreviews)
             state.operations.artifacts.append(contentsOf: restoredArtifacts)
             state.appendAudit(
                 domain: "workflow-package",
@@ -272,7 +280,8 @@ public extension DesktopAppModel {
                 permissions: revision.permissions,
                 correlationSummary: revision.correlationSummary,
                 contextSummary: revision.contextSummary,
-                completionSummary: revision.completionSummary
+                completionSummary: revision.completionSummary,
+                datasets: revision.datasetDefinitions
             )
             let canonical = try DesktopWorkflowPackageCodec.canonicalData(manifest)
             if DesktopWorkflowPackageCodec.digest(canonical) == revision.manifestDigest {
@@ -312,6 +321,17 @@ public extension DesktopAppModel {
         for index in state.effects.indices where pendingEffects.contains(state.effects[index].state) {
             state.effects[index].state = .cancelled
             state.effects[index].approvalID = nil
+        }
+        for index in state.reviewRequests.indices where state.reviewRequests[index].state == .pending {
+            state.reviewRequests[index].state = .cancelled
+            state.reviewRequests[index].resolvedAtUnixMillis = timestamp
+        }
+        for index in state.waitSubscriptions.indices where state.waitSubscriptions[index].state == .active {
+            state.waitSubscriptions[index].state = .cancelled
+            state.waitSubscriptions[index].resolvedAtUnixMillis = timestamp
+        }
+        for index in state.authorityGrants.indices {
+            state.authorityGrants[index].state = .revoked
         }
     }
 
@@ -357,7 +377,19 @@ public extension DesktopAppModel {
             stateRecords: snapshot.operations.workflows.stateRecords.filter { $0.workflowID == workflowID },
             artifactRoles: snapshot.operations.workflows.artifactRoles.filter { workItemIDs.contains($0.workItemID) },
             capabilityInstallations: [],
-            runtimeClaims: []
+            runtimeClaims: [],
+            transitionRecords: snapshot.operations.workflows.transitionRecords.filter { runIDs.contains($0.runID) },
+            reviewRequests: snapshot.operations.workflows.reviewRequests.filter { runIDs.contains($0.runID) },
+            waitSubscriptions: snapshot.operations.workflows.waitSubscriptions.filter { runIDs.contains($0.runID) },
+            datasetRows: snapshot.operations.workflows.datasetRows.filter { $0.workflowID == workflowID },
+            validatorReports: snapshot.operations.workflows.validatorReports.filter { report in
+                snapshot.operations.workflows.validations.contains { $0.id == report.validationID && runIDs.contains($0.runID) }
+            },
+            executionReceipts: snapshot.operations.workflows.executionReceipts.filter { runIDs.contains($0.runID) },
+            authorityGrants: snapshot.operations.workflows.authorityGrants.filter { $0.workflowID == workflowID },
+            effectPreviews: snapshot.operations.workflows.effectPreviews.filter { preview in
+                snapshot.operations.workflows.effects.contains { $0.id == preview.effectID && runIDs.contains($0.runID) }
+            }
         )
     }
 
@@ -427,6 +459,9 @@ public extension DesktopAppModel {
         let workItemIDs = Set(state.workItems.map(\.id))
         let episodeIDs = Set(state.episodes.map(\.id))
         let runIDs = Set(state.runs.map(\.id))
+        let stepAttemptIDs = Set(state.stepAttempts.map(\.id))
+        let validationIDs = Set(state.validations.map(\.id))
+        let effectIDs = Set(state.effects.map(\.id))
         let contextIDs = Set(state.contextSnapshots.map(\.id))
         let externalEventIDs = Set(state.externalEvents.map(\.id))
         let artifactIDs = Set(payload.artifacts.map(\.record.id))
@@ -444,6 +479,9 @@ public extension DesktopAppModel {
               uniqueIDs(state.stepAttempts), uniqueIDs(state.facts), uniqueIDs(state.contextSnapshots),
               uniqueIDs(state.validations), uniqueIDs(state.effects), uniqueIDs(state.externalEvents),
               uniqueIDs(state.artifactEdges), uniqueIDs(state.stateRecords), uniqueIDs(state.artifactRoles),
+              uniqueIDs(state.transitionRecords), uniqueIDs(state.reviewRequests), uniqueIDs(state.waitSubscriptions),
+              uniqueIDs(state.datasetRows), uniqueIDs(state.validatorReports), uniqueIDs(state.executionReceipts),
+              uniqueIDs(state.authorityGrants), uniqueIDs(state.effectPreviews),
               artifactIDs.count == payload.artifacts.count,
               state.capabilityInstallations.isEmpty, state.runtimeClaims.isEmpty,
               state.revisions.allSatisfy({ $0.workflowID == payload.manifest.id }),
@@ -457,8 +495,11 @@ public extension DesktopAppModel {
               }),
               Set(activeArtifactRoles).count == activeArtifactRoles.count,
               state.artifactRoles.allSatisfy({
-                  $0.workflowID == payload.manifest.id && workItemIDs.contains($0.workItemID)
-                      && episodeIDs.contains($0.episodeID) && artifactIDs.contains($0.artifactDigest)
+                  validImportedEpisodeLink(
+                      workflowID: $0.workflowID, expectedWorkflowID: payload.manifest.id,
+                      workItemID: $0.workItemID, workItemIDs: workItemIDs,
+                      episodeID: $0.episodeID, episodeIDs: episodeIDs
+                  ) && artifactIDs.contains($0.artifactDigest)
               }),
               state.conversationBindings.allSatisfy({ workItemIDs.contains($0.workItemID) }),
               state.episodes.allSatisfy({
@@ -478,6 +519,27 @@ public extension DesktopAppModel {
               }),
               state.effects.allSatisfy({
                   workItemIDs.contains($0.workItemID) && episodeIDs.contains($0.episodeID) && runIDs.contains($0.runID)
+              }),
+              state.transitionRecords.allSatisfy({ runIDs.contains($0.runID) }),
+              validImportedRunLinks(
+                  state.reviewRequests, expectedWorkflowID: payload.manifest.id,
+                  workItemIDs: workItemIDs, episodeIDs: episodeIDs, runIDs: runIDs
+              ),
+              validImportedRunLinks(
+                  state.waitSubscriptions, expectedWorkflowID: payload.manifest.id,
+                  workItemIDs: workItemIDs, episodeIDs: episodeIDs, runIDs: runIDs
+              ),
+              state.datasetRows.allSatisfy({
+                  $0.workflowID == payload.manifest.id && $0.revision > 0 && !$0.scopeID.isEmpty
+              }),
+              state.validatorReports.allSatisfy({ validationIDs.contains($0.validationID) }),
+              state.executionReceipts.allSatisfy({
+                  runIDs.contains($0.runID) && stepAttemptIDs.contains($0.stepAttemptID)
+              }),
+              state.authorityGrants.allSatisfy({ $0.workflowID == payload.manifest.id }),
+              state.effectPreviews.allSatisfy({
+                  effectIDs.contains($0.effectID) && $0.request.workflowID == payload.manifest.id
+                      && $0.structuredTarget.count <= 1 * 1_024 * 1_024
               }),
               state.artifactEdges.allSatisfy({ artifactIDs.contains($0.fromArtifactID) }) else {
             throw DesktopWorkflowTransferError.invalidArchive
@@ -502,6 +564,34 @@ public extension DesktopAppModel {
         }
     }
 
+    private func validImportedEpisodeLink(
+        workflowID: String,
+        expectedWorkflowID: String,
+        workItemID: String,
+        workItemIDs: Set<String>,
+        episodeID: String,
+        episodeIDs: Set<String>
+    ) -> Bool {
+        workflowID == expectedWorkflowID && workItemIDs.contains(workItemID) && episodeIDs.contains(episodeID)
+    }
+
+    private func validImportedRunLinks<Link: DesktopWorkflowImportedRunLink>(
+        _ links: [Link],
+        expectedWorkflowID: String,
+        workItemIDs: Set<String>,
+        episodeIDs: Set<String>,
+        runIDs: Set<String>
+    ) -> Bool {
+        for link in links {
+            guard validImportedEpisodeLink(
+                workflowID: link.workflowID, expectedWorkflowID: expectedWorkflowID,
+                workItemID: link.workItemID, workItemIDs: workItemIDs,
+                episodeID: link.episodeID, episodeIDs: episodeIDs
+            ), runIDs.contains(link.runID) else { return false }
+        }
+        return true
+    }
+
     private func uniqueIDs<Value: Identifiable>(_ values: [Value]) -> Bool where Value.ID == String {
         Set(values.map(\.id)).count == values.count
     }
@@ -523,6 +613,14 @@ public extension DesktopAppModel {
             || intersects(payload.state.artifactEdges, current.artifactEdges)
             || intersects(payload.state.stateRecords, current.stateRecords)
             || intersects(payload.state.artifactRoles, current.artifactRoles)
+            || intersects(payload.state.transitionRecords, current.transitionRecords)
+            || intersects(payload.state.reviewRequests, current.reviewRequests)
+            || intersects(payload.state.waitSubscriptions, current.waitSubscriptions)
+            || intersects(payload.state.datasetRows, current.datasetRows)
+            || intersects(payload.state.validatorReports, current.validatorReports)
+            || intersects(payload.state.executionReceipts, current.executionReceipts)
+            || intersects(payload.state.authorityGrants, current.authorityGrants)
+            || intersects(payload.state.effectPreviews, current.effectPreviews)
             || !Set(payload.artifacts.map(\.record.id)).isDisjoint(with: snapshot.operations.artifacts.map(\.id))
     }
 
@@ -564,3 +662,13 @@ public extension DesktopAppModel {
         }
     }
 }
+
+private protocol DesktopWorkflowImportedRunLink {
+    var workflowID: String { get }
+    var workItemID: String { get }
+    var episodeID: String { get }
+    var runID: String { get }
+}
+
+extension DesktopWorkflowReviewRequestRecord: DesktopWorkflowImportedRunLink {}
+extension DesktopWorkflowWaitSubscriptionRecord: DesktopWorkflowImportedRunLink {}

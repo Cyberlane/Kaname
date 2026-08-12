@@ -9,12 +9,12 @@ private func workflowPresentationOrder(
     return comparison == .orderedSame ? left.id < right.id : comparison == .orderedAscending
 }
 
-private enum WorkflowHostStepTransition {
+enum WorkflowHostStepTransition {
     case wait(reason: String)
     case complete(outputDigest: String, artifactIDs: [String])
 }
 
-private extension DesktopAppSnapshot {
+extension DesktopAppSnapshot {
     mutating func applyWorkflowHostStepTransition(
         attemptID: String,
         runID: String,
@@ -184,6 +184,7 @@ public extension DesktopAppModel {
             schemaVersion: manifest.schemaVersion, manifestDigest: digest, steps: manifest.steps,
             permissions: manifest.permissions, correlationSummary: manifest.correlationSummary,
             contextSummary: manifest.contextSummary, completionSummary: manifest.completionSummary,
+            datasetDefinitions: manifest.datasets,
             installedAtUnixMillis: timestamp
         )
         let definition = DesktopWorkflowDefinitionRecord(
@@ -511,6 +512,28 @@ public extension DesktopAppModel {
             return nil
         }
         let attempts = snapshot.operations.workflows.stepAttempts.filter { $0.runID == runID }
+        if revision.schemaVersion >= 2 {
+            var stepID = revision.steps.first?.id
+            var visited = Set<String>()
+            while let currentID = stepID, visited.insert(currentID).inserted,
+                  let step = revision.steps.first(where: { $0.id == currentID }) {
+                let stepAttempts = attempts.filter { $0.stepID == currentID }
+                let handledFailure = snapshot.operations.workflows.transitionRecords.contains {
+                    $0.runID == runID && $0.fromStepID == currentID && $0.outcome == .failed
+                }
+                if !stepAttempts.contains(where: { $0.state == .completed }) && !handledFailure {
+                    if let latest = stepAttempts.max(by: { $0.attempt < $1.attempt }), latest.state == .failed {
+                        guard step.isIdempotent, latest.attempt <= step.retryLimit else { return nil }
+                    }
+                    return step
+                }
+                guard step.kind != .complete else { return nil }
+                stepID = snapshot.operations.workflows.transitionRecords
+                    .filter { $0.runID == runID && $0.fromStepID == currentID }
+                    .max(by: { $0.createdAtUnixMillis < $1.createdAtUnixMillis })?.toStepID
+            }
+            return nil
+        }
         for step in revision.steps {
             let stepAttempts = attempts.filter { $0.stepID == step.id }
             if stepAttempts.contains(where: { $0.state == .completed }) { continue }
@@ -528,9 +551,15 @@ public extension DesktopAppModel {
             return false
         }
         let attempts = snapshot.operations.workflows.stepAttempts.filter { $0.runID == id }
-        guard revision.steps.allSatisfy({ step in
-            attempts.contains(where: { $0.stepID == step.id && $0.state == .completed })
-        }) else { return false }
+        if revision.schemaVersion >= 2 {
+            guard revision.steps.contains(where: { step in
+                step.kind == .complete && attempts.contains(where: { $0.stepID == step.id && $0.state == .completed })
+            }) else { return false }
+        } else {
+            guard revision.steps.allSatisfy({ step in
+                attempts.contains(where: { $0.stepID == step.id && $0.state == .completed })
+            }) else { return false }
+        }
         let timestamp = now()
         return mutate { state in
             guard state.changeRecord(at: \.operations.workflows.runs, id: id, change: { storedRun in
@@ -791,7 +820,7 @@ public extension DesktopAppModel {
     ) -> String? {
         guard let run = snapshot.operations.workflows.runs.first(where: { $0.id == runID && $0.workItemID == workItemID && $0.episodeID == episodeID }),
               let revision = snapshot.operations.workflows.revisions.first(where: { $0.id == run.workflowRevisionID }),
-              revision.steps.contains(where: { $0.id == stepID && [.createEmailDraft, .sendEmail].contains($0.kind) }),
+              revision.steps.contains(where: { $0.id == stepID && [.createEmailDraft, .sendEmail, .effect].contains($0.kind) }),
               !kind.isEmpty, !exactTarget.isEmpty, !contentDigest.isEmpty,
               !snapshot.operations.workflows.validations.contains(where: {
                   $0.runID == runID && $0.severity == .blocking && $0.outcome != .passed && $0.waiverDecisionID == nil
@@ -1103,6 +1132,45 @@ public extension DesktopAppModel {
                 state: .ready
             ),
         ]
+        if revision.schemaVersion >= 2 {
+            checks.append(.init(
+                id: "typed-graph", title: "Typed execution graph",
+                detail: "Every non-terminal stage declares bounded, schema-evaluated transitions with durable decisions.",
+                state: .ready
+            ))
+        } else {
+            checks.append(.init(
+                id: "typed-graph", title: "Ordered compatibility runtime",
+                detail: "This package uses the linear v1 runtime. Repackage as v2 to use decisions, structured reviews, and resumable subscriptions.",
+                state: .attention
+            ))
+        }
+        if revision.steps.contains(where: { $0.reviewContract != nil }) {
+            checks.append(.init(
+                id: "structured-review", title: "Structured review",
+                detail: "Editable decisions are schema-checked, digest-bound, and validation-aware.", state: .ready
+            ))
+        }
+        if revision.steps.contains(where: { $0.waitContract != nil }) {
+            checks.append(.init(
+                id: "resumable-waits", title: "Resumable external waits",
+                detail: "Subscriptions preserve correlation, deadline, supersession, and the event that resumed the run.", state: .ready
+            ))
+        }
+        if let datasets = revision.datasetDefinitions, !datasets.isEmpty {
+            checks.append(.init(
+                id: "datasets", title: "Workflow datasets",
+                detail: "\(datasets.count) schema-validated dataset\(datasets.count == 1 ? "" : "s") use transactional unique-key upserts.",
+                state: .ready
+            ))
+        }
+        if revision.steps.contains(where: { $0.kind == .effect }) {
+            checks.append(.init(
+                id: "connector-effects", title: "Connector effect boundary",
+                detail: "Effects require a trusted preview, exact approval or bounded grant, idempotency, execution, and reconciliation.",
+                state: .ready
+            ))
+        }
         for capabilityID in Set(revision.steps.compactMap(\.capabilityID)).sorted() {
             let installation = workflowCapabilityInstallation(capabilityID: capabilityID)
             let state: DesktopWorkflowMigrationReadinessState

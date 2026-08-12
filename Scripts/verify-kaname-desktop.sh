@@ -120,13 +120,13 @@ run_qualified_app --desktop-destination email --snapshot "$output_directory/emai
 run_qualified_app \
     --desktop-destination email \
     --desktop-email-workflows \
-    --desktop-workflow-fixture "$PWD/Examples/Workflows/document-revision.workflow.json" \
+    --desktop-workflow-fixture "$PWD/Examples/Workflows/generic-case-review.workflow.json" \
     --snapshot "$output_directory/workflow-work.png"
 run_qualified_app \
     --desktop-destination email \
     --desktop-email-workflows \
     --desktop-workflow-definitions \
-    --desktop-workflow-fixture "$PWD/Examples/Workflows/document-revision.workflow.json" \
+    --desktop-workflow-fixture "$PWD/Examples/Workflows/generic-case-review.workflow.json" \
     --snapshot "$output_directory/workflow-definitions.png"
 run_qualified_app --desktop-destination calendar --snapshot "$output_directory/calendar.png"
 run_qualified_app --desktop-destination automations --snapshot "$output_directory/automations.png"

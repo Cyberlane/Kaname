@@ -19,6 +19,8 @@ public enum DesktopWorkflowStepKind: String, Codable, CaseIterable, Equatable, S
     case registerArtifact
     case validate
     case branch
+    case agent
+    case effect
     case humanReview
     case requestApproval
     case createEmailDraft
@@ -36,6 +38,8 @@ public enum DesktopWorkflowStepKind: String, Codable, CaseIterable, Equatable, S
         case .registerArtifact: "Register artifact"
         case .validate: "Validate"
         case .branch: "Decision branch"
+        case .agent: "Bounded agent"
+        case .effect: "Connector effect"
         case .humanReview: "Human review"
         case .requestApproval: "Request approval"
         case .createEmailDraft: "Create email draft"
@@ -55,6 +59,7 @@ public enum DesktopWorkflowPermission: String, Codable, CaseIterable, Equatable,
     case fileWrite
     case modelEgress
     case network
+    case externalEffects
 
     public var label: String {
         switch self {
@@ -66,6 +71,7 @@ public enum DesktopWorkflowPermission: String, Codable, CaseIterable, Equatable,
         case .fileWrite: "Write selected folders"
         case .modelEgress: "Send declared data to a model provider"
         case .network: "Use declared network destinations"
+        case .externalEffects: "Propose effects through trusted connectors"
         }
     }
 }
@@ -82,6 +88,11 @@ public struct DesktopWorkflowStepDefinition: Codable, Equatable, Identifiable, S
     public var blocking: Bool
     public var artifactInputs: [DesktopWorkflowArtifactInputDefinition]?
     public var stateInputs: [DesktopWorkflowStateInputDefinition]?
+    public var transitions: [DesktopWorkflowTransitionDefinition]?
+    public var reviewContract: DesktopWorkflowReviewContract?
+    public var waitContract: DesktopWorkflowWaitContract?
+    public var executionPolicy: DesktopWorkflowExecutionPolicy?
+    public var agentPolicy: DesktopWorkflowAgentPolicy?
 
     public init(
         id: String,
@@ -94,7 +105,12 @@ public struct DesktopWorkflowStepDefinition: Codable, Equatable, Identifiable, S
         isIdempotent: Bool = true,
         blocking: Bool = true,
         artifactInputs: [DesktopWorkflowArtifactInputDefinition]? = nil,
-        stateInputs: [DesktopWorkflowStateInputDefinition]? = nil
+        stateInputs: [DesktopWorkflowStateInputDefinition]? = nil,
+        transitions: [DesktopWorkflowTransitionDefinition]? = nil,
+        reviewContract: DesktopWorkflowReviewContract? = nil,
+        waitContract: DesktopWorkflowWaitContract? = nil,
+        executionPolicy: DesktopWorkflowExecutionPolicy? = nil,
+        agentPolicy: DesktopWorkflowAgentPolicy? = nil
     ) {
         (self.id, self.name, self.kind) = (id, name, kind)
         (self.capabilityID, self.inputSchemaReference, self.outputSchemaReference) = (
@@ -103,6 +119,11 @@ public struct DesktopWorkflowStepDefinition: Codable, Equatable, Identifiable, S
         (self.retryLimit, self.isIdempotent, self.blocking) = (retryLimit, isIdempotent, blocking)
         self.artifactInputs = artifactInputs
         self.stateInputs = stateInputs
+        self.transitions = transitions
+        self.reviewContract = reviewContract
+        self.waitContract = waitContract
+        self.executionPolicy = executionPolicy
+        self.agentPolicy = agentPolicy
     }
 }
 
@@ -165,6 +186,7 @@ public struct DesktopWorkflowRevisionRecord: Codable, Equatable, Identifiable, S
     public var correlationSummary: String
     public var contextSummary: String
     public var completionSummary: String
+    public var datasetDefinitions: [DesktopWorkflowDatasetDefinition]? = nil
     public var installedAtUnixMillis: Int64
 }
 
@@ -588,65 +610,72 @@ public struct DesktopWorkflowPlatformState: Codable, Equatable, Sendable {
     public var artifactRoles: [DesktopWorkflowArtifactRoleRecord]
     public var capabilityInstallations: [DesktopWorkflowCapabilityInstallationRecord]
     public var runtimeClaims: [DesktopWorkflowRuntimeClaimRecord]
+    public var transitionRecords: [DesktopWorkflowTransitionRecord]
+    public var reviewRequests: [DesktopWorkflowReviewRequestRecord]
+    public var waitSubscriptions: [DesktopWorkflowWaitSubscriptionRecord]
+    public var datasetRows: [DesktopWorkflowDatasetRowRecord]
+    public var validatorReports: [DesktopWorkflowValidatorReportRecord]
+    public var executionReceipts: [DesktopWorkflowExecutionReceiptRecord]
+    public var authorityGrants: [DesktopWorkflowAuthorityGrantRecord]
+    public var effectPreviews: [DesktopWorkflowEffectPreviewRecord]
 
     public static let empty = Self(
         definitions: [], revisions: [], triggerBindings: [], workItems: [], conversationBindings: [], episodes: [], runs: [],
         stepAttempts: [], facts: [], contextSnapshots: [], validations: [], effects: [], externalEvents: [], artifactEdges: [],
         stateRecords: [], artifactRoles: [],
-        capabilityInstallations: DesktopWorkflowBuiltinCapabilities.installations(at: 0), runtimeClaims: []
+        capabilityInstallations: DesktopWorkflowBuiltinCapabilities.installations(at: 0), runtimeClaims: [],
+        transitionRecords: [], reviewRequests: [], waitSubscriptions: [], datasetRows: [], validatorReports: [],
+        executionReceipts: [], authorityGrants: [], effectPreviews: []
     )
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
         case definitions, revisions, triggerBindings, workItems, conversationBindings, episodes, runs, stepAttempts, facts
         case contextSnapshots, validations, effects, externalEvents, artifactEdges, stateRecords, artifactRoles
-        case capabilityInstallations, runtimeClaims
+        case capabilityInstallations, runtimeClaims, transitionRecords, reviewRequests, waitSubscriptions, datasetRows
+        case validatorReports, executionReceipts, authorityGrants, effectPreviews
     }
 
-    public init(
-        definitions: [DesktopWorkflowDefinitionRecord], revisions: [DesktopWorkflowRevisionRecord],
-        triggerBindings: [DesktopWorkflowTriggerBindingRecord],
-        workItems: [DesktopWorkflowWorkItemRecord], conversationBindings: [DesktopWorkflowConversationBindingRecord],
-        episodes: [DesktopWorkflowEpisodeRecord], runs: [DesktopWorkflowRunRecord],
-        stepAttempts: [DesktopWorkflowStepAttemptRecord], facts: [DesktopWorkflowFactRecord],
-        contextSnapshots: [DesktopWorkflowContextSnapshotRecord], validations: [DesktopWorkflowValidationRecord],
-        effects: [DesktopWorkflowEffectRecord], externalEvents: [DesktopWorkflowExternalEventRecord],
-        artifactEdges: [DesktopWorkflowArtifactEdgeRecord],
-        stateRecords: [DesktopWorkflowStateRecord] = [], artifactRoles: [DesktopWorkflowArtifactRoleRecord] = [],
-        capabilityInstallations: [DesktopWorkflowCapabilityInstallationRecord] = [],
-        runtimeClaims: [DesktopWorkflowRuntimeClaimRecord] = []
-    ) {
-        (self.definitions, self.revisions, self.triggerBindings) = (definitions, revisions, triggerBindings)
-        (self.workItems, self.conversationBindings, self.episodes) = (workItems, conversationBindings, episodes)
-        (self.runs, self.stepAttempts, self.facts) = (runs, stepAttempts, facts)
-        (self.contextSnapshots, self.validations, self.effects) = (contextSnapshots, validations, effects)
-        (self.externalEvents, self.artifactEdges) = (externalEvents, artifactEdges)
-        (self.stateRecords, self.artifactRoles) = (stateRecords, artifactRoles)
-        (self.capabilityInstallations, self.runtimeClaims) = (capabilityInstallations, runtimeClaims)
-    }
+}
 
+extension DesktopWorkflowPlatformState {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        definitions = try container.decodeIfPresent([DesktopWorkflowDefinitionRecord].self, forKey: .definitions) ?? []
-        revisions = try container.decodeIfPresent([DesktopWorkflowRevisionRecord].self, forKey: .revisions) ?? []
-        triggerBindings = try container.decodeIfPresent([DesktopWorkflowTriggerBindingRecord].self, forKey: .triggerBindings) ?? []
-        workItems = try container.decodeIfPresent([DesktopWorkflowWorkItemRecord].self, forKey: .workItems) ?? []
-        conversationBindings = try container.decodeIfPresent([DesktopWorkflowConversationBindingRecord].self, forKey: .conversationBindings) ?? []
-        episodes = try container.decodeIfPresent([DesktopWorkflowEpisodeRecord].self, forKey: .episodes) ?? []
-        runs = try container.decodeIfPresent([DesktopWorkflowRunRecord].self, forKey: .runs) ?? []
-        stepAttempts = try container.decodeIfPresent([DesktopWorkflowStepAttemptRecord].self, forKey: .stepAttempts) ?? []
-        facts = try container.decodeIfPresent([DesktopWorkflowFactRecord].self, forKey: .facts) ?? []
-        contextSnapshots = try container.decodeIfPresent([DesktopWorkflowContextSnapshotRecord].self, forKey: .contextSnapshots) ?? []
-        validations = try container.decodeIfPresent([DesktopWorkflowValidationRecord].self, forKey: .validations) ?? []
-        effects = try container.decodeIfPresent([DesktopWorkflowEffectRecord].self, forKey: .effects) ?? []
-        externalEvents = try container.decodeIfPresent([DesktopWorkflowExternalEventRecord].self, forKey: .externalEvents) ?? []
-        artifactEdges = try container.decodeIfPresent([DesktopWorkflowArtifactEdgeRecord].self, forKey: .artifactEdges) ?? []
-        stateRecords = try container.decodeIfPresent([DesktopWorkflowStateRecord].self, forKey: .stateRecords) ?? []
-        artifactRoles = try container.decodeIfPresent([DesktopWorkflowArtifactRoleRecord].self, forKey: .artifactRoles) ?? []
-        capabilityInstallations = try container.decodeIfPresent(
-            [DesktopWorkflowCapabilityInstallationRecord].self,
-            forKey: .capabilityInstallations
-        ) ?? []
-        runtimeClaims = try container.decodeIfPresent([DesktopWorkflowRuntimeClaimRecord].self, forKey: .runtimeClaims) ?? []
+        definitions = try Self.decodeArray([DesktopWorkflowDefinitionRecord].self, key: .definitions, from: container)
+        revisions = try Self.decodeArray([DesktopWorkflowRevisionRecord].self, key: .revisions, from: container)
+        triggerBindings = try Self.decodeArray([DesktopWorkflowTriggerBindingRecord].self, key: .triggerBindings, from: container)
+        workItems = try Self.decodeArray([DesktopWorkflowWorkItemRecord].self, key: .workItems, from: container)
+        conversationBindings = try Self.decodeArray([DesktopWorkflowConversationBindingRecord].self, key: .conversationBindings, from: container)
+        episodes = try Self.decodeArray([DesktopWorkflowEpisodeRecord].self, key: .episodes, from: container)
+        runs = try Self.decodeArray([DesktopWorkflowRunRecord].self, key: .runs, from: container)
+        stepAttempts = try Self.decodeArray([DesktopWorkflowStepAttemptRecord].self, key: .stepAttempts, from: container)
+        facts = try Self.decodeArray([DesktopWorkflowFactRecord].self, key: .facts, from: container)
+        contextSnapshots = try Self.decodeArray([DesktopWorkflowContextSnapshotRecord].self, key: .contextSnapshots, from: container)
+        validations = try Self.decodeArray([DesktopWorkflowValidationRecord].self, key: .validations, from: container)
+        effects = try Self.decodeArray([DesktopWorkflowEffectRecord].self, key: .effects, from: container)
+        externalEvents = try Self.decodeArray([DesktopWorkflowExternalEventRecord].self, key: .externalEvents, from: container)
+        artifactEdges = try Self.decodeArray([DesktopWorkflowArtifactEdgeRecord].self, key: .artifactEdges, from: container)
+        stateRecords = try Self.decodeArray([DesktopWorkflowStateRecord].self, key: .stateRecords, from: container)
+        artifactRoles = try Self.decodeArray([DesktopWorkflowArtifactRoleRecord].self, key: .artifactRoles, from: container)
+        capabilityInstallations = try Self.decodeArray(
+            [DesktopWorkflowCapabilityInstallationRecord].self, key: .capabilityInstallations, from: container
+        )
+        runtimeClaims = try Self.decodeArray([DesktopWorkflowRuntimeClaimRecord].self, key: .runtimeClaims, from: container)
+        transitionRecords = try Self.decodeArray([DesktopWorkflowTransitionRecord].self, key: .transitionRecords, from: container)
+        reviewRequests = try Self.decodeArray([DesktopWorkflowReviewRequestRecord].self, key: .reviewRequests, from: container)
+        waitSubscriptions = try Self.decodeArray([DesktopWorkflowWaitSubscriptionRecord].self, key: .waitSubscriptions, from: container)
+        datasetRows = try Self.decodeArray([DesktopWorkflowDatasetRowRecord].self, key: .datasetRows, from: container)
+        validatorReports = try Self.decodeArray([DesktopWorkflowValidatorReportRecord].self, key: .validatorReports, from: container)
+        executionReceipts = try Self.decodeArray([DesktopWorkflowExecutionReceiptRecord].self, key: .executionReceipts, from: container)
+        authorityGrants = try Self.decodeArray([DesktopWorkflowAuthorityGrantRecord].self, key: .authorityGrants, from: container)
+        effectPreviews = try Self.decodeArray([DesktopWorkflowEffectPreviewRecord].self, key: .effectPreviews, from: container)
+    }
+
+    private static func decodeArray<Element: Decodable>(
+        _ type: [Element].Type,
+        key: CodingKeys,
+        from container: KeyedDecodingContainer<CodingKeys>
+    ) throws -> [Element] {
+        try container.decodeIfPresent(type, forKey: key) ?? []
     }
 }
 
@@ -665,6 +694,8 @@ public struct DesktopWorkflowPackageManifest: Codable, Equatable, Sendable {
     public let correlationSummary: String
     public let contextSummary: String
     public let completionSummary: String
+    public var datasets: [DesktopWorkflowDatasetDefinition]? = nil
+
 }
 
 public enum DesktopWorkflowPackageError: Error, Equatable, LocalizedError {
@@ -717,7 +748,9 @@ public enum DesktopWorkflowPackageCodec {
         _ manifest: DesktopWorkflowPackageManifest,
         registeredCapabilityIDs: Set<String>
     ) throws {
-        guard manifest.schemaVersion == 1 else { throw DesktopWorkflowPackageError.invalidSchema }
+        guard manifest.schemaVersion == 1 || manifest.schemaVersion == 2 else {
+            throw DesktopWorkflowPackageError.invalidSchema
+        }
         guard validIdentifier(manifest.id), validVersion(manifest.version) else { throw DesktopWorkflowPackageError.invalidIdentifier }
         let text = [manifest.name, manifest.summary, manifest.source, manifest.license,
                     manifest.correlationSummary, manifest.contextSummary, manifest.completionSummary]
@@ -733,12 +766,24 @@ public enum DesktopWorkflowPackageCodec {
         guard manifest.permissions.capabilityIDs.allSatisfy(registeredCapabilityIDs.contains) else {
             throw DesktopWorkflowPackageError.unsafeCapability
         }
+        guard manifest.steps.allSatisfy({ step in
+            guard let agent = step.agentPolicy else { return step.kind != .agent }
+            let allowed = Set(agent.allowedCapabilityIDs)
+            return step.kind == .agent && allowed.isSubset(of: registeredCapabilityIDs)
+                && allowed.isSubset(of: Set(manifest.permissions.capabilityIDs))
+        }) else {
+            throw DesktopWorkflowPackageError.unsafeCapability
+        }
         if manifest.steps.contains(where: { $0.kind == .sendEmail }),
            !manifest.permissions.permissions.contains(.emailSend) {
             throw DesktopWorkflowPackageError.invalidPermission
         }
         if manifest.steps.contains(where: { $0.kind == .createEmailDraft }),
            !manifest.permissions.permissions.contains(.emailDraft) {
+            throw DesktopWorkflowPackageError.invalidPermission
+        }
+        if manifest.steps.contains(where: { $0.kind == .effect }),
+           !manifest.permissions.permissions.contains(.externalEffects) {
             throw DesktopWorkflowPackageError.invalidPermission
         }
         guard manifest.steps.allSatisfy({ (0...5).contains($0.retryLimit) && ($0.isIdempotent || $0.retryLimit == 0) }) else {
@@ -753,6 +798,20 @@ public enum DesktopWorkflowPackageCodec {
                 }
                 && Set(stateKeys).count == stateKeys.count
         }) else { throw DesktopWorkflowPackageError.invalidSteps }
+        let stepIDs = Set(ids)
+        do {
+            try manifest.steps.forEach { try DesktopWorkflowHostContractValidation.validate(step: $0, stepIDs: stepIDs) }
+            try (manifest.datasets ?? []).forEach(DesktopWorkflowHostContractValidation.validate)
+        } catch {
+            throw DesktopWorkflowPackageError.invalidSteps
+        }
+        guard Set((manifest.datasets ?? []).map(\.id)).count == (manifest.datasets ?? []).count else {
+            throw DesktopWorkflowPackageError.invalidSteps
+        }
+        if manifest.schemaVersion == 2 {
+            do { try DesktopWorkflowHostContractValidation.validateGraph(manifest.steps) }
+            catch { throw DesktopWorkflowPackageError.invalidSteps }
+        }
     }
 
     private static func validIdentifier(_ value: String) -> Bool {

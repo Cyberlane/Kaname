@@ -1,5 +1,11 @@
 # Unreleased
 
+- Add package-v2 typed, acyclic workflow graphs with declarative JSON Pointer decisions, durable selected edges, handled failure routes, and package-v1 compatibility.
+- Add schema-driven editable human review, resumable correlated event subscriptions, explicit timeout routes, and a quiet attention-first Workflow Work surface.
+- Add trusted connector preview, approval or predicate-bounded standing authority, idempotent execution, reconciliation, and unknown-outcome recovery without exposing credentials to capabilities.
+- Add workflow-owned schema-validated datasets with unique-key optimistic upserts, structured validator findings, privacy-filtered execution receipts, bounded agent policies, and complete extension-tree manifests.
+- Preserve all new private records in encrypted installation export and coherent backups while cancelling active waits and reviews and revoking inherited authority on import.
+- Advance the durable workspace schema to 20 so older builds cannot silently discard the generic workflow host state.
 - Add declared cross-step artifact inputs: Kaname materializes immutable role-bound artifacts into a private read-only sandbox area and supplies a provenance manifest without exposing app storage paths.
 - Add schema-validated, revision-checked workflow state. Capability mutations and step completion commit together, and stale optimistic revisions fail closed instead of overwriting newer state.
 - Add reviewable workflow knowledge with work-item, installation, and account-binding scopes. Capability proposals remain outside model context until verified; rejected, expired, and superseded knowledge becomes an explicit negative constraint.

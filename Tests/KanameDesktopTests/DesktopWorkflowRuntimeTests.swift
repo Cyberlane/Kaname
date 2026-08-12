@@ -193,6 +193,7 @@ struct DesktopWorkflowRuntimeTests {
         #expect(model.snapshot.operations.workflows.stepAttempts.count == 3)
         #expect(model.snapshot.operations.workflows.stepAttempts.allSatisfy { $0.state == .completed })
         #expect(model.snapshot.operations.workflows.runs.first(where: { $0.id == runID })?.state == .completed)
+        #expect(model.snapshot.operations.workflows.executionReceipts.count == 2)
     }
 
     @Test
@@ -306,7 +307,7 @@ struct DesktopWorkflowRuntimeTests {
         try store.save(JSONEncoder().encode(old))
         var clock: Int64 = 10_000
         let model = DesktopAppModel(store: store, now: { clock })
-        #expect(model.snapshot.version == 19)
+        #expect(model.snapshot.version == 20)
         #expect(Set(model.workflowCapabilityInstallations.map(\.capabilityID)) == DesktopWorkflowBuiltinCapabilities.identifiers)
 
         let manifest = DesktopWorkflowPackageManifest(
