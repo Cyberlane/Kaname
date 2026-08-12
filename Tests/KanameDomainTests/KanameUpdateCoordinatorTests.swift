@@ -148,6 +148,24 @@ struct KanameUpdateCoordinatorTests {
     }
 
     @Test
+    func bundleWorkspaceSchemaIsReadFromTheCandidateContract() throws {
+        let root = temporaryRoot("candidate-workspace-schema")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let candidate = try makeBundle(
+            root: root,
+            name: "Candidate",
+            version: "0.21.0",
+            build: "39",
+            workspaceSchema: KanameDesktopStateSchema.currentVersion + 1
+        )
+
+        #expect(
+            KanameUpdateCoordinator.workspaceSchemaVersion(at: candidate)
+                == KanameDesktopStateSchema.currentVersion + 1
+        )
+    }
+
+    @Test
     func updatePathsRejectAliasesNestingAndSymbolicLinks() throws {
         let root = FileManager.default.temporaryDirectory
             .appending(path: "kaname-update-paths-\(UUID().uuidString)", directoryHint: .isDirectory)
@@ -466,7 +484,13 @@ struct KanameUpdateCoordinatorTests {
         try JSONEncoder().encode(document).write(to: environment.dogfoodUpdateCatalogURL, options: .atomic)
     }
 
-    private func makeBundle(root: URL, name: String, version: String, build: String) throws -> URL {
+    private func makeBundle(
+        root: URL,
+        name: String,
+        version: String,
+        build: String,
+        workspaceSchema: Int = KanameDesktopStateSchema.currentVersion
+    ) throws -> URL {
         let bundle = root.appending(path: "\(name).app", directoryHint: .isDirectory)
         let contents = bundle.appending(path: "Contents", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(
@@ -479,6 +503,7 @@ struct KanameUpdateCoordinatorTests {
             "CFBundlePackageType": "APPL",
             "CFBundleShortVersionString": version,
             "CFBundleVersion": build,
+            "KanameWorkspaceSchemaVersion": workspaceSchema,
         ]
         let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
         try data.write(to: contents.appending(path: "Info.plist"))

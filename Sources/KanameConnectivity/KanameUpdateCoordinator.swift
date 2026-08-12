@@ -198,6 +198,11 @@ public actor KanameUpdateCoordinator {
             throw KanameUpdateError.invalidManifest
         }
         try Self.validateWorkspaceCompatibility(manifest)
+        guard let targetWorkspaceSchema = Self.workspaceSchemaVersion(at: source),
+              (manifest.minimumWorkspaceSchema...manifest.maximumWorkspaceSchema)
+                .contains(targetWorkspaceSchema) else {
+            throw KanameUpdateError.invalidManifest
+        }
         let candidateIdentity = try await verifiedIdentity(at: source)
         let installedIdentity = try await verifiedIdentity(at: currentBundleURL)
         guard candidateIdentity == installedIdentity else { throw KanameUpdateError.signerMismatch }
@@ -246,12 +251,17 @@ public actor KanameUpdateCoordinator {
             throw KanameUpdateError.signerMismatch
         }
         let manifest = try Self.updateManifest(at: stagedBundleURL)
+        try Self.validateWorkspaceCompatibility(manifest)
+        guard let targetWorkspaceSchema = Self.workspaceSchemaVersion(at: stagedBundleURL),
+              (manifest.minimumWorkspaceSchema...manifest.maximumWorkspaceSchema)
+                .contains(targetWorkspaceSchema) else {
+            throw KanameUpdateError.invalidManifest
+        }
         guard manifest.version == receipt.version,
               manifest.build == receipt.build,
               manifest.releaseNotes == receipt.releaseNotes else {
             throw KanameUpdateError.invalidManifest
         }
-        try Self.validateWorkspaceCompatibility(manifest)
         if Self.notarizationRequired(at: installedBundleURL) {
             guard Self.isDeveloperIDRequirement(stagedIdentity) else { throw KanameUpdateError.signerMismatch }
             try await verifyNotarization(at: stagedBundleURL)
@@ -307,7 +317,7 @@ public actor KanameUpdateCoordinator {
                 "--signer-digest", receipt.signerDigest ?? "",
                 "--health-nonce", healthNonce,
                 "--channel", environment.channel.rawValue,
-                "--workspace-schema", String(KanameDesktopStateSchema.currentVersion),
+                "--workspace-schema", String(targetWorkspaceSchema),
                 "--workspace", workspaceURL.path,
                 "--workspace-rollback", workspaceRollbackURL.path,
                 "--workspace-failed", failedWorkspaceURL.path,
@@ -404,6 +414,15 @@ public actor KanameUpdateCoordinator {
     static func bundleValue(_ key: String, at bundleURL: URL) -> String? {
         guard let bundle = Bundle(url: bundleURL) else { return nil }
         return bundle.object(forInfoDictionaryKey: key) as? String
+    }
+
+    static func workspaceSchemaVersion(at bundleURL: URL) -> Int? {
+        guard let bundle = Bundle(url: bundleURL),
+              let value = bundle.object(forInfoDictionaryKey: "KanameWorkspaceSchemaVersion") as? NSNumber,
+              value.intValue > 0 else {
+            return nil
+        }
+        return value.intValue
     }
 
     private func verifiedIdentity(at bundleURL: URL) async throws -> String {
