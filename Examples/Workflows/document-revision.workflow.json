@@ -1,0 +1,82 @@
+{
+  "completionSummary": "All blocking checks pass and the user explicitly approves any external effect.",
+  "contextSummary": "Use the latest instruction, active verified facts, current artifacts, and explicit superseded exclusions.",
+  "correlationSummary": "Use an exact fictional document identifier and require review when correlation is ambiguous.",
+  "icon": "doc.text.magnifyingglass",
+  "id": "org.example.document-revision",
+  "license": "MIT",
+  "name": "Document revision",
+  "permissions": {
+    "accountIDs": [],
+    "capabilityIDs": [
+      "kaname.context.compile",
+      "kaname.email.draft",
+      "kaname.model.structured",
+      "kaname.validation.run"
+    ],
+    "dataClassesLeavingDevice": [
+      "Fictional request text"
+    ],
+    "filesystemScopes": [],
+    "networkDestinations": [],
+    "permissions": [
+      "emailDraft",
+      "emailRead",
+      "modelEgress"
+    ]
+  },
+  "schemaVersion": 1,
+  "source": "Kaname synthetic example",
+  "steps": [
+    {
+      "blocking": true,
+      "capabilityID": "kaname.context.compile",
+      "id": "compile-context",
+      "isIdempotent": true,
+      "kind": "compileContext",
+      "name": "Compile current context",
+      "retryLimit": 1
+    },
+    {
+      "blocking": true,
+      "capabilityID": "kaname.model.structured",
+      "id": "draft-revision",
+      "isIdempotent": true,
+      "kind": "structuredModel",
+      "name": "Draft the revision",
+      "retryLimit": 1
+    },
+    {
+      "blocking": true,
+      "capabilityID": "kaname.validation.run",
+      "id": "validate",
+      "isIdempotent": true,
+      "kind": "validate",
+      "name": "Validate the output",
+      "retryLimit": 0
+    },
+    {
+      "blocking": true,
+      "capabilityID": "kaname.email.draft",
+      "id": "create-draft",
+      "isIdempotent": true,
+      "kind": "createEmailDraft",
+      "name": "Create a reviewable draft",
+      "retryLimit": 0
+    },
+    {
+      "blocking": true,
+      "id": "review",
+      "isIdempotent": true,
+      "kind": "humanReview",
+      "name": "Review before any effect",
+      "retryLimit": 0
+    }
+  ],
+  "summary": "A fictional correction-heavy document workflow demonstrating durable episodes and context.",
+  "triggers": [
+    "email",
+    "manual"
+  ],
+  "version": "1.0.0"
+}

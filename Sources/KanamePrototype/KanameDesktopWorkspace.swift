@@ -256,6 +256,10 @@ struct KanameDesktopWorkspace: View {
         _personalIntegrations = StateObject(wrappedValue: DesktopPersonalIntegrationViewModel(environment: environment))
         _updates = StateObject(wrappedValue: DesktopUpdateViewModel(environment: environment))
         let arguments = CommandLine.arguments
+        if let fixtureIndex = arguments.firstIndex(of: "--desktop-workflow-fixture"),
+           arguments.indices.contains(fixtureIndex + 1) {
+            seedSyntheticWorkflowFixture(model: desktopModel, manifestPath: arguments[fixtureIndex + 1])
+        }
         usesQALargeText = arguments.contains("--desktop-large-text")
         initialGlobalSearchQuery = arguments.firstIndex(of: "--desktop-search-query")
             .flatMap { arguments.indices.contains($0 + 1) ? arguments[$0 + 1] : nil }
@@ -6254,19 +6258,102 @@ private struct NewVaultScopeSheet: View {
     }
 }
 
+@MainActor
+private func seedSyntheticWorkflowFixture(model: DesktopAppModel, manifestPath: String) {
+    guard model.workflowDefinitions.isEmpty,
+          let data = try? Data(contentsOf: URL(fileURLWithPath: manifestPath)) else { return }
+    let capabilities: Set<String> = [
+        "kaname.context.compile", "kaname.model.structured", "kaname.artifact.register",
+        "kaname.validation.run", "kaname.email.read", "kaname.email.draft", "kaname.email.send"
+    ]
+    guard (try? model.installWorkflowPackage(
+        manifestData: data, registeredCapabilityIDs: capabilities, enable: false
+    )) != nil,
+    model.setWorkflowEnabled(id: "org.example.document-revision", enabled: true),
+    let workID = model.createWorkflowWorkItem(
+        workflowID: "org.example.document-revision",
+        title: "Northstar document revision",
+        goal: "Deliver a corrected fictional brief with traceable evidence."
+    ),
+    let firstEvent = model.observeWorkflowExternalEvent(
+        source: "gmail", accountID: "fixture-account", conversationID: "fixture-thread-a",
+        messageID: "fixture-message-1", cursor: "fixture-history-1", payloadDigest: "fixture-payload-1",
+        deduplicationKey: "fixture:message-1"
+    ) else { return }
+    _ = model.bindWorkflowConversation(
+        workItemID: workID, source: "gmail", accountID: "fixture-account",
+        conversationID: "fixture-thread-a", relationship: .primary,
+        reason: "Exact fictional document identifier", confidence: 1, requiresReview: false,
+        firstMessageID: "fixture-message-1", latestMessageID: "fixture-message-2"
+    )
+    guard let firstEpisode = model.createWorkflowEpisode(
+        workItemID: workID, sourceEventID: firstEvent, sourceMessageID: "fixture-message-1",
+        intent: .request, summary: "Create the first revision from the attached fictional brief.",
+        deltaSummary: "Initial request"
+    ),
+    let oldFact = model.recordWorkflowFact(
+        workItemID: workID, episodeID: firstEpisode, key: "Output format", value: "PDF",
+        state: .verified, sourceReferenceIDs: ["fixture-message-1"], verifiedBy: "Synthetic validator"
+    ),
+    let correctionEvent = model.observeWorkflowExternalEvent(
+        source: "gmail", accountID: "fixture-account", conversationID: "fixture-thread-a",
+        messageID: "fixture-message-2", cursor: "fixture-history-2", payloadDigest: "fixture-payload-2",
+        deduplicationKey: "fixture:message-2"
+    ),
+    let correctionEpisode = model.createWorkflowEpisode(
+        workItemID: workID, sourceEventID: correctionEvent, sourceMessageID: "fixture-message-2",
+        intent: .correction, summary: "Use an editable DOCX and replace the previous PDF requirement.",
+        deltaSummary: "Output format changed from PDF to DOCX"
+    ) else { return }
+    _ = model.recordWorkflowFact(
+        workItemID: workID, episodeID: correctionEpisode, key: "Output format", value: "DOCX",
+        state: .verified, sourceReferenceIDs: ["fixture-message-2"], verifiedBy: "Synthetic validator",
+        supersedesFactID: oldFact
+    )
+    guard let contextID = model.compileWorkflowContext(
+        workItemID: workID, episodeID: correctionEpisode,
+        request: "Create the corrected fictional document.",
+        references: [
+            DesktopWorkflowContextReference.reference(
+                id: "fixture-message-2", kind: "email-message", label: "Latest correction",
+                sourceID: "fixture-message-2", digest: "fixture-payload-2", included: true,
+                reason: "Latest active instruction", estimatedTokens: 180
+            ),
+            DesktopWorkflowContextReference.reference(
+                id: "fixture-message-1", kind: "email-message", label: "Superseded request",
+                sourceID: "fixture-message-1", digest: "fixture-payload-1", included: false,
+                reason: "Superseded by the latest correction", estimatedTokens: 160
+            )
+        ],
+        negativeConstraints: ["Do not use the superseded PDF requirement"]
+    ),
+    let runID = model.queueWorkflowRun(
+        workItemID: workID, episodeID: correctionEpisode, contextSnapshotID: contextID
+    ) else { return }
+    _ = model.recordWorkflowValidation(
+        workItemID: workID, episodeID: correctionEpisode, runID: runID,
+        validatorID: "fixture.document-contract", validatorRevision: "1", targetID: "fixture-output-docx",
+        severity: .blocking, outcome: .passed, summary: "Format and required headings passed."
+    )
+}
+
 private struct DesktopEmailView: View {
     @ObservedObject var model: DesktopAppModel
     @ObservedObject var integrations: DesktopPersonalIntegrationViewModel
     let allowsAutomaticInitialRead: Bool
     @StateObject private var mail = DesktopMailViewModel()
     @State private var showsComposer = false
-    @State private var section = MailSection.inbox
+    @State private var section = CommandLine.arguments.contains("--desktop-email-workflows") ? MailSection.workflows : MailSection.inbox
     @State private var selectedAccountID: String?
     @State private var pendingMutation: GmailThreadMutation?
     @State private var pendingOutboundDraftID: String?
     @State private var pendingOutboundSend = false
     @State private var showsRuleSheet = false
     @State private var replySeed: MailReplySeed?
+    @State private var workflowFilter = CommandLine.arguments.contains("--desktop-workflow-fixture") ? MailWorkflowFilter.active : .needsAttention
+    @State private var workflowCollection = CommandLine.arguments.contains("--desktop-workflow-definitions") ? MailWorkflowCollection.definitions : .work
+    @State private var selectedWorkflowWorkItemID: String?
+    @State private var workflowImportMessage: String?
 
     private var accounts: [DesktopAccountRecord] {
         model.snapshot.domains.accounts.filter { $0.service == .gmail }
@@ -6318,6 +6405,7 @@ private struct DesktopEmailView: View {
                     .disabled(mail.isBusy || googleAccounts.isEmpty)
                     Button("New standing rule", systemImage: "checklist") { showsRuleSheet = true }
                         .disabled(integrations.googleAccounts.isEmpty)
+                    Button("Install workflow package…", systemImage: "shippingbox") { installWorkflowPackage() }
                 } label: {
                     Image(systemName: "ellipsis.circle")
                         .accessibilityLabel("Email actions")
@@ -6331,7 +6419,7 @@ private struct DesktopEmailView: View {
             switch section {
             case .inbox: inboxWorkspace
             case .drafts: draftsWorkspace
-            case .rules: rulesWorkspace
+            case .workflows: workflowsWorkspace
             }
         }
         .background(Nord.polarNight0)
@@ -6488,6 +6576,8 @@ private struct DesktopEmailView: View {
                         .panelStyle()
                     }
 
+                    workflowAssociations(thread: thread)
+
                     ForEach(thread.messages) { message in
                         VStack(alignment: .leading, spacing: 9) {
                             HStack {
@@ -6570,39 +6660,173 @@ private struct DesktopEmailView: View {
         }
     }
 
-    private var rulesWorkspace: some View {
+    private var workflowsWorkspace: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 BoundaryCallout(
-                    title: "Visible, narrow standing authority",
-                    detail: "Rules bind one Gmail account, one saved query, and one reversible action. Trash and send always require an exact approval."
+                    title: "Generic workflows, private behavior",
+                    detail: "Kaname supplies durable work, context, checks, approvals, effects, and observability. Installed packages supply domain behavior; email content can never broaden their authority."
                 )
-                if model.snapshot.operations.mailStandingRules.isEmpty {
-                    EmptyPanel(symbol: "checklist", title: "No standing rules", detail: "Save a narrow archive rule from a tested Gmail query. Rules remain visible and pausable.")
+                Picker("Workflow collection", selection: $workflowCollection) {
+                    ForEach(MailWorkflowCollection.allCases, id: \.self) { Text($0.label).tag($0) }
                 }
-                ForEach(model.snapshot.operations.mailStandingRules) { rule in
-                    HStack(alignment: .top, spacing: 14) {
-                        Image(systemName: rule.enabled ? "checkmark.shield.fill" : "pause.circle").foregroundStyle(rule.enabled ? Nord.auroraGreen : .secondary)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(rule.name).font(.headline)
-                            Text(rule.accountIdentity).font(.caption).foregroundStyle(Nord.frost1)
-                            Text(rule.query).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
-                            Text(rule.action.label).font(.caption).foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Toggle("Enabled", isOn: Binding(
-                            get: { rule.enabled },
-                            set: { model.setMailStandingRuleEnabled(id: rule.id, enabled: $0) }
-                        ))
-                        Button("Run now") { mail.runStandingRule(model: model, rule: rule) }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(!rule.enabled || mail.isBusy)
-                    }
-                    .panelStyle()
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(maxWidth: 420)
+
+                switch workflowCollection {
+                case .work: workflowWorkList
+                case .definitions: workflowDefinitionList
+                case .simpleRules: simpleRuleList
                 }
+                if let workflowImportMessage { BoundaryCallout(title: "Workflow package", detail: workflowImportMessage) }
                 mailStatus
             }
             .padding(24)
+        }
+    }
+
+    @ViewBuilder
+    private var workflowWorkList: some View {
+        Picker("Work state", selection: $workflowFilter) {
+            ForEach(MailWorkflowFilter.allCases, id: \.self) { Text($0.label).tag($0) }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .frame(maxWidth: 520)
+
+        let items = filteredWorkflowItems
+        if items.isEmpty {
+            EmptyPanel(
+                symbol: workflowFilter.symbol,
+                title: workflowFilter.emptyTitle,
+                detail: "Work appears here only after a generic workflow is installed and an event is deliberately associated. Ordinary email remains uncluttered."
+            )
+        } else {
+            ForEach(items) { item in
+                WorkflowWorkItemCard(model: model, item: item, expanded: selectedWorkflowWorkItemID == item.id) {
+                    selectedWorkflowWorkItemID = selectedWorkflowWorkItemID == item.id ? nil : item.id
+                }
+                .onAppear {
+                    if selectedWorkflowWorkItemID == nil,
+                       CommandLine.arguments.contains("--desktop-workflow-fixture") {
+                        selectedWorkflowWorkItemID = item.id
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var workflowDefinitionList: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Installed definitions").font(.headline)
+                Text("Every revision is immutable; broadened authority remains disabled until reviewed.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Install package…", systemImage: "shippingbox") { installWorkflowPackage() }
+                .buttonStyle(.borderedProminent)
+        }
+        if model.workflowDefinitions.isEmpty {
+            EmptyPanel(
+                symbol: "shippingbox",
+                title: "No workflow packages installed",
+                detail: "Install a schema-1 JSON package. Packages refer only to registered capability IDs and cannot embed arbitrary executable paths."
+            )
+        } else {
+            ForEach(model.workflowDefinitions) { definition in
+                WorkflowDefinitionCard(model: model, definition: definition)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var simpleRuleList: some View {
+        BoundaryCallout(
+            title: "Visible, narrow standing authority",
+            detail: "Simple rules bind one Gmail account, one saved query, and one reversible action. Trash and send always require an exact approval."
+        )
+        if model.snapshot.operations.mailStandingRules.isEmpty {
+            EmptyPanel(symbol: "checklist", title: "No simple rules", detail: "Save a narrow archive rule from a tested Gmail query. Rules remain visible and pausable.")
+        }
+        ForEach(model.snapshot.operations.mailStandingRules) { rule in
+            HStack(alignment: .top, spacing: 14) {
+                Image(systemName: rule.enabled ? "checkmark.shield.fill" : "pause.circle")
+                    .foregroundStyle(rule.enabled ? Nord.auroraGreen : .secondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(rule.name).font(.headline)
+                    Text(rule.accountIdentity).font(.caption).foregroundStyle(Nord.frost1)
+                    Text(rule.query).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                    Text(rule.action.label).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Toggle("Enabled", isOn: Binding(
+                    get: { rule.enabled },
+                    set: { model.setMailStandingRuleEnabled(id: rule.id, enabled: $0) }
+                ))
+                Button("Run now") { mail.runStandingRule(model: model, rule: rule) }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!rule.enabled || mail.isBusy)
+            }
+            .panelStyle()
+        }
+    }
+
+    private var filteredWorkflowItems: [DesktopWorkflowWorkItemRecord] {
+        model.workflowWorkItems.filter { item in
+            switch workflowFilter {
+            case .needsAttention: item.state.needsAttention
+            case .active: !item.state.needsAttention && !item.state.isHistorical
+            case .history: item.state.isHistorical
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func workflowAssociations(thread: GmailThreadDetailSnapshot) -> some View {
+        let items = model.workflowWorkItems(accountID: thread.accountID, conversationID: thread.id)
+        if !items.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                LabeledContent {
+                    Text(items.count, format: .number).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                } label: {
+                    Label("Associated workflow work", systemImage: "point.3.connected.trianglepath.dotted").font(.headline)
+                }
+                ForEach(items) { item in
+                    WorkflowWorkItemCard(model: model, item: item, expanded: selectedWorkflowWorkItemID == item.id) {
+                        selectedWorkflowWorkItemID = selectedWorkflowWorkItemID == item.id ? nil : item.id
+                    }
+                }
+            }
+        }
+    }
+
+    private func installWorkflowPackage() {
+        let panel = NSOpenPanel()
+        panel.title = "Install Kaname workflow package"
+        panel.message = "Choose a schema-1 JSON workflow manifest. It is installed disabled until you review and enable it."
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let data = try Data(contentsOf: url, options: [.mappedIfSafe])
+            let builtIns: Set<String> = [
+                "kaname.context.compile", "kaname.model.structured", "kaname.artifact.register",
+                "kaname.validation.run", "kaname.email.read", "kaname.email.draft", "kaname.email.send"
+            ]
+            let registered = builtIns.union(model.snapshot.domains.skills.filter(\.enabled).map(\.id))
+            let revisionID = try model.installWorkflowPackage(
+                manifestData: data,
+                registeredCapabilityIDs: registered,
+                enable: false
+            )
+            workflowImportMessage = "Installed revision \(revisionID) disabled. Review its exact permissions and stages before enabling."
+            workflowCollection = .definitions
+        } catch {
+            workflowImportMessage = "Installation failed safely: \(error.localizedDescription)"
         }
     }
 
@@ -6668,9 +6892,53 @@ private struct DesktopEmailView: View {
 private enum MailSection: String, CaseIterable {
     case inbox
     case drafts
-    case rules
+    case workflows
 
     var label: String { rawValue.capitalized }
+}
+
+private enum MailWorkflowCollection: String, CaseIterable {
+    case work
+    case definitions
+    case simpleRules
+
+    var label: String {
+        switch self {
+        case .work: "Work"
+        case .definitions: "Definitions"
+        case .simpleRules: "Simple rules"
+        }
+    }
+}
+
+private enum MailWorkflowFilter: String, CaseIterable {
+    case needsAttention
+    case active
+    case history
+
+    var label: String {
+        switch self {
+        case .needsAttention: "Needs attention"
+        case .active: "Active"
+        case .history: "History"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .needsAttention: "checkmark.circle"
+        case .active: "waveform.path.ecg"
+        case .history: "clock.arrow.circlepath"
+        }
+    }
+
+    var emptyTitle: String {
+        switch self {
+        case .needsAttention: "Nothing needs attention"
+        case .active: "No active workflow work"
+        case .history: "No workflow history"
+        }
+    }
 }
 
 private struct MailReplySeed: Identifiable {
@@ -6701,6 +6969,415 @@ private struct MailThreadRow: View {
     private func subject(_ message: GmailMessageSnapshot?) -> String {
         guard let subject = message?.subject, !subject.isEmpty else { return "(No subject)" }
         return subject
+    }
+}
+
+private struct WorkflowWorkItemCard: View {
+    @ObservedObject var model: DesktopAppModel
+    let item: DesktopWorkflowWorkItemRecord
+    let expanded: Bool
+    let toggleExpanded: () -> Void
+
+    private var definition: DesktopWorkflowDefinitionRecord? {
+        model.snapshot.operations.workflows.definitions.first { $0.id == item.workflowID }
+    }
+
+    private var episodes: [DesktopWorkflowEpisodeRecord] {
+        model.workflowEpisodes(workItemID: item.id)
+    }
+
+    private var currentEpisode: DesktopWorkflowEpisodeRecord? {
+        item.currentEpisodeID.flatMap { id in episodes.first { $0.id == id } }
+    }
+
+    private var activeFacts: [DesktopWorkflowFactRecord] {
+        model.workflowFacts(workItemID: item.id)
+    }
+
+    private var inactiveFacts: [DesktopWorkflowFactRecord] {
+        model.workflowFacts(workItemID: item.id, includeInactive: true).filter {
+            $0.state == .rejected || $0.state == .superseded
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Button(action: toggleExpanded) {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: definition?.icon ?? "point.3.connected.trianglepath.dotted")
+                        .font(.title3)
+                        .foregroundStyle(item.state.tint)
+                        .frame(width: 28)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(item.title).font(.headline).foregroundStyle(.primary).lineLimit(2)
+                        Text(definition?.name ?? item.workflowID)
+                            .font(.caption).foregroundStyle(Nord.frost1)
+                        Text(item.nextAction).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                    }
+                    Spacer(minLength: 12)
+                    VStack(alignment: .trailing, spacing: 6) {
+                        WorkflowStatePill(state: item.state)
+                        Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                            .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(item.title), \(item.state.label)")
+            .accessibilityHint(expanded ? "Collapse workflow details" : "Show workflow details")
+
+            if expanded {
+                Divider()
+                VStack(alignment: .leading, spacing: 10) {
+                    LabeledContent("Goal", value: item.goal)
+                    if let currentEpisode {
+                        LabeledContent("Current episode", value: "\(currentEpisode.ordinal) · \(currentEpisode.intent.label)")
+                        Text(currentEpisode.deltaSummary.isEmpty ? currentEpisode.summary : currentEpisode.deltaSummary)
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    WorkflowMetricsRow(metrics: [
+                        WorkflowMetricValue(label: "Episodes", value: "\(episodes.count)", tint: Nord.frost1),
+                        WorkflowMetricValue(label: "Active facts", value: "\(activeFacts.count)", tint: Nord.auroraGreen),
+                        WorkflowMetricValue(label: "Superseded", value: "\(inactiveFacts.count)", tint: Nord.auroraYellow)
+                    ])
+                    if !episodes.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Episode history").font(.subheadline.weight(.semibold))
+                            ForEach(episodes.suffix(12)) { episode in
+                                WorkflowEpisodeRow(model: model, episode: episode)
+                            }
+                        }
+                    }
+                    if !activeFacts.isEmpty {
+                        DisclosureGroup("Current truth") {
+                            VStack(alignment: .leading, spacing: 7) {
+                                ForEach(activeFacts) { fact in
+                                    LabeledContent {
+                                        Text(fact.value).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                                    } label: {
+                                        Label(fact.key, systemImage: fact.state == .verified ? "checkmark.seal.fill" : "questionmark.circle")
+                                            .font(.caption.weight(.semibold))
+                                            .foregroundStyle(fact.state == .verified ? Nord.auroraGreen : Nord.auroraYellow)
+                                    }
+                                }
+                            }
+                            .padding(.top, 8)
+                        }
+                    }
+                    if !inactiveFacts.isEmpty {
+                        DisclosureGroup("Superseded or rejected facts") {
+                            VStack(alignment: .leading, spacing: 7) {
+                                ForEach(inactiveFacts) { fact in
+                                    LabeledContent(fact.key, value: fact.value)
+                                        .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                                }
+                            }
+                            .padding(.top, 8)
+                        }
+                    }
+                    if !item.state.isHistorical {
+                        HStack {
+                            Spacer()
+                            Button("Close operationally") { _ = model.closeWorkflowWorkItem(id: item.id, accepted: false) }
+                            Button("Record acceptance") { _ = model.closeWorkflowWorkItem(id: item.id, accepted: true) }
+                                .buttonStyle(.borderedProminent)
+                        }
+                    }
+                }
+            }
+        }
+        .panelStyle()
+    }
+}
+
+private struct WorkflowEpisodeRow: View {
+    @ObservedObject var model: DesktopAppModel
+    let episode: DesktopWorkflowEpisodeRecord
+
+    private var runs: [DesktopWorkflowRunRecord] { model.workflowRuns(episodeID: episode.id) }
+    private var validations: [DesktopWorkflowValidationRecord] { model.workflowValidations(episodeID: episode.id) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Image(systemName: episode.state == .superseded ? "arrow.uturn.forward.circle" : "circle.inset.filled")
+                    .foregroundStyle(episode.state.tint)
+                Text("Episode \(episode.ordinal) · \(episode.intent.label)").font(.caption.weight(.semibold))
+                Spacer()
+                Text(episode.state.label).font(.caption2).foregroundStyle(.secondary)
+            }
+            Text(episode.summary).font(.caption).foregroundStyle(.secondary).lineLimit(3)
+            HStack(spacing: 12) {
+                Label("\(runs.count) run\(runs.count == 1 ? "" : "s")", systemImage: "waveform.path.ecg")
+                Label("\(validations.filter { $0.outcome == .passed }.count) passed", systemImage: "checkmark.circle")
+                let blocking = validations.filter { $0.severity == .blocking && $0.outcome != .passed }.count
+                if blocking > 0 {
+                    Label("\(blocking) blocking", systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(Nord.auroraYellow)
+                }
+            }
+            .font(.caption2).foregroundStyle(.secondary)
+            if episode.state == .superseded {
+                Text("Superseded by a later episode; retained as evidence and excluded from current truth by default.")
+                    .font(.caption2).foregroundStyle(Nord.auroraYellow)
+            }
+        }
+        .padding(10)
+        .background(Nord.polarNight1.opacity(0.72), in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+private struct WorkflowDefinitionCard: View {
+    @ObservedObject var model: DesktopAppModel
+    let definition: DesktopWorkflowDefinitionRecord
+    @State private var selectedAccountID = ""
+    @State private var emailFilter = ""
+
+    private var gmailAccounts: [DesktopAccountRecord] {
+        model.snapshot.domains.accounts.filter { $0.service == .gmail && $0.status == .ready }
+    }
+
+    private var triggerBindings: [DesktopWorkflowTriggerBindingRecord] {
+        model.workflowTriggerBindings(workflowID: definition.id)
+    }
+
+    private var revision: DesktopWorkflowRevisionRecord? {
+        model.snapshot.operations.workflows.revisions.first { $0.id == definition.currentRevisionID }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            WorkflowDefinitionHeader(model: model, definition: definition)
+            if let revision {
+                WorkflowMetricsRow(metrics: [
+                    WorkflowMetricValue(label: "Revision", value: revision.version, tint: Nord.frost0),
+                    WorkflowMetricValue(label: "Steps", value: "\(revision.steps.count)", tint: Nord.frost1),
+                    WorkflowMetricValue(label: "Permissions", value: "\(revision.permissions.permissions.count)", tint: Nord.auroraYellow)
+                ])
+                DisclosureGroup("Stages and permission receipt") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(revision.steps) { step in
+                            HStack {
+                                Image(systemName: step.kind.symbol).foregroundStyle(Nord.frost1).frame(width: 22)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(step.name).font(.caption.weight(.semibold))
+                                    Text(step.kind.label + (step.capabilityID.map { " · \($0)" } ?? ""))
+                                        .font(.caption2).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if !step.isIdempotent { Text("No automatic retry").font(.caption2).foregroundStyle(Nord.auroraYellow) }
+                            }
+                        }
+                        Divider()
+                        if revision.permissions.permissions.isEmpty {
+                            Text("Local read-only workflow").font(.caption).foregroundStyle(.secondary)
+                        } else {
+                            ForEach(revision.permissions.permissions, id: \.self) { permission in
+                                Label(permission.label, systemImage: permission.symbol).font(.caption)
+                            }
+                        }
+                        LabeledContent("Manifest digest", value: String(revision.manifestDigest.prefix(20)) + "…")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                    .padding(.top, 8)
+                }
+                if definition.triggerKinds.contains(.email) {
+                    DisclosureGroup("Email trigger scope") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            if triggerBindings.isEmpty {
+                                Text("No mailbox is observed until you add and enable an account-scoped filter.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            } else {
+                                ForEach(triggerBindings) { binding in
+                                    WorkflowTriggerBindingRow(model: model, binding: binding)
+                                }
+                            }
+                            if !gmailAccounts.isEmpty {
+                                HStack {
+                                    Picker("Account", selection: $selectedAccountID) {
+                                        Text("Choose account").tag("")
+                                        ForEach(gmailAccounts) { account in Text(account.identity).tag(account.id) }
+                                    }
+                                    .frame(maxWidth: 220)
+                                    TextField("Gmail filter, for example from:sender@example.com", text: $emailFilter)
+                                    Button("Add scope") {
+                                        _ = model.bindWorkflowTrigger(
+                                            workflowID: definition.id, trigger: .email, source: "gmail",
+                                            accountIDs: [selectedAccountID], sourceFilter: emailFilter, enabled: false
+                                        )
+                                        emailFilter = ""
+                                    }
+                                    .disabled(selectedAccountID.isEmpty || emailFilter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                }
+                            } else {
+                                Text("Connect a Gmail account to configure an email trigger.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(.top, 8)
+                    }
+                }
+            }
+        }
+        .panelStyle()
+    }
+}
+
+private struct WorkflowMetricValue: Identifiable {
+    let id = UUID()
+    let label: String
+    let value: String
+    let tint: Color
+}
+
+private struct WorkflowMetricsRow: View {
+    let metrics: [WorkflowMetricValue]
+
+    var body: some View {
+        Grid(horizontalSpacing: 8) {
+            GridRow {
+                ForEach(metrics) { metric in
+                    LabeledContent {
+                        Text(metric.value).font(.caption.weight(.semibold)).foregroundStyle(metric.tint)
+                    } label: {
+                        Text(metric.label).font(.caption2).foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 10).padding(.vertical, 7)
+                    .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 8))
+                }
+            }
+        }
+    }
+}
+
+private struct WorkflowDefinitionHeader: View {
+    @ObservedObject var model: DesktopAppModel
+    let definition: DesktopWorkflowDefinitionRecord
+
+    var body: some View {
+        Grid(alignment: .topLeading, horizontalSpacing: 12) {
+            GridRow {
+                Image(systemName: definition.icon)
+                    .font(.title2)
+                    .foregroundStyle(definition.enabled ? Nord.frost1 : .secondary)
+                Grid(alignment: .leading, verticalSpacing: 4) {
+                    GridRow { Text(definition.name).font(.headline) }
+                    GridRow { Text(definition.summary).font(.caption).foregroundStyle(.secondary) }
+                    GridRow { Text("\(definition.source) · \(definition.license)").font(.caption2).foregroundStyle(.secondary) }
+                }
+                Toggle("Enabled", isOn: Binding(
+                    get: { definition.enabled },
+                    set: { _ = model.setWorkflowEnabled(id: definition.id, enabled: $0) }
+                ))
+            }
+        }
+    }
+}
+
+private struct WorkflowTriggerBindingRow: View {
+    @ObservedObject var model: DesktopAppModel
+    let binding: DesktopWorkflowTriggerBindingRecord
+
+    var body: some View {
+        LabeledContent {
+            Toggle("Observe", isOn: Binding(
+                get: { binding.enabled },
+                set: { _ = model.setWorkflowTriggerBindingEnabled(id: binding.id, enabled: $0) }
+            ))
+            .labelsHidden()
+        } label: {
+            Label {
+                Grid(alignment: .leading, verticalSpacing: 2) {
+                    GridRow { Text(binding.sourceFilter).font(.caption.weight(.semibold)) }
+                    GridRow {
+                        Text("\(binding.accountIDs.count) account scope · \(binding.lastCursor ?? "No cursor yet")")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+            } icon: {
+                Image(systemName: "line.3.horizontal.decrease.circle")
+            }
+        }
+    }
+}
+
+private struct WorkflowStatePill: View {
+    let state: DesktopWorkflowWorkState
+
+    var body: some View {
+        Label(state.label, systemImage: state.symbol)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(state.tint)
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            .background(state.tint.opacity(0.14), in: Capsule())
+            .overlay(Capsule().strokeBorder(state.tint.opacity(0.8), lineWidth: 1))
+            .accessibilityLabel("Workflow status: \(state.label)")
+    }
+}
+
+private extension DesktopWorkflowWorkState {
+    var symbol: String {
+        switch self {
+        case .open: "circle"
+        case .preparing: "hourglass"
+        case .running: "waveform.path.ecg"
+        case .needsAttention: "exclamationmark.triangle.fill"
+        case .readyForEffect: "checkmark.shield"
+        case .waitingExternal: "envelope.badge"
+        case .accepted: "checkmark.seal.fill"
+        case .operationallyClosed: "archivebox.fill"
+        case .failed: "xmark.octagon.fill"
+        case .cancelled: "slash.circle"
+        case .superseded: "arrow.uturn.forward.circle"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .accepted: Nord.auroraGreen
+        case .running, .preparing: Nord.frost1
+        case .needsAttention, .readyForEffect: Nord.auroraYellow
+        case .failed: Nord.auroraRed
+        case .waitingExternal: Nord.frost0
+        case .open, .operationallyClosed, .cancelled, .superseded: .secondary
+        }
+    }
+}
+
+private extension DesktopWorkflowStepKind {
+    var symbol: String {
+        switch self {
+        case .classifyEvent: "text.magnifyingglass"
+        case .correlateWork: "link"
+        case .compileContext: "square.stack.3d.up"
+        case .structuredModel: "brain"
+        case .invokeTool: "wrench.and.screwdriver"
+        case .registerArtifact: "doc.badge.plus"
+        case .validate: "checkmark.shield"
+        case .branch: "arrow.triangle.branch"
+        case .humanReview: "person.crop.circle.badge.questionmark"
+        case .requestApproval: "hand.raised"
+        case .createEmailDraft: "square.and.pencil"
+        case .sendEmail: "paperplane"
+        case .waitForEmail: "envelope.badge"
+        case .complete: "checkmark.circle"
+        }
+    }
+}
+
+private extension DesktopWorkflowPermission {
+    var symbol: String {
+        switch self {
+        case .emailRead: "envelope.open"
+        case .emailDraft: "square.and.pencil"
+        case .emailSend: "paperplane"
+        case .emailLabels: "tag"
+        case .fileRead: "doc.text.magnifyingglass"
+        case .fileWrite: "doc.badge.arrow.up"
+        case .modelEgress: "brain"
+        case .network: "network"
+        }
     }
 }
 

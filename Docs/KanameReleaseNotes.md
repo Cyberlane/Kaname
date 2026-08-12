@@ -1,9 +1,9 @@
-# Kaname 0.20.0 build 38
+# Kaname 0.21.0 build 39
 
-- Turn Command-K into a keyboard-first Command Center for new work, project actions, destination navigation, and the existing privacy-bounded saved-content search.
-- Make Command-N open or reuse a project-aware conversation draft immediately, focus the composer, and preserve the full provider and authority setup as an advanced path.
-- Reclaim working space by opening the inspector only for selected conversation or project context while keeping its manual toggle available everywhere.
-- Let the Threads directory collapse independently so dense conversations, diffs, plans, and checks can use the full workspace width.
-- Tighten the Home hierarchy around new work and attention, add coding-workbench pulse metrics and project-aware creation, and collapse Calendar account configuration behind the agenda workflow.
-- Add search to Skills and Settings, document every primary shortcut in-app, and distinguish degraded provider capability from a genuinely ready provider.
-- Preserve the approved mobile command-centre, intervention, editable queue, approval, diff, and reachability behavior without changing its five-area information architecture.
+- Add a generic workflow workspace under Email with calm Work, Definitions, and Simple rules views while leaving ordinary email threads uncluttered.
+- Model correction-heavy work as durable work items, conversation bindings, episodes, frozen runs, ordered step attempts, and provider-run links instead of treating one email thread as one run.
+- Compile bounded, digest-addressed context snapshots from active facts and source references, with superseded material retained as evidence but explicitly excluded from current truth.
+- Install immutable JSON workflow revisions disabled by default, accept only registered capabilities, surface exact permission receipts, and prevent silent authority broadening.
+- Require separate account-scoped email trigger bindings with durable cursors; disabling a definition also disables all of its observation scopes.
+- Gate external effects on deterministic validation and exact approval, preserve idempotency keys and reconciliation receipts, and never retry a non-idempotent send with an unknown outcome.
+- Add a privacy-safe synthetic workflow package, package author documentation, schema-17 migration coverage, and fixture-backed workflow UI qualification.

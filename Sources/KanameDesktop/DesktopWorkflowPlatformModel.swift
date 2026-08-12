@@ -1,0 +1,717 @@
+import Foundation
+
+public extension DesktopAppModel {
+    var workflowDefinitions: [DesktopWorkflowDefinitionRecord] {
+        snapshot.operations.workflows.definitions.sorted {
+            if $0.enabled != $1.enabled { return $0.enabled && !$1.enabled }
+            let comparison = $0.name.localizedCaseInsensitiveCompare($1.name)
+            return comparison == .orderedSame ? $0.id < $1.id : comparison == .orderedAscending
+        }
+    }
+
+    var workflowWorkItems: [DesktopWorkflowWorkItemRecord] {
+        snapshot.operations.workflows.workItems.sorted {
+            ($0.updatedAtUnixMillis, $0.id) > ($1.updatedAtUnixMillis, $1.id)
+        }
+    }
+
+    func workflowTriggerBindings(workflowID: String? = nil) -> [DesktopWorkflowTriggerBindingRecord] {
+        snapshot.operations.workflows.triggerBindings
+            .filter { workflowID == nil || $0.workflowID == workflowID }
+            .sorted { ($0.updatedAtUnixMillis, $0.id) > ($1.updatedAtUnixMillis, $1.id) }
+    }
+
+    @discardableResult
+    func bindWorkflowTrigger(
+        workflowID: String,
+        trigger: DesktopWorkflowTriggerKind,
+        source: String,
+        accountIDs: [String],
+        sourceFilter: String,
+        enabled: Bool = false
+    ) -> String? {
+        let cleanSource = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanFilter = sourceFilter.trimmingCharacters(in: .whitespacesAndNewlines)
+        let scopedAccounts = Array(Set(accountIDs.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }))
+            .filter { !$0.isEmpty }.sorted()
+        guard let definition = snapshot.operations.workflows.definitions.first(where: { $0.id == workflowID }),
+              definition.triggerKinds.contains(trigger),
+              !cleanSource.isEmpty, cleanSource.utf8.count <= 160,
+              !cleanFilter.isEmpty, cleanFilter.utf8.count <= 2_048,
+              !scopedAccounts.isEmpty else { return nil }
+        let timestamp = now()
+        let binding = DesktopWorkflowTriggerBindingRecord(
+            id: UUID().uuidString.lowercased(), workflowID: workflowID, trigger: trigger,
+            source: cleanSource, accountIDs: scopedAccounts, sourceFilter: cleanFilter,
+            enabled: enabled && definition.enabled, lastCursor: nil,
+            createdAtUnixMillis: timestamp, updatedAtUnixMillis: timestamp
+        )
+        guard mutate({ state in
+            state.operations.workflows.triggerBindings.append(binding)
+            state.operations.audit.append(DesktopAuditRecord(
+                id: UUID().uuidString.lowercased(), domain: "workflow-trigger", action: "bound",
+                target: binding.id, state: binding.enabled ? .approved : .proposed,
+                detail: "Scoped \(trigger.rawValue) trigger for \(workflowID) to \(scopedAccounts.count) account(s).",
+                recordedAtUnixMillis: timestamp
+            ))
+        }) else { return nil }
+        return binding.id
+    }
+
+    func setWorkflowTriggerBindingEnabled(id: String, enabled: Bool) -> Bool {
+        guard let binding = snapshot.operations.workflows.triggerBindings.first(where: { $0.id == id }),
+              let definition = snapshot.operations.workflows.definitions.first(where: { $0.id == binding.workflowID }),
+              !enabled || definition.enabled else { return false }
+        let timestamp = now()
+        return mutateRecord(at: \.operations.workflows.triggerBindings, id: id) { binding in
+            binding.enabled = enabled
+            binding.updatedAtUnixMillis = timestamp
+        }
+    }
+
+    func advanceWorkflowTriggerCursor(id: String, cursor: String) -> Bool {
+        let cleanCursor = cursor.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanCursor.isEmpty, cleanCursor.utf8.count <= 2_048 else { return false }
+        let timestamp = now()
+        return mutateRecord(at: \.operations.workflows.triggerBindings, id: id) { binding in
+            binding.lastCursor = cleanCursor
+            binding.updatedAtUnixMillis = timestamp
+        }
+    }
+
+    func workflowWorkItems(accountID: String, conversationID: String) -> [DesktopWorkflowWorkItemRecord] {
+        let ids = Set(snapshot.operations.workflows.conversationBindings.compactMap { binding in
+            binding.accountID == accountID && binding.conversationID == conversationID
+                && binding.relationship != .detached ? binding.workItemID : nil
+        })
+        return workflowWorkItems.filter { ids.contains($0.id) }
+    }
+
+    func workflowEpisodes(workItemID: String) -> [DesktopWorkflowEpisodeRecord] {
+        snapshot.operations.workflows.episodes.filter { $0.workItemID == workItemID }
+            .sorted { ($0.ordinal, $0.createdAtUnixMillis, $0.id) < ($1.ordinal, $1.createdAtUnixMillis, $1.id) }
+    }
+
+    func workflowRuns(episodeID: String) -> [DesktopWorkflowRunRecord] {
+        snapshot.operations.workflows.runs.filter { $0.episodeID == episodeID }
+            .sorted { (($0.startedAtUnixMillis ?? Int64.min), $0.id) < (($1.startedAtUnixMillis ?? Int64.min), $1.id) }
+    }
+
+    func workflowValidations(episodeID: String) -> [DesktopWorkflowValidationRecord] {
+        snapshot.operations.workflows.validations.filter { $0.episodeID == episodeID }
+            .sorted { ($0.createdAtUnixMillis, $0.id) < ($1.createdAtUnixMillis, $1.id) }
+    }
+
+    func workflowFacts(workItemID: String, includeInactive: Bool = false) -> [DesktopWorkflowFactRecord] {
+        snapshot.operations.workflows.facts.filter {
+            $0.workItemID == workItemID && (includeInactive || $0.state == .proposed || $0.state == .verified)
+        }.sorted { ($0.key, $0.createdAtUnixMillis, $0.id) < ($1.key, $1.createdAtUnixMillis, $1.id) }
+    }
+
+    @discardableResult
+    func installWorkflowPackage(
+        manifestData: Data,
+        registeredCapabilityIDs: Set<String>,
+        enable: Bool = false
+    ) throws -> String {
+        let manifest = try DesktopWorkflowPackageCodec.decode(
+            manifestData,
+            registeredCapabilityIDs: registeredCapabilityIDs
+        )
+        let canonical = try DesktopWorkflowPackageCodec.canonicalData(manifest)
+        let digest = DesktopWorkflowPackageCodec.digest(canonical)
+        let revisionID = "\(manifest.id)@\(manifest.version)#\(digest.prefix(16))"
+        if snapshot.operations.workflows.revisions.contains(where: { $0.id == revisionID }) {
+            return revisionID
+        }
+        let timestamp = now()
+        if let priorDefinition = snapshot.operations.workflows.definitions.first(where: { $0.id == manifest.id }),
+           let priorRevision = snapshot.operations.workflows.revisions.first(where: { $0.id == priorDefinition.currentRevisionID }),
+           manifest.permissions.broadens(priorRevision.permissions), enable {
+            throw DesktopWorkflowPackageError.permissionBroadening
+        }
+        let revision = DesktopWorkflowRevisionRecord(
+            id: revisionID, workflowID: manifest.id, version: manifest.version,
+            schemaVersion: manifest.schemaVersion, manifestDigest: digest, steps: manifest.steps,
+            permissions: manifest.permissions, correlationSummary: manifest.correlationSummary,
+            contextSummary: manifest.contextSummary, completionSummary: manifest.completionSummary,
+            installedAtUnixMillis: timestamp
+        )
+        let definition = DesktopWorkflowDefinitionRecord(
+            id: manifest.id, name: manifest.name, summary: manifest.summary, icon: manifest.icon,
+            source: manifest.source, license: manifest.license, currentRevisionID: revision.id,
+            enabled: enable, triggerKinds: Array(Set(manifest.triggers)).sorted { $0.rawValue < $1.rawValue },
+            createdAtUnixMillis: snapshot.operations.workflows.definitions.first(where: { $0.id == manifest.id })?.createdAtUnixMillis ?? timestamp,
+            updatedAtUnixMillis: timestamp
+        )
+        guard mutate({ state in
+            state.operations.workflows.revisions.append(revision)
+            if let index = state.operations.workflows.definitions.firstIndex(where: { $0.id == definition.id }) {
+                state.operations.workflows.definitions[index] = definition
+            } else {
+                state.operations.workflows.definitions.append(definition)
+            }
+            state.operations.audit.append(DesktopAuditRecord(
+                id: UUID().uuidString.lowercased(), domain: "workflow-package", action: "installed",
+                target: "\(definition.id)@\(revision.version)", state: enable ? .approved : .proposed,
+                detail: enable
+                    ? "Installed and enabled an exact reviewed workflow revision."
+                    : "Installed disabled. Review its permissions before enabling.",
+                recordedAtUnixMillis: timestamp
+            ))
+        }) else { throw DesktopWorkflowPackageError.invalidSchema }
+        return revision.id
+    }
+
+    func setWorkflowEnabled(id: String, enabled: Bool) -> Bool {
+        guard let definition = snapshot.operations.workflows.definitions.first(where: { $0.id == id }),
+              snapshot.operations.workflows.revisions.contains(where: { $0.id == definition.currentRevisionID }) else {
+            return false
+        }
+        let timestamp = now()
+        return mutate { state in
+            guard let index = state.operations.workflows.definitions.firstIndex(where: { $0.id == id }) else { return }
+            state.operations.workflows.definitions[index].enabled = enabled
+            state.operations.workflows.definitions[index].updatedAtUnixMillis = timestamp
+            if !enabled {
+                for bindingIndex in state.operations.workflows.triggerBindings.indices
+                    where state.operations.workflows.triggerBindings[bindingIndex].workflowID == id {
+                    state.operations.workflows.triggerBindings[bindingIndex].enabled = false
+                    state.operations.workflows.triggerBindings[bindingIndex].updatedAtUnixMillis = timestamp
+                }
+            }
+            state.operations.audit.append(DesktopAuditRecord(
+                id: UUID().uuidString.lowercased(), domain: "workflow-package",
+                action: enabled ? "enabled" : "disabled", target: id,
+                state: enabled ? .approved : .cancelled,
+                detail: enabled ? "Enabled the exact installed workflow revision." : "Disabled future workflow dispatch.",
+                recordedAtUnixMillis: timestamp
+            ))
+        }
+    }
+
+    @discardableResult
+    func createWorkflowWorkItem(workflowID: String, title: String, goal: String) -> String? {
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanGoal = goal.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let definition = snapshot.operations.workflows.definitions.first(where: { $0.id == workflowID && $0.enabled }),
+              snapshot.operations.workflows.revisions.contains(where: { $0.id == definition.currentRevisionID }),
+              !cleanTitle.isEmpty, cleanTitle.utf8.count <= 240,
+              !cleanGoal.isEmpty, cleanGoal.utf8.count <= 8_192 else { return nil }
+        let timestamp = now()
+        let item = DesktopWorkflowWorkItemRecord(
+            id: UUID().uuidString.lowercased(), workflowID: workflowID, title: cleanTitle, goal: cleanGoal,
+            state: .open, currentEpisodeID: nil, nextAction: "Wait for or attach a triggering event.",
+            explicitAcceptance: false, createdAtUnixMillis: timestamp, updatedAtUnixMillis: timestamp, closedAtUnixMillis: nil
+        )
+        guard mutate({ state in
+            state.operations.workflows.workItems.append(item)
+            state.appendAudit(
+                domain: "workflow", action: "work-item-created", target: item.id,
+                state: .completed, detail: item.title, recordedAtUnixMillis: timestamp
+            )
+        }) else { return nil }
+        return item.id
+    }
+
+    @discardableResult
+    func observeWorkflowExternalEvent(
+        source: String,
+        accountID: String,
+        conversationID: String?,
+        messageID: String?,
+        cursor: String?,
+        payloadDigest: String,
+        deduplicationKey: String
+    ) -> String? {
+        let normalized = [source, accountID, payloadDigest, deduplicationKey]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard normalized.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 2_048 }) else { return nil }
+        if let existing = snapshot.operations.workflows.externalEvents.first(where: {
+            $0.source == normalized[0] && $0.accountID == normalized[1] && $0.deduplicationKey == normalized[3]
+        }) { return existing.id }
+        let event = DesktopWorkflowExternalEventRecord(
+            id: UUID().uuidString.lowercased(), source: normalized[0], accountID: normalized[1],
+            conversationID: conversationID, messageID: messageID, cursor: cursor,
+            payloadDigest: normalized[2], deduplicationKey: normalized[3], observedAtUnixMillis: now()
+        )
+        return mutate({ $0.operations.workflows.externalEvents.append(event) }) ? event.id : nil
+    }
+
+    @discardableResult
+    func bindWorkflowConversation(
+        workItemID: String,
+        source: String,
+        accountID: String,
+        conversationID: String,
+        relationship: DesktopWorkflowConversationRelationship,
+        reason: String,
+        confidence: Double,
+        requiresReview: Bool,
+        firstMessageID: String? = nil,
+        latestMessageID: String? = nil
+    ) -> String? {
+        guard snapshot.operations.workflows.workItems.contains(where: { $0.id == workItemID }),
+              !source.isEmpty, !accountID.isEmpty, !conversationID.isEmpty,
+              !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              (0...1).contains(confidence) else { return nil }
+        if let existing = snapshot.operations.workflows.conversationBindings.first(where: {
+            $0.workItemID == workItemID && $0.source == source && $0.accountID == accountID
+                && $0.conversationID == conversationID && $0.relationship != .detached
+        }) { return existing.id }
+        let timestamp = now()
+        let binding = DesktopWorkflowConversationBindingRecord(
+            id: UUID().uuidString.lowercased(), workItemID: workItemID, source: source, accountID: accountID,
+            conversationID: conversationID, relationship: relationship, correlationReason: reason,
+            confidence: confidence, requiresReview: requiresReview, firstMessageID: firstMessageID,
+            latestMessageID: latestMessageID, createdAtUnixMillis: timestamp
+        )
+        guard mutate({ state in
+            if requiresReview {
+                state.appendWorkflowRecord(
+                    binding, at: \.operations.workflows.conversationBindings,
+                    workItemID: workItemID, workState: .needsAttention,
+                    nextAction: "Review the proposed conversation association.",
+                    updatedAtUnixMillis: timestamp
+                )
+            } else {
+                state.operations.workflows.conversationBindings.append(binding)
+            }
+        }) else { return nil }
+        return binding.id
+    }
+
+    func reviewWorkflowConversationBinding(id: String, accepted: Bool) -> Bool {
+        guard let binding = snapshot.operations.workflows.conversationBindings.first(where: { $0.id == id }) else {
+            return false
+        }
+        let timestamp = now()
+        return mutate { state in
+            _ = state.changeTwoRecords(
+                first: \.operations.workflows.conversationBindings, id: id,
+                change: { storedBinding in
+                    storedBinding.requiresReview = false
+                    if !accepted { storedBinding.relationship = .detached }
+                },
+                second: \.operations.workflows.workItems, id: binding.workItemID,
+                change: { item in
+                    item.state = .open
+                    item.nextAction = accepted
+                        ? "Create an episode from the associated event."
+                        : "Choose or create the correct work item."
+                    item.updatedAtUnixMillis = timestamp
+                }
+            )
+        }
+    }
+
+    @discardableResult
+    func createWorkflowEpisode(
+        workItemID: String,
+        sourceEventID: String,
+        sourceMessageID: String?,
+        intent: DesktopWorkflowEpisodeIntent,
+        summary: String,
+        deltaSummary: String
+    ) -> String? {
+        guard let item = snapshot.operations.workflows.workItems.first(where: { $0.id == workItemID }),
+              let definition = snapshot.operations.workflows.definitions.first(where: { $0.id == item.workflowID && $0.enabled }),
+              snapshot.operations.workflows.externalEvents.contains(where: { $0.id == sourceEventID }),
+              !summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        if let existing = snapshot.operations.workflows.episodes.first(where: {
+            $0.workItemID == workItemID && $0.sourceEventID == sourceEventID
+        }) { return existing.id }
+        let priorEpisodes = workflowEpisodes(workItemID: workItemID)
+        let timestamp = now()
+        let episode = DesktopWorkflowEpisodeRecord(
+            id: UUID().uuidString.lowercased(), workItemID: workItemID, ordinal: (priorEpisodes.last?.ordinal ?? 0) + 1,
+            intent: intent, sourceEventID: sourceEventID, sourceMessageID: sourceMessageID,
+            summary: String(summary.prefix(8_192)), deltaSummary: String(deltaSummary.prefix(8_192)),
+            state: .preparing, workflowRevisionID: definition.currentRevisionID,
+            supersedesEpisodeID: intent == .correction ? priorEpisodes.last?.id : nil,
+            createdAtUnixMillis: timestamp
+        )
+        guard mutate({ state in
+            if let priorID = episode.supersedesEpisodeID,
+               state.changeRecord(at: \.operations.workflows.episodes, id: priorID, change: { $0.state = .superseded }) {
+            }
+            state.operations.workflows.episodes.append(episode)
+            state.changeRecord(at: \.operations.workflows.workItems, id: workItemID) { item in
+                item.currentEpisodeID = episode.id
+                item.state = .preparing
+                item.nextAction = "Review interpretation and compile current context."
+                item.updatedAtUnixMillis = timestamp
+            }
+        }) else { return nil }
+        return episode.id
+    }
+
+    @discardableResult
+    func recordWorkflowFact(
+        workItemID: String,
+        episodeID: String,
+        key: String,
+        value: String,
+        state factState: DesktopWorkflowFactState,
+        sourceReferenceIDs: [String],
+        verifiedBy: String? = nil,
+        supersedesFactID: String? = nil
+    ) -> String? {
+        let cleanKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard snapshot.operations.workflows.workItems.contains(where: { $0.id == workItemID }),
+              snapshot.operations.workflows.episodes.contains(where: { $0.id == episodeID && $0.workItemID == workItemID }),
+              !cleanKey.isEmpty, cleanKey.utf8.count <= 240, !cleanValue.isEmpty, cleanValue.utf8.count <= 8_192,
+              supersedesFactID == nil || snapshot.operations.workflows.facts.contains(where: { $0.id == supersedesFactID && $0.workItemID == workItemID }) else {
+            return nil
+        }
+        let fact = DesktopWorkflowFactRecord(
+            id: UUID().uuidString.lowercased(), workItemID: workItemID, key: cleanKey, value: cleanValue,
+            state: factState, sourceReferenceIDs: Array(Set(sourceReferenceIDs)).sorted(), verifiedBy: verifiedBy,
+            episodeID: episodeID, supersededByFactID: nil, createdAtUnixMillis: now()
+        )
+        guard mutate({ state in
+            if let oldID = supersedesFactID {
+                state.changeRecord(at: \.operations.workflows.facts, id: oldID) { oldFact in
+                    oldFact.state = .superseded
+                    oldFact.supersededByFactID = fact.id
+                }
+            }
+            state.operations.workflows.facts.append(fact)
+        }) else { return nil }
+        return fact.id
+    }
+
+    @discardableResult
+    func compileWorkflowContext(
+        workItemID: String,
+        episodeID: String,
+        request: String,
+        references: [DesktopWorkflowContextReference],
+        openQuestions: [String] = [],
+        negativeConstraints: [String] = [],
+        tokenBudget: Int = 32_000
+    ) -> String? {
+        guard let item = snapshot.operations.workflows.workItems.first(where: { $0.id == workItemID }),
+              let episode = snapshot.operations.workflows.episodes.first(where: { $0.id == episodeID && $0.workItemID == workItemID }),
+              let revision = snapshot.operations.workflows.revisions.first(where: { $0.id == episode.workflowRevisionID }),
+              let context = DesktopWorkflowContextCompiler.compile(
+                workItem: item, episode: episode, facts: snapshot.operations.workflows.facts,
+                references: references, request: request, openQuestions: openQuestions,
+                negativeConstraints: negativeConstraints, authority: revision.permissions,
+                createdAtUnixMillis: now(), tokenBudget: tokenBudget
+              ) else { return nil }
+        guard mutate({ state in
+            state.appendWorkflowRecord(
+                context, at: \.operations.workflows.contextSnapshots,
+                workItemID: workItemID,
+                nextAction: "Run the exact workflow revision with this frozen context.",
+                updatedAtUnixMillis: context.createdAtUnixMillis
+            )
+        }) else { return nil }
+        return context.id
+    }
+
+    @discardableResult
+    func queueWorkflowRun(
+        workItemID: String,
+        episodeID: String,
+        contextSnapshotID: String,
+        retryMode: DesktopWorkflowRetryMode = .initial,
+        priorRunID: String? = nil
+    ) -> String? {
+        guard let episode = snapshot.operations.workflows.episodes.first(where: { $0.id == episodeID && $0.workItemID == workItemID }),
+              snapshot.operations.workflows.contextSnapshots.contains(where: {
+                  $0.id == contextSnapshotID && $0.workItemID == workItemID && $0.episodeID == episodeID
+              }), retryMode == .initial || priorRunID != nil else { return nil }
+        let run = DesktopWorkflowRunRecord(
+            id: UUID().uuidString.lowercased(), workItemID: workItemID, episodeID: episodeID,
+            workflowRevisionID: retryMode == .currentRevision
+                ? snapshot.operations.workflows.definitions.first(where: { $0.id == snapshot.operations.workflows.workItems.first(where: { $0.id == workItemID })?.workflowID })?.currentRevisionID ?? episode.workflowRevisionID
+                : episode.workflowRevisionID,
+            retryMode: retryMode, priorRunID: priorRunID, contextSnapshotID: contextSnapshotID,
+            state: .queued, currentStepID: nil, traceID: UUID().uuidString.lowercased(),
+            startedAtUnixMillis: nil, completedAtUnixMillis: nil
+        )
+        guard mutate({ state in
+            state.appendWorkflowRecord(
+                run, at: \.operations.workflows.runs, workItemID: workItemID,
+                workState: .preparing, nextAction: "Workflow run queued.",
+                updatedAtUnixMillis: self.now()
+            )
+        }) else { return nil }
+        return run.id
+    }
+
+    /// Returns the next ordered stage only when no stage is currently running
+    /// and every prior blocking stage has completed. Capability executors use
+    /// this as the durable dispatch contract rather than maintaining a private
+    /// in-memory cursor.
+    func nextWorkflowStep(runID: String) -> DesktopWorkflowStepDefinition? {
+        guard let run = snapshot.operations.workflows.runs.first(where: { $0.id == runID }),
+              run.state == .queued || run.state == .running,
+              run.currentStepID == nil,
+              let revision = snapshot.operations.workflows.revisions.first(where: { $0.id == run.workflowRevisionID }) else {
+            return nil
+        }
+        let attempts = snapshot.operations.workflows.stepAttempts.filter { $0.runID == runID }
+        for step in revision.steps {
+            let stepAttempts = attempts.filter { $0.stepID == step.id }
+            if stepAttempts.contains(where: { $0.state == .completed }) { continue }
+            if let latest = stepAttempts.max(by: { $0.attempt < $1.attempt }), latest.state == .failed {
+                guard step.isIdempotent, latest.attempt <= step.retryLimit else { return nil }
+            }
+            return step
+        }
+        return nil
+    }
+
+    func completeWorkflowRun(id: String) -> Bool {
+        guard let run = snapshot.operations.workflows.runs.first(where: { $0.id == id && ($0.state == .queued || $0.state == .running) }),
+              let revision = snapshot.operations.workflows.revisions.first(where: { $0.id == run.workflowRevisionID }) else {
+            return false
+        }
+        let attempts = snapshot.operations.workflows.stepAttempts.filter { $0.runID == id }
+        guard revision.steps.allSatisfy({ step in
+            attempts.contains(where: { $0.stepID == step.id && $0.state == .completed })
+        }) else { return false }
+        let timestamp = now()
+        return mutate { state in
+            guard state.changeRecord(at: \.operations.workflows.runs, id: id, change: { storedRun in
+                storedRun.state = .completed
+                storedRun.currentStepID = nil
+                storedRun.completedAtUnixMillis = timestamp
+            }) else { return }
+            let hasPendingEffect = state.operations.workflows.effects.contains {
+                $0.runID == id && $0.state != .reconciled && $0.state != .cancelled
+            }
+            state.setWorkflowWorkItemPresentation(
+                id: run.workItemID,
+                state: hasPendingEffect ? .readyForEffect : .waitingExternal,
+                nextAction: hasPendingEffect
+                    ? "Review the exact proposed effect."
+                    : "Run complete. Wait for an external reply or record acceptance.",
+                updatedAtUnixMillis: timestamp
+            )
+        }
+    }
+
+    @discardableResult
+    func beginWorkflowStep(runID: String, stepID: String, inputDigest: String) -> String? {
+        guard let run = snapshot.operations.workflows.runs.first(where: { $0.id == runID && ($0.state == .queued || $0.state == .running) }),
+              let revision = snapshot.operations.workflows.revisions.first(where: { $0.id == run.workflowRevisionID }),
+              revision.steps.contains(where: { $0.id == stepID }),
+              !snapshot.operations.workflows.stepAttempts.contains(where: { $0.runID == runID && $0.stepID == stepID && $0.state == .running }),
+              !inputDigest.isEmpty else { return nil }
+        let timestamp = now()
+        let attemptNumber = snapshot.operations.workflows.stepAttempts.filter { $0.runID == runID && $0.stepID == stepID }.count + 1
+        let previous = snapshot.operations.workflows.stepAttempts.last(where: { $0.runID == runID })
+        let attempt = DesktopWorkflowStepAttemptRecord(
+            id: UUID().uuidString.lowercased(), runID: runID, stepID: stepID, attempt: attemptNumber,
+            state: .running, inputDigest: inputDigest, outputDigest: nil, providerRunID: nil,
+            artifactIDs: [], errorSummary: nil, spanID: UUID().uuidString.lowercased(),
+            parentSpanID: previous?.spanID, startedAtUnixMillis: timestamp, completedAtUnixMillis: nil
+        )
+        guard mutate({ state in
+            state.operations.workflows.stepAttempts.append(attempt)
+            guard let runIndex = state.operations.workflows.runs.firstIndex(where: { $0.id == runID }) else { return }
+            state.operations.workflows.runs[runIndex].state = .running
+            state.operations.workflows.runs[runIndex].currentStepID = stepID
+            state.operations.workflows.runs[runIndex].startedAtUnixMillis = state.operations.workflows.runs[runIndex].startedAtUnixMillis ?? timestamp
+            if let itemIndex = state.operations.workflows.workItems.firstIndex(where: { $0.id == run.workItemID }) {
+                state.operations.workflows.workItems[itemIndex].state = .running
+                state.operations.workflows.workItems[itemIndex].nextAction = "Running \(revision.steps.first(where: { $0.id == stepID })?.name ?? stepID)."
+                state.operations.workflows.workItems[itemIndex].updatedAtUnixMillis = timestamp
+            }
+        }) else { return nil }
+        return attempt.id
+    }
+
+    func completeWorkflowStep(
+        attemptID: String,
+        outputDigest: String?,
+        artifactIDs: [String] = [],
+        providerRunID: String? = nil,
+        error: String? = nil
+    ) -> Bool {
+        guard let attempt = snapshot.operations.workflows.stepAttempts.first(where: { $0.id == attemptID && $0.state == .running }),
+              let run = snapshot.operations.workflows.runs.first(where: { $0.id == attempt.runID }),
+              let revision = snapshot.operations.workflows.revisions.first(where: { $0.id == run.workflowRevisionID }),
+              let step = revision.steps.first(where: { $0.id == attempt.stepID }) else { return false }
+        let timestamp = now()
+        let failed = error != nil
+        return mutate { state in
+            guard let attemptIndex = state.operations.workflows.stepAttempts.firstIndex(where: { $0.id == attemptID }),
+                  let runIndex = state.operations.workflows.runs.firstIndex(where: { $0.id == run.id }) else { return }
+            state.operations.workflows.stepAttempts[attemptIndex].state = failed ? .failed : .completed
+            state.operations.workflows.stepAttempts[attemptIndex].outputDigest = outputDigest
+            state.operations.workflows.stepAttempts[attemptIndex].artifactIDs = Array(Set(artifactIDs)).sorted()
+            state.operations.workflows.stepAttempts[attemptIndex].providerRunID = providerRunID
+            state.operations.workflows.stepAttempts[attemptIndex].errorSummary = error.map { String($0.prefix(8_192)) }
+            state.operations.workflows.stepAttempts[attemptIndex].completedAtUnixMillis = timestamp
+            state.operations.workflows.runs[runIndex].currentStepID = nil
+            if failed && step.blocking {
+                state.operations.workflows.runs[runIndex].state = .failed
+                state.operations.workflows.runs[runIndex].completedAtUnixMillis = timestamp
+                if let itemIndex = state.operations.workflows.workItems.firstIndex(where: { $0.id == run.workItemID }) {
+                    state.operations.workflows.workItems[itemIndex].state = .needsAttention
+                    state.operations.workflows.workItems[itemIndex].nextAction = step.isIdempotent && attempt.attempt <= step.retryLimit
+                        ? "Review the failure and retry this idempotent step."
+                        : "Review the blocking failure. No automatic retry is permitted."
+                    state.operations.workflows.workItems[itemIndex].updatedAtUnixMillis = timestamp
+                }
+            }
+        }
+    }
+
+    func attachProviderRunToWorkflowStep(providerRunID: String, stepAttemptID: String) -> Bool {
+        guard let attempt = snapshot.operations.workflows.stepAttempts.first(where: { $0.id == stepAttemptID }),
+              let run = snapshot.operations.workflows.runs.first(where: { $0.id == attempt.runID }),
+              let providerRun = snapshot.operations.providerRuns.first(where: { $0.id == providerRunID }),
+              providerRun.workflowRunID == nil else { return false }
+        return mutate { state in
+            _ = state.attachWorkflowProviderLinkage(
+                providerRunID: providerRunID, stepAttemptID: stepAttemptID,
+                run: run, attempt: attempt
+            )
+        }
+    }
+
+    @discardableResult
+    func recordWorkflowValidation(
+        workItemID: String,
+        episodeID: String,
+        runID: String,
+        validatorID: String,
+        validatorRevision: String,
+        targetID: String,
+        severity: DesktopWorkflowValidationSeverity,
+        outcome: DesktopWorkflowValidationOutcome,
+        summary: String,
+        evidenceArtifactIDs: [String] = []
+    ) -> String? {
+        guard snapshot.operations.workflows.runs.contains(where: { $0.id == runID && $0.workItemID == workItemID && $0.episodeID == episodeID }),
+              !validatorID.isEmpty, !validatorRevision.isEmpty, !targetID.isEmpty, !summary.isEmpty else { return nil }
+        let timestamp = now()
+        let validation = DesktopWorkflowValidationRecord(
+            id: UUID().uuidString.lowercased(), workItemID: workItemID, episodeID: episodeID, runID: runID,
+            validatorID: validatorID, validatorRevision: validatorRevision, targetID: targetID,
+            severity: severity, outcome: outcome, summary: String(summary.prefix(8_192)),
+            evidenceArtifactIDs: Array(Set(evidenceArtifactIDs)).sorted(), waiverDecisionID: nil,
+            createdAtUnixMillis: timestamp
+        )
+        guard mutate({ state in
+            state.operations.workflows.validations.append(validation)
+            if severity == .blocking && outcome != .passed,
+               let itemIndex = state.operations.workflows.workItems.firstIndex(where: { $0.id == workItemID }) {
+                state.operations.workflows.workItems[itemIndex].state = .needsAttention
+                state.operations.workflows.workItems[itemIndex].nextAction = "Resolve the blocking validation: \(validation.summary)"
+                state.operations.workflows.workItems[itemIndex].updatedAtUnixMillis = timestamp
+            }
+        }) else { return nil }
+        return validation.id
+    }
+
+    @discardableResult
+    func proposeWorkflowEffect(
+        workItemID: String,
+        episodeID: String,
+        runID: String,
+        stepID: String,
+        kind: String,
+        accountID: String?,
+        exactTarget: String,
+        contentDigest: String,
+        attachmentDigests: [String]
+    ) -> String? {
+        guard let run = snapshot.operations.workflows.runs.first(where: { $0.id == runID && $0.workItemID == workItemID && $0.episodeID == episodeID }),
+              let revision = snapshot.operations.workflows.revisions.first(where: { $0.id == run.workflowRevisionID }),
+              revision.steps.contains(where: { $0.id == stepID && [.createEmailDraft, .sendEmail].contains($0.kind) }),
+              !kind.isEmpty, !exactTarget.isEmpty, !contentDigest.isEmpty,
+              !snapshot.operations.workflows.validations.contains(where: {
+                  $0.runID == runID && $0.severity == .blocking && $0.outcome != .passed && $0.waiverDecisionID == nil
+              }) else { return nil }
+        let timestamp = now()
+        let idempotency = DesktopWorkflowPackageCodec.digest(Data("\(workItemID)|\(episodeID)|\(runID)|\(stepID)|\(exactTarget)|\(contentDigest)|\(attachmentDigests.sorted().joined(separator: ","))".utf8))
+        if let prior = snapshot.operations.workflows.effects.first(where: { $0.idempotencyKey == idempotency }) { return prior.id }
+        let effect = DesktopWorkflowEffectRecord(
+            id: UUID().uuidString.lowercased(), workItemID: workItemID, episodeID: episodeID,
+            runID: runID, stepID: stepID, kind: kind, accountID: accountID, exactTarget: exactTarget,
+            contentDigest: contentDigest, attachmentDigests: attachmentDigests.sorted(), approvalID: nil,
+            idempotencyKey: idempotency, state: .proposed, remoteReceipt: nil,
+            createdAtUnixMillis: timestamp, reconciledAtUnixMillis: nil
+        )
+        guard mutate({ state in
+            state.appendWorkflowRecord(
+                effect, at: \.operations.workflows.effects, workItemID: workItemID,
+                workState: .readyForEffect,
+                nextAction: "Review and approve the exact external effect.",
+                updatedAtUnixMillis: timestamp
+            )
+        }) else { return nil }
+        return effect.id
+    }
+
+    func attachWorkflowEffectApproval(effectID: String, approvalID: String) -> Bool {
+        guard let effect = snapshot.operations.workflows.effects.first(where: { $0.id == effectID && $0.state == .proposed }),
+              let approval = snapshot.operations.approvals.first(where: {
+                  $0.id == approvalID && $0.exactTarget == effect.exactTarget && $0.state == .awaitingApproval
+              }) else { return false }
+        return mutateRecord(at: \.operations.workflows.effects, id: effectID) { effect in
+            effect.approvalID = approval.id
+            effect.state = .awaitingApproval
+        }
+    }
+
+    func beginWorkflowEffect(effectID: String) -> Bool {
+        guard let effect = snapshot.operations.workflows.effects.first(where: { $0.id == effectID }),
+              effect.state == .approved || effect.state == .awaitingApproval,
+              effect.remoteReceipt == nil, !effect.idempotencyKey.isEmpty,
+              let approvalID = effect.approvalID,
+              exactEffectIsAuthorized(approvalID: approvalID, target: effect.exactTarget) else { return false }
+        return mutateRecord(at: \.operations.workflows.effects, id: effectID) { $0.state = .executing }
+    }
+
+    func reconcileWorkflowEffect(effectID: String, receipt: String?, outcomeKnown: Bool, succeeded: Bool) -> Bool {
+        guard let effect = snapshot.operations.workflows.effects.first(where: { $0.id == effectID && $0.state == .executing }) else {
+            return false
+        }
+        let timestamp = now()
+        let newState: DesktopWorkflowEffectState = !outcomeKnown ? .outcomeUnknown : (succeeded ? .reconciled : .failed)
+        let nextAction = !outcomeKnown
+            ? "Reconcile the provider outcome before any retry."
+            : (succeeded ? "Wait for an external reply or explicit acceptance." : "Review the failed effect before retrying.")
+        return mutate { state in
+            guard state.changeRecord(at: \.operations.workflows.effects, id: effectID, change: { storedEffect in
+                storedEffect.state = newState
+                storedEffect.remoteReceipt = receipt
+                storedEffect.reconciledAtUnixMillis = outcomeKnown ? timestamp : nil
+            }) else { return }
+            state.setWorkflowWorkItemPresentation(
+                id: effect.workItemID,
+                state: !outcomeKnown || !succeeded ? .needsAttention : .waitingExternal,
+                nextAction: nextAction, updatedAtUnixMillis: timestamp
+            )
+            state.appendAudit(
+                domain: "workflow-effect", action: effect.kind, target: effect.exactTarget,
+                state: !outcomeKnown ? .running : (succeeded ? .reconciled : .failed),
+                detail: receipt ?? (!outcomeKnown ? "Outcome unknown; reconciliation required." : "No remote receipt was returned."),
+                recordedAtUnixMillis: timestamp
+            )
+        }
+    }
+
+    func closeWorkflowWorkItem(id: String, accepted: Bool) -> Bool {
+        let timestamp = now()
+        return mutate { state in
+            guard let index = state.operations.workflows.workItems.firstIndex(where: { $0.id == id }) else { return }
+            state.operations.workflows.workItems[index].state = accepted ? .accepted : .operationallyClosed
+            state.operations.workflows.workItems[index].explicitAcceptance = accepted
+            state.operations.workflows.workItems[index].nextAction = accepted
+                ? "Explicit acceptance recorded."
+                : "Closed operationally without claiming external acceptance."
+            state.operations.workflows.workItems[index].updatedAtUnixMillis = timestamp
+            state.operations.workflows.workItems[index].closedAtUnixMillis = timestamp
+        }
+    }
+}

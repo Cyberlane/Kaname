@@ -586,7 +586,7 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
     }
 
     func migratedToCurrent(now: Int64) throws -> DesktopAppSnapshot {
-        guard (1...15).contains(version) else { throw DesktopModelError.unsupportedVersion }
+        guard (1...16).contains(version) else { throw DesktopModelError.unsupportedVersion }
         var migrated = self
         while migrated.version < Self.currentVersion {
             switch migrated.version {
@@ -632,12 +632,108 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
                         .map(\.createdAtUnixMillis)
                         .min() ?? migrated.threads[index].updatedAtUnixMillis
                 }
+            case 16:
+                // Workflow state decodes to an empty collection for older snapshots.
+                // Advancing the schema prevents an older build from silently
+                // discarding workflow history after it has been created.
+                break
             default:
                 throw DesktopModelError.unsupportedVersion
             }
             migrated.version += 1
         }
         return migrated
+    }
+}
+
+extension DesktopAppSnapshot {
+    @discardableResult
+    mutating func attachWorkflowProviderLinkage(
+        providerRunID: String,
+        stepAttemptID: String,
+        run: DesktopWorkflowRunRecord,
+        attempt: DesktopWorkflowStepAttemptRecord
+    ) -> Bool {
+        changeTwoRecords(
+            first: \.operations.providerRuns, id: providerRunID,
+            change: { storedRun in
+                storedRun.workflowWorkItemID = run.workItemID
+                storedRun.workflowEpisodeID = run.episodeID
+                storedRun.workflowRunID = run.id
+                storedRun.workflowStepAttemptID = attempt.id
+                storedRun.workflowContextSnapshotID = run.contextSnapshotID
+            },
+            second: \.operations.workflows.stepAttempts, id: stepAttemptID,
+            change: { $0.providerRunID = providerRunID }
+        )
+    }
+
+    mutating func appendWorkflowRecord<Record>(
+        _ record: Record,
+        at keyPath: WritableKeyPath<DesktopAppSnapshot, [Record]>,
+        workItemID: String,
+        workState: DesktopWorkflowWorkState? = nil,
+        nextAction: String,
+        updatedAtUnixMillis: Int64
+    ) {
+        self[keyPath: keyPath].append(record)
+        setWorkflowWorkItemPresentation(
+            id: workItemID, state: workState, nextAction: nextAction,
+            updatedAtUnixMillis: updatedAtUnixMillis
+        )
+    }
+
+    @discardableResult
+    mutating func changeTwoRecords<First: Identifiable, Second: Identifiable>(
+        first firstPath: WritableKeyPath<DesktopAppSnapshot, [First]>,
+        id firstID: String,
+        change firstChange: (inout First) -> Void,
+        second secondPath: WritableKeyPath<DesktopAppSnapshot, [Second]>,
+        id secondID: String,
+        change secondChange: (inout Second) -> Void
+    ) -> Bool where First.ID == String, Second.ID == String {
+        guard changeRecord(at: firstPath, id: firstID, change: firstChange) else { return false }
+        return changeRecord(at: secondPath, id: secondID, change: secondChange)
+    }
+
+    @discardableResult
+    mutating func setWorkflowWorkItemPresentation(
+        id: String,
+        state: DesktopWorkflowWorkState? = nil,
+        nextAction: String,
+        updatedAtUnixMillis: Int64
+    ) -> Bool {
+        changeRecord(at: \.operations.workflows.workItems, id: id) { item in
+            if let state { item.state = state }
+            item.nextAction = nextAction
+            item.updatedAtUnixMillis = updatedAtUnixMillis
+        }
+    }
+
+    mutating func appendAudit(
+        domain: String,
+        action: String,
+        target: String,
+        state: DesktopActionState,
+        detail: String,
+        recordedAtUnixMillis: Int64
+    ) {
+        operations.audit.append(DesktopAuditRecord(
+            id: UUID().uuidString.lowercased(), domain: domain, action: action,
+            target: target, state: state, detail: detail,
+            recordedAtUnixMillis: recordedAtUnixMillis
+        ))
+    }
+
+    @discardableResult
+    mutating func changeRecord<Record: Identifiable>(
+        at keyPath: WritableKeyPath<DesktopAppSnapshot, [Record]>,
+        id: String,
+        change: (inout Record) -> Void
+    ) -> Bool where Record.ID == String {
+        guard let index = self[keyPath: keyPath].firstIndex(where: { $0.id == id }) else { return false }
+        change(&self[keyPath: keyPath][index])
+        return true
     }
 }
 
@@ -1287,7 +1383,7 @@ public final class DesktopAppModel: ObservableObject {
     @Published public private(set) var recoveryStatus: DesktopRecoveryStatus?
 
     private let store: any DesktopStateStoring
-    private let now: () -> Int64
+    let now: () -> Int64
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
     private var providerEventIDs: Set<String>
@@ -2683,12 +2779,11 @@ public final class DesktopAppModel: ObservableObject {
     }
 
     public func beginCalendarProposalExecution(id: String) -> Bool {
-        guard !snapshot.preferences.safeMode,
-              let proposal = snapshot.domains.calendarProposals.first(where: { $0.id == id }),
+        guard let proposal = snapshot.domains.calendarProposals.first(where: { $0.id == id }),
               proposal.status == .waiting || proposal.status == .running,
               let approvalID = proposal.approvalID,
               let exactTarget = proposal.exactTarget,
-              isApprovalGranted(id: approvalID, exactTarget: exactTarget) else { return false }
+              exactEffectIsAuthorized(approvalID: approvalID, target: exactTarget) else { return false }
         mutateRecord(at: \.domains.calendarProposals, id: id) { $0.status = .running }
         return true
     }
@@ -2890,6 +2985,10 @@ public final class DesktopAppModel: ObservableObject {
               approval.state == .approved,
               approval.exactTarget == exactTarget else { return false }
         return approval.expiresAtUnixMillis.map { $0 >= checkedAt } ?? true
+    }
+
+    func exactEffectIsAuthorized(approvalID: String, target: String) -> Bool {
+        !snapshot.preferences.safeMode && isApprovalGranted(id: approvalID, exactTarget: target)
     }
 
     public func setAutomationPaused(id: String, paused: Bool) {
@@ -4125,7 +4224,7 @@ public final class DesktopAppModel: ObservableObject {
     }
 
     @discardableResult
-    private func mutate(_ change: (inout DesktopAppSnapshot) -> Void) -> Bool {
+    func mutate(_ change: (inout DesktopAppSnapshot) -> Void) -> Bool {
         guard recoveryStatus == nil else {
             persistenceError = "Kaname is keeping this recovery workspace read-only until verified state is restored or exported."
             return false
@@ -4157,16 +4256,14 @@ public final class DesktopAppModel: ObservableObject {
     }
 
     @discardableResult
-    private func mutateRecord<Record: Identifiable>(
+    func mutateRecord<Record: Identifiable>(
         at keyPath: WritableKeyPath<DesktopAppSnapshot, [Record]>,
         id: String,
         change: (inout Record) -> Void
     ) -> Bool where Record.ID == String {
         var didFindRecord = false
         let persisted = mutate { snapshot in
-            guard let index = snapshot[keyPath: keyPath].firstIndex(where: { $0.id == id }) else { return }
-            change(&snapshot[keyPath: keyPath][index])
-            didFindRecord = true
+            didFindRecord = snapshot.changeRecord(at: keyPath, id: id, change: change)
         }
         return didFindRecord && persisted
     }

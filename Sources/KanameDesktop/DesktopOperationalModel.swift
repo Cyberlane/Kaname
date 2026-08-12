@@ -72,19 +72,14 @@ public struct DesktopProviderEventRecord: Codable, Equatable, Identifiable, Send
         payloadWasTruncated: Bool,
         createdAtUnixMillis: Int64
     ) {
-        self.id = id
-        self.threadID = threadID
-        self.runID = runID
-        self.kind = kind
-        self.title = title
-        self.detail = detail
-        self.nativeType = nativeType
-        self.nativeThreadID = nativeThreadID
-        self.nativeTurnID = nativeTurnID
-        self.approvalID = approvalID
-        self.rawPayloadBase64 = rawPayloadBase64
-        self.payloadWasTruncated = payloadWasTruncated
-        self.createdAtUnixMillis = createdAtUnixMillis
+        (self.id, self.threadID, self.runID, self.kind) = (id, threadID, runID, kind)
+        (self.title, self.detail, self.nativeType) = (title, detail, nativeType)
+        (self.nativeThreadID, self.nativeTurnID, self.approvalID) = (
+            nativeThreadID, nativeTurnID, approvalID
+        )
+        (self.rawPayloadBase64, self.payloadWasTruncated, self.createdAtUnixMillis) = (
+            rawPayloadBase64, payloadWasTruncated, createdAtUnixMillis
+        )
     }
 }
 
@@ -341,6 +336,11 @@ private struct DesktopProviderRunPayload: Decodable {
     let usesProjectContext: Bool?
     let workspacePathOverride: String?
     let purpose: DesktopProviderRunPurpose?
+    let workflowWorkItemID: String?
+    let workflowEpisodeID: String?
+    let workflowRunID: String?
+    let workflowStepAttemptID: String?
+    let workflowContextSnapshotID: String?
 }
 
 public struct DesktopProviderRunRecord: Codable, Equatable, Identifiable, Sendable {
@@ -365,6 +365,11 @@ public struct DesktopProviderRunRecord: Codable, Equatable, Identifiable, Sendab
     public var usesProjectContext: Bool? = nil
     public var workspacePathOverride: String? = nil
     public var purpose: DesktopProviderRunPurpose = .conversation
+    public var workflowWorkItemID: String? = nil
+    public var workflowEpisodeID: String? = nil
+    public var workflowRunID: String? = nil
+    public var workflowStepAttemptID: String? = nil
+    public var workflowContextSnapshotID: String? = nil
 
     public init(
         id: String,
@@ -387,29 +392,32 @@ public struct DesktopProviderRunRecord: Codable, Equatable, Identifiable, Sendab
         completedAtUnixMillis: Int64?,
         usesProjectContext: Bool? = nil,
         workspacePathOverride: String? = nil,
-        purpose: DesktopProviderRunPurpose = .conversation
+        purpose: DesktopProviderRunPurpose = .conversation,
+        workflowWorkItemID: String? = nil,
+        workflowEpisodeID: String? = nil,
+        workflowRunID: String? = nil,
+        workflowStepAttemptID: String? = nil,
+        workflowContextSnapshotID: String? = nil
     ) {
-        self.id = id
-        self.threadID = threadID
-        self.sourceMessageID = sourceMessageID
-        self.provider = provider
-        self.model = model
-        self.reasoningEffort = reasoningEffort
-        self.runtimeMode = runtimeMode
-        self.networkAccess = networkAccess
-        self.briefDigest = briefDigest
-        self.contextReferenceCount = contextReferenceCount
-        self.nativeThreadID = nativeThreadID
-        self.nativeTurnID = nativeTurnID
-        self.tokenUsage = tokenUsage
-        self.costSummary = costSummary
-        self.errorSummary = errorSummary
-        self.state = state
-        self.startedAtUnixMillis = startedAtUnixMillis
-        self.completedAtUnixMillis = completedAtUnixMillis
-        self.usesProjectContext = usesProjectContext
-        self.workspacePathOverride = workspacePathOverride
-        self.purpose = purpose
+        (self.id, self.threadID, self.sourceMessageID) = (id, threadID, sourceMessageID)
+        (self.provider, self.model, self.reasoningEffort) = (provider, model, reasoningEffort)
+        (self.runtimeMode, self.networkAccess, self.briefDigest) = (runtimeMode, networkAccess, briefDigest)
+        (self.contextReferenceCount, self.nativeThreadID, self.nativeTurnID) = (
+            contextReferenceCount, nativeThreadID, nativeTurnID
+        )
+        (self.tokenUsage, self.costSummary, self.errorSummary) = (tokenUsage, costSummary, errorSummary)
+        (self.state, self.startedAtUnixMillis, self.completedAtUnixMillis) = (
+            state, startedAtUnixMillis, completedAtUnixMillis
+        )
+        (self.usesProjectContext, self.workspacePathOverride, self.purpose) = (
+            usesProjectContext, workspacePathOverride, purpose
+        )
+        (self.workflowWorkItemID, self.workflowEpisodeID, self.workflowRunID) = (
+            workflowWorkItemID, workflowEpisodeID, workflowRunID
+        )
+        (self.workflowStepAttemptID, self.workflowContextSnapshotID) = (
+            workflowStepAttemptID, workflowContextSnapshotID
+        )
     }
 
     public init(from decoder: any Decoder) throws {
@@ -435,6 +443,11 @@ public struct DesktopProviderRunRecord: Codable, Equatable, Identifiable, Sendab
         usesProjectContext = payload.usesProjectContext
         workspacePathOverride = payload.workspacePathOverride
         purpose = payload.purpose ?? .conversation
+        workflowWorkItemID = payload.workflowWorkItemID
+        workflowEpisodeID = payload.workflowEpisodeID
+        workflowRunID = payload.workflowRunID
+        workflowStepAttemptID = payload.workflowStepAttemptID
+        workflowContextSnapshotID = payload.workflowContextSnapshotID
     }
 }
 
@@ -503,6 +516,7 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
     public var mailActions: [DesktopMailActionRecord]
     public var mailStandingRules: [DesktopMailStandingRule]
     public var mailAttention: [DesktopMailAttentionRecord]
+    public var workflows: DesktopWorkflowPlatformState
     public var audit: [DesktopAuditRecord]
 
     public static let empty = DesktopOperationalSnapshot(
@@ -530,6 +544,7 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         mailActions: [],
         mailStandingRules: [],
         mailAttention: [],
+        workflows: .empty,
         audit: []
     )
 
@@ -558,6 +573,7 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         case mailActions
         case mailStandingRules
         case mailAttention
+        case workflows
         case audit
     }
 
@@ -586,33 +602,22 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         mailActions: [DesktopMailActionRecord] = [],
         mailStandingRules: [DesktopMailStandingRule] = [],
         mailAttention: [DesktopMailAttentionRecord] = [],
+        workflows: DesktopWorkflowPlatformState = .empty,
         audit: [DesktopAuditRecord]
     ) {
-        self.researchSources = researchSources
-        self.knowledgeProposals = knowledgeProposals
-        self.artifacts = artifacts
-        self.approvals = approvals
-        self.gitStackLayers = gitStackLayers
-        self.providerRuns = providerRuns
-        self.providerEvents = providerEvents
-        self.composerDrafts = composerDrafts
-        self.composerAttachmentDrafts = composerAttachmentDrafts
-        self.comparisons = comparisons
-        self.automationRuns = automationRuns
-        self.providerSessions = providerSessions
-        self.worktrees = worktrees
-        self.subagents = subagents
-        self.comparisonDecisions = comparisonDecisions
-        self.pullRequests = pullRequests
-        self.qualityGates = qualityGates
-        self.vaultScopes = vaultScopes
-        self.knowledgeDocuments = knowledgeDocuments
-        self.knowledgeWrites = knowledgeWrites
-        self.capabilityUpdates = capabilityUpdates
-        self.mailActions = mailActions
-        self.mailStandingRules = mailStandingRules
-        self.mailAttention = mailAttention
-        self.audit = audit
+        (self.researchSources, self.knowledgeProposals, self.artifacts) = (researchSources, knowledgeProposals, artifacts)
+        (self.approvals, self.gitStackLayers, self.providerRuns) = (approvals, gitStackLayers, providerRuns)
+        (self.providerEvents, self.composerDrafts, self.composerAttachmentDrafts) = (
+            providerEvents, composerDrafts, composerAttachmentDrafts
+        )
+        (self.comparisons, self.automationRuns, self.providerSessions) = (comparisons, automationRuns, providerSessions)
+        (self.worktrees, self.subagents, self.comparisonDecisions) = (worktrees, subagents, comparisonDecisions)
+        (self.pullRequests, self.qualityGates, self.vaultScopes) = (pullRequests, qualityGates, vaultScopes)
+        (self.knowledgeDocuments, self.knowledgeWrites, self.capabilityUpdates) = (
+            knowledgeDocuments, knowledgeWrites, capabilityUpdates
+        )
+        (self.mailActions, self.mailStandingRules, self.mailAttention) = (mailActions, mailStandingRules, mailAttention)
+        (self.workflows, self.audit) = (workflows, audit)
     }
 
     public init(from decoder: any Decoder) throws {
@@ -644,6 +649,7 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         mailActions = try container.decodeIfPresent([DesktopMailActionRecord].self, forKey: .mailActions) ?? []
         mailStandingRules = try container.decodeIfPresent([DesktopMailStandingRule].self, forKey: .mailStandingRules) ?? []
         mailAttention = try container.decodeIfPresent([DesktopMailAttentionRecord].self, forKey: .mailAttention) ?? []
+        workflows = try container.decodeIfPresent(DesktopWorkflowPlatformState.self, forKey: .workflows) ?? .empty
         audit = try container.decode([DesktopAuditRecord].self, forKey: .audit)
     }
 }
