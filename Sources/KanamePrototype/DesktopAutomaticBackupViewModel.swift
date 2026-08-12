@@ -15,6 +15,8 @@ final class DesktopAutomaticBackupViewModel: ObservableObject {
     private let secretStore: any DesktopAutomaticBackupSecretStoring
     private let service = DesktopAutomaticBackupService()
     private var schedulerTask: Task<Void, Never>?
+    private var secretStatusTask: Task<Void, Never>?
+    private var secretStatusRevision = 0
 
     init(environment: KanameDesktopEnvironment = .current) {
         configurationStore = FileDesktopAutomaticBackupConfigurationStore(
@@ -24,12 +26,16 @@ final class DesktopAutomaticBackupViewModel: ObservableObject {
             service: "\(environment.bundleIdentifier).automatic-backup"
         )
         configuration = (try? configurationStore.load()) ?? .init()
-        secretsConfigured = ((try? secretStore.load()) ?? nil) != nil
+        secretsConfigured = false
     }
 
-    deinit { schedulerTask?.cancel() }
+    deinit {
+        schedulerTask?.cancel()
+        secretStatusTask?.cancel()
+    }
 
     func start(model: DesktopAppModel) {
+        loadSecretStatusIfNeeded()
         guard schedulerTask == nil else { return }
         schedulerTask = Task { [weak self, weak model] in
             while !Task.isCancelled {
@@ -98,6 +104,7 @@ final class DesktopAutomaticBackupViewModel: ObservableObject {
                 secretAccessKey: secret,
                 encryptionPassphrase: normalizedPassphrase
             ))
+            secretStatusRevision += 1
             secretsConfigured = true
             var updated = configuration
             updated.enabled = false
@@ -112,6 +119,7 @@ final class DesktopAutomaticBackupViewModel: ObservableObject {
     func removeSecrets() {
         do {
             try secretStore.delete()
+            secretStatusRevision += 1
             secretsConfigured = false
             var updated = configuration
             updated.enabled = false
@@ -298,6 +306,19 @@ final class DesktopAutomaticBackupViewModel: ObservableObject {
             throw DesktopAutomaticBackupError.credentialsUnavailable
         }
         return (validated, secrets, try service.transport(configuration: validated, secrets: secrets))
+    }
+
+    private func loadSecretStatusIfNeeded() {
+        guard secretStatusTask == nil else { return }
+        let store = secretStore
+        let revision = secretStatusRevision
+        secretStatusTask = Task { [weak self] in
+            let configured = await Task.detached(priority: .utility) {
+                ((try? store.load()) ?? nil) != nil
+            }.value
+            guard !Task.isCancelled, let self, revision == self.secretStatusRevision else { return }
+            self.secretsConfigured = configured
+        }
     }
 
     private func persist(_ updated: DesktopAutomaticBackupConfiguration) {
