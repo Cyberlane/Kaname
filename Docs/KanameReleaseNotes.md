@@ -1,5 +1,13 @@
 # Unreleased
 
+- Connect installed workflows to production Gmail reads for bounded search, exact full-thread retrieval, labels, and message-bound attachment bytes.
+- Add deliberate manual runs and previewed processing of existing Gmail matches without silently changing mail or importing historical messages on observation enablement.
+- Add the trusted Gmail workflow connector for exact archive, Trash, mark-read, and label effects with frozen targets, explicit approval or standing authority, partial-result evidence, and postcondition re-reads.
+- Compile complete email conversations and recent correction episodes into bounded frozen model context while retaining immutable trigger and attachment artifacts with message lineage.
+- Execute reviewed bounded-agent stages through the existing provider adapters with allowlisted read-only tools, schema-checked actions, token/tool/time budgets, and a transcript artifact; effects remain separate graph stages.
+- Add low-noise artifact review with system Quick Look, verified export copies, current/previous version history, comparison, and deliberate current-version selection.
+- Strengthen Gmail send and draft reconciliation by verifying normalized recipients, subject, reply headers, thread identity, attachment names, and retrievable attachment digests before a workflow proceeds.
+- Advance the durable workspace schema to 21 and merge newly available built-in host capabilities into existing installations without replacing private capability configuration.
 - Add package-v2 typed, acyclic workflow graphs with declarative JSON Pointer decisions, durable selected edges, handled failure routes, and package-v1 compatibility.
 - Add schema-driven editable human review, resumable correlated event subscriptions, explicit timeout routes, and a quiet attention-first Workflow Work surface.
 - Add trusted connector preview, approval or predicate-bounded standing authority, idempotent execution, reconciliation, and unknown-outcome recovery without exposing credentials to capabilities.

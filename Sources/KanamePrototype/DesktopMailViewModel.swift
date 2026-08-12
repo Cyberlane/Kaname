@@ -4,6 +4,19 @@ import Foundation
 import KanameConnectivity
 import KanameDesktop
 
+private func withWorkflowAgentTimeout<Value: Sendable>(
+    seconds: Int,
+    operation: @escaping @Sendable () async throws -> Value
+) async throws -> Value {
+    do {
+        return try await AsyncDeadline.first(timeout: .seconds(seconds), operation: operation)
+    } catch AsyncDeadlineError.timedOut {
+        throw DesktopWorkflowCapabilityError.executionFailed(
+            "The bounded agent exhausted its reviewed wall-clock budget."
+        )
+    }
+}
+
 @MainActor
 final class DesktopMailViewModel: ObservableObject {
     @Published private(set) var threads: [GmailThreadDetailSnapshot] = []
@@ -21,6 +34,7 @@ final class DesktopMailViewModel: ObservableObject {
     private let environment: KanameDesktopEnvironment
     private var workflowMonitoringTask: _Concurrency.Task<Void, Never>?
     private var workflowRuntime: DesktopWorkflowRuntime?
+    private var workflowEffectCoordinator: DesktopWorkflowEffectCoordinator?
 
     init(environment: KanameDesktopEnvironment = .current) {
         self.environment = environment
@@ -49,6 +63,108 @@ final class DesktopMailViewModel: ObservableObject {
 
     func checkWorkflowTriggers(model: DesktopAppModel) {
         _Concurrency.Task { await pollWorkflowBindings(model: model, announce: true) }
+    }
+
+    func processExistingWorkflowMatches(
+        model: DesktopAppModel,
+        binding: DesktopWorkflowTriggerBindingRecord
+    ) {
+        guard !isBusy, binding.trigger == .email, binding.source == "gmail",
+              let accountID = binding.accountIDs.first else { return }
+        isBusy = true
+        _Concurrency.Task {
+            do {
+                let matches = try await service.matchingGmailThreadIDs(
+                    accountID: accountID, query: binding.sourceFilter
+                ).sorted()
+                let alert = NSAlert()
+                alert.messageText = "Process \(matches.count) existing Gmail match\(matches.count == 1 ? "" : "es")?"
+                alert.informativeText = "Account: \(accountID)\nFilter: \(binding.sourceFilter)\n\nThis creates durable workflow episodes for the exact current matches. It does not archive, label, trash, mark read, draft, or send email."
+                alert.alertStyle = .informational
+                alert.addButton(withTitle: "Process existing matches")
+                alert.addButton(withTitle: "Cancel")
+                guard alert.runModal() == .alertFirstButtonReturn else {
+                    message = "Existing-mail processing cancelled; Gmail was not changed."
+                    isBusy = false
+                    return
+                }
+                let cursor = try await service.gmailHistoryCursor(accountID: accountID)
+                var ingested = 0
+                for threadID in matches {
+                    let thread = try await service.readMailThread(accountID: accountID, threadID: threadID)
+                    guard let latest = thread.messages.last else { continue }
+                    let event = GmailHistoryEvent.record(
+                        id: "backfill:\(accountID):\(latest.id)", historyID: thread.historyID ?? cursor,
+                        kind: .messageAdded, messageID: latest.id, threadID: thread.id,
+                        labelIDs: latest.labels
+                    )
+                    if try await ingestWorkflowThread(
+                        thread, event: event, binding: binding, cursor: cursor, model: model
+                    ) { ingested += 1 }
+                }
+                _ = model.advanceWorkflowTriggerCursor(id: binding.id, cursor: cursor)
+                message = "Created \(ingested) workflow episode\(ingested == 1 ? "" : "s") from \(matches.count) exact existing match\(matches.count == 1 ? "" : "es"). Gmail was not changed."
+                await executeQueuedWorkflowRuns(model: model)
+            } catch {
+                message = "Existing-mail processing stopped safely: \(error.localizedDescription)"
+            }
+            isBusy = false
+        }
+    }
+
+    @discardableResult
+    func runWorkflowManually(
+        model: DesktopAppModel,
+        workflowID: String,
+        title: String,
+        request: String,
+        input: Data
+    ) -> Bool {
+        guard !isBusy,
+              (try? JSONSerialization.jsonObject(with: input, options: [.fragmentsAllowed])) != nil,
+              let storage = model.workflowStorage(workflowID: workflowID) else {
+            message = "Enter valid JSON input before starting this workflow."
+            return false
+        }
+        let timestamp = Int64(Date().timeIntervalSince1970 * 1_000)
+        let digest = DesktopWorkflowPackageCodec.digest(input)
+        guard let eventID = model.observeWorkflowExternalEvent(
+            source: "manual", accountID: "local-user", conversationID: nil, messageID: nil,
+            cursor: nil, payloadDigest: digest,
+            deduplicationKey: "manual:\(workflowID):\(UUID().uuidString.lowercased())"
+        ), let workItemID = model.createWorkflowWorkItem(workflowID: workflowID, title: title, goal: request),
+        let episodeID = model.createWorkflowEpisode(
+            workItemID: workItemID, sourceEventID: eventID, sourceMessageID: nil,
+            intent: .request, summary: title, deltaSummary: "User-started workflow run"
+        ), let artifact = try? storage.importArtifact(
+            data: input, filename: "manual-input.json", mediaType: "application/json",
+            createdAtUnixMillis: timestamp
+        ) else {
+            message = "Kaname could not create the durable manual workflow input."
+            return false
+        }
+        _ = model.bindWorkflowArtifactRole(
+            workflowID: workflowID, workItemID: workItemID, episodeID: episodeID,
+            role: "trigger-payload", artifact: artifact, createdByRunID: "manual:\(eventID)"
+        )
+        guard let contextID = model.compileWorkflowContext(
+            workItemID: workItemID, episodeID: episodeID, request: request,
+            references: [.reference(
+                id: eventID, kind: "manual-input", label: title, sourceID: "manual:\(eventID)",
+                digest: artifact.sha256, included: true,
+                reason: "Exact user-supplied input for this manual run.",
+                estimatedTokens: max(1, min(input.count / 4, 8_000)),
+                content: String(data: input, encoding: .utf8)
+            )]
+        ), model.queueWorkflowRun(
+            workItemID: workItemID, episodeID: episodeID, contextSnapshotID: contextID
+        ) != nil else {
+            message = "Kaname stored the manual input but could not queue its run."
+            return false
+        }
+        message = "Manual workflow run queued."
+        _Concurrency.Task { await executeQueuedWorkflowRuns(model: model) }
+        return true
     }
 
     private func pollWorkflowBindings(model: DesktopAppModel, announce: Bool) async {
@@ -139,17 +255,19 @@ final class DesktopMailViewModel: ObservableObject {
         guard let message = thread.messages.first(where: { $0.id == event.messageID }) ?? thread.messages.last else { return false }
         var attachmentPayloads: [String: Data] = [:]
         var totalAttachmentBytes = 0
-        for attachment in message.attachments {
-            let data = try await service.downloadGmailAttachment(
-                accountID: thread.accountID,
-                messageID: attachment.messageID,
-                attachmentID: attachment.attachmentID
-            )
-            totalAttachmentBytes += data.count
-            guard totalAttachmentBytes <= GmailOutboundAttachment.maximumTotalBytes else {
-                throw DesktopWorkflowStorageError.quotaExceeded
+        for threadMessage in thread.messages {
+            for attachment in threadMessage.attachments {
+                let data = try await service.downloadGmailAttachment(
+                    accountID: thread.accountID,
+                    messageID: attachment.messageID,
+                    attachmentID: attachment.attachmentID
+                )
+                totalAttachmentBytes += data.count
+                guard totalAttachmentBytes <= GmailOutboundAttachment.maximumTotalBytes else {
+                    throw DesktopWorkflowStorageError.quotaExceeded
+                }
+                attachmentPayloads[WorkflowEmailReadResponse.attachmentKey(attachment)] = data
             }
-            attachmentPayloads[attachment.attachmentID] = data
         }
         let payload = try workflowEventPayload(
             thread: thread,
@@ -215,23 +333,45 @@ final class DesktopMailViewModel: ObservableObject {
                 workflowID: binding.workflowID, workItemID: item.id, episodeID: episodeID,
                 role: "trigger-payload", artifact: artifact, createdByRunID: "gmail:\(message.id)"
             )
+            for threadMessage in thread.messages {
+                for attachment in threadMessage.attachments {
+                    guard let data = attachmentPayloads[WorkflowEmailReadResponse.attachmentKey(attachment)],
+                          let stored = try? storage.importArtifact(
+                              data: data,
+                              filename: attachment.filename,
+                              mediaType: attachment.mimeType,
+                              createdAtUnixMillis: Int64(Date().timeIntervalSince1970 * 1_000)
+                          ) else { continue }
+                    _ = model.bindWorkflowArtifactRole(
+                        workflowID: binding.workflowID, workItemID: item.id, episodeID: episodeID,
+                        role: "source-attachment-\(stored.sha256.prefix(16))", artifact: stored,
+                        createdByRunID: "gmail:\(threadMessage.id)"
+                    )
+                }
+            }
         }
+        let threadText = workflowThreadText(thread)
+        var contextReferences = priorWorkflowContextReferences(
+            model: model, workItemID: item.id, excludingEpisodeID: episodeID
+        )
+        contextReferences.append(
+            .reference(
+                id: eventID,
+                kind: "gmail-thread",
+                label: message.subject.isEmpty ? "Gmail conversation" : message.subject,
+                sourceID: "gmail:\(thread.accountID):\(thread.id):\(message.id)",
+                digest: artifactDigest,
+                included: true,
+                reason: "Complete conversation snapshot for the active workflow episode.",
+                estimatedTokens: max(1, min(threadText.utf8.count / 4, 24_000)),
+                content: threadText
+            )
+        )
         let contextID = model.compileWorkflowContext(
             workItemID: item.id,
             episodeID: episodeID,
             request: message.body.isEmpty ? message.subject : message.body,
-            references: [
-                .reference(
-                    id: eventID,
-                    kind: "gmail-message",
-                    label: message.subject.isEmpty ? "Gmail message" : message.subject,
-                    sourceID: "gmail:\(thread.accountID):\(message.id)",
-                    digest: artifactDigest,
-                    included: true,
-                    reason: "Triggered the active workflow episode.",
-                    estimatedTokens: max(1, min(message.body.count / 4, 16_000))
-                )
-            ]
+            references: contextReferences
         )
         if let contextID {
             _ = model.queueWorkflowRun(workItemID: item.id, episodeID: episodeID, contextSnapshotID: contextID)
@@ -244,31 +384,50 @@ final class DesktopMailViewModel: ObservableObject {
         message: GmailMessageSnapshot,
         attachmentPayloads: [String: Data]
     ) throws -> Data {
+        let messages = thread.messages.map {
+            WorkflowGmailPayloadEncoder.messageObject($0, attachmentPayloads: attachmentPayloads)
+        }
         let object: [String: Any] = [
             "accountID": thread.accountID,
             "accountIdentity": thread.accountIdentity,
             "threadID": thread.id,
             "historyID": thread.historyID ?? "",
-            "message": [
-                "id": message.id,
-                "sender": message.sender,
-                "recipients": message.recipients,
-                "subject": message.subject,
-                "date": message.dateDescription,
-                "body": message.body,
-                "labels": message.labels,
-                "attachments": message.attachments.map {
-                    [
-                        "id": $0.attachmentID,
-                        "filename": $0.filename,
-                        "mediaType": $0.mimeType,
-                        "size": $0.size,
-                        "dataBase64": attachmentPayloads[$0.attachmentID]?.base64EncodedString() ?? "",
-                    ] as [String: Any]
-                },
-            ] as [String: Any],
+            "triggerMessageID": message.id,
+            "messages": messages,
         ]
         return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
+    }
+
+    private func workflowThreadText(_ thread: GmailThreadDetailSnapshot) -> String {
+        thread.messages.enumerated().map { index, message in
+            """
+            Message \(index + 1) [\(message.id)]
+            From: \(message.sender)
+            To: \(message.recipients)
+            Date: \(message.dateDescription)
+            Subject: \(message.subject)
+            Attachments: \(message.attachments.map(\.filename).joined(separator: ", "))
+
+            \(message.body)
+            """
+        }.joined(separator: "\n\n---\n\n")
+    }
+
+    private func priorWorkflowContextReferences(
+        model: DesktopAppModel,
+        workItemID: String,
+        excludingEpisodeID: String
+    ) -> [DesktopWorkflowContextReference] {
+        model.workflowEpisodes(workItemID: workItemID).filter { $0.id != excludingEpisodeID }.suffix(8).map { episode in
+            let content = "Episode \(episode.ordinal) · \(episode.intent.label)\n\(episode.summary)\nDelta: \(episode.deltaSummary)"
+            return .reference(
+                id: episode.id, kind: "prior-episode", label: "Episode \(episode.ordinal)",
+                sourceID: episode.sourceEventID,
+                digest: DesktopWorkflowPackageCodec.digest(Data(content.utf8)), included: true,
+                reason: "Recent correlated workflow history retained for correction continuity.",
+                estimatedTokens: max(1, content.utf8.count / 4), content: content
+            )
+        }
     }
 
     private func executeQueuedWorkflowRuns(model: DesktopAppModel) async {
@@ -308,6 +467,9 @@ final class DesktopMailViewModel: ObservableObject {
             attributes: [.posixPermissions: 0o700]
         )
         let router = DesktopWorkflowCapabilityRouter(fallback: fallback)
+        let effectCoordinator = DesktopWorkflowEffectCoordinator(model: model)
+        effectCoordinator.register(DesktopGmailWorkflowConnector(service: service))
+        workflowEffectCoordinator = effectCoordinator
         await router.register(capabilityID: "kaname.context.compile") { invocation, _ in
             .completed(output: invocation.input, artifactIDs: [])
         }
@@ -349,6 +511,144 @@ final class DesktopMailViewModel: ObservableObject {
             let output = try request.validatedOutput(providerText)
             return .completed(output: output, artifactIDs: [])
         }
+        await router.register(capabilityID: "kaname.agent.bounded") { [weak model] invocation, _ in
+            guard let model, let policy = invocation.step.agentPolicy else {
+                throw DesktopWorkflowCapabilityError.executionUnavailable
+            }
+            let request = try WorkflowBoundedAgentRequest.decode(invocation.input)
+            let basePrompt = DesktopWorkflowModelContextCompiler.augment(
+                prompt: request.prompt, context: invocation.contextSnapshot
+            )
+            guard let basePrompt else { throw DesktopWorkflowCapabilityError.inputTooLarge }
+            let started = Date()
+            var transcript: [[String: String]] = []
+            var toolCalls = 0
+            var estimatedTokens = max(1, basePrompt.utf8.count / 4)
+            var artifactIDs: [String] = []
+            var artifactMetadata: [DesktopWorkflowStoredArtifact] = []
+            var commitProposal = DesktopWorkflowCapabilityCommitProposal()
+
+            for turn in 0...policy.maximumToolCalls {
+                guard Date().timeIntervalSince(started) <= Double(policy.timeoutSeconds),
+                      estimatedTokens <= policy.maximumModelTokens else {
+                    throw DesktopWorkflowCapabilityError.executionFailed("The bounded agent exhausted its reviewed time or model-token budget.")
+                }
+                let history = transcript.map { "\($0["role"] ?? "event"): \($0["content"] ?? "")" }
+                    .joined(separator: "\n")
+                let turnPrompt = """
+                \(basePrompt)
+
+                You are executing a bounded Kaname workflow agent. Return only JSON matching the supplied action schema.
+                To call a tool, return {"kind":"tool","capabilityID":"...","input":<JSON>}.
+                To finish, return {"kind":"finish","output":<JSON matching the workflow final schema>}.
+                Allowed tool capabilities: \(policy.allowedCapabilityIDs.joined(separator: ", "))
+                Remaining tool calls: \(policy.maximumToolCalls - toolCalls)
+                Final output schema: \(request.outputSchema)
+
+                Bounded transcript:
+                \(history.isEmpty ? "No prior turns." : history)
+                """
+                let structured = WorkflowStructuredModelRequest(
+                    providerName: request.providerName, prompt: turnPrompt,
+                    outputSchema: WorkflowAgentAction.schema
+                )
+                let providerText: String
+                let remainingSeconds = max(
+                    1,
+                    policy.timeoutSeconds - Int(Date().timeIntervalSince(started).rounded(.down))
+                )
+                let provider = try request.provider
+                switch provider {
+                case .codex:
+                    providerText = try await withWorkflowAgentTimeout(seconds: remainingSeconds) {
+                        try await NativeProviderDiscussionService().runCodex(
+                            prompt: turnPrompt, workspace: workflowModelWorkspace, executable: nil
+                        )
+                    }
+                case let .native(driver):
+                    providerText = try await withWorkflowAgentTimeout(seconds: remainingSeconds) {
+                        try await NativeProviderDiscussionService().run(
+                            driver: driver, prompt: turnPrompt, workspace: workflowModelWorkspace
+                        ).text
+                    }
+                }
+                let actionData = try structured.validatedOutput(providerText)
+                estimatedTokens += max(1, providerText.utf8.count / 4)
+                let action = try WorkflowAgentAction.decode(actionData)
+                transcript.append(["role": "model", "content": String(data: actionData, encoding: .utf8) ?? "{}"])
+                switch action.kind {
+                case .finish:
+                    guard let output = action.output,
+                          DesktopWorkflowJSONSchemaValidator.validates(instance: output, against: request.outputSchema) else {
+                        throw DesktopWorkflowCapabilityError.outputInvalid
+                    }
+                    let transcriptData = try JSONSerialization.data(
+                        withJSONObject: transcript, options: [.sortedKeys, .withoutEscapingSlashes]
+                    )
+                    if let storage = await MainActor.run(body: { model.workflowStorage(workflowID: invocation.workflowID) }) {
+                        let stored = try storage.importArtifact(
+                            data: transcriptData, filename: "agent-\(invocation.runID)-\(invocation.step.id)-transcript.json",
+                            mediaType: "application/json",
+                            createdAtUnixMillis: Int64(Date().timeIntervalSince1970 * 1_000)
+                        )
+                        artifactIDs.append(stored.sha256)
+                        artifactMetadata.append(stored)
+                    }
+                    return .completed(
+                        output: output, artifactIDs: artifactIDs,
+                        commitProposal: commitProposal, artifactMetadata: artifactMetadata,
+                        executionEvidence: .init(
+                            standardOutput: "Bounded agent completed \(turn + 1) model turn(s) and \(toolCalls) tool call(s).",
+                            elapsedMilliseconds: Int64(Date().timeIntervalSince(started) * 1_000)
+                        )
+                    )
+                case .tool:
+                    guard toolCalls < policy.maximumToolCalls,
+                          let capabilityID = action.capabilityID, let toolInput = action.input,
+                          policy.allowedCapabilityIDs.contains(capabilityID),
+                          capabilityID != "kaname.agent.bounded",
+                          let installation = await MainActor.run(body: {
+                              model.workflowCapabilityInstallation(capabilityID: capabilityID)
+                          }), installation.enabled, installation.lastTestPassed,
+                          !installation.permissions.permissions.contains(where: {
+                              [.externalEffects, .emailDraft, .emailSend, .emailLabels].contains($0)
+                          }) else {
+                        throw DesktopWorkflowCapabilityError.executionFailed("The bounded agent requested an unavailable or effect-capable tool.")
+                    }
+                    toolCalls += 1
+                    let toolStep = DesktopWorkflowStepDefinition(
+                        id: "\(invocation.step.id)-tool-\(toolCalls)", name: capabilityID,
+                        kind: .invokeTool, capabilityID: capabilityID,
+                        retryLimit: 0, isIdempotent: installation.idempotent, blocking: true
+                    )
+                    let result = try await router.invoke(
+                        workflowID: invocation.workflowID, workItemID: invocation.workItemID,
+                        episodeID: invocation.episodeID, runID: invocation.runID, step: toolStep,
+                        contextSnapshotID: invocation.contextSnapshotID, input: toolInput,
+                        artifactInputs: invocation.artifactInputs, stateInputs: invocation.stateInputs,
+                        contextSnapshot: invocation.contextSnapshot,
+                        installation: installation
+                    )
+                    guard case let .completed(toolOutput, toolArtifacts, toolCommit, toolMetadata, _) = result else {
+                        throw DesktopWorkflowCapabilityError.executionFailed("A bounded-agent tool attempted to wait or create an effect.")
+                    }
+                    estimatedTokens += max(1, toolOutput.count / 4)
+                    guard toolOutput.count <= 8 * 1_024 * 1_024 else {
+                        throw DesktopWorkflowCapabilityError.outputInvalid
+                    }
+                    artifactIDs.append(contentsOf: toolArtifacts)
+                    artifactMetadata.append(contentsOf: toolMetadata)
+                    commitProposal.stateMutations.append(contentsOf: toolCommit.stateMutations)
+                    commitProposal.knowledgeProposals.append(contentsOf: toolCommit.knowledgeProposals)
+                    commitProposal.artifactRoles.append(contentsOf: toolCommit.artifactRoles)
+                    transcript.append([
+                        "role": "tool",
+                        "content": "\(capabilityID): \(String(data: toolOutput, encoding: .utf8) ?? "[binary output \(toolOutput.count) bytes]")"
+                    ])
+                }
+            }
+            throw DesktopWorkflowCapabilityError.executionFailed("The bounded agent did not finish within its reviewed tool-call budget.")
+        }
         for capabilityID in ["kaname.email.draft", "kaname.email.send"] {
             await router.register(capabilityID: capabilityID) { [weak model] invocation, _ in
                 guard let model else { throw DesktopWorkflowCapabilityError.executionUnavailable }
@@ -385,8 +685,84 @@ final class DesktopMailViewModel: ObservableObject {
                 return .waiting(reason: "Review and approve the exact email effect.")
             }
         }
-        await router.register(capabilityID: "kaname.email.read") { invocation, _ in
-            .completed(output: invocation.input, artifactIDs: [])
+        await router.register(capabilityID: "kaname.email.read") { [weak model, weak self] invocation, _ in
+            guard let model, let self else { throw DesktopWorkflowCapabilityError.executionUnavailable }
+            let request = try WorkflowEmailReadRequest.decode(invocation.input)
+            guard await MainActor.run(body: {
+                model.workflowRevision(runID: invocation.runID)?.permissions.accountIDs.contains(request.accountID) == true
+            }) else { throw DesktopWorkflowCapabilityError.executionFailed("The Gmail account is outside this workflow revision's reviewed scope.") }
+            var threads: [GmailThreadDetailSnapshot] = []
+            var labels: [GmailLabelSnapshot] = []
+            var pages = 0
+            switch request.operation {
+            case .search:
+                var pageToken: String?
+                var seenTokens = Set<String>()
+                repeat {
+                    guard pages < request.maximumPages else {
+                        throw DesktopWorkflowCapabilityError.executionFailed("The Gmail search exceeded its reviewed page limit.")
+                    }
+                    let page = try await self.service.searchMail(
+                        accountID: request.accountID, query: request.query ?? "", pageToken: pageToken, limit: 100
+                    )
+                    guard page.failedThreadCount == 0 else {
+                        throw DesktopWorkflowCapabilityError.executionFailed("Gmail returned an incomplete thread page.")
+                    }
+                    threads.append(contentsOf: page.threads)
+                    guard threads.count <= request.maximumThreads else {
+                        throw DesktopWorkflowCapabilityError.executionFailed("The Gmail search exceeded its reviewed thread limit.")
+                    }
+                    pages += 1
+                    pageToken = page.nextPageToken
+                    if let pageToken, !seenTokens.insert(pageToken).inserted {
+                        throw DesktopWorkflowCapabilityError.executionFailed("Gmail repeated a search page token.")
+                    }
+                } while pageToken != nil
+            case .thread:
+                threads = [try await self.service.readMailThread(
+                    accountID: request.accountID, threadID: request.threadID ?? ""
+                )]
+                pages = 1
+            case .labels:
+                labels = try await self.service.listGmailLabels(accountID: request.accountID)
+                pages = 1
+            }
+            var attachments: [String: Data] = [:]
+            if request.includeAttachmentBytes {
+                var total = 0
+                for thread in threads {
+                    for message in thread.messages {
+                        for attachment in message.attachments {
+                            let data = try await self.service.downloadGmailAttachment(
+                                accountID: request.accountID, messageID: attachment.messageID,
+                                attachmentID: attachment.attachmentID,
+                                maximumBytes: request.maximumAttachmentBytes
+                            )
+                            total += data.count
+                            guard total <= request.maximumAttachmentBytes else {
+                                throw DesktopWorkflowCapabilityError.inputTooLarge
+                            }
+                            attachments[WorkflowEmailReadResponse.attachmentKey(attachment)] = data
+                        }
+                    }
+                }
+            }
+            let output = try WorkflowEmailReadResponse.encode(
+                request: request, threads: threads, labels: labels, pages: pages,
+                attachmentPayloads: attachments
+            )
+            return .completed(output: output, artifactIDs: [])
+        }
+        await router.register(capabilityID: "kaname.connector.effect") { [weak model, weak effectCoordinator] invocation, _ in
+            guard let model, let effectCoordinator else { throw DesktopWorkflowCapabilityError.executionUnavailable }
+            let input = try WorkflowConnectorEffectInput.decode(invocation.input)
+            guard let revision = await MainActor.run(body: { model.workflowRevision(runID: invocation.runID) }),
+                  revision.permissions.permissions.contains(.externalEffects),
+                  input.accountID.map(revision.permissions.accountIDs.contains) ?? true else {
+                throw DesktopWorkflowCapabilityError.executionFailed("The connector effect is outside this workflow revision's reviewed authority.")
+            }
+            _ = try await effectCoordinator.preview(input.request(for: invocation))
+            return .waiting(reason: "Review or apply the exact trusted connector effect.")
         }
         return DesktopWorkflowRuntime(
             model: model,
@@ -397,16 +773,19 @@ final class DesktopMailViewModel: ObservableObject {
     }
 
     func requestWorkflowEffectApproval(model: DesktopAppModel, effect: DesktopWorkflowEffectRecord) {
+        let preview = model.snapshot.operations.workflows.effectPreviews.first(where: { $0.effectID == effect.id })
         guard effect.approvalID == nil,
               let approvalID = model.createApproval(
                   threadID: nil,
-                  title: effect.kind == "gmail-send" ? "Send workflow email" : "Create workflow Gmail draft",
+                  title: preview?.title ?? (effect.kind == "gmail-send" ? "Send workflow email" : "Create workflow Gmail draft"),
                   exactTarget: effect.exactTarget,
-                  consequence: effect.kind == "gmail-send"
+                  consequence: preview?.consequences.joined(separator: " ") ?? (effect.kind == "gmail-send"
                       ? "Send the exact reviewed workflow reply."
-                      : "Create the exact reviewed workflow draft in Gmail.",
-                  dataLeavingDevice: "Recipients, thread headers, subject, body, and attachment bytes",
-                  reversible: effect.kind != "gmail-send",
+                      : "Create the exact reviewed workflow draft in Gmail."),
+                  dataLeavingDevice: effect.kind.hasPrefix("gmail-")
+                      ? "Recipients, thread headers, subject, body, and attachment bytes"
+                      : "Exact connector target and declared effect payload",
+                  reversible: preview?.reversible ?? (effect.kind != "gmail-send"),
                   expiresAtUnixMillis: Int64(Date().addingTimeInterval(15 * 60).timeIntervalSince1970 * 1_000)
               ) else { return }
         _ = model.attachWorkflowEffectApproval(effectID: effect.id, approvalID: approvalID)
@@ -414,6 +793,12 @@ final class DesktopMailViewModel: ObservableObject {
     }
 
     func executeWorkflowEffect(model: DesktopAppModel, effect: DesktopWorkflowEffectRecord) {
+        if model.snapshot.operations.workflows.effectPreviews.contains(where: {
+            $0.effectID == effect.id && $0.connectorID == "kaname.gmail"
+        }) {
+            executeTrustedConnectorEffect(model: model, effect: effect)
+            return
+        }
         guard !isBusy,
               effect.state == .approved || effect.state == .awaitingApproval,
               model.beginWorkflowEffect(effectID: effect.id),
@@ -433,16 +818,24 @@ final class DesktopMailViewModel: ObservableObject {
                 let receipt: String
                 if effect.kind == "gmail-send" {
                     let sent = try await service.sendGmailMessage(accountID: request.accountID, message: outbound, grant: grant)
-                    receipt = "Sent message \(sent.messageID) was re-read from Gmail."
+                    receipt = "Sent message \(sent.messageID). \(sent.reconciliation.summary)"
                 } else {
                     let drafted = try await service.createGmailDraft(accountID: request.accountID, message: outbound, grant: grant)
-                    receipt = "Draft \(drafted.id) was re-read from Gmail."
+                    receipt = "Draft \(drafted.id). \(drafted.reconciliation.summary)"
                 }
                 _ = model.reconcileWorkflowEffect(effectID: effect.id, receipt: receipt, outcomeKnown: true, succeeded: true)
                 let digest = SHA256.hash(data: input).map { String(format: "%02x", $0) }.joined()
                 _ = model.resumeWorkflowStepAfterEffect(runID: effect.runID, stepID: effect.stepID, outputDigest: digest)
                 message = receipt
                 await executeQueuedWorkflowRuns(model: model)
+            } catch GmailWorkError.reconciliationFailed {
+                _ = model.reconcileWorkflowEffect(
+                    effectID: effect.id,
+                    receipt: GmailWorkError.reconciliationFailed.localizedDescription,
+                    outcomeKnown: true,
+                    succeeded: false
+                )
+                message = "Gmail returned a result that did not match the approved message. Kaname will not retry it."
             } catch {
                 _ = model.reconcileWorkflowEffect(
                     effectID: effect.id,
@@ -451,6 +844,35 @@ final class DesktopMailViewModel: ObservableObject {
                     succeeded: false
                 )
                 message = "The Gmail outcome is unknown. Kaname will not retry until it is reconciled."
+            }
+            isBusy = false
+        }
+    }
+
+    private func executeTrustedConnectorEffect(model: DesktopAppModel, effect: DesktopWorkflowEffectRecord) {
+        guard !isBusy, let workflowEffectCoordinator else {
+            message = "The trusted connector is unavailable."
+            return
+        }
+        isBusy = true
+        _Concurrency.Task {
+            do {
+                let receipt = try await (effect.state == .outcomeUnknown
+                    ? workflowEffectCoordinator.reconcile(effectID: effect.id)
+                    : workflowEffectCoordinator.execute(effectID: effect.id))
+                guard receipt.outcomeKnown, receipt.succeeded else {
+                    message = receipt.detail
+                    isBusy = false
+                    return
+                }
+                let digest = DesktopWorkflowPackageCodec.digest(Data(receipt.detail.utf8))
+                _ = model.resumeWorkflowStepAfterEffect(
+                    runID: effect.runID, stepID: effect.stepID, outputDigest: digest
+                )
+                message = receipt.detail
+                await executeQueuedWorkflowRuns(model: model)
+            } catch {
+                message = error.localizedDescription
             }
             isBusy = false
         }
@@ -651,10 +1073,10 @@ final class DesktopMailViewModel: ObservableObject {
                 let remoteReceipt: String
                 if send {
                     let receipt = try await service.sendGmailMessage(accountID: action.accountID, message: outbound, grant: grant)
-                    remoteReceipt = "Sent message \(receipt.messageID) was re-read from Gmail."
+                    remoteReceipt = "Sent message \(receipt.messageID). \(receipt.reconciliation.summary)"
                 } else {
                     let receipt = try await service.createGmailDraft(accountID: action.accountID, message: outbound, grant: grant)
-                    remoteReceipt = "Draft \(receipt.id) was re-read from Gmail."
+                    remoteReceipt = "Draft \(receipt.id). \(receipt.reconciliation.summary)"
                 }
                 model.markEmailDraft(id: draft.id, status: send ? .ready : .proposed)
                 model.reconcileMailAction(id: action.id, state: .reconciled, remoteReceipt: remoteReceipt)

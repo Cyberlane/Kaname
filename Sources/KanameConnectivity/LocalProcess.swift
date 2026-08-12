@@ -312,16 +312,34 @@ enum LocalProcessRace {
         onTimeout: @escaping @Sendable () -> Void,
         operation: @escaping @Sendable () async throws -> Result
     ) async throws -> Result {
+        do {
+            return try await AsyncDeadline.first(timeout: timeout, onTimeout: onTimeout, operation: operation)
+        } catch AsyncDeadlineError.timedOut {
+            throw ProviderConnectivityError.processTimedOut(timeoutMessage)
+        }
+    }
+}
+
+public enum AsyncDeadlineError: Error, Sendable {
+    case timedOut
+}
+
+public enum AsyncDeadline {
+    public static func first<Result: Sendable>(
+        timeout: Duration,
+        onTimeout: @escaping @Sendable () -> Void = {},
+        operation: @escaping @Sendable () async throws -> Result
+    ) async throws -> Result {
         try await withThrowingTaskGroup(of: Result.self) { group in
             group.addTask(operation: operation)
             group.addTask {
                 try await _Concurrency.Task.sleep(for: timeout)
                 onTimeout()
-                throw ProviderConnectivityError.processTimedOut(timeoutMessage)
+                throw AsyncDeadlineError.timedOut
             }
             defer { group.cancelAll() }
             guard let first = try await group.next() else {
-                throw ProviderConnectivityError.processTimedOut(timeoutMessage)
+                throw AsyncDeadlineError.timedOut
             }
             return first
         }

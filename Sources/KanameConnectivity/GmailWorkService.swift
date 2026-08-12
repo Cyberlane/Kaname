@@ -20,6 +20,8 @@ public struct GmailMessageSnapshot: Equatable, Identifiable, Sendable {
     public let body: String
     public let labels: [String]
     public let attachments: [GmailAttachmentSnapshot]
+    public let inReplyTo: String
+    public let references: String
 }
 
 public struct GmailThreadDetailSnapshot: Equatable, Identifiable, Sendable {
@@ -159,12 +161,29 @@ public struct GmailDraftReceipt: Equatable, Sendable {
     public let id: String
     public let messageID: String?
     public let accountID: String
+    public let reconciliation: GmailOutboundReconciliation
 }
 
 public struct GmailSendReceipt: Equatable, Sendable {
     public let messageID: String
     public let threadID: String?
     public let accountID: String
+    public let reconciliation: GmailOutboundReconciliation
+}
+
+public struct GmailOutboundReconciliation: Equatable, Sendable {
+    public let recipients: String
+    public let subject: String
+    public let threadID: String
+    public let attachmentNames: [String]
+    public let attachmentDigests: [String]
+    public let verifiedAttachmentBytes: Bool
+
+    public var summary: String {
+        let attachments = attachmentNames.isEmpty ? "no attachments" : "\(attachmentNames.count) attachment(s)"
+        return "Verified recipients, subject, thread, and \(attachments) from Gmail"
+            + (verifiedAttachmentBytes ? ", including attachment bytes." : ".")
+    }
 }
 
 public enum GmailWorkError: Error, Equatable, LocalizedError, Sendable {
@@ -444,24 +463,63 @@ public extension NativeGoogleIntegrationService {
         let wire = try GmailAPIParser.outboundReceipt(data: data, service: service)
         switch operation {
         case .draft:
-            let receipt = GmailDraftReceipt(
-                id: try GmailAPIParser.validatedID(wire.id),
-                messageID: wire.message?.id,
-                accountID: account.id
+            let draftID = try GmailAPIParser.validatedID(wire.id)
+            let url = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/drafts/\(draftID)?format=full")!
+            let remoteData = try await authorizedData(url: url, accessToken: token, service: "Gmail draft reconciliation")
+            let remote = try GmailAPIParser.draftMessage(data: remoteData, account: account)
+            let reconciliation = try await reconcileOutbound(
+                intended: message, remote: remote, account: account, accessToken: token
             )
-            let url = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/drafts/\(receipt.id)?format=minimal")!
-            _ = try await authorizedData(url: url, accessToken: token, service: "Gmail draft reconciliation")
+            let receipt = GmailDraftReceipt(
+                id: draftID, messageID: remote.id, accountID: account.id,
+                reconciliation: reconciliation
+            )
             return .draft(receipt)
         case .send:
-            let receipt = GmailSendReceipt(
-                messageID: try GmailAPIParser.validatedID(wire.id),
-                threadID: wire.threadId,
-                accountID: account.id
+            let messageID = try GmailAPIParser.validatedID(wire.id)
+            let url = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/messages/\(messageID)?format=full")!
+            let remoteData = try await authorizedData(url: url, accessToken: token, service: "Gmail send reconciliation")
+            let remote = try GmailAPIParser.message(data: remoteData, account: account)
+            let reconciliation = try await reconcileOutbound(
+                intended: message, remote: remote, account: account, accessToken: token
             )
-            let url = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/messages/\(receipt.messageID)?format=minimal")!
-            _ = try await authorizedData(url: url, accessToken: token, service: "Gmail send reconciliation")
+            let receipt = GmailSendReceipt(
+                messageID: messageID, threadID: remote.threadID, accountID: account.id,
+                reconciliation: reconciliation
+            )
             return .sent(receipt)
         }
+    }
+
+    private func reconcileOutbound(
+        intended: GmailOutboundMessage,
+        remote: GmailMessageSnapshot,
+        account: NativeGoogleAccountSnapshot,
+        accessToken: String
+    ) async throws -> GmailOutboundReconciliation {
+        let intendedNames = intended.attachments.map(\.filename)
+        let remoteNames = remote.attachments.map(\.filename)
+        guard GmailAPIParser.normalizedRecipients(intended.recipients) == GmailAPIParser.normalizedRecipients(remote.recipients),
+              intended.subject == remote.subject,
+              intended.threadID.map({ $0 == remote.threadID }) ?? true,
+              intended.inReplyTo.map({ $0 == remote.inReplyTo }) ?? true,
+              Set(intended.references).isSubset(of: Set(remote.references.split(separator: " ").map(String.init))),
+              intendedNames == remoteNames else { throw GmailWorkError.reconciliationFailed }
+        var digests: [String] = []
+        for (index, attachment) in remote.attachments.enumerated() {
+            let url = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/messages/\(attachment.messageID)/attachments/\(attachment.attachmentID)")!
+            let data = try await authorizedData(
+                url: url, accessToken: accessToken, service: "Gmail outbound attachment reconciliation"
+            )
+            let bytes = try GmailAPIParser.attachment(data: data)
+            guard bytes == intended.attachments[index].data else { throw GmailWorkError.reconciliationFailed }
+            digests.append(SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined())
+        }
+        return GmailOutboundReconciliation(
+            recipients: remote.recipients, subject: remote.subject, threadID: remote.threadID,
+            attachmentNames: remoteNames, attachmentDigests: digests,
+            verifiedAttachmentBytes: remote.attachments.count == intended.attachments.count
+        )
     }
 
     private func draftValue(from result: OutboundResult) throws -> GmailDraftReceipt {
@@ -521,6 +579,11 @@ private struct GmailWireMessage: Decodable {
     let payload: GmailWirePart?
 }
 
+private struct GmailWireDraft: Decodable {
+    let id: String
+    let message: GmailWireMessage
+}
+
 fileprivate struct GmailWireOutboundReceipt: Decodable {
     struct Message: Decodable { let id: String? }
     let id: String
@@ -563,10 +626,8 @@ public enum GmailAPIParser {
 
     public static func profileHistoryID(data: Data) throws -> String {
         struct Response: Decodable { let historyId: String }
-        do {
-            return try validatedHistoryID(JSONDecoder().decode(Response.self, from: data).historyId)
-        } catch let error as GmailWorkError { throw error }
-        catch { throw NativeGoogleIntegrationError.invalidResponse("Gmail profile") }
+        let response = try GoogleAPIResponseParser.decode(Response.self, from: data, service: "Gmail profile")
+        return try validatedHistoryID(response.historyId)
     }
 
     public static func historyPage(data: Data) throws -> HistoryPage {
@@ -637,27 +698,7 @@ public enum GmailAPIParser {
     public static func thread(data: Data, account: NativeGoogleAccountSnapshot) throws -> GmailThreadDetailSnapshot {
         do {
             let decoded = try JSONDecoder().decode(GmailWireThread.self, from: data)
-            let messages = try (decoded.messages ?? []).map { message in
-                let headers = message.payload?.headers ?? []
-                func header(_ name: String) -> String {
-                    headers.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }?.value ?? ""
-                }
-                var attachments: [GmailAttachmentSnapshot] = []
-                let body = message.payload.map {
-                    bodyAndAttachments(part: $0, messageID: message.id, attachments: &attachments)
-                } ?? ""
-                return GmailMessageSnapshot(
-                    id: try validatedID(message.id),
-                    threadID: try validatedID(message.threadId),
-                    sender: header("From"),
-                    recipients: header("To"),
-                    subject: header("Subject"),
-                    dateDescription: header("Date"),
-                    body: body,
-                    labels: message.labelIds ?? [],
-                    attachments: attachments
-                )
-            }
+            let messages = try (decoded.messages ?? []).map { try messageSnapshot($0) }
             return GmailThreadDetailSnapshot(
                 id: try validatedID(decoded.id),
                 accountID: account.id,
@@ -668,6 +709,33 @@ public enum GmailAPIParser {
             )
         } catch let error as GmailWorkError { throw error }
         catch { throw NativeGoogleIntegrationError.invalidResponse("Gmail thread") }
+    }
+
+    public static func message(data: Data, account: NativeGoogleAccountSnapshot) throws -> GmailMessageSnapshot {
+        try parsedMessage(data: data, service: "Gmail message") { (message: GmailWireMessage) in message }
+    }
+
+    public static func draftMessage(data: Data, account: NativeGoogleAccountSnapshot) throws -> GmailMessageSnapshot {
+        try parsedMessage(data: data, service: "Gmail draft") { (draft: GmailWireDraft) in draft.message }
+    }
+
+    public static func normalizedRecipients(_ value: String) -> [String] {
+        value.split(separator: ",").map {
+            let recipient = $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if let opening = recipient.lastIndex(of: "<"), let closing = recipient[opening...].firstIndex(of: ">") {
+                return String(recipient[recipient.index(after: opening)..<closing])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            return recipient
+        }.filter { !$0.isEmpty }.sorted()
+    }
+
+    private static func parsedMessage<Wire: Decodable>(
+        data: Data,
+        service: String,
+        message: (Wire) -> GmailWireMessage
+    ) throws -> GmailMessageSnapshot {
+        try messageSnapshot(message(GoogleAPIResponseParser.decode(Wire.self, from: data, service: service)))
     }
 
     public static func labels(data: Data) throws -> [GmailLabelSnapshot] {
@@ -702,7 +770,7 @@ public enum GmailAPIParser {
         return request
     }
 
-    static func reconciled(mutation: GmailThreadMutation, labels: [String]) -> Bool {
+    public static func reconciled(mutation: GmailThreadMutation, labels: [String]) -> Bool {
         let current = Set(labels)
         return switch mutation {
         case .archive: !current.contains("INBOX")
@@ -779,6 +847,23 @@ public enum GmailAPIParser {
 
     fileprivate static func outboundReceipt(data: Data, service: String) throws -> GmailWireOutboundReceipt {
         try GoogleAPIResponseParser.decode(GmailWireOutboundReceipt.self, from: data, service: service)
+    }
+
+    private static func messageSnapshot(_ message: GmailWireMessage) throws -> GmailMessageSnapshot {
+        let headers = message.payload?.headers ?? []
+        func header(_ name: String) -> String {
+            headers.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }?.value ?? ""
+        }
+        var attachments: [GmailAttachmentSnapshot] = []
+        let body = message.payload.map {
+            bodyAndAttachments(part: $0, messageID: message.id, attachments: &attachments)
+        } ?? ""
+        return GmailMessageSnapshot(
+            id: try validatedID(message.id), threadID: try validatedID(message.threadId),
+            sender: header("From"), recipients: header("To"), subject: header("Subject"),
+            dateDescription: header("Date"), body: body, labels: message.labelIds ?? [],
+            attachments: attachments, inReplyTo: header("In-Reply-To"), references: header("References")
+        )
     }
 
     private static func bodyAndAttachments(

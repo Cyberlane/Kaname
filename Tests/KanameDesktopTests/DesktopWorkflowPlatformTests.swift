@@ -177,7 +177,12 @@ struct DesktopWorkflowPlatformTests {
         let contextID = try #require(model.compileWorkflowContext(
             workItemID: workID, episodeID: correction, request: "Create the corrected fictional document.",
             references: [
-                reference(id: "current", included: true, tokens: 300),
+                DesktopWorkflowContextReference.reference(
+                    id: "current", kind: "email-thread", label: "Complete conversation",
+                    sourceID: "gmail:thread-1", digest: "digest-current", included: true,
+                    reason: "Full correlated conversation", estimatedTokens: 300,
+                    content: "Message 1: original request\nMessage 2: corrected requirement"
+                ),
                 reference(id: "obsolete", included: false, tokens: 200, reason: "Superseded by message-2")
             ], negativeConstraints: ["Do not use the superseded PDF requirement"]
         ))
@@ -193,12 +198,28 @@ struct DesktopWorkflowPlatformTests {
             prompt: "Produce structured output.", context: context
         ))
         #expect(modelPrompt.contains("required-format: DOCX"))
+        #expect(modelPrompt.contains("Message 1: original request"))
+        #expect(modelPrompt.contains("Message 2: corrected requirement"))
+        #expect(context.compilerVersion == 3)
         #expect(modelPrompt.contains("Do not use inactive knowledge required-format=PDF."))
         #expect(modelPrompt.contains("Context digest: \(context.digest)"))
         #expect(DesktopWorkflowModelContextCompiler.augment(
             prompt: "Produce structured output.", context: context, maximumBytes: 16
         ) == nil)
         #expect(!context.digest.isEmpty)
+
+        let unicodeContextID = try #require(model.compileWorkflowContext(
+            workItemID: workID, episodeID: correction, request: "Bound Unicode context.",
+            references: [.reference(
+                id: "unicode", kind: "email-thread", label: "Large thread", sourceID: "fixture",
+                digest: "digest-unicode", included: true, reason: "Exercise the byte boundary",
+                estimatedTokens: 1, content: String(repeating: "界", count: 30_000)
+            )], tokenBudget: 100_000
+        ))
+        let unicodeContext = try #require(
+            model.snapshot.operations.workflows.contextSnapshots.first { $0.id == unicodeContextID }
+        )
+        #expect(unicodeContext.references.first?.content?.utf8.count ?? 0 <= 64_000)
 
         let proposal = try #require(model.recordWorkflowFact(
             workItemID: workID, episodeID: correction, key: "required-format", value: "ODT",
@@ -211,6 +232,44 @@ struct DesktopWorkflowPlatformTests {
         #expect(model.snapshot.operations.audit.contains {
             $0.domain == "workflow-knowledge" && $0.action == "verified" && $0.target == proposal
         })
+    }
+
+    @Test
+    func artifactRoleCanSelectAnImmutablePriorVersionAsCurrent() throws {
+        let root = try TestTemporaryDirectory.make(prefix: "kaname-artifact-current")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = DesktopAppModel(
+            store: FileDesktopStateStore(fileURL: root.appendingPathComponent("Desktop/workspace.json")),
+            now: { 35_000 }
+        )
+        try installAndEnable(model)
+        let workID = try #require(model.createWorkflowWorkItem(
+            workflowID: "org.example.document-revision", title: "Versions", goal: "Review versions"
+        ))
+        let eventID = try #require(event(model, message: "version-1", digest: "version-digest"))
+        let episodeID = try #require(model.createWorkflowEpisode(
+            workItemID: workID, sourceEventID: eventID, sourceMessageID: "version-1",
+            intent: .request, summary: "Versions", deltaSummary: "Initial"
+        ))
+        let storage = try #require(model.workflowStorage(workflowID: "org.example.document-revision"))
+        let first = try storage.importArtifact(
+            data: Data("first".utf8), filename: "report-v1.txt", mediaType: "text/plain", createdAtUnixMillis: 1
+        )
+        let second = try storage.importArtifact(
+            data: Data("second".utf8), filename: "report-v2.txt", mediaType: "text/plain", createdAtUnixMillis: 2
+        )
+        let firstRole = try #require(model.bindWorkflowArtifactRole(
+            workflowID: "org.example.document-revision", workItemID: workID, episodeID: episodeID,
+            role: "current-report", artifact: first, createdByRunID: "fixture-1"
+        ))
+        _ = try #require(model.bindWorkflowArtifactRole(
+            workflowID: "org.example.document-revision", workItemID: workID, episodeID: episodeID,
+            role: "current-report", artifact: second, createdByRunID: "fixture-2"
+        ))
+        #expect(model.setWorkflowArtifactRoleCurrent(id: firstRole))
+        let roles = model.workflowArtifactRoles(workItemID: workID, includeInactive: true)
+        #expect(roles.first(where: { $0.id == firstRole })?.active == true)
+        #expect(roles.first(where: { $0.artifactDigest == second.sha256 })?.active == false)
     }
 
     @Test

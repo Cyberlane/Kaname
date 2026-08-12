@@ -34,8 +34,29 @@ struct GmailWorkServiceTests {
         #expect(thread.accountIdentity == account.identity)
         #expect(thread.messages.first?.body == "Hello from the complete message body.")
         #expect(thread.messages.first?.attachments.first?.filename == "report.pdf")
+        #expect(thread.messages.first?.inReplyTo == "")
         #expect(thread.labels == ["INBOX", "UNREAD"])
         #expect(labels.map(\.name) == ["Inbox", "Projects"])
+    }
+
+    @Test
+    func fullRemoteMessageExposesHeadersAndAttachmentIdentityForOutboundReconciliation() throws {
+        let attachment = base64URL("result bytes")
+        let message = try GmailAPIParser.message(
+            data: Data(
+                """
+                {"id":"message-2","threadId":"thread-1","labelIds":["SENT"],"payload":{"mimeType":"multipart/mixed","headers":[{"name":"To","value":"Kay <kay@example.test>"},{"name":"Subject","value":"Re: Report"},{"name":"In-Reply-To","value":"<message-1@example.test>"},{"name":"References","value":"<root@example.test> <message-1@example.test>"}],"parts":[{"mimeType":"text/plain","filename":"","body":{"data":"\(base64URL("Attached."))"}},{"mimeType":"application/octet-stream","filename":"result.xlsx","body":{"size":12,"attachmentId":"attachment-2"}}]}}
+                """.utf8
+            ),
+            account: account
+        )
+        #expect(message.recipients == "Kay <kay@example.test>")
+        #expect(message.inReplyTo == "<message-1@example.test>")
+        #expect(message.references.contains("<root@example.test>"))
+        #expect(message.attachments.first?.messageID == "message-2")
+        #expect(GmailAPIParser.normalizedRecipients("B@example.test, a@example.test") == ["a@example.test", "b@example.test"])
+        #expect(GmailAPIParser.normalizedRecipients("Kay <kay@example.test>") == ["kay@example.test"])
+        #expect(try GmailAPIParser.attachment(data: Data("{\"data\":\"\(attachment)\"}".utf8)) == Data("result bytes".utf8))
     }
 
     @Test

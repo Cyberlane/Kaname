@@ -225,14 +225,49 @@ struct WorkflowKnowledgeReviewSection: View {
 
 struct WorkflowArtifactRoleRow: View {
     let artifact: DesktopWorkflowArtifactRoleRecord
+    let byteCount: Int?
+    let validationSummary: String
+    let preview: () -> Void
+    let exportCopy: () -> Void
+    let compareWithCurrent: (() -> Void)?
+    let makeCurrent: (() -> Void)?
 
     var body: some View {
-        LabeledContent(
-            artifact.role,
-            value: "\(artifact.filename) · \(artifact.artifactDigest.prefix(12))"
-        )
-        .font(.caption)
-        .accessibilityElement(children: .combine)
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: artifact.active ? "doc.fill" : "clock.arrow.circlepath")
+                .foregroundStyle(artifact.active ? Nord.frost1 : .secondary).frame(width: 20)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("\(artifact.role) · \(artifact.active ? "Current" : "Previous")")
+                    .font(.caption.weight(.semibold))
+                Text("\(artifact.filename) · \(artifact.artifactDigest.prefix(12))")
+                    .font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
+                Text([
+                    artifact.mediaType,
+                    byteCount.map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file) },
+                    "episode \(artifact.episodeID.prefix(8))",
+                    "run \(artifact.createdByRunID.prefix(8))",
+                    validationSummary,
+                ].compactMap { $0 }.joined(separator: " · "))
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Preview", systemImage: "eye", action: preview).labelStyle(.iconOnly)
+                .help("Preview \(artifact.filename)")
+            Menu {
+                Button("Export copy…", systemImage: "square.and.arrow.up", action: exportCopy)
+                if let compareWithCurrent {
+                    Button("Compare with current", systemImage: "rectangle.split.2x1", action: compareWithCurrent)
+                }
+                if let makeCurrent {
+                    Button("Make current", systemImage: "checkmark.circle", action: makeCurrent)
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle").accessibilityLabel("Artifact actions")
+            }
+            .menuStyle(.borderlessButton)
+        }
+        .padding(8)
+        .background(Nord.polarNight1.opacity(0.65), in: RoundedRectangle(cornerRadius: 8))
     }
 }
 

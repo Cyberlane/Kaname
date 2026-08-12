@@ -353,6 +353,36 @@ public struct DesktopWorkflowEffectRequest: Codable, Equatable, Sendable {
     public var artifactDigests: [String]
     public var itemCount: Int
     public var manuallyInitiated: Bool
+
+    public init(
+        workflowID: String,
+        workItemID: String,
+        episodeID: String,
+        runID: String,
+        stepID: String,
+        connectorID: String,
+        effectKind: String,
+        accountID: String?,
+        target: Data,
+        payload: Data,
+        artifactDigests: [String],
+        itemCount: Int,
+        manuallyInitiated: Bool
+    ) {
+        self.workflowID = workflowID
+        self.workItemID = workItemID
+        self.episodeID = episodeID
+        self.runID = runID
+        self.stepID = stepID
+        self.connectorID = connectorID
+        self.effectKind = effectKind
+        self.accountID = accountID
+        self.target = target
+        self.payload = payload
+        self.artifactDigests = artifactDigests
+        self.itemCount = itemCount
+        self.manuallyInitiated = manuallyInitiated
+    }
 }
 
 public struct DesktopWorkflowEffectPreview: Codable, Equatable, Sendable {

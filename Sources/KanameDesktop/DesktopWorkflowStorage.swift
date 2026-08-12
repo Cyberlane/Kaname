@@ -155,6 +155,32 @@ public struct DesktopWorkflowStorage: Sendable {
         return url
     }
 
+    /// Returns a private, filename-preserving copy for system presentation.
+    /// The canonical content-addressed artifact remains immutable.
+    public func artifactPresentationURL(sha256: String, filename: String) throws -> URL {
+        let data = try artifactData(sha256: sha256)
+        let safeFilename = filename.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !safeFilename.isEmpty, safeFilename.utf8.count <= 512,
+              !safeFilename.contains("/"), !safeFilename.contains("\\"),
+              !safeFilename.contains("\r"), !safeFilename.contains("\n") else {
+            throw DesktopWorkflowStorageError.artifactUnavailable
+        }
+        let directory = try privateDirectory(
+            installationRoot.appendingPathComponent("Presentation", isDirectory: true)
+                .appendingPathComponent(sha256, isDirectory: true)
+        )
+        let url = directory.appendingPathComponent(safeFilename).standardizedFileURL
+        guard url.deletingLastPathComponent() == directory else { throw DesktopWorkflowStorageError.unsafeStorage }
+        if FileManager.default.fileExists(atPath: url.path) {
+            guard try requiredData(at: url, maximumBytes: Self.maximumArtifactBytes) == data else {
+                throw DesktopWorkflowStorageError.artifactUnavailable
+            }
+        } else {
+            try writePrivate(data, to: url)
+        }
+        return url
+    }
+
     private func validateKey(_ key: String) throws {
         guard key.range(of: #"^[a-z0-9][a-z0-9._-]{0,127}$"#, options: .regularExpression) != nil else {
             throw DesktopWorkflowStorageError.invalidKey

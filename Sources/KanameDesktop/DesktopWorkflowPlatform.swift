@@ -423,6 +423,9 @@ public struct DesktopWorkflowContextReference: Codable, Equatable, Identifiable,
     public var included: Bool
     public var reason: String
     public var estimatedTokens: Int
+    /// Bounded, immutable source text selected by the context compiler. Binary
+    /// artifacts remain digest references and are never coerced into prompt text.
+    public var content: String? = nil
 
     public static func reference(
         id: String,
@@ -432,13 +435,15 @@ public struct DesktopWorkflowContextReference: Codable, Equatable, Identifiable,
         digest: String,
         included: Bool,
         reason: String,
-        estimatedTokens: Int
+        estimatedTokens: Int,
+        content: String? = nil
     ) -> Self {
         let boundedTokenEstimate = max(0, estimatedTokens)
         let explanation = reason.isEmpty ? "No selection explanation supplied." : reason
         return Self(
             id: id, kind: kind, label: label, sourceID: sourceID, digest: digest,
-            included: included, reason: explanation, estimatedTokens: boundedTokenEstimate
+            included: included, reason: explanation, estimatedTokens: boundedTokenEstimate,
+            content: content
         )
     }
 }
@@ -848,11 +853,26 @@ public enum DesktopWorkflowContextCompiler {
                 && ($0.expiresAtUnixMillis == nil || $0.expiresAtUnixMillis! > createdAtUnixMillis)
         }
             .sorted { ($0.key, $0.createdAtUnixMillis, $0.id) < ($1.key, $1.createdAtUnixMillis, $1.id) }
-        let prioritized = references.sorted {
+        let factText = activeFacts.map {
+            "\($0.key)=\($0.value) [verified; scope=\(($0.scope ?? .workItem).rawValue); sources=\($0.sourceReferenceIDs.sorted().joined(separator: ","))]"
+        }.joined(separator: "\n")
+        let normalizedReferences = references.map { reference -> DesktopWorkflowContextReference in
+            var normalized = reference
+            if let content = normalized.content {
+                normalized.content = boundedUTF8(content, maximumBytes: 64_000)
+                normalized.estimatedTokens = max(normalized.estimatedTokens, normalized.content!.utf8.count / 4)
+            }
+            return normalized
+        }
+        let prioritized = normalizedReferences.sorted {
             if $0.included != $1.included { return $0.included && !$1.included }
             return ($0.kind, $0.label, $0.id) < ($1.kind, $1.label, $1.id)
         }
-        var remaining = max(0, tokenBudget - max(1, cleanRequest.utf8.count / 4))
+        let fixedTokens = max(1, cleanRequest.utf8.count / 4)
+            + max(1, factText.utf8.count / 4)
+            + openQuestions.reduce(0) { $0 + max(1, $1.utf8.count / 4) }
+            + negativeConstraints.reduce(0) { $0 + max(1, $1.utf8.count / 4) }
+        var remaining = max(0, tokenBudget - fixedTokens)
         let boundedReferences = prioritized.map { reference -> DesktopWorkflowContextReference in
             var selected = reference
             if selected.included && selected.estimatedTokens > remaining {
@@ -863,9 +883,6 @@ public enum DesktopWorkflowContextCompiler {
             return selected
         }
         let includedTokens = boundedReferences.filter(\.included).reduce(0) { $0 + $1.estimatedTokens }
-        let factText = activeFacts.map {
-            "\($0.key)=\($0.value) [verified; scope=\(($0.scope ?? .workItem).rawValue); sources=\($0.sourceReferenceIDs.sorted().joined(separator: ","))]"
-        }.joined(separator: "\n")
         let superseded = facts.filter {
             ($0.workItemID == workItem.id
                 || ($0.scope == .installation && $0.workflowID == workItem.workflowID)
@@ -901,7 +918,7 @@ public enum DesktopWorkflowContextCompiler {
         guard let data = try? encoder.encode(payload) else { return nil }
         return DesktopWorkflowContextSnapshotRecord(
             id: UUID().uuidString.lowercased(), workItemID: workItem.id, episodeID: episode.id,
-            compilerVersion: 2, currentRequest: cleanRequest, openQuestions: openQuestions,
+            compilerVersion: 3, currentRequest: cleanRequest, openQuestions: openQuestions,
             negativeConstraints: compiledNegativeConstraints, references: boundedReferences,
             authoritySummary: authoritySummary.isEmpty ? "Read-only local workflow" : authoritySummary,
             dataEgressSummary: egressSummary,
@@ -914,5 +931,16 @@ public enum DesktopWorkflowContextCompiler {
                 )
             }
         )
+    }
+
+    private static func boundedUTF8(_ value: String, maximumBytes: Int) -> String {
+        guard value.utf8.count > maximumBytes else { return value }
+        var usedBytes = 0
+        return String(value.prefix { character in
+            let characterBytes = String(character).utf8.count
+            guard usedBytes + characterBytes <= maximumBytes else { return false }
+            usedBytes += characterBytes
+            return true
+        })
     }
 }

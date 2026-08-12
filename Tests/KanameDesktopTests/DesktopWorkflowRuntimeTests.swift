@@ -116,6 +116,14 @@ struct DesktopWorkflowRuntimeTests {
         )
         #expect(try storage.artifactData(sha256: artifact.sha256) == Data("private artifact".utf8))
         #expect(try storage.artifactRecords() == [artifact])
+        let presentation = try storage.artifactPresentationURL(
+            sha256: artifact.sha256, filename: artifact.filename
+        )
+        #expect(presentation.lastPathComponent == "result.txt")
+        #expect(try Data(contentsOf: presentation) == Data("private artifact".utf8))
+        #expect(throws: DesktopWorkflowStorageError.artifactUnavailable) {
+            _ = try storage.artifactPresentationURL(sha256: artifact.sha256, filename: "../escape.txt")
+        }
     }
 
     @Test
@@ -307,8 +315,10 @@ struct DesktopWorkflowRuntimeTests {
         try store.save(JSONEncoder().encode(old))
         var clock: Int64 = 10_000
         let model = DesktopAppModel(store: store, now: { clock })
-        #expect(model.snapshot.version == 20)
+        #expect(model.snapshot.version == 21)
         #expect(Set(model.workflowCapabilityInstallations.map(\.capabilityID)) == DesktopWorkflowBuiltinCapabilities.identifiers)
+        #expect(model.workflowCapabilityInstallation(capabilityID: "kaname.email.read")?.deterministic == false)
+        #expect(model.workflowCapabilityInstallation(capabilityID: "kaname.agent.bounded")?.deterministic == false)
 
         let manifest = DesktopWorkflowPackageManifest(
             schemaVersion: 1, id: "org.example.lease", name: "Lease", summary: "Recovery fixture",
@@ -340,6 +350,29 @@ struct DesktopWorkflowRuntimeTests {
         #expect(model.snapshot.operations.workflows.runs.first(where: { $0.id == runID })?.state == .failed)
         #expect(model.workflowWorkItems.first(where: { $0.id == workID })?.state == .needsAttention)
         #expect(model.nextWorkflowStep(runID: runID) == nil)
+    }
+
+    @Test
+    func schema20MigrationAddsOnlyMissingBuiltInHostCapabilities() throws {
+        let root = try TestTemporaryDirectory.make(prefix: "kaname-workflow-host-migration")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = FileDesktopStateStore(fileURL: root.appendingPathComponent("Desktop/workspace.json"))
+        var old = DesktopAppModel(store: store, now: { 1_000 }).snapshot
+        old.version = 20
+        old.operations.workflows.capabilityInstallations =
+            DesktopWorkflowBuiltinCapabilities.installations(at: 1_000)
+                .filter { $0.capabilityID != "kaname.email.read" && $0.capabilityID != "kaname.agent.bounded" }
+        let preserved = old.operations.workflows.capabilityInstallations
+            .first { $0.capabilityID == "kaname.email.send" }
+        try store.save(JSONEncoder().encode(old))
+
+        let model = DesktopAppModel(store: store, now: { 2_000 })
+
+        #expect(model.snapshot.version == 21)
+        #expect(Set(model.workflowCapabilityInstallations.map(\.capabilityID)) == DesktopWorkflowBuiltinCapabilities.identifiers)
+        #expect(model.workflowCapabilityInstallations.first { $0.capabilityID == "kaname.email.send" } == preserved)
+        #expect(model.workflowCapabilityInstallations.filter { $0.capabilityID == "kaname.email.read" }.count == 1)
+        #expect(model.workflowCapabilityInstallations.filter { $0.capabilityID == "kaname.agent.bounded" }.count == 1)
     }
 }
 

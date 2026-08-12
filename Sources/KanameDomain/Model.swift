@@ -4,7 +4,7 @@ import Foundation
 /// compatibility checks. Keeping this in KanameDomain prevents an updater from
 /// duplicating a security-sensitive version number owned by the desktop model.
 public enum KanameDesktopStateSchema {
-    public static let currentVersion = 20
+    public static let currentVersion = 21
 }
 
 /// A provider-neutral description of how much autonomy one conversation has.

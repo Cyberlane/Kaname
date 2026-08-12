@@ -30,6 +30,7 @@ public struct DesktopWorkflowCapabilityInvocation: Equatable, Sendable {
     public let artifactInputs: [DesktopWorkflowCapabilityArtifactInput]
     public let stateInputs: [DesktopWorkflowCapabilityStateInput]
     public let contextSnapshot: DesktopWorkflowContextSnapshotRecord?
+
 }
 
 public enum DesktopWorkflowCapabilityInvocationResult: Equatable, Sendable {
@@ -84,6 +85,29 @@ public actor DesktopWorkflowCapabilityRouter: DesktopWorkflowCapabilityInvoking 
             return try await handler(invocation, installation)
         }
         return try await fallback.invoke(invocation, installation: installation)
+    }
+
+    public func invoke(
+        workflowID: String,
+        workItemID: String,
+        episodeID: String,
+        runID: String,
+        step: DesktopWorkflowStepDefinition,
+        contextSnapshotID: String?,
+        input: Data,
+        artifactInputs: [DesktopWorkflowCapabilityArtifactInput],
+        stateInputs: [DesktopWorkflowCapabilityStateInput],
+        contextSnapshot: DesktopWorkflowContextSnapshotRecord?,
+        installation: DesktopWorkflowCapabilityInstallationRecord
+    ) async throws -> DesktopWorkflowCapabilityInvocationResult {
+        try await invoke(
+            DesktopWorkflowCapabilityInvocation(
+                workflowID: workflowID, workItemID: workItemID, episodeID: episodeID, runID: runID,
+                step: step, contextSnapshotID: contextSnapshotID, input: input,
+                artifactInputs: artifactInputs, stateInputs: stateInputs, contextSnapshot: contextSnapshot
+            ),
+            installation: installation
+        )
     }
 }
 

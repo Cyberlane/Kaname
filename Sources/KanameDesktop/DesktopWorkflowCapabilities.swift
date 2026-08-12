@@ -215,6 +215,8 @@ public enum DesktopWorkflowBuiltinCapabilities {
         "kaname.email.read",
         "kaname.email.draft",
         "kaname.email.send",
+        "kaname.connector.effect",
+        "kaname.agent.bounded",
     ]
 
     public static func installations(at timestamp: Int64) -> [DesktopWorkflowCapabilityInstallationRecord] {
@@ -231,8 +233,11 @@ public enum DesktopWorkflowBuiltinCapabilities {
                 executableDigest: nil,
                 designatedRequirement: nil,
                 permissions: permissionEnvelope(for: identifier),
-                deterministic: !identifier.hasPrefix("kaname.model.") && identifier != "kaname.email.send",
-                idempotent: identifier != "kaname.email.send",
+                deterministic: ![
+                    "kaname.model.structured", "kaname.email.read", "kaname.email.draft",
+                    "kaname.email.send", "kaname.connector.effect", "kaname.agent.bounded",
+                ].contains(identifier),
+                idempotent: identifier != "kaname.email.send" && identifier != "kaname.connector.effect",
                 enabled: true,
                 lastTestedAtUnixMillis: timestamp,
                 lastTestPassed: true,
@@ -250,6 +255,8 @@ public enum DesktopWorkflowBuiltinCapabilities {
         case "kaname.email.read": ("Gmail reader", "Reads account-scoped Gmail history, threads, and attachments.")
         case "kaname.email.draft": ("Gmail draft writer", "Creates and reconciles an exact Gmail draft.")
         case "kaname.email.send": ("Gmail sender", "Sends and reconciles an exactly approved Gmail message.")
+        case "kaname.connector.effect": ("Trusted connector effects", "Previews and reconciles exact effects through registered Kaname connectors.")
+        case "kaname.agent.bounded": ("Bounded workflow agent", "Uses an allowlisted, budgeted tool loop and returns schema-checked output.")
         default: (identifier, "Kaname built-in workflow capability.")
         }
     }
@@ -263,6 +270,8 @@ public enum DesktopWorkflowBuiltinCapabilities {
         case "kaname.email.read": [.emailRead]
         case "kaname.email.draft": [.emailDraft]
         case "kaname.email.send": [.emailSend]
+        case "kaname.connector.effect": [.externalEffects]
+        case "kaname.agent.bounded": [.modelEgress]
         default: []
         }
         return DesktopWorkflowPermissionEnvelope(permissions: permissions, capabilityIDs: [identifier])

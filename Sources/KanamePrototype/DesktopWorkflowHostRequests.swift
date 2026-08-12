@@ -2,7 +2,39 @@ import Foundation
 import KanameConnectivity
 import KanameDesktop
 
-struct WorkflowStructuredModelRequest: Decodable {
+private func decodeWorkflowRequest<Wire: Decodable, Request>(
+    _ wireType: Wire.Type,
+    from data: Data,
+    maximumBytes: Int,
+    makeRequest: (Wire) throws -> Request
+) throws -> Request {
+    guard data.count <= maximumBytes,
+          let wire = try? JSONDecoder().decode(wireType, from: data) else {
+        throw DesktopWorkflowCapabilityError.outputInvalid
+    }
+    return try makeRequest(wire)
+}
+
+private struct WorkflowModelRequestWire: Decodable {
+    let providerName: String
+    let prompt: String
+    let outputSchema: String
+}
+
+private func validateWorkflowModelRequest(
+    providerName: String,
+    prompt: String,
+    outputSchema: String
+) throws {
+    guard !providerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+          !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+          prompt.utf8.count <= 100_000,
+          DesktopWorkflowJSONSchemaValidator.validateSchema(Data(outputSchema.utf8)) else {
+        throw DesktopWorkflowCapabilityError.outputInvalid
+    }
+}
+
+struct WorkflowStructuredModelRequest {
     enum Provider {
         case codex
         case native(NativeProviderDiscussionDriver)
@@ -24,14 +56,16 @@ struct WorkflowStructuredModelRequest: Decodable {
     }
 
     static func decode(_ data: Data) throws -> Self {
-        guard data.count <= 512 * 1_024,
-              let request = try? JSONDecoder().decode(Self.self, from: data),
-              !request.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              request.prompt.utf8.count <= 100_000,
-              DesktopWorkflowJSONSchemaValidator.validateSchema(Data(request.outputSchema.utf8)) else {
-            throw DesktopWorkflowCapabilityError.outputInvalid
+        try decodeWorkflowRequest(
+            WorkflowModelRequestWire.self, from: data, maximumBytes: 512 * 1_024
+        ) { wire in
+            try validateWorkflowModelRequest(
+                providerName: wire.providerName, prompt: wire.prompt, outputSchema: wire.outputSchema
+            )
+            return Self(
+                providerName: wire.providerName, prompt: wire.prompt, outputSchema: wire.outputSchema
+            )
         }
-        return request
     }
 
     func validatedOutput(_ text: String) throws -> Data {
@@ -60,7 +94,7 @@ struct WorkflowStructuredModelRequest: Decodable {
     }
 }
 
-struct WorkflowEmailEffectRequest: Decodable {
+struct WorkflowEmailEffectRequest {
     struct Attachment: Decodable {
         let filename: String
         let mimeType: String
@@ -78,39 +112,33 @@ struct WorkflowEmailEffectRequest: Decodable {
     let threadID: String?
     let attachments: [Attachment]
 
-    private enum CodingKeys: String, CodingKey {
-        case accountID, recipients, subject, body, inReplyTo, references, threadID, attachments
-    }
-
-    init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let required = try (
-            container.decode(String.self, forKey: .accountID),
-            container.decode(String.self, forKey: .recipients),
-            container.decode(String.self, forKey: .subject),
-            container.decode(String.self, forKey: .body)
-        )
-        (accountID, recipients, subject, body) = required
-        inReplyTo = try container.decodeIfPresent(String.self, forKey: .inReplyTo)
-        let optional = try (
-            container.decodeIfPresent([String].self, forKey: .references) ?? [],
-            container.decodeIfPresent(String.self, forKey: .threadID),
-            container.decodeIfPresent([Attachment].self, forKey: .attachments) ?? []
-        )
-        (references, threadID, attachments) = optional
+    private struct Wire: Decodable {
+        let accountID: String
+        let recipients: String
+        let subject: String
+        let body: String
+        let inReplyTo: String?
+        let references: [String]?
+        let threadID: String?
+        let attachments: [Attachment]?
     }
 
     static func decode(_ data: Data) throws -> Self {
-        guard data.count <= 36 * 1_024 * 1_024,
-              let request = try? JSONDecoder().decode(Self.self, from: data),
-              !request.accountID.isEmpty,
-              request.attachments.count <= GmailOutboundAttachment.maximumCount,
-              request.attachments.allSatisfy({ !$0.data.isEmpty }),
-              request.attachments.reduce(0, { $0 + $1.data.count }) <= GmailOutboundAttachment.maximumTotalBytes else {
-            throw DesktopWorkflowCapabilityError.outputInvalid
+        try decodeWorkflowRequest(Wire.self, from: data, maximumBytes: 36 * 1_024 * 1_024) { wire in
+            let request = Self(
+                accountID: wire.accountID, recipients: wire.recipients, subject: wire.subject,
+                body: wire.body, inReplyTo: wire.inReplyTo, references: wire.references ?? [],
+                threadID: wire.threadID, attachments: wire.attachments ?? []
+            )
+            guard !request.accountID.isEmpty,
+                  request.attachments.count <= GmailOutboundAttachment.maximumCount,
+                  request.attachments.allSatisfy({ !$0.data.isEmpty }),
+                  request.attachments.reduce(0, { $0 + $1.data.count }) <= GmailOutboundAttachment.maximumTotalBytes else {
+                throw DesktopWorkflowCapabilityError.outputInvalid
+            }
+            _ = try request.message()
+            return request
         }
-        _ = try request.message()
-        return request
     }
 
     func message() throws -> GmailOutboundMessage {
@@ -125,5 +153,236 @@ struct WorkflowEmailEffectRequest: Decodable {
                 GmailOutboundAttachment(filename: $0.filename, mimeType: $0.mimeType, data: $0.data)
             }
         )
+    }
+}
+
+struct WorkflowEmailReadRequest {
+    enum Operation: String, Decodable { case search, thread, labels }
+
+    let operation: Operation
+    let accountID: String
+    let query: String?
+    let threadID: String?
+    let includeAttachmentBytes: Bool
+    let maximumPages: Int
+    let maximumThreads: Int
+    let maximumAttachmentBytes: Int
+
+    private struct Wire: Decodable {
+        let operation: Operation
+        let accountID: String
+        let query: String?
+        let threadID: String?
+        let includeAttachmentBytes: Bool?
+        let maximumPages: Int?
+        let maximumThreads: Int?
+        let maximumAttachmentBytes: Int?
+    }
+
+    static func decode(_ data: Data) throws -> Self {
+        try decodeWorkflowRequest(Wire.self, from: data, maximumBytes: 64 * 1_024) { wire in
+            let request = Self(
+                operation: wire.operation, accountID: wire.accountID, query: wire.query,
+                threadID: wire.threadID, includeAttachmentBytes: wire.includeAttachmentBytes ?? false,
+                maximumPages: wire.maximumPages ?? 20, maximumThreads: wire.maximumThreads ?? 2_000,
+                maximumAttachmentBytes: wire.maximumAttachmentBytes ?? GmailOutboundAttachment.maximumTotalBytes
+            )
+            guard !request.accountID.isEmpty,
+                  (1...100).contains(request.maximumPages),
+                  (1...10_000).contains(request.maximumThreads),
+                  (0...GmailOutboundAttachment.maximumTotalBytes).contains(request.maximumAttachmentBytes),
+                  request.query.map({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.utf8.count <= 2_048 })
+                    ?? (request.operation != .search),
+                  request.threadID.map({ (try? GmailAPIParser.validatedID($0)) != nil })
+                    ?? (request.operation != .thread) else {
+                throw DesktopWorkflowCapabilityError.outputInvalid
+            }
+            return request
+        }
+    }
+}
+
+enum WorkflowEmailReadResponse {
+    static func encode(
+        request: WorkflowEmailReadRequest,
+        threads: [GmailThreadDetailSnapshot] = [],
+        labels: [GmailLabelSnapshot] = [],
+        pages: Int = 0,
+        attachmentPayloads: [String: Data] = [:]
+    ) throws -> Data {
+        let object: [String: Any] = [
+            "operation": request.operation.rawValue,
+            "accountID": request.accountID,
+            "query": request.query ?? "",
+            "complete": true,
+            "pages": pages,
+            "threadCount": threads.count,
+            "threads": threads.map { threadObject($0, attachmentPayloads: attachmentPayloads) },
+            "labels": labels.map { ["id": $0.id, "name": $0.name, "type": $0.type] },
+        ]
+        return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
+    }
+
+    static func attachmentKey(_ attachment: GmailAttachmentSnapshot) -> String {
+        "\(attachment.messageID):\(attachment.attachmentID)"
+    }
+
+    private static func threadObject(
+        _ thread: GmailThreadDetailSnapshot,
+        attachmentPayloads: [String: Data]
+    ) -> [String: Any] {
+        [
+            "id": thread.id,
+            "accountID": thread.accountID,
+            "accountIdentity": thread.accountIdentity,
+            "snippet": thread.snippet,
+            "historyID": thread.historyID ?? "",
+            "messages": thread.messages.map {
+                WorkflowGmailPayloadEncoder.messageObject($0, attachmentPayloads: attachmentPayloads)
+            },
+        ]
+    }
+}
+
+enum WorkflowGmailPayloadEncoder {
+    static func messageObject(
+        _ message: GmailMessageSnapshot,
+        attachmentPayloads: [String: Data]
+    ) -> [String: Any] {
+        [
+            "id": message.id,
+            "threadID": message.threadID,
+            "sender": message.sender,
+            "recipients": message.recipients,
+            "subject": message.subject,
+            "date": message.dateDescription,
+            "body": message.body,
+            "labels": message.labels,
+            "attachments": message.attachments.map { attachment in
+                let key = WorkflowEmailReadResponse.attachmentKey(attachment)
+                let data = attachmentPayloads[key]
+                return [
+                    "id": attachment.attachmentID,
+                    "messageID": attachment.messageID,
+                    "filename": attachment.filename,
+                    "mediaType": attachment.mimeType,
+                    "size": attachment.size,
+                    "sha256": data.map(DesktopWorkflowPackageCodec.digest) ?? "",
+                    "dataBase64": data?.base64EncodedString() ?? "",
+                ] as [String: Any]
+            },
+        ]
+    }
+}
+
+struct WorkflowConnectorEffectInput {
+    let connectorID: String
+    let effectKind: String
+    let accountID: String?
+    let target: Data
+    let payload: Data
+    let artifactDigests: [String]
+    let itemCount: Int
+    let manuallyInitiated: Bool
+
+    private struct Wire: Decodable {
+        let connectorID: String
+        let effectKind: String
+        let accountID: String?
+        let target: DesktopWorkflowJSONValue
+        let payload: DesktopWorkflowJSONValue?
+        let artifactDigests: [String]?
+        let itemCount: Int
+        let manuallyInitiated: Bool?
+    }
+
+    static func decode(_ data: Data) throws -> Self {
+        try decodeWorkflowRequest(Wire.self, from: data, maximumBytes: 2 * 1_024 * 1_024) { wire in
+            let request = Self(
+                connectorID: wire.connectorID, effectKind: wire.effectKind, accountID: wire.accountID,
+                target: try wire.target.canonicalData(),
+                payload: try wire.payload?.canonicalData() ?? Data("{}".utf8),
+                artifactDigests: wire.artifactDigests ?? [], itemCount: wire.itemCount,
+                manuallyInitiated: wire.manuallyInitiated ?? false
+            )
+            guard request.connectorID.range(of: #"^[a-z0-9][a-z0-9._-]{0,127}$"#, options: .regularExpression) != nil,
+                  request.effectKind.range(of: #"^[a-z0-9][a-z0-9._-]{0,127}$"#, options: .regularExpression) != nil,
+                  (1...10_000).contains(request.itemCount),
+                  request.artifactDigests.allSatisfy({
+                      $0.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil
+                  }) else { throw DesktopWorkflowCapabilityError.outputInvalid }
+            return request
+        }
+    }
+
+    func request(for invocation: DesktopWorkflowCapabilityInvocation) -> DesktopWorkflowEffectRequest {
+        DesktopWorkflowEffectRequest(
+            workflowID: invocation.workflowID, workItemID: invocation.workItemID,
+            episodeID: invocation.episodeID, runID: invocation.runID, stepID: invocation.step.id,
+            connectorID: connectorID, effectKind: effectKind, accountID: accountID,
+            target: target, payload: payload, artifactDigests: artifactDigests,
+            itemCount: itemCount, manuallyInitiated: manuallyInitiated
+        )
+    }
+}
+
+struct WorkflowBoundedAgentRequest {
+    let providerName: String
+    let prompt: String
+    let outputSchema: String
+
+    var provider: WorkflowStructuredModelRequest.Provider {
+        get throws {
+            switch providerName.lowercased() {
+            case "codex", "openai": .codex
+            case "claude": .native(.claude)
+            case "opencode", "open code": .native(.openCode)
+            default: throw DesktopWorkflowCapabilityError.outputInvalid
+            }
+        }
+    }
+
+    static func decode(_ data: Data) throws -> Self {
+        try decodeWorkflowRequest(
+            WorkflowModelRequestWire.self, from: data, maximumBytes: 512 * 1_024
+        ) { wire in
+            try validateWorkflowModelRequest(
+                providerName: wire.providerName, prompt: wire.prompt, outputSchema: wire.outputSchema
+            )
+            let request = Self(
+                providerName: wire.providerName, prompt: wire.prompt, outputSchema: wire.outputSchema
+            )
+            _ = try request.provider
+            return request
+        }
+    }
+}
+
+struct WorkflowAgentAction {
+    enum Kind: String { case tool, finish }
+    let kind: Kind
+    let capabilityID: String?
+    let input: Data?
+    let output: Data?
+
+    static let schema = #"{"type":"object","required":["kind"],"properties":{"kind":{"type":"string","enum":["tool","finish"]},"capabilityID":{"type":"string"},"input":{},"output":{}},"additionalProperties":false}"#
+
+    static func decode(_ data: Data) throws -> Self {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rawKind = object["kind"] as? String, let kind = Kind(rawValue: rawKind) else {
+            throw DesktopWorkflowCapabilityError.outputInvalid
+        }
+        let capabilityID = object["capabilityID"] as? String
+        let input = try object["input"].map {
+            try JSONSerialization.data(withJSONObject: $0, options: [.fragmentsAllowed, .sortedKeys, .withoutEscapingSlashes])
+        }
+        let output = try object["output"].map {
+            try JSONSerialization.data(withJSONObject: $0, options: [.fragmentsAllowed, .sortedKeys, .withoutEscapingSlashes])
+        }
+        guard (kind == .tool && capabilityID != nil && input != nil && output == nil)
+                || (kind == .finish && output != nil && capabilityID == nil && input == nil) else {
+            throw DesktopWorkflowCapabilityError.outputInvalid
+        }
+        return Self(kind: kind, capabilityID: capabilityID, input: input, output: output)
     }
 }

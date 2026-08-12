@@ -586,7 +586,7 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
     }
 
     func migratedToCurrent(now: Int64) throws -> DesktopAppSnapshot {
-        guard (1...19).contains(version) else { throw DesktopModelError.unsupportedVersion }
+        guard (1...20).contains(version) else { throw DesktopModelError.unsupportedVersion }
         var migrated = self
         while migrated.version < Self.currentVersion {
             switch migrated.version {
@@ -656,6 +656,18 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
                 // datasets, connector previews, authority grants, and bounded
                 // execution evidence decode additively into the workflow host.
                 break
+            case 20:
+                // Production mail reads, connector effects, and bounded agent
+                // execution are built-in host capabilities. Merge them by ID so
+                // existing installations gain the new host surface without
+                // replacing private or explicitly configured capabilities.
+                let installedIDs = Set(
+                    migrated.operations.workflows.capabilityInstallations.map(\.capabilityID)
+                )
+                migrated.operations.workflows.capabilityInstallations.append(
+                    contentsOf: DesktopWorkflowBuiltinCapabilities.installations(at: now)
+                        .filter { !installedIDs.contains($0.capabilityID) }
+                )
             default:
                 throw DesktopModelError.unsupportedVersion
             }

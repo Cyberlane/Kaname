@@ -335,17 +335,13 @@ public actor NativeGoogleIntegrationService {
             receiver.cancel()
             throw NativeGoogleIntegrationError.authorizationUnavailable
         }
-        let code = try await withThrowingTaskGroup(of: String.self) { group in
-            group.addTask { try await receiver.waitForCode(expectedState: request.state) }
-            group.addTask {
-                try await Task.sleep(for: .seconds(300))
-                throw NativeGoogleIntegrationError.authorizationCancelled
+        let code: String
+        do {
+            code = try await AsyncDeadline.first(timeout: .seconds(300), onTimeout: receiver.cancel) {
+                try await receiver.waitForCode(expectedState: request.state)
             }
-            defer { group.cancelAll() }
-            guard let result = try await group.next() else {
-                throw NativeGoogleIntegrationError.authorizationCancelled
-            }
-            return result
+        } catch AsyncDeadlineError.timedOut {
+            throw NativeGoogleIntegrationError.authorizationCancelled
         }
         do {
             let token = try await exchangeCode(code, request: request, configuration: configuration)

@@ -6365,6 +6365,7 @@ private struct DesktopEmailView: View {
     @State private var selectedWorkflowWorkItemID: String?
     @State private var workflowImportMessage: String?
     @State private var capabilityImportMessage: String?
+    @State private var manualRunDefinition: DesktopWorkflowDefinitionRecord?
 
     private var accounts: [DesktopAccountRecord] {
         model.snapshot.domains.accounts.filter { $0.service == .gmail }
@@ -6452,6 +6453,14 @@ private struct DesktopEmailView: View {
                 subject: seed.subject,
                 body: ""
             )
+        }
+        .sheet(item: $manualRunDefinition) { definition in
+            WorkflowManualRunSheet(definition: definition) { title, request, input in
+                mail.runWorkflowManually(
+                    model: model, workflowID: definition.id,
+                    title: title, request: request, input: input
+                )
+            }
         }
         .onAppear {
             if allowsAutomaticInitialRead,
@@ -6791,7 +6800,9 @@ private struct DesktopEmailView: View {
                 WorkflowDefinitionCard(
                     model: model,
                     definition: definition,
-                    googleAccounts: integrations.googleAccounts
+                    googleAccounts: integrations.googleAccounts,
+                    runManually: { manualRunDefinition = definition },
+                    processExistingMatches: { mail.processExistingWorkflowMatches(model: model, binding: $0) }
                 )
             }
         }
@@ -7158,7 +7169,11 @@ private struct WorkflowWorkItemCard: View {
     }
 
     private var artifactRoles: [DesktopWorkflowArtifactRoleRecord] {
-        model.workflowArtifactRoles(workItemID: item.id)
+        model.workflowArtifactRoles(workItemID: item.id, includeInactive: true)
+    }
+
+    private var artifactRoleNames: [String] {
+        Array(Set(artifactRoles.map(\.role))).sorted()
     }
 
     private var stateRecords: [DesktopWorkflowStateRecord] {
@@ -7298,7 +7313,28 @@ private struct WorkflowWorkItemCard: View {
                     if !artifactRoles.isEmpty {
                         DisclosureGroup("Artifacts · \(artifactRoles.count)") {
                             VStack(alignment: .leading, spacing: 7) {
-                                ForEach(artifactRoles) { WorkflowArtifactRoleRow(artifact: $0) }
+                                ForEach(artifactRoleNames, id: \.self) { role in
+                                    Text(role).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                                    ForEach(artifactRoles.filter { $0.role == role }.sorted {
+                                        ($0.active ? 0 : 1, -$0.createdAtUnixMillis, $0.id)
+                                            < ($1.active ? 0 : 1, -$1.createdAtUnixMillis, $1.id)
+                                    }) { artifact in
+                                        WorkflowArtifactRoleRow(
+                                            artifact: artifact,
+                                            byteCount: artifactByteCount(artifact),
+                                            validationSummary: artifactValidationSummary(artifact),
+                                            preview: { previewArtifacts([artifact]) },
+                                            exportCopy: { exportArtifact(artifact) },
+                                            compareWithCurrent: artifact.active ? nil : {
+                                                let current = artifactRoles.first { $0.role == artifact.role && $0.active }
+                                                previewArtifacts([artifact, current].compactMap { $0 })
+                                            },
+                                            makeCurrent: artifact.active ? nil : {
+                                                _ = model.setWorkflowArtifactRoleCurrent(id: artifact.id)
+                                            }
+                                        )
+                                    }
+                                }
                             }
                             .padding(.top, 8)
                         }
@@ -7419,14 +7455,20 @@ private struct WorkflowWorkItemCard: View {
                                         }
                                     }
                                     Spacer()
-                                    if effect.approvalID == nil {
+                                    if effect.approvalID == nil && preview?.authorityGrantID == nil {
                                         Button("Request approval") { requestEffectApproval(effect) }
                                     } else if effect.state == .outcomeUnknown {
-                                        Text("Outcome unknown").font(.caption).foregroundStyle(Nord.auroraRed)
+                                        if preview != nil {
+                                            Button("Reconcile result") { executeEffect(effect) }
+                                                .buttonStyle(.borderedProminent)
+                                                .help("Re-read every frozen target without repeating the action")
+                                        } else {
+                                            Text("Outcome unknown").font(.caption).foregroundStyle(Nord.auroraRed)
+                                        }
                                     } else if effect.state == .executing {
                                         ProgressView().controlSize(.small).accessibilityLabel("Applying email effect")
-                                    } else if approval?.state == .approved {
-                                        Button(effect.kind == "gmail-send" ? "Send" : "Create draft") { executeEffect(effect) }
+                                    } else if approval?.state == .approved || preview?.authorityGrantID != nil {
+                                        Button(effect.kind == "gmail-send" ? "Send" : "Apply exact action") { executeEffect(effect) }
                                             .buttonStyle(.borderedProminent)
                                     } else {
                                         Text("Waiting in Inbox").font(.caption).foregroundStyle(.secondary)
@@ -7457,6 +7499,45 @@ private struct WorkflowWorkItemCard: View {
             }
         }
         .panelStyle()
+    }
+
+    private func artifactURL(_ artifact: DesktopWorkflowArtifactRoleRecord) -> URL? {
+        try? model.workflowStorage(workflowID: item.workflowID)?.artifactPresentationURL(
+            sha256: artifact.artifactDigest, filename: artifact.filename
+        )
+    }
+
+    private func artifactByteCount(_ artifact: DesktopWorkflowArtifactRoleRecord) -> Int? {
+        try? model.workflowStorage(workflowID: item.workflowID)?.artifactRecords()
+            .first { $0.sha256 == artifact.artifactDigest }?.byteCount
+    }
+
+    private func artifactValidationSummary(_ artifact: DesktopWorkflowArtifactRoleRecord) -> String {
+        let reportValidationIDs = Set(model.snapshot.operations.workflows.validatorReports.compactMap {
+            $0.subjectDigest == artifact.artifactDigest ? $0.validationID : nil
+        })
+        let validations = model.snapshot.operations.workflows.validations.filter {
+            $0.targetID == artifact.artifactDigest || reportValidationIDs.contains($0.id)
+        }
+        guard !validations.isEmpty else { return "not validated" }
+        return validations.allSatisfy { $0.outcome == .passed } ? "validated" : "validation attention"
+    }
+
+    private func previewArtifacts(_ artifacts: [DesktopWorkflowArtifactRoleRecord]) {
+        let urls = artifacts.compactMap(artifactURL)
+        guard !urls.isEmpty else { return }
+        WorkflowArtifactPreviewController.shared.present(urls)
+    }
+
+    private func exportArtifact(_ artifact: DesktopWorkflowArtifactRoleRecord) {
+        guard let data = try? model.workflowStorage(workflowID: item.workflowID)?.artifactData(
+            sha256: artifact.artifactDigest
+        ) else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = artifact.filename
+        panel.message = "Export a verified copy. Kaname keeps the immutable workflow artifact in private storage."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        try? data.write(to: url, options: .atomic)
     }
 }
 
@@ -7554,6 +7635,8 @@ private struct WorkflowDefinitionCard: View {
     @ObservedObject var model: DesktopAppModel
     let definition: DesktopWorkflowDefinitionRecord
     let googleAccounts: [NativeGoogleAccountSnapshot]
+    let runManually: () -> Void
+    let processExistingMatches: (DesktopWorkflowTriggerBindingRecord) -> Void
     @State private var selectedAccountID = ""
     @State private var emailFilter = ""
     @State private var transferMessage: String?
@@ -7570,6 +7653,11 @@ private struct WorkflowDefinitionCard: View {
         VStack(alignment: .leading, spacing: 12) {
             WorkflowDefinitionHeader(model: model, definition: definition)
             HStack(spacing: 8) {
+                if definition.triggerKinds.contains(.manual) {
+                    Button("Run…", systemImage: "play.fill", action: runManually)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!definition.enabled)
+                }
                 Button("Export package…", systemImage: "shippingbox.and.arrow.backward") {
                     do {
                         transferMessage = try DesktopWorkflowTransferUI.exportPackage(model: model, definition: definition)
@@ -7687,7 +7775,10 @@ private struct WorkflowDefinitionCard: View {
                                     .font(.caption).foregroundStyle(.secondary)
                             } else {
                                 ForEach(triggerBindings) { binding in
-                                    WorkflowTriggerBindingRow(model: model, binding: binding)
+                                    WorkflowTriggerBindingRow(
+                                        model: model, binding: binding,
+                                        processExistingMatches: { processExistingMatches(binding) }
+                                    )
                                 }
                             }
                             if !googleAccounts.isEmpty {
@@ -7734,6 +7825,60 @@ private struct WorkflowDefinitionCard: View {
         case .attention: Nord.auroraYellow
         case .blocked: Nord.auroraRed
         }
+    }
+}
+
+private struct WorkflowManualRunSheet: View {
+    let definition: DesktopWorkflowDefinitionRecord
+    let start: (String, String, Data) -> Bool
+    @Environment(\.dismiss) private var dismiss
+    @State private var title = ""
+    @State private var request = ""
+    @State private var input = "{}"
+    @State private var validationMessage: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Run \(definition.name)").font(.title2.weight(.bold))
+            Text("This creates durable work and runs the exact installed revision. It does not change email unless a later reviewed effect is approved.")
+                .font(.callout).foregroundStyle(.secondary)
+            TextField("Work title", text: $title)
+            TextField("What should this run accomplish?", text: $request, axis: .vertical)
+                .lineLimit(2...5)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Structured input").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                TextEditor(text: $input)
+                    .font(.system(.body, design: .monospaced))
+                    .frame(minHeight: 150)
+                    .padding(6)
+                    .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+                    .accessibilityLabel("Manual workflow JSON input")
+            }
+            if let validationMessage {
+                Label(validationMessage, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(Nord.auroraYellow)
+            }
+            DesktopSheetActionBar(
+                primaryTitle: "Start run",
+                isPrimaryEnabled: !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    && !request.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                dismiss: dismiss.callAsFunction,
+                performPrimary: submit
+            )
+        }
+        .padding(24)
+        .frame(width: 560)
+        .onAppear { title = definition.name }
+    }
+
+    private func submit() {
+        guard let data = input.data(using: .utf8),
+              (try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])) != nil else {
+            validationMessage = "Enter valid JSON input."
+            return
+        }
+        if start(title, request, data) { dismiss() }
+        else { validationMessage = "Kaname could not queue this run. Review the workflow readiness details." }
     }
 }
 
@@ -7791,14 +7936,19 @@ private struct WorkflowDefinitionHeader: View {
 private struct WorkflowTriggerBindingRow: View {
     @ObservedObject var model: DesktopAppModel
     let binding: DesktopWorkflowTriggerBindingRecord
+    let processExistingMatches: () -> Void
 
     var body: some View {
         LabeledContent {
-            Toggle("Observe", isOn: Binding(
-                get: { binding.enabled },
-                set: { _ = model.setWorkflowTriggerBindingEnabled(id: binding.id, enabled: $0) }
-            ))
-            .labelsHidden()
+            HStack {
+                Button("Process existing…", action: processExistingMatches)
+                    .help("Preview and create workflow episodes for existing Gmail matches without changing mail")
+                Toggle("Observe", isOn: Binding(
+                    get: { binding.enabled },
+                    set: { _ = model.setWorkflowTriggerBindingEnabled(id: binding.id, enabled: $0) }
+                ))
+                .labelsHidden()
+            }
         } label: {
             Label {
                 Grid(alignment: .leading, verticalSpacing: 2) {
@@ -7917,21 +8067,36 @@ private struct NewMailRuleSheet: View {
             TextField("Rule name", text: $name).textFieldStyle(.roundedBorder)
             LabeledContent("Gmail query", value: mail.query)
             LabeledContent("Action", value: "Archive")
-            HStack {
-                Spacer()
-                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("Save rule") {
+            DesktopSheetActionBar(
+                primaryTitle: "Save rule",
+                isPrimaryEnabled: accountID != nil && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                dismiss: dismiss.callAsFunction
+            ) {
                     guard let account = accounts.first(where: { $0.id == accountID }) else { return }
                     mail.createStandingRule(model: model, account: account, name: name, action: .archive)
                     dismiss()
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(accountID == nil || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
         .padding(24)
         .desktopAdaptiveSheet(idealWidth: 560)
         .onAppear { accountID = accountID ?? accounts.first?.id }
+    }
+}
+
+private struct DesktopSheetActionBar: View {
+    let primaryTitle: String
+    let isPrimaryEnabled: Bool
+    let dismiss: () -> Void
+    let performPrimary: () -> Void
+
+    var body: some View {
+        HStack {
+            Button("Cancel", action: dismiss).keyboardShortcut(.cancelAction)
+            Button(primaryTitle, action: performPrimary)
+                .buttonStyle(.borderedProminent)
+                .disabled(!isPrimaryEnabled)
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
     }
 }
 

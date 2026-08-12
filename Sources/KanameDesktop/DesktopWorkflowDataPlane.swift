@@ -314,7 +314,7 @@ enum DesktopWorkflowDataPlaneValidation {
     }
 }
 
-private indirect enum DesktopWorkflowJSONValue: Codable, Equatable {
+public indirect enum DesktopWorkflowJSONValue: Codable, Equatable, Sendable {
     case null
     case boolean(Bool)
     case number(Double)
@@ -322,7 +322,7 @@ private indirect enum DesktopWorkflowJSONValue: Codable, Equatable {
     case array([Self])
     case object([String: Self])
 
-    init(from decoder: any Decoder) throws {
+    public init(from decoder: any Decoder) throws {
         let container = try decoder.singleValueContainer()
         if container.decodeNil() { self = .null }
         else if let value = try? container.decode(Bool.self) { self = .boolean(value) }
@@ -332,7 +332,7 @@ private indirect enum DesktopWorkflowJSONValue: Codable, Equatable {
         else { self = .object(try container.decode([String: Self].self)) }
     }
 
-    func encode(to encoder: any Encoder) throws {
+    public func encode(to encoder: any Encoder) throws {
         var container = encoder.singleValueContainer()
         switch self {
         case .null: try container.encodeNil()
@@ -344,11 +344,11 @@ private indirect enum DesktopWorkflowJSONValue: Codable, Equatable {
         }
     }
 
-    static func decode(_ data: Data) throws -> Self {
+    public static func decode(_ data: Data) throws -> Self {
         try JSONDecoder().decode(Self.self, from: data)
     }
 
-    func canonicalData() throws -> Data {
+    public func canonicalData() throws -> Data {
         try DesktopWorkflowCanonicalJSON.encode(self)
     }
 }
@@ -366,7 +366,9 @@ public enum DesktopWorkflowModelContextCompiler {
         let exclusions = context.negativeConstraints.map { "- \($0)" }.joined(separator: "\n")
         let questions = context.openQuestions.map { "- \($0)" }.joined(separator: "\n")
         let references = context.references.filter(\.included).map {
-            "- \($0.kind): \($0.label) [digest: \($0.digest); reason: \($0.reason)]"
+            let header = "- \($0.kind): \($0.label) [digest: \($0.digest); reason: \($0.reason)]"
+            guard let content = $0.content, !content.isEmpty else { return header }
+            return "\(header)\n  Selected content:\n\(content)"
         }.joined(separator: "\n")
         let compiled = """
         \(prompt)
@@ -461,21 +463,72 @@ public extension DesktopAppModel {
             createdByRunID: createdByRunID, createdAtUnixMillis: timestamp
         )
         guard mutate({ state in
-            for index in state.operations.workflows.artifactRoles.indices
-                where state.operations.workflows.artifactRoles[index].workflowID == workflowID
-                    && state.operations.workflows.artifactRoles[index].workItemID == workItemID
-                    && state.operations.workflows.artifactRoles[index].role == role
-                    && state.operations.workflows.artifactRoles[index].active {
-                state.operations.workflows.artifactRoles[index].active = false
-                state.operations.workflows.artifactRoles[index].supersededByID = record.id
-            }
             state.operations.workflows.artifactRoles.append(record)
-            state.appendAudit(
-                domain: "workflow-artifact", action: "role-published", target: record.id,
-                state: .completed, detail: "\(role) · \(artifact.sha256.prefix(12))",
-                recordedAtUnixMillis: timestamp
+            _ = state.recordWorkflowArtifactRoleSelection(
+                id: record.id, workflowID: workflowID, workItemID: workItemID, role: role,
+                auditAction: "role-published", detail: "\(role) · \(artifact.sha256.prefix(12))",
+                timestamp: timestamp
             )
         }) else { return nil }
         return record.id
+    }
+
+    @discardableResult
+    func setWorkflowArtifactRoleCurrent(id: String) -> Bool {
+        guard let selected = snapshot.operations.workflows.artifactRoles.first(where: { $0.id == id }),
+              !selected.active else { return false }
+        return applyWorkflowArtifactRoleSelection(selected)
+    }
+
+    private func applyWorkflowArtifactRoleSelection(_ selected: DesktopWorkflowArtifactRoleRecord) -> Bool {
+        let timestamp = now()
+        return mutate { state in
+            _ = state.recordWorkflowArtifactRoleSelection(
+                id: selected.id, workflowID: selected.workflowID,
+                workItemID: selected.workItemID, role: selected.role,
+                auditAction: "role-selected",
+                detail: "Selected \(selected.role) · \(selected.artifactDigest.prefix(12)) as current.",
+                timestamp: timestamp
+            )
+        }
+    }
+}
+
+private extension DesktopAppSnapshot {
+    mutating func recordWorkflowArtifactRoleSelection(
+        id: String,
+        workflowID: String,
+        workItemID: String,
+        role: String,
+        auditAction: String,
+        detail: String,
+        timestamp: Int64
+    ) -> Bool {
+        guard selectCurrentWorkflowArtifactRole(
+            id: id, workflowID: workflowID, workItemID: workItemID, role: role
+        ) else { return false }
+        appendAudit(
+            domain: "workflow-artifact", action: auditAction, target: id,
+            state: .completed, detail: detail, recordedAtUnixMillis: timestamp
+        )
+        return true
+    }
+
+    mutating func selectCurrentWorkflowArtifactRole(
+        id: String,
+        workflowID: String,
+        workItemID: String,
+        role: String
+    ) -> Bool {
+        guard operations.workflows.artifactRoles.contains(where: { $0.id == id }) else { return false }
+        for index in operations.workflows.artifactRoles.indices
+            where operations.workflows.artifactRoles[index].workflowID == workflowID
+                && operations.workflows.artifactRoles[index].workItemID == workItemID
+                && operations.workflows.artifactRoles[index].role == role {
+            let isSelected = operations.workflows.artifactRoles[index].id == id
+            operations.workflows.artifactRoles[index].active = isSelected
+            operations.workflows.artifactRoles[index].supersededByID = isSelected ? nil : id
+        }
+        return true
     }
 }

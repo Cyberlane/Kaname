@@ -51,6 +51,11 @@ extension DesktopAppSnapshot {
 }
 
 public extension DesktopAppModel {
+    func workflowRevision(runID: String) -> DesktopWorkflowRevisionRecord? {
+        guard let run = snapshot.operations.workflows.runs.first(where: { $0.id == runID }) else { return nil }
+        return snapshot.operations.workflows.revisions.first(where: { $0.id == run.workflowRevisionID })
+    }
+
     var workflowDefinitions: [DesktopWorkflowDefinitionRecord] {
         snapshot.operations.workflows.definitions.sorted {
             workflowPresentationOrder(($0.enabled, $0.name, $0.id), ($1.enabled, $1.name, $1.id))
@@ -1171,6 +1176,24 @@ public extension DesktopAppModel {
                 state: .ready
             ))
         }
+        if revision.steps.contains(where: { $0.kind == .agent }) {
+            let policies = revision.steps.compactMap(\.agentPolicy)
+            let allowed = Set(policies.flatMap(\.allowedCapabilityIDs))
+            let unavailable = allowed.filter { capabilityID in
+                guard let installation = workflowCapabilityInstallation(capabilityID: capabilityID) else { return true }
+                return !installation.enabled || !installation.lastTestPassed
+                    || installation.permissions.permissions.contains(where: {
+                        [.externalEffects, .emailDraft, .emailSend, .emailLabels].contains($0)
+                    })
+            }
+            checks.append(.init(
+                id: "bounded-agent", title: "Bounded agent runtime",
+                detail: unavailable.isEmpty
+                    ? "Every allowed tool is installed and tested; token, tool-call, time, output, and direct-effect limits are enforced."
+                    : "Review or replace unavailable or effect-capable agent tools: \(unavailable.sorted().joined(separator: ", ")).",
+                state: unavailable.isEmpty ? .ready : .blocked
+            ))
+        }
         for capabilityID in Set(revision.steps.compactMap(\.capabilityID)).sorted() {
             let installation = workflowCapabilityInstallation(capabilityID: capabilityID)
             let state: DesktopWorkflowMigrationReadinessState
@@ -1192,8 +1215,23 @@ public extension DesktopAppModel {
             checks.append(.init(
                 id: "email-threading",
                 title: "Threaded email with attachments",
-                detail: "Kaname binds thread ID, reply headers, recipients, body, and attachment digests to the exact effect.",
+                detail: "Kaname binds thread ID, reply headers, recipients, body, and attachment digests, then re-reads Gmail and verifies recipients, subject, thread, headers, names, and attachment bytes.",
                 state: .ready
+            ))
+        }
+        if definition.triggerKinds.contains(.manual) {
+            checks.append(.init(
+                id: "manual-trigger", title: "Manual run",
+                detail: "Run creates a durable user-supplied event, work item, episode, frozen context, and exact-revision run.",
+                state: .ready
+            ))
+        }
+        for unsupported in [DesktopWorkflowTriggerKind.schedule, .calendar]
+            where definition.triggerKinds.contains(unsupported) {
+            checks.append(.init(
+                id: "trigger:\(unsupported.rawValue)", title: "\(unsupported.label) trigger",
+                detail: "This trigger is declared by the package but is not connected to the production workflow dispatcher.",
+                state: .blocked
             ))
         }
         if definition.triggerKinds.contains(.email) {
