@@ -213,7 +213,9 @@ do
     [[ "$(stat -f %z "$snapshot")" -gt 100000 ]]
 done
 
-run_qualified_app --desktop-destination home >/dev/null 2>&1 &
+"$executable" \
+    --desktop-qa-application-support-base "$qa_application_support_base" \
+    --desktop-destination home >/dev/null 2>&1 &
 qualification_pid=$!
 for _ in {1..100}; do
     if lsof -a -p "$qualification_pid" "$instance_lock" >/dev/null 2>&1; then break; fi
@@ -228,7 +230,9 @@ if ! lsof -a -p "$qualification_pid" "$instance_lock" >/dev/null 2>&1; then
     exit 1
 fi
 
-run_qualified_app --desktop-destination settings >/dev/null 2>&1 &
+"$executable" \
+    --desktop-qa-application-support-base "$qa_application_support_base" \
+    --desktop-destination settings >/dev/null 2>&1 &
 second_instance_pid=$!
 if ! wait "$second_instance_pid"; then
     echo "The second Kaname launch did not exit cleanly." >&2
