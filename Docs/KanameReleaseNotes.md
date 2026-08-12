@@ -1,3 +1,15 @@
+# Kaname 0.23.0 build 43
+
+- Add immutable, separately installable local capability packages with a complete package-tree digest, executable digest or code-signature trust, JSON input/output contracts, quotas, and an explicit test-before-enable lifecycle.
+- Run external adapters in a deny-by-default macOS sandbox with no network access, private scratch space, bounded execution and output, content-addressed artifact ingestion, and durable step receipts.
+- Add a resumable workflow interpreter with single-owner leases, bounded dispatch, exact frozen revisions, output chaining, idempotent crash recovery, and review stops for interrupted non-idempotent work.
+- Observe enabled account-scoped Gmail workflow bindings with paginated History API cursors, deduplication, filter checks, bounded full-sync recovery, and durable email-to-work-item episode grouping.
+- Preserve thread-aware replies and attachment bytes in exact Gmail approval targets, including reply headers, thread ID, multipart MIME, limits, remote reconciliation, and cursor parsing.
+- Add private per-workflow JSON state and content-addressed artifact storage, include both capability packages and workflow storage in coherent encrypted backups, and keep them out of reusable behavior packages.
+- Add a low-noise capability library and per-definition migration-readiness disclosure so missing, untested, disabled, or permission-incompatible pieces are visible before observe-only migration.
+- Route schema-constrained model stages through Kaname's existing Codex, Claude, or OpenCode runtimes while retaining frozen context and validated JSON output.
+- Ship a privacy-safe synthetic capability fixture and conformance coverage without adding any legacy-workflow behavior, prompts, data, accounts, or migration adapter.
+
 # Kaname 0.22.0 build 42
 
 - Export a workflow either as a reusable behavior-only `.kanameworkflow` package or as a passphrase-encrypted private `.kanameinstallation` containing its durable history and available referenced artifacts.

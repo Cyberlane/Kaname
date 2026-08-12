@@ -1,4 +1,5 @@
 import Foundation
+import KanameDomain
 
 public enum NativeProviderDiscussionDriver: String, CaseIterable, Equatable, Sendable {
     case claude
@@ -115,6 +116,83 @@ public actor NativeProviderDiscussionService {
             return try parseClaude(output)
         case .openCode:
             return try parseOpenCode(output)
+        }
+    }
+
+    public func runCodex(
+        prompt: String,
+        workspace: URL,
+        executable: String?
+    ) async throws -> String {
+        let cleanPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        var isDirectory: ObjCBool = false
+        guard !cleanPrompt.isEmpty,
+              cleanPrompt.utf8.count <= CodexCodingRequest.maximumPromptBytes,
+              FileManager.default.fileExists(atPath: workspace.path, isDirectory: &isDirectory),
+              isDirectory.boolValue,
+              let providerID = ProviderInstanceID(rawValue: "codexWorkflow") else {
+            throw NativeProviderDiscussionError.invalidPrompt
+        }
+        let provider = ProviderInstance(id: providerID, driver: .codex, displayName: "Codex workflow model")
+        let session = CodexLiveSession(configuration: .init(
+            instance: provider,
+            executable: executable ?? "codex",
+            workspaceURL: workspace,
+            timeout: timeout
+        ))
+        let deadline = timeout
+        do {
+            let stream = await session.events()
+            let result = try await withThrowingTaskGroup(of: String.self) { group in
+                group.addTask {
+                    var result = ""
+                    for await event in stream {
+                        if event.kind == .messageDelta, let text = event.text { result += text }
+                        if event.kind == .providerCompleted {
+                            guard !result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                                throw NativeProviderDiscussionError.malformedOutput("Codex")
+                            }
+                            return result
+                        }
+                        if event.kind == .runFailed || event.kind == .runInterrupted
+                            || event.kind == .approvalRequested || event.kind == .questionRequested {
+                            throw NativeProviderDiscussionError.failed("Codex")
+                        }
+                    }
+                    throw NativeProviderDiscussionError.malformedOutput("Codex")
+                }
+                _ = try await session.start(CodexCodingRequest(
+                    prompt: cleanPrompt,
+                    model: "gpt-5.6-terra",
+                    reasoningEffort: "high",
+                    sandbox: .readOnly,
+                    networkAccess: false,
+                    approvalPolicy: .never,
+                    runtimeAuthority: .workflowApprovalRequired
+                )).nativeThreadID
+                group.addTask {
+                    try await _Concurrency.Task.sleep(for: deadline)
+                    try? await session.interrupt()
+                    await session.close()
+                    throw NativeProviderDiscussionError.failed("Codex")
+                }
+                guard let text = try await group.next() else {
+                    throw NativeProviderDiscussionError.malformedOutput("Codex")
+                }
+                group.cancelAll()
+                return text
+            }
+            await session.close()
+            return result
+        } catch let error as NativeProviderDiscussionError {
+            await session.close()
+            throw error
+        } catch ProviderConnectivityError.executableNotFound {
+            await session.close()
+            throw NativeProviderDiscussionError.unavailable("Codex")
+        } catch {
+            await session.close()
+            throw NativeProviderDiscussionError.failed("Codex")
         }
     }
 

@@ -100,10 +100,81 @@ struct GmailWorkServiceTests {
         #expect(thread.messages.first?.body == "Readable plain text")
     }
 
+    @Test
+    func historyPagesNormalizeEveryChangeAndPreserveTheAdvanceCursor() throws {
+        let page = try GmailAPIParser.historyPage(data: Data(
+            """
+            {"history":[{"id":"101","messagesAdded":[{"message":{"id":"message-1","threadId":"thread-1","labelIds":["INBOX"]}}],"labelsRemoved":[{"message":{"id":"message-2","threadId":"thread-2"},"labelIds":["UNREAD"]}]}],"nextPageToken":"page-2","historyId":"105"}
+            """.utf8
+        ))
+
+        #expect(page.latestHistoryID == "105")
+        #expect(page.nextPageToken == "page-2")
+        #expect(page.events.map(\.kind) == [.messageAdded, .labelsRemoved])
+        #expect(page.events.map(\.messageID) == ["message-1", "message-2"])
+        #expect(page.events.map(\.labelIDs) == [["INBOX"], ["UNREAD"]])
+        #expect(try GmailAPIParser.profileHistoryID(data: Data(#"{"historyId":"105"}"#.utf8)) == "105")
+        #expect(throws: GmailWorkError.invalidIdentifier) { _ = try GmailAPIParser.validatedHistoryID("old") }
+    }
+
+    @Test
+    func outboundReplyIncludesThreadHeadersAndMultipartAttachments() throws {
+        let message = GmailOutboundMessage(
+            recipients: "recipient@example.test",
+            subject: "Re: Review",
+            body: "Attached is the corrected result.",
+            inReplyTo: "<message-1@example.test>",
+            references: ["<root@example.test>"],
+            threadID: "thread-1",
+            attachments: [GmailOutboundAttachment(
+                filename: "result.xlsx",
+                mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                data: Data("fictional workbook".utf8)
+            )]
+        )
+        let raw = try GmailAPIParser.rawMessage(message)
+        let decoded = try #require(Data(base64URLEncoded: raw))
+        let mime = try #require(String(data: decoded, encoding: .utf8))
+
+        #expect(mime.contains("In-Reply-To: <message-1@example.test>"))
+        #expect(mime.contains("References: <message-1@example.test> <root@example.test>")
+            || mime.contains("References: <root@example.test> <message-1@example.test>"))
+        #expect(mime.contains("Content-Type: multipart/mixed"))
+        #expect(mime.contains("filename=\"result.xlsx\""))
+        #expect(try NativeGoogleIntegrationService.gmailSendTarget(accountID: account.id, message: message)
+            != NativeGoogleIntegrationService.gmailSendTarget(
+                accountID: account.id,
+                message: GmailOutboundMessage(
+                    recipients: message.recipients,
+                    subject: message.subject,
+                    body: message.body,
+                    inReplyTo: message.inReplyTo,
+                    references: message.references,
+                    threadID: message.threadID,
+                    attachments: [GmailOutboundAttachment(
+                        filename: "result.xlsx",
+                        mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        data: Data("changed workbook".utf8)
+                    )]
+                )
+            ))
+    }
+
     private func base64URL(_ value: String) -> String {
         Data(value.utf8).base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
+    }
+}
+
+private extension Data {
+    init?(base64URLEncoded value: String) {
+        let translated = value
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let padding = String(repeating: "=", count: (4 - translated.count % 4) % 4)
+        guard let decoded = Data(base64Encoded: translated + padding) else { return nil }
+        self = decoded
     }
 }

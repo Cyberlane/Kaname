@@ -563,15 +563,18 @@ public struct DesktopWorkflowPlatformState: Codable, Equatable, Sendable {
     public var effects: [DesktopWorkflowEffectRecord]
     public var externalEvents: [DesktopWorkflowExternalEventRecord]
     public var artifactEdges: [DesktopWorkflowArtifactEdgeRecord]
+    public var capabilityInstallations: [DesktopWorkflowCapabilityInstallationRecord]
+    public var runtimeClaims: [DesktopWorkflowRuntimeClaimRecord]
 
     public static let empty = Self(
         definitions: [], revisions: [], triggerBindings: [], workItems: [], conversationBindings: [], episodes: [], runs: [],
-        stepAttempts: [], facts: [], contextSnapshots: [], validations: [], effects: [], externalEvents: [], artifactEdges: []
+        stepAttempts: [], facts: [], contextSnapshots: [], validations: [], effects: [], externalEvents: [], artifactEdges: [],
+        capabilityInstallations: DesktopWorkflowBuiltinCapabilities.installations(at: 0), runtimeClaims: []
     )
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
         case definitions, revisions, triggerBindings, workItems, conversationBindings, episodes, runs, stepAttempts, facts
-        case contextSnapshots, validations, effects, externalEvents, artifactEdges
+        case contextSnapshots, validations, effects, externalEvents, artifactEdges, capabilityInstallations, runtimeClaims
     }
 
     public init(
@@ -582,13 +585,16 @@ public struct DesktopWorkflowPlatformState: Codable, Equatable, Sendable {
         stepAttempts: [DesktopWorkflowStepAttemptRecord], facts: [DesktopWorkflowFactRecord],
         contextSnapshots: [DesktopWorkflowContextSnapshotRecord], validations: [DesktopWorkflowValidationRecord],
         effects: [DesktopWorkflowEffectRecord], externalEvents: [DesktopWorkflowExternalEventRecord],
-        artifactEdges: [DesktopWorkflowArtifactEdgeRecord]
+        artifactEdges: [DesktopWorkflowArtifactEdgeRecord],
+        capabilityInstallations: [DesktopWorkflowCapabilityInstallationRecord] = [],
+        runtimeClaims: [DesktopWorkflowRuntimeClaimRecord] = []
     ) {
         (self.definitions, self.revisions, self.triggerBindings) = (definitions, revisions, triggerBindings)
         (self.workItems, self.conversationBindings, self.episodes) = (workItems, conversationBindings, episodes)
         (self.runs, self.stepAttempts, self.facts) = (runs, stepAttempts, facts)
         (self.contextSnapshots, self.validations, self.effects) = (contextSnapshots, validations, effects)
         (self.externalEvents, self.artifactEdges) = (externalEvents, artifactEdges)
+        (self.capabilityInstallations, self.runtimeClaims) = (capabilityInstallations, runtimeClaims)
     }
 
     public init(from decoder: any Decoder) throws {
@@ -607,6 +613,11 @@ public struct DesktopWorkflowPlatformState: Codable, Equatable, Sendable {
         effects = try container.decodeIfPresent([DesktopWorkflowEffectRecord].self, forKey: .effects) ?? []
         externalEvents = try container.decodeIfPresent([DesktopWorkflowExternalEventRecord].self, forKey: .externalEvents) ?? []
         artifactEdges = try container.decodeIfPresent([DesktopWorkflowArtifactEdgeRecord].self, forKey: .artifactEdges) ?? []
+        capabilityInstallations = try container.decodeIfPresent(
+            [DesktopWorkflowCapabilityInstallationRecord].self,
+            forKey: .capabilityInstallations
+        ) ?? []
+        runtimeClaims = try container.decodeIfPresent([DesktopWorkflowRuntimeClaimRecord].self, forKey: .runtimeClaims) ?? []
     }
 }
 

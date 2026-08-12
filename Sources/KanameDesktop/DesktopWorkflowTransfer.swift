@@ -349,7 +349,9 @@ public extension DesktopAppModel {
             artifactEdges: snapshot.operations.workflows.artifactEdges.filter { edge in
                 let referenced = referencedArtifactIDs(workItems: workItems, runs: runs)
                 return referenced.contains(edge.fromArtifactID) || referenced.contains(edge.toID)
-            }
+            },
+            capabilityInstallations: [],
+            runtimeClaims: []
         )
     }
 
@@ -421,6 +423,7 @@ public extension DesktopAppModel {
               uniqueIDs(state.stepAttempts), uniqueIDs(state.facts), uniqueIDs(state.contextSnapshots),
               uniqueIDs(state.validations), uniqueIDs(state.effects), uniqueIDs(state.externalEvents),
               uniqueIDs(state.artifactEdges), artifactIDs.count == payload.artifacts.count,
+              state.capabilityInstallations.isEmpty, state.runtimeClaims.isEmpty,
               state.revisions.allSatisfy({ $0.workflowID == payload.manifest.id }),
               state.triggerBindings.allSatisfy({ $0.workflowID == payload.manifest.id }),
               state.workItems.allSatisfy({ $0.workflowID == payload.manifest.id }),

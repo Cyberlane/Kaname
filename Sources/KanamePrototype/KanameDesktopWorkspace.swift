@@ -772,20 +772,11 @@ struct KanameDesktopWorkspace: View {
 
                 Divider()
             }
-            Button {
-                presentSettings()
-            } label: {
-                HStack {
-                    Label("Settings", systemImage: DesktopDestination.settings.symbol)
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.tertiary)
-                }
+            Button("Settings", systemImage: DesktopDestination.settings.symbol, action: presentSettings)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
                 .padding(.horizontal, 14)
                 .padding(.vertical, 12)
-            }
             .buttonStyle(.plain)
             .background(showsSettings ? Nord.polarNight2.opacity(0.72) : Color.clear)
         }
@@ -5421,6 +5412,7 @@ private final class DesktopPersonalIntegrationViewModel: ObservableObject {
     private let googleIntegration: NativeGoogleIntegrationService
     private let appleCalendar = AppleCalendarIntegrationService()
     private let providerCache: ProviderCapabilityCacheStore
+    private let workflowMailMonitor: DesktopMailViewModel
 
     init(environment: KanameDesktopEnvironment = .current) {
         googleIntegration = NativeGoogleIntegrationService(
@@ -5428,6 +5420,7 @@ private final class DesktopPersonalIntegrationViewModel: ObservableObject {
             keychainService: environment.googleKeychainService
         )
         providerCache = ProviderCapabilityCacheStore(directory: environment.connectivityDirectory)
+        workflowMailMonitor = DesktopMailViewModel(environment: environment)
         appleAccessState = appleCalendar.accessState
         _Concurrency.Task {
             hasGoogleClientConfiguration = await googleIntegration.hasClientConfiguration
@@ -5443,6 +5436,7 @@ private final class DesktopPersonalIntegrationViewModel: ObservableObject {
 
     func startMonitoring(model: DesktopAppModel) {
         guard monitoringTask == nil else { return }
+        workflowMailMonitor.startWorkflowMonitoring(model: model)
         monitoringTask = _Concurrency.Task { [weak self] in
             guard let self else { return }
             hasGoogleClientConfiguration = await googleIntegration.hasClientConfiguration
@@ -6364,6 +6358,7 @@ private struct DesktopEmailView: View {
     @State private var workflowCollection = CommandLine.arguments.contains("--desktop-workflow-definitions") ? MailWorkflowCollection.definitions : .work
     @State private var selectedWorkflowWorkItemID: String?
     @State private var workflowImportMessage: String?
+    @State private var capabilityImportMessage: String?
 
     private var accounts: [DesktopAccountRecord] {
         model.snapshot.domains.accounts.filter { $0.service == .gmail }
@@ -6415,6 +6410,10 @@ private struct DesktopEmailView: View {
                     .disabled(mail.isBusy || googleAccounts.isEmpty)
                     Button("New standing rule", systemImage: "checklist") { showsRuleSheet = true }
                         .disabled(integrations.googleAccounts.isEmpty)
+                    Button("Check workflow triggers", systemImage: "arrow.triangle.2.circlepath") {
+                        mail.checkWorkflowTriggers(model: model)
+                    }
+                    .disabled(!model.workflowTriggerBindings().contains(where: { $0.enabled && $0.trigger == .email }))
                     Button("Install workflow package…", systemImage: "shippingbox") { installWorkflowPackage() }
                 } label: {
                     Image(systemName: "ellipsis.circle")
@@ -6714,9 +6713,17 @@ private struct DesktopEmailView: View {
             )
         } else {
             ForEach(items) { item in
-                WorkflowWorkItemCard(model: model, item: item, expanded: selectedWorkflowWorkItemID == item.id) {
-                    selectedWorkflowWorkItemID = selectedWorkflowWorkItemID == item.id ? nil : item.id
-                }
+                WorkflowWorkItemCard(
+                    model: model,
+                    item: item,
+                    expanded: selectedWorkflowWorkItemID == item.id,
+                    requestEffectApproval: { mail.requestWorkflowEffectApproval(model: model, effect: $0) },
+                    executeEffect: { mail.executeWorkflowEffect(model: model, effect: $0) },
+                    completeHumanReview: { mail.completeWorkflowHumanReview(model: model, runID: $0, stepID: $1) },
+                    toggleExpanded: {
+                        selectedWorkflowWorkItemID = selectedWorkflowWorkItemID == item.id ? nil : item.id
+                    }
+                )
                 .onAppear {
                     if selectedWorkflowWorkItemID == nil,
                        CommandLine.arguments.contains("--desktop-workflow-fixture") {
@@ -6729,6 +6736,34 @@ private struct DesktopEmailView: View {
 
     @ViewBuilder
     private var workflowDefinitionList: some View {
+        DisclosureGroup {
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(model.workflowCapabilityInstallations) { capability in
+                    WorkflowCapabilityInstallationRow(
+                        model: model,
+                        capability: capability,
+                        onTest: testWorkflowCapability
+                    )
+                }
+                HStack {
+                    Text("External capabilities run locally without network access and remain disabled until their schema test passes.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Install capability…", systemImage: "puzzlepiece.extension") { installWorkflowCapability() }
+                }
+                if let capabilityImportMessage {
+                    Label(capabilityImportMessage, systemImage: "info.circle")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .padding(.top, 8)
+        } label: {
+            Label(
+                "Capability library · \(model.workflowCapabilityInstallations.count) installed",
+                systemImage: "puzzlepiece.extension"
+            )
+        }
+
         HStack {
             VStack(alignment: .leading, spacing: 3) {
                 Text("Installed definitions").font(.headline)
@@ -6747,7 +6782,11 @@ private struct DesktopEmailView: View {
             )
         } else {
             ForEach(model.workflowDefinitions) { definition in
-                WorkflowDefinitionCard(model: model, definition: definition)
+                WorkflowDefinitionCard(
+                    model: model,
+                    definition: definition,
+                    googleAccounts: integrations.googleAccounts
+                )
             }
         }
     }
@@ -6805,9 +6844,17 @@ private struct DesktopEmailView: View {
                     Label("Associated workflow work", systemImage: "point.3.connected.trianglepath.dotted").font(.headline)
                 }
                 ForEach(items) { item in
-                    WorkflowWorkItemCard(model: model, item: item, expanded: selectedWorkflowWorkItemID == item.id) {
-                        selectedWorkflowWorkItemID = selectedWorkflowWorkItemID == item.id ? nil : item.id
-                    }
+                    WorkflowWorkItemCard(
+                        model: model,
+                        item: item,
+                        expanded: selectedWorkflowWorkItemID == item.id,
+                        requestEffectApproval: { mail.requestWorkflowEffectApproval(model: model, effect: $0) },
+                        executeEffect: { mail.executeWorkflowEffect(model: model, effect: $0) },
+                        completeHumanReview: { mail.completeWorkflowHumanReview(model: model, runID: $0, stepID: $1) },
+                        toggleExpanded: {
+                            selectedWorkflowWorkItemID = selectedWorkflowWorkItemID == item.id ? nil : item.id
+                        }
+                    )
                 }
             }
         }
@@ -6823,11 +6870,8 @@ private struct DesktopEmailView: View {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
             let data = try Data(contentsOf: url, options: [.mappedIfSafe])
-            let builtIns: Set<String> = [
-                "kaname.context.compile", "kaname.model.structured", "kaname.artifact.register",
-                "kaname.validation.run", "kaname.email.read", "kaname.email.draft", "kaname.email.send"
-            ]
-            let registered = builtIns.union(model.snapshot.domains.skills.filter(\.enabled).map(\.id))
+            let registered = Set(model.workflowCapabilityInstallations.filter(\.enabled).map(\.capabilityID))
+                .union(model.snapshot.domains.skills.filter(\.enabled).map(\.id))
             if url.pathExtension.lowercased() == "kanameinstallation" {
                 guard let passphrase = DesktopWorkflowTransferUI.requestImportPassphrase() else { return }
                 let payload = try model.previewWorkflowInstallation(data, passphrase: passphrase)
@@ -6849,6 +6893,75 @@ private struct DesktopEmailView: View {
             workflowCollection = .definitions
         } catch {
             workflowImportMessage = "Installation failed safely: \(error.localizedDescription)"
+        }
+    }
+
+    private func installWorkflowCapability() {
+        guard let store = model.workflowCapabilityStore() else {
+            capabilityImportMessage = "Capability storage is unavailable in this workspace."
+            return
+        }
+        let panel = NSOpenPanel()
+        panel.title = "Install Kaname capability"
+        panel.message = "Choose a .kanamecapability directory. Kaname verifies its manifest, executable digest, schemas, paths, and trust receipt before copying it privately."
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let inspected = try store.inspectPackage(
+                at: url,
+                installedAtUnixMillis: Int64(Date().timeIntervalSince1970 * 1_000)
+            )
+            let alert = NSAlert()
+            let permissionSummary = inspected.0.permissions.permissions.map(\.label).joined(separator: ", ")
+            alert.messageText = "Install \(inspected.0.name) \(inspected.0.version)?"
+            alert.informativeText = "\(inspected.0.summary)\n\nTrust: \(inspected.0.trust.label)\nRuntime: \(inspected.0.runtime.label)\nPermissions: \(permissionSummary.isEmpty ? "Local computation only" : permissionSummary)\n\nThe capability will remain disabled until its local schema test passes."
+            alert.alertStyle = .informational
+            alert.addButton(withTitle: "Install disabled")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            let receipt = try store.installPackage(
+                at: url,
+                installedAtUnixMillis: Int64(Date().timeIntervalSince1970 * 1_000)
+            )
+            guard model.registerWorkflowCapabilityInstallation(receipt) else {
+                capabilityImportMessage = "The capability bytes were installed, but Kaname could not commit its receipt."
+                return
+            }
+            capabilityImportMessage = "Installed \(receipt.name) \(receipt.version) disabled. Run a representative schema test before enabling it."
+        } catch {
+            capabilityImportMessage = "Capability installation failed safely: \(error.localizedDescription)"
+        }
+    }
+
+    private func testWorkflowCapability(_ capability: DesktopWorkflowCapabilityInstallationRecord) {
+        guard let store = model.workflowCapabilityStore() else { return }
+        let panel = NSOpenPanel()
+        panel.title = "Choose capability test input"
+        panel.message = "Choose representative JSON that matches the capability input schema. The test remains local and network-disabled."
+        panel.allowedContentTypes = [.json]
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let input = try Data(contentsOf: url, options: [.mappedIfSafe])
+            let manifest = try store.manifest(for: capability)
+            let result = try DesktopWorkflowCapabilityProcessRunner().execute(
+                manifest: manifest,
+                installationDirectory: store.installationDirectory(
+                    capabilityID: capability.capabilityID,
+                    version: capability.version
+                ),
+                input: input,
+                scratchRoot: FileManager.default.temporaryDirectory
+                    .appendingPathComponent("KanameWorkflowCapabilityTests", isDirectory: true)
+            )
+            _ = model.recordWorkflowCapabilityTest(id: capability.id, passed: true)
+            capabilityImportMessage = "Test passed in \(result.elapsedMilliseconds) ms. Review and enable \(capability.name) when ready."
+        } catch {
+            _ = model.recordWorkflowCapabilityTest(id: capability.id, passed: false)
+            capabilityImportMessage = "Test failed; the capability remains disabled: \(error.localizedDescription)"
         }
     }
 
@@ -6998,6 +7111,9 @@ private struct WorkflowWorkItemCard: View {
     @ObservedObject var model: DesktopAppModel
     let item: DesktopWorkflowWorkItemRecord
     let expanded: Bool
+    let requestEffectApproval: (DesktopWorkflowEffectRecord) -> Void
+    let executeEffect: (DesktopWorkflowEffectRecord) -> Void
+    let completeHumanReview: (String, String) -> Void
     let toggleExpanded: () -> Void
 
     private var definition: DesktopWorkflowDefinitionRecord? {
@@ -7019,6 +7135,23 @@ private struct WorkflowWorkItemCard: View {
     private var inactiveFacts: [DesktopWorkflowFactRecord] {
         model.workflowFacts(workItemID: item.id, includeInactive: true).filter {
             $0.state == .rejected || $0.state == .superseded
+        }
+    }
+
+    private var pendingEffects: [DesktopWorkflowEffectRecord] {
+        model.snapshot.operations.workflows.effects.filter {
+            $0.workItemID == item.id && ![.reconciled, .cancelled].contains($0.state)
+        }
+    }
+
+    private var waitingHumanReviews: [(runID: String, step: DesktopWorkflowStepDefinition)] {
+        model.snapshot.operations.workflows.runs.compactMap { run in
+            guard run.workItemID == item.id, run.state == .waiting,
+                  let revision = model.snapshot.operations.workflows.revisions.first(where: { $0.id == run.workflowRevisionID }),
+                  let step = revision.steps.first(where: { $0.id == run.currentStepID && $0.kind == .humanReview }) else {
+                return nil
+            }
+            return (run.id, step)
         }
     }
 
@@ -7098,6 +7231,50 @@ private struct WorkflowWorkItemCard: View {
                             .padding(.top, 8)
                         }
                     }
+                    if !pendingEffects.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("External effects").font(.subheadline.weight(.semibold))
+                            ForEach(pendingEffects) { effect in
+                                let approval = effect.approvalID.flatMap { id in
+                                    model.snapshot.operations.approvals.first { $0.id == id }
+                                }
+                                HStack(alignment: .top, spacing: 10) {
+                                    Image(systemName: effect.kind == "gmail-send" ? "paperplane.fill" : "envelope.badge")
+                                        .foregroundStyle(Nord.auroraYellow)
+                                        .frame(width: 20)
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(effect.kind == "gmail-send" ? "Send email" : "Create Gmail draft")
+                                            .font(.caption.weight(.semibold))
+                                        Text(effect.exactTarget).font(.caption2).foregroundStyle(.secondary)
+                                            .lineLimit(2).textSelection(.enabled)
+                                    }
+                                    Spacer()
+                                    if effect.approvalID == nil {
+                                        Button("Request approval") { requestEffectApproval(effect) }
+                                    } else if effect.state == .outcomeUnknown {
+                                        Text("Outcome unknown").font(.caption).foregroundStyle(Nord.auroraRed)
+                                    } else if effect.state == .executing {
+                                        ProgressView().controlSize(.small).accessibilityLabel("Applying email effect")
+                                    } else if approval?.state == .approved {
+                                        Button(effect.kind == "gmail-send" ? "Send" : "Create draft") { executeEffect(effect) }
+                                            .buttonStyle(.borderedProminent)
+                                    } else {
+                                        Text("Waiting in Inbox").font(.caption).foregroundStyle(.secondary)
+                                    }
+                                }
+                                .padding(10)
+                                .background(Nord.polarNight1.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
+                            }
+                        }
+                    }
+                    ForEach(waitingHumanReviews, id: \.runID) { review in
+                        WorkflowHumanReviewRow(
+                            runID: review.runID,
+                            stepID: review.step.id,
+                            stepName: review.step.name,
+                            onContinue: completeHumanReview
+                        )
+                    }
                     if !item.state.isHistorical {
                         HStack {
                             Spacer()
@@ -7153,13 +7330,10 @@ private struct WorkflowEpisodeRow: View {
 private struct WorkflowDefinitionCard: View {
     @ObservedObject var model: DesktopAppModel
     let definition: DesktopWorkflowDefinitionRecord
+    let googleAccounts: [NativeGoogleAccountSnapshot]
     @State private var selectedAccountID = ""
     @State private var emailFilter = ""
     @State private var transferMessage: String?
-
-    private var gmailAccounts: [DesktopAccountRecord] {
-        model.snapshot.domains.accounts.filter { $0.service == .gmail && $0.status == .ready }
-    }
 
     private var triggerBindings: [DesktopWorkflowTriggerBindingRecord] {
         model.workflowTriggerBindings(workflowID: definition.id)
@@ -7196,11 +7370,36 @@ private struct WorkflowDefinitionCard: View {
                     .foregroundStyle(.secondary)
             }
             if let revision {
+                let readiness = model.workflowMigrationReadiness(workflowID: definition.id)
                 WorkflowMetricsRow(metrics: [
                     WorkflowMetricValue(label: "Revision", value: revision.version, tint: Nord.frost0),
                     WorkflowMetricValue(label: "Steps", value: "\(revision.steps.count)", tint: Nord.frost1),
                     WorkflowMetricValue(label: "Permissions", value: "\(revision.permissions.permissions.count)", tint: Nord.auroraYellow)
                 ])
+                DisclosureGroup {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(readiness.checks) { check in
+                            HStack(alignment: .top, spacing: 10) {
+                                Image(systemName: readinessSymbol(check.state))
+                                    .foregroundStyle(readinessTint(check.state))
+                                    .frame(width: 20)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(check.title).font(.caption.weight(.semibold))
+                                    Text(check.detail).font(.caption2).foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                    .padding(.top, 8)
+                } label: {
+                    HStack {
+                        Label("Migration readiness", systemImage: readiness.isReady ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                            .foregroundStyle(readiness.isReady ? Nord.auroraGreen : Nord.auroraYellow)
+                        Spacer()
+                        Text(readiness.isReady ? "Ready for observe-only migration" : "\(readiness.blockedCount) blocked")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
                 DisclosureGroup("Stages and permission receipt") {
                     VStack(alignment: .leading, spacing: 10) {
                         ForEach(revision.steps) { step in
@@ -7239,11 +7438,11 @@ private struct WorkflowDefinitionCard: View {
                                     WorkflowTriggerBindingRow(model: model, binding: binding)
                                 }
                             }
-                            if !gmailAccounts.isEmpty {
+                            if !googleAccounts.isEmpty {
                                 HStack {
                                     Picker("Account", selection: $selectedAccountID) {
                                         Text("Choose account").tag("")
-                                        ForEach(gmailAccounts) { account in Text(account.identity).tag(account.id) }
+                                        ForEach(googleAccounts) { account in Text(account.identity).tag(account.id) }
                                     }
                                     .frame(maxWidth: 220)
                                     TextField("Gmail filter, for example from:sender@example.com", text: $emailFilter)
@@ -7267,6 +7466,22 @@ private struct WorkflowDefinitionCard: View {
             }
         }
         .panelStyle()
+    }
+
+    private func readinessSymbol(_ state: DesktopWorkflowMigrationReadinessState) -> String {
+        switch state {
+        case .ready: "checkmark.circle.fill"
+        case .attention: "exclamationmark.circle.fill"
+        case .blocked: "xmark.circle.fill"
+        }
+    }
+
+    private func readinessTint(_ state: DesktopWorkflowMigrationReadinessState) -> Color {
+        switch state {
+        case .ready: Nord.auroraGreen
+        case .attention: Nord.auroraYellow
+        case .blocked: Nord.auroraRed
+        }
     }
 }
 

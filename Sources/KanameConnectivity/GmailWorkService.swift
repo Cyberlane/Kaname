@@ -43,6 +43,42 @@ public struct GmailThreadPage: Equatable, Sendable {
     public let failedThreadCount: Int
 }
 
+public enum GmailHistoryEventKind: String, Codable, CaseIterable, Equatable, Sendable {
+    case messageAdded
+    case messageDeleted
+    case labelsAdded
+    case labelsRemoved
+}
+
+public struct GmailHistoryEvent: Equatable, Identifiable, Sendable {
+    public let id: String
+    public let historyID: String
+    public let kind: GmailHistoryEventKind
+    public let messageID: String
+    public let threadID: String
+    public let labelIDs: [String]
+
+    public static func record(
+        id: String,
+        historyID: String,
+        kind: GmailHistoryEventKind,
+        messageID: String,
+        threadID: String,
+        labelIDs: [String]
+    ) -> Self {
+        Self(id: id, historyID: historyID, kind: kind, messageID: messageID, threadID: threadID, labelIDs: labelIDs)
+    }
+}
+
+public struct GmailHistoryPage: Equatable, Sendable {
+    public let accountID: String
+    public let accountIdentity: String
+    public let startHistoryID: String
+    public let latestHistoryID: String
+    public let events: [GmailHistoryEvent]
+    public let nextPageToken: String?
+}
+
 public struct GmailLabelSnapshot: Equatable, Identifiable, Sendable {
     public let id: String
     public let name: String
@@ -79,14 +115,43 @@ public struct GmailMutationReceipt: Equatable, Sendable {
     public let reconciledThread: GmailThreadDetailSnapshot
 }
 
+public struct GmailOutboundAttachment: Equatable, Sendable {
+    public static let maximumCount = 20
+    public static let maximumTotalBytes = 25_000_000
+
+    public let filename: String
+    public let mimeType: String
+    public let data: Data
+
+    public init(filename: String, mimeType: String, data: Data) {
+        self.filename = filename
+        self.mimeType = mimeType
+        self.data = data
+    }
+}
+
 public struct GmailOutboundMessage: Equatable, Sendable {
     public let recipients: String
     public let subject: String
     public let body: String
     public let inReplyTo: String?
+    public let references: [String]
+    public let threadID: String?
+    public let attachments: [GmailOutboundAttachment]
 
-    public init(recipients: String, subject: String, body: String, inReplyTo: String? = nil) {
+    public init(
+        recipients: String,
+        subject: String,
+        body: String,
+        inReplyTo: String? = nil,
+        references: [String] = [],
+        threadID: String? = nil,
+        attachments: [GmailOutboundAttachment] = []
+    ) {
         (self.recipients, self.subject, self.body, self.inReplyTo) = (recipients, subject, body, inReplyTo)
+        self.references = references
+        self.threadID = threadID
+        self.attachments = attachments
     }
 }
 
@@ -167,6 +232,48 @@ public extension NativeGoogleIntegrationService {
         )
     }
 
+    func matchingGmailThreadIDs(
+        accountID: String,
+        query: String,
+        maximumPages: Int = 20,
+        maximumThreads: Int = 2_000
+    ) async throws -> Set<String> {
+        let account = try gmailAccount(id: accountID)
+        let token = try await validAccessToken(for: account)
+        let cleanQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanQuery.isEmpty, cleanQuery.utf8.count <= 2_048 else { throw GmailWorkError.invalidIdentifier }
+        let pageLimit = min(max(maximumPages, 1), 100)
+        let threadLimit = min(max(maximumThreads, 1), 10_000)
+        var pageToken: String?
+        var seenTokens = Set<String>()
+        var identifiers = Set<String>()
+        for _ in 0..<pageLimit {
+            var components = URLComponents(string: "https://gmail.googleapis.com/gmail/v1/users/me/threads")!
+            var items = [
+                URLQueryItem(name: "maxResults", value: "100"),
+                URLQueryItem(name: "q", value: cleanQuery),
+            ]
+            if let pageToken { items.append(URLQueryItem(name: "pageToken", value: pageToken)) }
+            components.queryItems = items
+            let data = try await authorizedData(
+                url: components.url!,
+                accessToken: token,
+                service: "Gmail workflow filter"
+            )
+            let page = try GmailAPIParser.threadPage(data: data)
+            identifiers.formUnion(page.ids)
+            guard identifiers.count <= threadLimit else {
+                throw NativeGoogleIntegrationError.invalidResponse("Gmail workflow filter exceeded its bounded thread limit")
+            }
+            guard let next = page.nextPageToken else { return identifiers }
+            guard seenTokens.insert(next).inserted else {
+                throw NativeGoogleIntegrationError.invalidResponse("Gmail workflow filter repeated a page")
+            }
+            pageToken = next
+        }
+        throw NativeGoogleIntegrationError.invalidResponse("Gmail workflow filter exceeded its bounded page limit")
+    }
+
     func readMailThread(accountID: String, threadID: String) async throws -> GmailThreadDetailSnapshot {
         let account = try gmailAccount(id: accountID)
         let token = try await validAccessToken(for: account)
@@ -178,11 +285,59 @@ public extension NativeGoogleIntegrationService {
     }
 
     func listGmailLabels(accountID: String) async throws -> [GmailLabelSnapshot] {
+        try await gmailGET(accountID: accountID, path: "labels", service: "Gmail labels", decode: GmailAPIParser.labels)
+    }
+
+    func gmailHistoryCursor(accountID: String) async throws -> String {
+        try await gmailGET(accountID: accountID, path: "profile", service: "Gmail profile", decode: GmailAPIParser.profileHistoryID)
+    }
+
+    private func gmailGET<Value>(
+        accountID: String,
+        path: String,
+        service: String,
+        decode: (Data) throws -> Value
+    ) async throws -> Value {
         let account = try gmailAccount(id: accountID)
         let token = try await validAccessToken(for: account)
-        let url = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/labels")!
-        let data = try await authorizedData(url: url, accessToken: token, service: "Gmail labels")
-        return try GmailAPIParser.labels(data: data)
+        guard let url = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/\(path)") else {
+            throw GmailWorkError.invalidIdentifier
+        }
+        return try decode(await authorizedData(url: url, accessToken: token, service: service))
+    }
+
+    func listGmailHistory(
+        accountID: String,
+        startHistoryID: String,
+        pageToken: String? = nil,
+        maximumResults: Int = 100,
+        labelID: String? = nil,
+        historyTypes: [GmailHistoryEventKind] = GmailHistoryEventKind.allCases
+    ) async throws -> GmailHistoryPage {
+        let account = try gmailAccount(id: accountID)
+        let token = try await validAccessToken(for: account)
+        let start = try GmailAPIParser.validatedHistoryID(startHistoryID)
+        var components = URLComponents(string: "https://gmail.googleapis.com/gmail/v1/users/me/history")!
+        var items = [
+            URLQueryItem(name: "startHistoryId", value: start),
+            URLQueryItem(name: "maxResults", value: "\(min(max(maximumResults, 1), 500))"),
+        ]
+        if let pageToken { items.append(URLQueryItem(name: "pageToken", value: pageToken)) }
+        if let labelID { items.append(URLQueryItem(name: "labelId", value: try GmailAPIParser.validatedID(labelID))) }
+        for kind in Array(Set(historyTypes)).sorted(by: { $0.rawValue < $1.rawValue }) {
+            items.append(URLQueryItem(name: "historyTypes", value: kind.rawValue))
+        }
+        components.queryItems = items
+        let data = try await authorizedData(url: components.url!, accessToken: token, service: "Gmail history")
+        let page = try GmailAPIParser.historyPage(data: data)
+        return GmailHistoryPage(
+            accountID: account.id,
+            accountIdentity: account.identity,
+            startHistoryID: start,
+            latestHistoryID: page.latestHistoryID,
+            events: page.events,
+            nextPageToken: page.nextPageToken
+        )
     }
 
     func downloadGmailAttachment(
@@ -273,7 +428,11 @@ public extension NativeGoogleIntegrationService {
         var request = URLRequest(url: URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/\(path)")!)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let body: [String: Any] = operation == .draft ? ["message": ["raw": raw]] : ["raw": raw]
+        var wireMessage: [String: Any] = ["raw": raw]
+        if let threadID = message.threadID {
+            wireMessage["threadId"] = try GmailAPIParser.validatedID(threadID)
+        }
+        let body: [String: Any] = operation == .draft ? ["message": wireMessage] : wireMessage
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         let token = try await validAccessToken(for: account)
         let service = operation == .draft ? "Gmail draft" : "Gmail send"
@@ -377,6 +536,12 @@ private struct GmailWireThread: Decodable {
 }
 
 public enum GmailAPIParser {
+    public struct HistoryPage: Equatable, Sendable {
+        public let latestHistoryID: String
+        public let events: [GmailHistoryEvent]
+        public let nextPageToken: String?
+    }
+
     public struct ThreadPage: Equatable, Sendable {
         public let ids: [String]
         public let nextPageToken: String?
@@ -387,6 +552,76 @@ public enum GmailAPIParser {
         guard !value.isEmpty, value.utf8.count <= 512,
               value.unicodeScalars.allSatisfy(allowed.contains) else { throw GmailWorkError.invalidIdentifier }
         return value
+    }
+
+    public static func validatedHistoryID(_ value: String) throws -> String {
+        guard !value.isEmpty, value.utf8.count <= 64, value.allSatisfy(\.isNumber) else {
+            throw GmailWorkError.invalidIdentifier
+        }
+        return value
+    }
+
+    public static func profileHistoryID(data: Data) throws -> String {
+        struct Response: Decodable { let historyId: String }
+        do {
+            return try validatedHistoryID(JSONDecoder().decode(Response.self, from: data).historyId)
+        } catch let error as GmailWorkError { throw error }
+        catch { throw NativeGoogleIntegrationError.invalidResponse("Gmail profile") }
+    }
+
+    public static func historyPage(data: Data) throws -> HistoryPage {
+        struct Response: Decodable {
+            struct Message: Decodable {
+                let id: String
+                let threadId: String
+                let labelIds: [String]?
+            }
+            struct Change: Decodable { let message: Message; let labelIds: [String]? }
+            struct History: Decodable {
+                let id: String
+                let messagesAdded: [Change]?
+                let messagesDeleted: [Change]?
+                let labelsAdded: [Change]?
+                let labelsRemoved: [Change]?
+            }
+            let history: [History]?
+            let nextPageToken: String?
+            let historyId: String
+        }
+        do {
+            let response = try JSONDecoder().decode(Response.self, from: data)
+            var events: [GmailHistoryEvent] = []
+            for history in response.history ?? [] {
+                let historyID = try validatedHistoryID(history.id)
+                let groups: [(GmailHistoryEventKind, [Response.Change])] = [
+                    (.messageAdded, history.messagesAdded ?? []),
+                    (.messageDeleted, history.messagesDeleted ?? []),
+                    (.labelsAdded, history.labelsAdded ?? []),
+                    (.labelsRemoved, history.labelsRemoved ?? []),
+                ]
+                for (kind, changes) in groups {
+                    for (ordinal, change) in changes.enumerated() {
+                        let messageID = try validatedID(change.message.id)
+                        let threadID = try validatedID(change.message.threadId)
+                        let labels = try (change.labelIds ?? change.message.labelIds ?? []).map(validatedID).sorted()
+                        events.append(GmailHistoryEvent.record(
+                            id: "\(historyID):\(kind.rawValue):\(messageID):\(ordinal)",
+                            historyID: historyID,
+                            kind: kind,
+                            messageID: messageID,
+                            threadID: threadID,
+                            labelIDs: labels
+                        ))
+                    }
+                }
+            }
+            return HistoryPage(
+                latestHistoryID: try validatedHistoryID(response.historyId),
+                events: events,
+                nextPageToken: response.nextPageToken
+            )
+        } catch let error as GmailWorkError { throw error }
+        catch { throw NativeGoogleIntegrationError.invalidResponse("Gmail history") }
     }
 
     public static func threadPage(data: Data) throws -> ThreadPage {
@@ -479,15 +714,67 @@ public enum GmailAPIParser {
     static func rawMessage(_ message: GmailOutboundMessage) throws -> String {
         let recipients = message.recipients.trimmingCharacters(in: .whitespacesAndNewlines)
         let body = message.body.trimmingCharacters(in: .whitespacesAndNewlines)
+        let referenceValues = Array(Set(message.references + [message.inReplyTo].compactMap { $0 })).sorted()
+        let attachmentBytes = message.attachments.reduce(0) { $0 + $1.data.count }
         guard !recipients.isEmpty, !body.isEmpty,
               !recipients.contains("\r"), !recipients.contains("\n"),
-              !message.subject.contains("\r"), !message.subject.contains("\n") else { throw GmailWorkError.invalidMessage }
-        var headers = ["To: \(recipients)", "Subject: \(message.subject)", "MIME-Version: 1.0", "Content-Type: text/plain; charset=utf-8"]
-        if let reply = message.inReplyTo, !reply.contains("\r"), !reply.contains("\n") {
+              !message.subject.contains("\r"), !message.subject.contains("\n"),
+              message.attachments.count <= GmailOutboundAttachment.maximumCount,
+              attachmentBytes <= GmailOutboundAttachment.maximumTotalBytes,
+              referenceValues.allSatisfy({ !$0.contains("\r") && !$0.contains("\n") }),
+              message.attachments.allSatisfy(validAttachment) else { throw GmailWorkError.invalidMessage }
+        var headers = ["To: \(recipients)", "Subject: \(message.subject)", "MIME-Version: 1.0"]
+        if let reply = message.inReplyTo {
             headers.append("In-Reply-To: \(reply)")
-            headers.append("References: \(reply)")
         }
-        return Data((headers + ["", message.body]).joined(separator: "\r\n").utf8).base64URLEncodedString()
+        if !referenceValues.isEmpty { headers.append("References: \(referenceValues.joined(separator: " "))") }
+        let messageData: Data
+        if message.attachments.isEmpty {
+            headers.append("Content-Type: text/plain; charset=utf-8")
+            headers.append("Content-Transfer-Encoding: base64")
+            messageData = Data((headers + ["", foldedBase64(Data(message.body.utf8))]).joined(separator: "\r\n").utf8)
+        } else {
+            let boundarySeed = message.attachments.reduce(into: Data((message.subject + "\n" + message.body).utf8)) {
+                $0.append(Data($1.filename.utf8))
+                $0.append(Data($1.mimeType.utf8))
+                $0.append($1.data)
+            }
+            let boundary = "kaname-\(SHA256.hash(data: boundarySeed).prefix(12).map { String(format: "%02x", $0) }.joined())"
+            headers.append("Content-Type: multipart/mixed; boundary=\"\(boundary)\"")
+            var lines = headers + ["", "--\(boundary)", "Content-Type: text/plain; charset=utf-8", "Content-Transfer-Encoding: base64", "", foldedBase64(Data(message.body.utf8))]
+            for attachment in message.attachments {
+                let filename = attachment.filename.replacingOccurrences(of: "\"", with: "'")
+                lines += [
+                    "--\(boundary)",
+                    "Content-Type: \(attachment.mimeType); name=\"\(filename)\"",
+                    "Content-Disposition: attachment; filename=\"\(filename)\"",
+                    "Content-Transfer-Encoding: base64",
+                    "",
+                    foldedBase64(attachment.data),
+                ]
+            }
+            lines += ["--\(boundary)--", ""]
+            messageData = Data(lines.joined(separator: "\r\n").utf8)
+        }
+        return messageData.base64URLEncodedString()
+    }
+
+    private static func validAttachment(_ attachment: GmailOutboundAttachment) -> Bool {
+        let filename = attachment.filename.trimmingCharacters(in: .whitespacesAndNewlines)
+        let mimeType = attachment.mimeType.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !filename.isEmpty && filename.utf8.count <= 512
+            && !filename.contains("/") && !filename.contains("\\")
+            && !filename.contains("\r") && !filename.contains("\n")
+            && mimeType.range(of: #"^[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*$"#, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    private static func foldedBase64(_ data: Data) -> String {
+        let encoded = data.base64EncodedString()
+        return stride(from: 0, to: encoded.count, by: 76).map { offset in
+            let start = encoded.index(encoded.startIndex, offsetBy: offset)
+            let end = encoded.index(start, offsetBy: min(76, encoded.count - offset))
+            return String(encoded[start..<end])
+        }.joined(separator: "\r\n")
     }
 
     fileprivate static func outboundReceipt(data: Data, service: String) throws -> GmailWireOutboundReceipt {

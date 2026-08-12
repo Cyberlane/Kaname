@@ -586,7 +586,7 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
     }
 
     func migratedToCurrent(now: Int64) throws -> DesktopAppSnapshot {
-        guard (1...16).contains(version) else { throw DesktopModelError.unsupportedVersion }
+        guard (1...17).contains(version) else { throw DesktopModelError.unsupportedVersion }
         var migrated = self
         while migrated.version < Self.currentVersion {
             switch migrated.version {
@@ -637,6 +637,15 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
                 // Advancing the schema prevents an older build from silently
                 // discarding workflow history after it has been created.
                 break
+            case 17:
+                // Capability receipts and runtime leases are additive. Built-in
+                // capabilities are regenerated from this exact Kaname build;
+                // imported/private capabilities remain explicit installations.
+                if migrated.operations.workflows.capabilityInstallations.isEmpty {
+                    migrated.operations.workflows.capabilityInstallations =
+                        DesktopWorkflowBuiltinCapabilities.installations(at: now)
+                }
+                migrated.operations.workflows.runtimeClaims.removeAll()
             default:
                 throw DesktopModelError.unsupportedVersion
             }
@@ -860,6 +869,10 @@ public final class FileDesktopStateStore: DesktopRecoveryStateStoring {
         applicationSupportRootURL.appendingPathComponent("WorkflowInstallations", isDirectory: true)
     }
 
+    public var workflowCapabilitiesDirectoryURL: URL {
+        applicationSupportRootURL.appendingPathComponent("WorkflowCapabilities", isDirectory: true)
+    }
+
     public var resetArchiveDirectoryURL: URL {
         managedRecoveryDirectoryURL.appendingPathComponent("ResetArchives", isDirectory: true)
     }
@@ -1043,7 +1056,12 @@ public final class FileDesktopStateStore: DesktopRecoveryStateStoring {
         try preparePrivateDirectory(destinationRoot)
         var moves: [DesktopRuntimeArchiveMove] = []
         do {
-            for source in [localCoreDirectoryURL, conversationServiceDirectoryURL, workflowInstallationsDirectoryURL]
+            for source in [
+                localCoreDirectoryURL,
+                conversationServiceDirectoryURL,
+                workflowInstallationsDirectoryURL,
+                workflowCapabilitiesDirectoryURL,
+            ]
             where FileManager.default.fileExists(atPath: source.path) {
                 let values = try source.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
                 guard values.isDirectory == true, values.isSymbolicLink != true else {
@@ -1093,6 +1111,7 @@ public final class FileDesktopStateStore: DesktopRecoveryStateStoring {
         try !regularFiles(below: localCoreDirectoryURL).isEmpty
             || !regularFiles(below: conversationServiceDirectoryURL).isEmpty
             || !regularFiles(below: workflowInstallationsDirectoryURL).isEmpty
+            || !regularFiles(below: workflowCapabilitiesDirectoryURL).isEmpty
     }
 
     public func activateVerifiedRuntimeRestore(
@@ -1106,6 +1125,7 @@ public final class FileDesktopStateStore: DesktopRecoveryStateStoring {
             .localCoreSnapshot,
             .conversationServiceState,
             .workflowInstallationState,
+            .workflowCapabilityPackage,
         ]
         let runtimeArtifacts = try service.verifiedArtifacts(kinds: runtimeKinds, from: bundleURL)
         guard manifest.runtimeStateIncluded == true else {
@@ -1140,7 +1160,7 @@ public final class FileDesktopStateStore: DesktopRecoveryStateStoring {
                 .appendingPathComponent("FailedRuntimeRestores", isDirectory: true)
                 .appendingPathComponent(restoreID.uuidString.lowercased(), isDirectory: true)
             do {
-                for name in ["LocalCore", "ConversationService", "WorkflowInstallations"] {
+                for name in ["LocalCore", "ConversationService", "WorkflowInstallations", "WorkflowCapabilities"] {
                     let staged = stagingRoot.appendingPathComponent(name, isDirectory: true)
                     guard FileManager.default.fileExists(atPath: staged.path) else { continue }
                     let active = applicationSupportRootURL.appendingPathComponent(name, isDirectory: true)
@@ -1211,6 +1231,8 @@ public final class FileDesktopStateStore: DesktopRecoveryStateStoring {
             path.hasPrefix("ConversationService/")
         case .workflowInstallationState:
             path.hasPrefix("WorkflowInstallations/")
+        case .workflowCapabilityPackage:
+            path.hasPrefix("WorkflowCapabilities/")
         case .workspaceState, .previousWorkspaceState:
             false
         }
@@ -1244,6 +1266,12 @@ public final class FileDesktopStateStore: DesktopRecoveryStateStoring {
             kind: .workflowInstallationState,
             restorePrefix: "WorkflowInstallations",
             archivePrefix: "workflow-installation"
+        )
+        sources += try runtimeRecoverySources(
+            below: workflowCapabilitiesDirectoryURL,
+            kind: .workflowCapabilityPackage,
+            restorePrefix: "WorkflowCapabilities",
+            archivePrefix: "workflow-capability"
         )
         guard sources.count <= 4_098 else { throw DesktopRecoveryError.unsafeSource }
         return sources
@@ -3948,6 +3976,11 @@ public final class DesktopAppModel: ObservableObject {
         return fileStore.applicationSupportRootURL
             .appendingPathComponent("WorkflowInstallations", isDirectory: true)
             .appendingPathComponent(workflowID, isDirectory: true)
+    }
+
+    public func workflowCapabilityStore() -> DesktopWorkflowCapabilityStore? {
+        guard let fileStore = store as? FileDesktopStateStore else { return nil }
+        return DesktopWorkflowCapabilityStore(rootDirectory: fileStore.workflowCapabilitiesDirectoryURL)
     }
 
     public func restorePreviousWorkspace() throws {

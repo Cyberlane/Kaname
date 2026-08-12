@@ -1,11 +1,59 @@
 import Foundation
 
+private func workflowPresentationOrder(
+    _ left: (enabled: Bool, name: String, id: String),
+    _ right: (enabled: Bool, name: String, id: String)
+) -> Bool {
+    if left.enabled != right.enabled { return left.enabled && !right.enabled }
+    let comparison = left.name.localizedCaseInsensitiveCompare(right.name)
+    return comparison == .orderedSame ? left.id < right.id : comparison == .orderedAscending
+}
+
+private enum WorkflowHostStepTransition {
+    case wait(reason: String)
+    case complete(outputDigest: String, artifactIDs: [String])
+}
+
+private extension DesktopAppSnapshot {
+    mutating func applyWorkflowHostStepTransition(
+        attemptID: String,
+        runID: String,
+        workItemID: String,
+        stepID: String,
+        transition: WorkflowHostStepTransition,
+        timestamp: Int64
+    ) {
+        guard let attemptIndex = operations.workflows.stepAttempts.firstIndex(where: { $0.id == attemptID }),
+              let runIndex = operations.workflows.runs.firstIndex(where: { $0.id == runID }) else { return }
+        switch transition {
+        case let .wait(reason):
+            operations.workflows.stepAttempts[attemptIndex].state = .waiting
+            operations.workflows.stepAttempts[attemptIndex].errorSummary = String(reason.prefix(8_192))
+            operations.workflows.stepAttempts[attemptIndex].completedAtUnixMillis = timestamp
+            operations.workflows.runs[runIndex].state = .waiting
+            operations.workflows.runs[runIndex].currentStepID = stepID
+            setWorkflowWorkItemPresentation(
+                id: workItemID,
+                state: .needsAttention,
+                nextAction: String(reason.prefix(8_192)),
+                updatedAtUnixMillis: timestamp
+            )
+        case let .complete(outputDigest, artifactIDs):
+            operations.workflows.stepAttempts[attemptIndex].state = .completed
+            operations.workflows.stepAttempts[attemptIndex].outputDigest = outputDigest
+            operations.workflows.stepAttempts[attemptIndex].artifactIDs = Array(Set(artifactIDs)).sorted()
+            operations.workflows.stepAttempts[attemptIndex].errorSummary = nil
+            operations.workflows.stepAttempts[attemptIndex].completedAtUnixMillis = timestamp
+            operations.workflows.runs[runIndex].state = .queued
+            operations.workflows.runs[runIndex].currentStepID = nil
+        }
+    }
+}
+
 public extension DesktopAppModel {
     var workflowDefinitions: [DesktopWorkflowDefinitionRecord] {
         snapshot.operations.workflows.definitions.sorted {
-            if $0.enabled != $1.enabled { return $0.enabled && !$1.enabled }
-            let comparison = $0.name.localizedCaseInsensitiveCompare($1.name)
-            return comparison == .orderedSame ? $0.id < $1.id : comparison == .orderedAscending
+            workflowPresentationOrder(($0.enabled, $0.name, $0.id), ($1.enabled, $1.name, $1.id))
         }
     }
 
@@ -38,7 +86,8 @@ public extension DesktopAppModel {
               definition.triggerKinds.contains(trigger),
               !cleanSource.isEmpty, cleanSource.utf8.count <= 160,
               !cleanFilter.isEmpty, cleanFilter.utf8.count <= 2_048,
-              !scopedAccounts.isEmpty else { return nil }
+              !scopedAccounts.isEmpty,
+              trigger != .email || scopedAccounts.count == 1 else { return nil }
         let timestamp = now()
         let binding = DesktopWorkflowTriggerBindingRecord(
             id: UUID().uuidString.lowercased(), workflowID: workflowID, trigger: trigger,
@@ -713,5 +762,287 @@ public extension DesktopAppModel {
             state.operations.workflows.workItems[index].updatedAtUnixMillis = timestamp
             state.operations.workflows.workItems[index].closedAtUnixMillis = timestamp
         }
+    }
+
+    var workflowCapabilityInstallations: [DesktopWorkflowCapabilityInstallationRecord] {
+        snapshot.operations.workflows.capabilityInstallations.sorted {
+            workflowPresentationOrder(($0.enabled, $0.name, $0.id), ($1.enabled, $1.name, $1.id))
+        }
+    }
+
+    func workflowCapabilityInstallation(capabilityID: String) -> DesktopWorkflowCapabilityInstallationRecord? {
+        snapshot.operations.workflows.capabilityInstallations
+            .filter { $0.capabilityID == capabilityID }
+            .sorted { $0.version.compare($1.version, options: .numeric) == .orderedDescending }
+            .first
+    }
+
+    @discardableResult
+    func registerWorkflowCapabilityInstallation(_ installation: DesktopWorkflowCapabilityInstallationRecord) -> Bool {
+        guard installation.capabilityID.range(
+            of: #"^[a-z0-9][a-z0-9._-]{0,127}$"#,
+            options: .regularExpression
+        ) != nil else { return false }
+        return mutate { state in
+            if let index = state.operations.workflows.capabilityInstallations.firstIndex(where: { $0.id == installation.id }) {
+                guard state.operations.workflows.capabilityInstallations[index].packageDigest == installation.packageDigest,
+                      state.operations.workflows.capabilityInstallations[index].executableDigest == installation.executableDigest else {
+                    return
+                }
+                state.operations.workflows.capabilityInstallations[index] = installation
+            } else {
+                state.operations.workflows.capabilityInstallations.append(installation)
+            }
+            state.appendAudit(
+                domain: "workflow-capability",
+                action: "install",
+                target: installation.id,
+                state: .completed,
+                detail: "Installed disabled with \(installation.trust.label.lowercased()) trust.",
+                recordedAtUnixMillis: self.now()
+            )
+        }
+    }
+
+    func setWorkflowCapabilityEnabled(id: String, enabled: Bool) -> Bool {
+        guard let installation = snapshot.operations.workflows.capabilityInstallations.first(where: { $0.id == id }),
+              !enabled || installation.trust == .kanameBuiltIn || installation.lastTestPassed else { return false }
+        return mutateRecord(at: \.operations.workflows.capabilityInstallations, id: id) { $0.enabled = enabled }
+    }
+
+    func recordWorkflowCapabilityTest(id: String, passed: Bool) -> Bool {
+        let timestamp = now()
+        return mutateRecord(at: \.operations.workflows.capabilityInstallations, id: id) {
+            $0.lastTestedAtUnixMillis = timestamp
+            $0.lastTestPassed = passed
+            if !passed { $0.enabled = false }
+        }
+    }
+
+    @discardableResult
+    func claimWorkflowRun(runID: String, ownerID: String, leaseMilliseconds: Int64) -> String? {
+        let cleanOwner = ownerID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let timestamp = now()
+        guard !cleanOwner.isEmpty, cleanOwner.utf8.count <= 256, leaseMilliseconds >= 5_000,
+              snapshot.operations.workflows.runs.contains(where: {
+                  $0.id == runID && ($0.state == .queued || $0.state == .running)
+              }), !snapshot.operations.workflows.runtimeClaims.contains(where: {
+                  $0.runID == runID && $0.state == .active && $0.leaseDeadlineUnixMillis > timestamp
+              }) else { return nil }
+        let claim = DesktopWorkflowRuntimeClaimRecord(
+            id: UUID().uuidString.lowercased(),
+            runID: runID,
+            ownerID: cleanOwner,
+            state: .active,
+            claimedAtUnixMillis: timestamp,
+            heartbeatAtUnixMillis: timestamp,
+            leaseDeadlineUnixMillis: timestamp + min(leaseMilliseconds, 300_000),
+            releasedAtUnixMillis: nil
+        )
+        guard mutate({ state in
+            for index in state.operations.workflows.runtimeClaims.indices
+                where state.operations.workflows.runtimeClaims[index].runID == runID
+                    && state.operations.workflows.runtimeClaims[index].state == .active {
+                state.operations.workflows.runtimeClaims[index].state = .expired
+                state.operations.workflows.runtimeClaims[index].releasedAtUnixMillis = timestamp
+            }
+            state.operations.workflows.runtimeClaims.append(claim)
+        }) else { return nil }
+        return claim.id
+    }
+
+    func heartbeatWorkflowRunClaim(id: String, ownerID: String, leaseMilliseconds: Int64) -> Bool {
+        let timestamp = now()
+        guard let claim = snapshot.operations.workflows.runtimeClaims.first(where: {
+            $0.id == id && $0.ownerID == ownerID && $0.state == .active && $0.leaseDeadlineUnixMillis >= timestamp
+        }), snapshot.operations.workflows.runs.contains(where: {
+            $0.id == claim.runID && ($0.state == .queued || $0.state == .running)
+        }) else { return false }
+        return mutateRecord(at: \.operations.workflows.runtimeClaims, id: id) {
+            $0.heartbeatAtUnixMillis = timestamp
+            $0.leaseDeadlineUnixMillis = timestamp + min(max(leaseMilliseconds, 5_000), 300_000)
+        }
+    }
+
+    func releaseWorkflowRunClaim(id: String, ownerID: String) -> Bool {
+        let timestamp = now()
+        guard snapshot.operations.workflows.runtimeClaims.contains(where: {
+            $0.id == id && $0.ownerID == ownerID && $0.state == .active
+        }) else { return false }
+        return mutateRecord(at: \.operations.workflows.runtimeClaims, id: id) {
+            $0.state = .released
+            $0.releasedAtUnixMillis = timestamp
+        }
+    }
+
+    @discardableResult
+    func recoverExpiredWorkflowClaims() -> Int {
+        let timestamp = now()
+        let expired = snapshot.operations.workflows.runtimeClaims.filter {
+            $0.state == .active && $0.leaseDeadlineUnixMillis < timestamp
+        }
+        guard !expired.isEmpty else { return 0 }
+        let runIDs = Set(expired.map(\.runID))
+        guard mutate({ state in
+            for index in state.operations.workflows.runtimeClaims.indices
+                where runIDs.contains(state.operations.workflows.runtimeClaims[index].runID)
+                    && state.operations.workflows.runtimeClaims[index].state == .active {
+                state.operations.workflows.runtimeClaims[index].state = .expired
+                state.operations.workflows.runtimeClaims[index].releasedAtUnixMillis = timestamp
+            }
+            for attemptIndex in state.operations.workflows.stepAttempts.indices
+                where runIDs.contains(state.operations.workflows.stepAttempts[attemptIndex].runID)
+                    && state.operations.workflows.stepAttempts[attemptIndex].state == .running {
+                let attempt = state.operations.workflows.stepAttempts[attemptIndex]
+                let run = state.operations.workflows.runs.first(where: { $0.id == attempt.runID })
+                let step = run.flatMap { run in
+                    state.operations.workflows.revisions.first(where: { $0.id == run.workflowRevisionID })?
+                        .steps.first(where: { $0.id == attempt.stepID })
+                }
+                state.operations.workflows.stepAttempts[attemptIndex].state = .failed
+                state.operations.workflows.stepAttempts[attemptIndex].errorSummary = "The workflow worker lease expired."
+                state.operations.workflows.stepAttempts[attemptIndex].completedAtUnixMillis = timestamp
+                if let runIndex = state.operations.workflows.runs.firstIndex(where: { $0.id == attempt.runID }) {
+                    state.operations.workflows.runs[runIndex].currentStepID = nil
+                    state.operations.workflows.runs[runIndex].state = step?.isIdempotent == true ? .queued : .failed
+                }
+                if let workItemID = run?.workItemID,
+                   let itemIndex = state.operations.workflows.workItems.firstIndex(where: { $0.id == workItemID }) {
+                    state.operations.workflows.workItems[itemIndex].state = step?.isIdempotent == true ? .preparing : .needsAttention
+                    state.operations.workflows.workItems[itemIndex].nextAction = step?.isIdempotent == true
+                        ? "The interrupted idempotent step is ready to resume."
+                        : "Review the interrupted non-idempotent step before any retry."
+                    state.operations.workflows.workItems[itemIndex].updatedAtUnixMillis = timestamp
+                }
+            }
+        }) else { return 0 }
+        return expired.count
+    }
+
+    func interruptWorkflowStepForHost(attemptID: String, reason: String) -> Bool {
+        guard let attempt = snapshot.operations.workflows.stepAttempts.first(where: {
+            $0.id == attemptID && $0.state == .running
+        }), let run = snapshot.operations.workflows.runs.first(where: { $0.id == attempt.runID }) else { return false }
+        return persistWorkflowHostStepTransition(
+            attemptID: attemptID,
+            runID: run.id,
+            workItemID: run.workItemID,
+            stepID: attempt.stepID,
+            transition: .wait(reason: reason)
+        )
+    }
+
+    func resumeWorkflowStepAfterEffect(
+        runID: String,
+        stepID: String,
+        outputDigest: String,
+        artifactIDs: [String] = []
+    ) -> Bool {
+        guard let attempt = snapshot.operations.workflows.stepAttempts
+            .filter({ $0.runID == runID && $0.stepID == stepID && $0.state == .waiting })
+            .max(by: { $0.attempt < $1.attempt }),
+              let run = snapshot.operations.workflows.runs.first(where: { $0.id == runID && $0.state == .waiting }),
+              !outputDigest.isEmpty else { return false }
+        return persistWorkflowHostStepTransition(
+            attemptID: attempt.id,
+            runID: runID,
+            workItemID: run.workItemID,
+            stepID: stepID,
+            transition: .complete(outputDigest: outputDigest, artifactIDs: artifactIDs)
+        )
+    }
+
+    private func persistWorkflowHostStepTransition(
+        attemptID: String,
+        runID: String,
+        workItemID: String,
+        stepID: String,
+        transition: WorkflowHostStepTransition
+    ) -> Bool {
+        let timestamp = now()
+        return mutate {
+            $0.applyWorkflowHostStepTransition(
+                attemptID: attemptID,
+                runID: runID,
+                workItemID: workItemID,
+                stepID: stepID,
+                transition: transition,
+                timestamp: timestamp
+            )
+        }
+    }
+
+    func workflowMigrationReadiness(workflowID: String) -> DesktopWorkflowMigrationReadinessReport {
+        guard let definition = snapshot.operations.workflows.definitions.first(where: { $0.id == workflowID }),
+              let revision = snapshot.operations.workflows.revisions.first(where: { $0.id == definition.currentRevisionID }) else {
+            return DesktopWorkflowMigrationReadinessReport(workflowID: workflowID, checks: [
+                .init(id: "definition", title: "Workflow definition", detail: "Install a valid workflow package first.", state: .blocked),
+            ])
+        }
+        var checks: [DesktopWorkflowMigrationReadinessCheck] = [
+            .init(
+                id: "definition",
+                title: "Immutable workflow contract",
+                detail: "Revision \(revision.version) is installed with digest \(String(revision.manifestDigest.prefix(12))).",
+                state: .ready
+            ),
+        ]
+        for capabilityID in Set(revision.steps.compactMap(\.capabilityID)).sorted() {
+            let installation = workflowCapabilityInstallation(capabilityID: capabilityID)
+            let state: DesktopWorkflowMigrationReadinessState
+            let detail: String
+            if let installation, installation.enabled, installation.lastTestPassed,
+               !installation.permissions.broadens(revision.permissions) {
+                state = installation.trust == .localDigest ? .attention : .ready
+                detail = "\(installation.name) \(installation.version) is enabled, tested, and \(installation.trust.label.lowercased())."
+            } else if let installation, !installation.enabled || !installation.lastTestPassed {
+                state = .blocked
+                detail = "\(installation.name) is installed but must pass its local test and be enabled."
+            } else {
+                state = .blocked
+                detail = "Install and review capability \(capabilityID)."
+            }
+            checks.append(.init(id: "capability:\(capabilityID)", title: capabilityID, detail: detail, state: state))
+        }
+        if revision.steps.contains(where: { $0.kind == .sendEmail }) {
+            checks.append(.init(
+                id: "email-threading",
+                title: "Threaded email with attachments",
+                detail: "Kaname binds thread ID, reply headers, recipients, body, and attachment digests to the exact effect.",
+                state: .ready
+            ))
+        }
+        if definition.triggerKinds.contains(.email) {
+            let bindings = workflowTriggerBindings(workflowID: workflowID).filter { $0.trigger == .email }
+            let enabledBindings = bindings.filter(\.enabled)
+            let triggerState: DesktopWorkflowMigrationReadinessState = bindings.isEmpty || enabledBindings.isEmpty
+                ? .blocked
+                : enabledBindings.allSatisfy { $0.lastCursor != nil } ? .ready : .attention
+            checks.append(.init(
+                id: "email-trigger",
+                title: "Durable email trigger",
+                detail: bindings.isEmpty
+                    ? "Configure an account-scoped Gmail history binding and test its filter before enabling it."
+                    : enabledBindings.isEmpty
+                        ? "\(bindings.count) account-scoped binding\(bindings.count == 1 ? " is" : "s are") configured but disabled."
+                        : enabledBindings.allSatisfy { $0.lastCursor != nil }
+                            ? "\(enabledBindings.count) enabled Gmail history binding\(enabledBindings.count == 1 ? " has" : "s have") a durable cursor."
+                            : "The enabled binding will establish its start cursor without importing old mail on the next check.",
+                state: triggerState
+            ))
+        }
+        checks.append(.init(
+            id: "storage",
+            title: "Private workflow storage",
+            detail: "State and content-addressed artifacts are namespaced, backup-aware, and excluded from reusable packages.",
+            state: .ready
+        ))
+        checks.append(.init(
+            id: "recovery",
+            title: "Crash-safe execution",
+            detail: "Durable leases recover interrupted idempotent work and stop non-idempotent work for review.",
+            state: .ready
+        ))
+        return DesktopWorkflowMigrationReadinessReport(workflowID: workflowID, checks: checks)
     }
 }

@@ -130,9 +130,9 @@ struct DesktopRecoveryIntegrationTests {
             #expect(migrated.attention == .completed)
             #expect(migrated.unread == false)
             #expect(migrated.updatedAtUnixMillis == 777)
-            // Schema 16 already owns the explicit creation timestamp. Earlier
+            // Schema 16 and later own the explicit creation timestamp. Earlier
             // schemas derive it from their oldest message during migration.
-            #expect(migrated.createdAtUnixMillis == (version == 16 ? 1_000 : 700))
+            #expect(migrated.createdAtUnixMillis == (version >= 16 ? 1_000 : 700))
             #expect(migrated.messages.map(\.body) == ["User content v\(version)"])
             #expect(migrated.plan.map(\.title) == ["User plan"])
             #expect(migrated.evidence.map(\.label) == ["User evidence"])

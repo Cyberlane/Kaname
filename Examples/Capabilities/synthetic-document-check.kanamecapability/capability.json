@@ -1,0 +1,34 @@
+{
+  "deterministic": true,
+  "entrypoint": "run",
+  "executableSHA256": "b29d599f8115384f7c4bff8c8452ca28e2c787be7cb60b992e0372b0072de7ac",
+  "id": "org.example.synthetic-document-check",
+  "idempotent": true,
+  "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"artifactDigest\":{\"pattern\":\"^[0-9a-f]{64}$\",\"type\":\"string\"}},\"required\":[\"artifactDigest\"],\"type\":\"object\"}",
+  "license": "MIT",
+  "limits": {
+    "maximumArtifactBytes": 1048576,
+    "maximumInputBytes": 65536,
+    "maximumOutputBytes": 65536,
+    "timeoutSeconds": 10
+  },
+  "name": "Synthetic document check",
+  "outputSchema": "{\"additionalProperties\":false,\"properties\":{\"passed\":{\"type\":\"boolean\"},\"summary\":{\"maxLength\":512,\"type\":\"string\"}},\"required\":[\"passed\",\"summary\"],\"type\":\"object\"}",
+  "permissions": {
+    "accountIDs": [],
+    "capabilityIDs": [
+      "org.example.synthetic-document-check"
+    ],
+    "dataClassesLeavingDevice": [],
+    "filesystemScopes": [],
+    "networkDestinations": [],
+    "permissions": []
+  },
+  "reviewSchema": null,
+  "runtime": "isolatedProcess",
+  "schemaVersion": 1,
+  "source": "Kaname synthetic example",
+  "summary": "Runs a fictional deterministic document contract without network or filesystem authority.",
+  "trust": "localDigest",
+  "version": "1.0.0"
+}
