@@ -7,6 +7,7 @@ public enum DesktopRecoveryArtifactKind: String, Codable, CaseIterable, Hashable
     case localCoreJournal
     case localCoreSnapshot
     case conversationServiceState
+    case workflowInstallationState
 }
 
 public enum DesktopRecoveryExcludedScope: String, Codable, CaseIterable, Sendable {

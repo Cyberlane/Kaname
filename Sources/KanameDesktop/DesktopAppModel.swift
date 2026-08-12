@@ -856,6 +856,10 @@ public final class FileDesktopStateStore: DesktopRecoveryStateStoring {
         applicationSupportRootURL.appendingPathComponent("ConversationService", isDirectory: true)
     }
 
+    public var workflowInstallationsDirectoryURL: URL {
+        applicationSupportRootURL.appendingPathComponent("WorkflowInstallations", isDirectory: true)
+    }
+
     public var resetArchiveDirectoryURL: URL {
         managedRecoveryDirectoryURL.appendingPathComponent("ResetArchives", isDirectory: true)
     }
@@ -1039,7 +1043,7 @@ public final class FileDesktopStateStore: DesktopRecoveryStateStoring {
         try preparePrivateDirectory(destinationRoot)
         var moves: [DesktopRuntimeArchiveMove] = []
         do {
-            for source in [localCoreDirectoryURL, conversationServiceDirectoryURL]
+            for source in [localCoreDirectoryURL, conversationServiceDirectoryURL, workflowInstallationsDirectoryURL]
             where FileManager.default.fileExists(atPath: source.path) {
                 let values = try source.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
                 guard values.isDirectory == true, values.isSymbolicLink != true else {
@@ -1088,6 +1092,7 @@ public final class FileDesktopStateStore: DesktopRecoveryStateStoring {
     public func hasRuntimeState() throws -> Bool {
         try !regularFiles(below: localCoreDirectoryURL).isEmpty
             || !regularFiles(below: conversationServiceDirectoryURL).isEmpty
+            || !regularFiles(below: workflowInstallationsDirectoryURL).isEmpty
     }
 
     public func activateVerifiedRuntimeRestore(
@@ -1100,6 +1105,7 @@ public final class FileDesktopStateStore: DesktopRecoveryStateStoring {
             .localCoreJournal,
             .localCoreSnapshot,
             .conversationServiceState,
+            .workflowInstallationState,
         ]
         let runtimeArtifacts = try service.verifiedArtifacts(kinds: runtimeKinds, from: bundleURL)
         guard manifest.runtimeStateIncluded == true else {
@@ -1134,7 +1140,7 @@ public final class FileDesktopStateStore: DesktopRecoveryStateStoring {
                 .appendingPathComponent("FailedRuntimeRestores", isDirectory: true)
                 .appendingPathComponent(restoreID.uuidString.lowercased(), isDirectory: true)
             do {
-                for name in ["LocalCore", "ConversationService"] {
+                for name in ["LocalCore", "ConversationService", "WorkflowInstallations"] {
                     let staged = stagingRoot.appendingPathComponent(name, isDirectory: true)
                     guard FileManager.default.fileExists(atPath: staged.path) else { continue }
                     let active = applicationSupportRootURL.appendingPathComponent(name, isDirectory: true)
@@ -1203,6 +1209,8 @@ public final class FileDesktopStateStore: DesktopRecoveryStateStoring {
             path.hasPrefix("LocalCore/")
         case .conversationServiceState:
             path.hasPrefix("ConversationService/")
+        case .workflowInstallationState:
+            path.hasPrefix("WorkflowInstallations/")
         case .workspaceState, .previousWorkspaceState:
             false
         }
@@ -1230,6 +1238,12 @@ public final class FileDesktopStateStore: DesktopRecoveryStateStoring {
             kind: .conversationServiceState,
             restorePrefix: "ConversationService",
             archivePrefix: "conversation"
+        )
+        sources += try runtimeRecoverySources(
+            below: workflowInstallationsDirectoryURL,
+            kind: .workflowInstallationState,
+            restorePrefix: "WorkflowInstallations",
+            archivePrefix: "workflow-installation"
         )
         guard sources.count <= 4_098 else { throw DesktopRecoveryError.unsafeSource }
         return sources
@@ -3926,6 +3940,14 @@ public final class DesktopAppModel: ObservableObject {
             stateSchemaVersion: recoveryStatus?.detectedStateSchemaVersion ?? snapshot.version,
             createdAtUnixMillis: now()
         )
+    }
+
+    public func workflowInstallationStorageURL(workflowID: String) -> URL? {
+        guard workflowID.range(of: #"^[a-z0-9][a-z0-9._-]{0,127}$"#, options: .regularExpression) != nil,
+              let fileStore = store as? FileDesktopStateStore else { return nil }
+        return fileStore.applicationSupportRootURL
+            .appendingPathComponent("WorkflowInstallations", isDirectory: true)
+            .appendingPathComponent(workflowID, isDirectory: true)
     }
 
     public func restorePreviousWorkspace() throws {

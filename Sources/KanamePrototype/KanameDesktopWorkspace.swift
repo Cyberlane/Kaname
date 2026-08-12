@@ -212,6 +212,7 @@ struct KanameDesktopWorkspace: View {
     @StateObject private var automationScheduler: DesktopAutomationSchedulerViewModel
     @StateObject private var personalIntegrations: DesktopPersonalIntegrationViewModel
     @StateObject private var updates: DesktopUpdateViewModel
+    @StateObject private var automaticBackup: DesktopAutomaticBackupViewModel
     @StateObject private var portableTransfer = DesktopPortableTransferViewModel()
     @State private var destination: DesktopDestination
     @State private var selectedThreadID: String?
@@ -255,6 +256,7 @@ struct KanameDesktopWorkspace: View {
         _automationScheduler = StateObject(wrappedValue: DesktopAutomationSchedulerViewModel(model: desktopModel, runtime: runtime, environment: environment))
         _personalIntegrations = StateObject(wrappedValue: DesktopPersonalIntegrationViewModel(environment: environment))
         _updates = StateObject(wrappedValue: DesktopUpdateViewModel(environment: environment))
+        _automaticBackup = StateObject(wrappedValue: DesktopAutomaticBackupViewModel(environment: environment))
         let arguments = CommandLine.arguments
         if let fixtureIndex = arguments.firstIndex(of: "--desktop-workflow-fixture"),
            arguments.indices.contains(fixtureIndex + 1) {
@@ -324,6 +326,7 @@ struct KanameDesktopWorkspace: View {
                     model: model,
                     integrations: personalIntegrations,
                     updates: updates,
+                    automaticBackup: automaticBackup,
                     dismiss: { dismissSettings(restoringFocus: true) }
                 )
                 .transition(.opacity.combined(with: .scale(scale: 0.985)))
@@ -433,6 +436,7 @@ struct KanameDesktopWorkspace: View {
         .task {
             guard !model.isRecoveryReadOnly else { return }
             personalIntegrations.startMonitoring(model: model)
+            automaticBackup.start(model: model)
             await _Concurrency.Task<Never, Never>.yield()
             NotificationCenter.default.post(name: .kanameDesktopReady, object: nil)
             updates.startAutomaticChecks()
@@ -443,6 +447,7 @@ struct KanameDesktopWorkspace: View {
                 return
             }
             personalIntegrations.startMonitoring(model: model)
+            automaticBackup.start(model: model)
             NotificationCenter.default.post(name: .kanameDesktopReady, object: nil)
             updates.startAutomaticChecks()
         }
@@ -899,7 +904,12 @@ struct KanameDesktopWorkspace: View {
             case .localCore:
                 LocalCoreWorkspace()
             case .settings:
-                DesktopSettingsView(model: model, integrations: personalIntegrations, updates: updates)
+                DesktopSettingsView(
+                    model: model,
+                    integrations: personalIntegrations,
+                    updates: updates,
+                    automaticBackup: automaticBackup
+                )
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -6806,8 +6816,8 @@ private struct DesktopEmailView: View {
     private func installWorkflowPackage() {
         let panel = NSOpenPanel()
         panel.title = "Install Kaname workflow package"
-        panel.message = "Choose a schema-1 JSON workflow manifest. It is installed disabled until you review and enable it."
-        panel.allowedContentTypes = [.json]
+        panel.message = "Choose a reusable workflow package or an encrypted private installation archive. Kaname reviews either locally and imports it disabled."
+        panel.allowedContentTypes = [.json, DesktopWorkflowTransferUI.packageType, DesktopWorkflowTransferUI.installationType]
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
@@ -6818,12 +6828,24 @@ private struct DesktopEmailView: View {
                 "kaname.validation.run", "kaname.email.read", "kaname.email.draft", "kaname.email.send"
             ]
             let registered = builtIns.union(model.snapshot.domains.skills.filter(\.enabled).map(\.id))
-            let revisionID = try model.installWorkflowPackage(
-                manifestData: data,
-                registeredCapabilityIDs: registered,
-                enable: false
-            )
-            workflowImportMessage = "Installed revision \(revisionID) disabled. Review its exact permissions and stages before enabling."
+            if url.pathExtension.lowercased() == "kanameinstallation" {
+                guard let passphrase = DesktopWorkflowTransferUI.requestImportPassphrase() else { return }
+                let payload = try model.previewWorkflowInstallation(data, passphrase: passphrase)
+                guard DesktopWorkflowTransferUI.confirmInstallationImport(payload) else { return }
+                let workflowID = try model.importWorkflowInstallation(payload, registeredCapabilityIDs: registered)
+                workflowImportMessage = "Imported \(workflowID) disabled. Rebind accounts and review capabilities, context, triggers, and effects before resuming."
+            } else {
+                let manifest = try DesktopWorkflowPackageCodec.decode(data, registeredCapabilityIDs: registered)
+                let canonical = try DesktopWorkflowPackageCodec.canonicalData(manifest)
+                let digest = DesktopWorkflowPackageCodec.digest(canonical)
+                guard DesktopWorkflowTransferUI.confirmPackageImport(manifest, digest: digest) else { return }
+                let revisionID = try model.installWorkflowPackage(
+                    manifestData: canonical,
+                    registeredCapabilityIDs: registered,
+                    enable: false
+                )
+                workflowImportMessage = "Installed revision \(revisionID) disabled. Review its exact permissions and stages before enabling."
+            }
             workflowCollection = .definitions
         } catch {
             workflowImportMessage = "Installation failed safely: \(error.localizedDescription)"
@@ -7133,6 +7155,7 @@ private struct WorkflowDefinitionCard: View {
     let definition: DesktopWorkflowDefinitionRecord
     @State private var selectedAccountID = ""
     @State private var emailFilter = ""
+    @State private var transferMessage: String?
 
     private var gmailAccounts: [DesktopAccountRecord] {
         model.snapshot.domains.accounts.filter { $0.service == .gmail && $0.status == .ready }
@@ -7149,6 +7172,29 @@ private struct WorkflowDefinitionCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             WorkflowDefinitionHeader(model: model, definition: definition)
+            HStack(spacing: 8) {
+                Button("Export package…", systemImage: "shippingbox.and.arrow.backward") {
+                    do {
+                        transferMessage = try DesktopWorkflowTransferUI.exportPackage(model: model, definition: definition)
+                    } catch {
+                        transferMessage = error.localizedDescription
+                    }
+                }
+                Button("Export installation…", systemImage: "lock.doc") {
+                    do {
+                        transferMessage = try DesktopWorkflowTransferUI.exportInstallation(model: model, definition: definition)
+                    } catch {
+                        transferMessage = error.localizedDescription
+                    }
+                }
+                Spacer()
+            }
+            .buttonStyle(.bordered)
+            if let transferMessage {
+                Label(transferMessage, systemImage: "info.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             if let revision {
                 WorkflowMetricsRow(metrics: [
                     WorkflowMetricValue(label: "Revision", value: revision.version, tint: Nord.frost0),
@@ -9062,6 +9108,7 @@ private struct DesktopSettingsModal: View {
     @ObservedObject var model: DesktopAppModel
     @ObservedObject var integrations: DesktopPersonalIntegrationViewModel
     @ObservedObject var updates: DesktopUpdateViewModel
+    @ObservedObject var automaticBackup: DesktopAutomaticBackupViewModel
     let dismiss: () -> Void
 
     var body: some View {
@@ -9071,7 +9118,13 @@ private struct DesktopSettingsModal: View {
                 .contentShape(Rectangle())
                 .onTapGesture(perform: dismiss)
 
-            DesktopSettingsView(model: model, integrations: integrations, updates: updates, dismiss: dismiss)
+            DesktopSettingsView(
+                model: model,
+                integrations: integrations,
+                updates: updates,
+                automaticBackup: automaticBackup,
+                dismiss: dismiss
+            )
                 .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                 .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
                 .overlay {
@@ -9094,6 +9147,7 @@ private struct DesktopSettingsView: View {
     @ObservedObject var model: DesktopAppModel
     @ObservedObject var integrations: DesktopPersonalIntegrationViewModel
     @ObservedObject var updates: DesktopUpdateViewModel
+    @ObservedObject var automaticBackup: DesktopAutomaticBackupViewModel
     @State private var draft: DesktopPreferences
     private let explicitDismiss: (() -> Void)?
 
@@ -9101,11 +9155,13 @@ private struct DesktopSettingsView: View {
         model: DesktopAppModel,
         integrations: DesktopPersonalIntegrationViewModel,
         updates: DesktopUpdateViewModel,
+        automaticBackup: DesktopAutomaticBackupViewModel,
         dismiss: (() -> Void)? = nil
     ) {
         self.model = model
         self.integrations = integrations
         self.updates = updates
+        self.automaticBackup = automaticBackup
         explicitDismiss = dismiss
         _draft = State(initialValue: model.snapshot.preferences)
     }
@@ -9115,6 +9171,7 @@ private struct DesktopSettingsView: View {
             model: model,
             integrations: integrations,
             updates: updates,
+            automaticBackup: automaticBackup,
             draft: $draft,
             dismiss: { explicitDismiss?() ?? environmentDismiss() }
         )
@@ -9133,39 +9190,36 @@ private struct DesktopSettingsShell: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.desktopQALargeText) private var usesQALargeText
     private enum Category: String, CaseIterable, Identifiable {
-        case general, commands, integrations, providers, updates, calendars, scheduling, privacy, diagnostics
+        case general, commands, integrations, providers, updates, calendars, scheduling, privacy, backups, diagnostics
+        private struct Presentation {
+            let label: String
+            let symbol: String
+            let detail: String
+        }
         var id: String { rawValue }
-        var label: String {
+        private var presentation: Presentation {
             switch self {
-            case .general: "General"
-            case .commands: "Commands & Shortcuts"
-            case .integrations: "Integrations"
-            case .providers: "Coding providers"
-            case .updates: "Updates"
-            case .calendars: "Calendars"
-            case .scheduling: "Scheduling"
-            case .privacy: "Privacy & Safety"
-            case .diagnostics: "Diagnostics"
+            case .general: .init(label: "General", symbol: "gearshape.fill", detail: "Workspace presentation and review defaults")
+            case .commands: .init(label: "Commands & Shortcuts", symbol: "command", detail: "Keyboard-first navigation and the Kaname Command Center")
+            case .integrations: .init(label: "Integrations", symbol: "link", detail: "Personal services, account health, and explicit authorization")
+            case .providers: .init(label: "Coding providers", symbol: "chevron.left.forwardslash.chevron.right", detail: "Local coding agents available to Kaname")
+            case .updates: .init(label: "Updates", symbol: "arrow.triangle.2.circlepath.circle.fill", detail: "Verified switching, health checks, and rollback")
+            case .calendars: .init(label: "Calendars", symbol: "calendar", detail: "Choose which connected calendars Kaname may show")
+            case .scheduling: .init(label: "Scheduling", symbol: "clock.fill", detail: "Stable wall-clock behavior when you travel")
+            case .privacy: .init(label: "Privacy & Safety", symbol: "lock.shield.fill", detail: "Notification content and execution authority")
+            case .backups: .init(label: "Backup & Restore", symbol: "externaldrive.badge.icloud", detail: "Opt-in encrypted local, R2, or S3 recovery generations")
+            case .diagnostics: .init(label: "Diagnostics", symbol: "lifepreserver.fill", detail: "Retention and privacy-safe support information")
             }
         }
-        var symbol: String {
-            switch self {
-            case .general: "gearshape.fill"
-            case .commands: "command"
-            case .integrations: "link"
-            case .providers: "chevron.left.forwardslash.chevron.right"
-            case .updates: "arrow.triangle.2.circlepath.circle.fill"
-            case .calendars: "calendar"
-            case .scheduling: "clock.fill"
-            case .privacy: "lock.shield.fill"
-            case .diagnostics: "lifepreserver.fill"
-            }
-        }
+        var label: String { presentation.label }
+        var symbol: String { presentation.symbol }
+        var detail: String { presentation.detail }
     }
 
     @ObservedObject var model: DesktopAppModel
     @ObservedObject var integrations: DesktopPersonalIntegrationViewModel
     @ObservedObject var updates: DesktopUpdateViewModel
+    @ObservedObject var automaticBackup: DesktopAutomaticBackupViewModel
     @Binding var draft: DesktopPreferences
     let dismiss: () -> Void
     @State private var category: Category = .general
@@ -9178,12 +9232,14 @@ private struct DesktopSettingsShell: View {
         model: DesktopAppModel,
         integrations: DesktopPersonalIntegrationViewModel,
         updates: DesktopUpdateViewModel,
+        automaticBackup: DesktopAutomaticBackupViewModel,
         draft: Binding<DesktopPreferences>,
         dismiss: @escaping () -> Void
     ) {
         self.model = model
         self.integrations = integrations
         self.updates = updates
+        self.automaticBackup = automaticBackup
         _draft = draft
         self.dismiss = dismiss
         let arguments = CommandLine.arguments
@@ -9342,26 +9398,12 @@ private struct DesktopSettingsShell: View {
         guard !query.isEmpty else { return Category.allCases }
         return Category.allCases.filter {
             $0.label.lowercased().contains(query)
-                || pageDetail(for: $0).lowercased().contains(query)
+                || $0.detail.lowercased().contains(query)
         }
     }
 
     private var pageDetail: String {
-        pageDetail(for: category)
-    }
-
-    private func pageDetail(for category: Category) -> String {
-        switch category {
-        case .general: "Workspace presentation and review defaults"
-        case .commands: "Keyboard-first navigation and the Kaname Command Center"
-        case .integrations: "Personal services, account health, and explicit authorization"
-        case .providers: "Local coding agents available to Kaname"
-        case .updates: "Verified switching, health checks, and rollback"
-        case .calendars: "Choose which connected calendars Kaname may show"
-        case .scheduling: "Stable wall-clock behavior when you travel"
-        case .privacy: "Notification content and execution authority"
-        case .diagnostics: "Retention and privacy-safe support information"
-        }
+        category.detail
     }
 
     @ViewBuilder private var categoryPage: some View {
@@ -9374,6 +9416,7 @@ private struct DesktopSettingsShell: View {
         case .calendars: calendarsPage
         case .scheduling: schedulingPage
         case .privacy: privacyPage
+        case .backups: DesktopAutomaticBackupSettings(model: model, backup: automaticBackup)
         case .diagnostics: diagnosticsPage
         }
     }
@@ -12391,7 +12434,7 @@ private struct InspectorStatus: View {
     }
 }
 
-private struct SettingsSection<Content: View>: View {
+struct SettingsSection<Content: View>: View {
     let title: String
     let symbol: String
     @ViewBuilder let content: Content

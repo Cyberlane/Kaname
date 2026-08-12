@@ -1,3 +1,11 @@
+# Kaname 0.22.0 build 42
+
+- Export a workflow either as a reusable behavior-only `.kanameworkflow` package or as a passphrase-encrypted private `.kanameinstallation` containing its durable history and available referenced artifacts.
+- Review imports locally and remove inherited authority: definitions and triggers arrive disabled, cursors are cleared, active work needs attention, pending runs are cancelled, and unexecuted effects lose approval.
+- Add opt-in automatic encrypted backups to a local folder, Cloudflare R2, or S3-compatible object storage, with device-only Keychain credentials and exact-destination verification before enablement.
+- Seal workspace, provider/runtime state, and workflow-installation artifacts as one coherent recovery generation; verify upload metadata, authenticated encryption, packed-file digests, and the existing recovery manifest.
+- Add paginated remote retention, keep-at-least-three generation safety, latest-generation verification and download, and a quiet Backup & Restore settings surface with concise health and failure state.
+
 # Kaname 0.21.0 build 41
 
 - Add a generic workflow workspace under Email with calm Work, Definitions, and Simple rules views while leaving ordinary email threads uncluttered.

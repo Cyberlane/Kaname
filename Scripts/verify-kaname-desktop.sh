@@ -160,6 +160,10 @@ run_qualified_app \
     --desktop-settings-category updates \
     --snapshot "$output_directory/settings-updates.png"
 run_qualified_app \
+    --desktop-destination settings \
+    --desktop-settings-category backups \
+    --snapshot "$output_directory/settings-backups.png"
+run_qualified_app \
     --desktop-destination calendar \
     --desktop-back-target home \
     --post-mouse-back \
@@ -189,6 +193,7 @@ for snapshot in \
     "$output_directory/settings-integrations.png" \
     "$output_directory/settings-providers.png" \
     "$output_directory/settings-updates.png" \
+    "$output_directory/settings-backups.png" \
     "$output_directory/mouse-back.png"
 do
     [[ -s "$snapshot" ]]

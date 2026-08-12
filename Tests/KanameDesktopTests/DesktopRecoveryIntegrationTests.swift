@@ -365,6 +365,35 @@ struct DesktopRecoveryIntegrationTests {
     }
 
     @Test
+    func fullBackupExportsWorkflowArtifactsInTheSameGeneration() throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("Desktop/workspace.json")
+        let store = FileDesktopStateStore(fileURL: file)
+        let model = DesktopAppModel(store: store, now: { 4_000 })
+        let workflowArtifact = root.appendingPathComponent("WorkflowInstallations/example/Artifacts/output.bin")
+        try FileManager.default.createDirectory(
+            at: workflowArtifact.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("workflow-output".utf8).write(to: workflowArtifact)
+        let bundle = root.appendingPathComponent("full.kanamebackup", isDirectory: true)
+
+        let manifest = try model.exportRecoveryBackup(to: bundle)
+
+        #expect(manifest.runtimeStateIncluded == true)
+        #expect(manifest.artifacts.contains {
+            $0.kind == .workflowInstallationState
+                && $0.restoreRelativePath == "WorkflowInstallations/example/Artifacts/output.bin"
+        })
+        let restored = try #require(DesktopRecoveryService().verifiedArtifacts(
+            kinds: [.workflowInstallationState],
+            from: bundle
+        ).first)
+        #expect(restored.data == Data("workflow-output".utf8))
+    }
+
+    @Test
     func verifiedFullBackupRestoresWorkspaceAndRuntimeAsOneGeneration() throws {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -373,10 +402,13 @@ struct DesktopRecoveryIntegrationTests {
         try store.save(Data("corrupt".utf8))
         let currentJournal = root.appendingPathComponent("LocalCore/journal/live-provider.sqlite")
         let currentQueue = root.appendingPathComponent("ConversationService/Threads/old/Inbox/old.json")
+        let currentWorkflowArtifact = root.appendingPathComponent("WorkflowInstallations/example/Artifacts/old.bin")
         try FileManager.default.createDirectory(at: currentJournal.deletingLastPathComponent(), withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: currentQueue.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: currentWorkflowArtifact.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data("old-journal".utf8).write(to: currentJournal)
         try Data("old-queue".utf8).write(to: currentQueue)
+        try Data("old-workflow-artifact".utf8).write(to: currentWorkflowArtifact)
         let model = DesktopAppModel(store: store, now: { 5_000 })
         #expect(model.isRecoveryReadOnly)
 
@@ -384,9 +416,11 @@ struct DesktopRecoveryIntegrationTests {
         let restoredWorkspace = root.appendingPathComponent("restore-workspace.json")
         let restoredJournal = root.appendingPathComponent("restore-journal.sqlite")
         let restoredQueue = root.appendingPathComponent("restore-queue.json")
+        let restoredWorkflowArtifact = root.appendingPathComponent("restore-workflow-artifact.bin")
         try JSONEncoder().encode(restoredSnapshot).write(to: restoredWorkspace)
         try Data("restored-journal".utf8).write(to: restoredJournal)
         try Data("restored-queue".utf8).write(to: restoredQueue)
+        try Data("restored-workflow-artifact".utf8).write(to: restoredWorkflowArtifact)
         let bundle = root.appendingPathComponent("full.kanamebackup")
         _ = try DesktopRecoveryService().createBackup(
             at: bundle,
@@ -403,6 +437,12 @@ struct DesktopRecoveryIntegrationTests {
                     fileURL: restoredQueue,
                     archiveName: "queue.bin",
                     restoreRelativePath: "ConversationService/Threads/restored/Inbox/restored.json"
+                ),
+                .init(
+                    kind: .workflowInstallationState,
+                    fileURL: restoredWorkflowArtifact,
+                    archiveName: "workflow-artifact.bin",
+                    restoreRelativePath: "WorkflowInstallations/example/Artifacts/restored.bin"
                 ),
             ],
             stateSchemaVersion: DesktopAppSnapshot.currentVersion,
@@ -422,9 +462,13 @@ struct DesktopRecoveryIntegrationTests {
         #expect(model.snapshot == restoredSnapshot)
         #expect(try Data(contentsOf: currentJournal) == Data("restored-journal".utf8))
         #expect(!FileManager.default.fileExists(atPath: currentQueue.path))
+        #expect(!FileManager.default.fileExists(atPath: currentWorkflowArtifact.path))
         #expect(try Data(contentsOf: root.appendingPathComponent(
             "ConversationService/Threads/restored/Inbox/restored.json"
         )) == Data("restored-queue".utf8))
+        #expect(try Data(contentsOf: root.appendingPathComponent(
+            "WorkflowInstallations/example/Artifacts/restored.bin"
+        )) == Data("restored-workflow-artifact".utf8))
     }
 
     @Test

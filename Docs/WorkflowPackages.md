@@ -14,6 +14,15 @@ The synthetic [document revision example](../Examples/Workflows/document-revisio
 
 Installing a newer revision never changes prior runs. A permission-broadening revision cannot remain enabled silently. Disabling a definition also disables each of its trigger bindings.
 
+## Export and move
+
+Each installed definition offers two intentionally different exports:
+
+- **Reusable package (`.kanameworkflow`)** — canonical behavior, stages, triggers, and permission declarations only. It excludes accounts, bindings, cursors, work items, prompts assembled at runtime, runs, artifacts, credentials, and private installation data. This is the shareable OSS boundary.
+- **Private installation (`.kanameinstallation`)** — the package plus that workflow's durable work history, thread bindings, episodes, facts, frozen contexts, runs, validations, effects, evidence links, and available referenced artifact bytes. It is encrypted locally with AES-GCM using a passphrase-derived key before it is written.
+
+Kaname never stores an installation-export passphrase. Import decrypts and reviews locally, refuses identity collisions, and preserves prior evidence while removing authority: the definition and all triggers arrive disabled, cursors are cleared, active work requires attention, pending runs are cancelled, and unexecuted effects lose approval and are cancelled. Account, capability, context, and effect authority must be reviewed before resuming.
+
 ## Runtime identity
 
 Kaname separates the durable identities that make correction-heavy work understandable:
@@ -36,3 +45,5 @@ Blocking validation failures prevent effect proposals. Consequential effects use
 ## Private migrations
 
 Keep proprietary prompts, matching rules, schemas, private knowledge, paths, and adapters outside this repository. Migrate an existing workflow through observe-only, shadow, draft-only, approved-effect, and finally narrowly scoped standing-authority stages. The package boundary lets Kaname provide the generic infrastructure while private installations remain opinionated.
+
+Use a private installation export to move or preserve one configured workflow. Use Kaname's whole-app backup for disaster recovery of one coherent generation; these formats are not interchangeable.
