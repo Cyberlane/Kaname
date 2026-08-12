@@ -417,10 +417,14 @@ public extension DesktopAppModel {
         let fact = DesktopWorkflowFactRecord(
             id: UUID().uuidString.lowercased(), workItemID: workItemID, key: cleanKey, value: cleanValue,
             state: factState, sourceReferenceIDs: Array(Set(sourceReferenceIDs)).sorted(), verifiedBy: verifiedBy,
-            episodeID: episodeID, supersededByFactID: nil, createdAtUnixMillis: now()
+            episodeID: episodeID, supersededByFactID: nil, createdAtUnixMillis: now(),
+            scope: .workItem,
+            workflowID: snapshot.operations.workflows.workItems.first(where: { $0.id == workItemID })?.workflowID,
+            proposedSupersedesFactID: factState == .proposed ? supersedesFactID : nil,
+            scopeID: workItemID
         )
         guard mutate({ state in
-            if let oldID = supersedesFactID {
+            if factState != .proposed, let oldID = supersedesFactID {
                 state.changeRecord(at: \.operations.workflows.facts, id: oldID) { oldFact in
                     oldFact.state = .superseded
                     oldFact.supersededByFactID = fact.id
@@ -448,6 +452,9 @@ public extension DesktopAppModel {
                 workItem: item, episode: episode, facts: snapshot.operations.workflows.facts,
                 references: references, request: request, openQuestions: openQuestions,
                 negativeConstraints: negativeConstraints, authority: revision.permissions,
+                accountIDs: Set(snapshot.operations.workflows.conversationBindings.filter {
+                    $0.workItemID == workItemID && $0.relationship != .detached
+                }.map(\.accountID)),
                 createdAtUnixMillis: now(), tokenBudget: tokenBudget
               ) else { return nil }
         guard mutate({ state in
@@ -581,12 +588,63 @@ public extension DesktopAppModel {
         outputDigest: String?,
         artifactIDs: [String] = [],
         providerRunID: String? = nil,
-        error: String? = nil
+        error: String? = nil,
+        commitProposal: DesktopWorkflowCapabilityCommitProposal = .init(),
+        artifactMetadata: [DesktopWorkflowStoredArtifact] = []
     ) -> Bool {
         guard let attempt = snapshot.operations.workflows.stepAttempts.first(where: { $0.id == attemptID && $0.state == .running }),
               let run = snapshot.operations.workflows.runs.first(where: { $0.id == attempt.runID }),
               let revision = snapshot.operations.workflows.revisions.first(where: { $0.id == run.workflowRevisionID }),
-              let step = revision.steps.first(where: { $0.id == attempt.stepID }) else { return false }
+              let step = revision.steps.first(where: { $0.id == attempt.stepID }),
+              let workItem = snapshot.operations.workflows.workItems.first(where: { $0.id == run.workItemID }) else { return false }
+        do { try DesktopWorkflowDataPlaneValidation.validate(commitProposal) } catch { return false }
+        let accountScopeIDs = Set(snapshot.operations.workflows.conversationBindings.filter {
+            $0.workItemID == workItem.id && $0.relationship != .detached
+        }.map(\.accountID))
+        let scopeContext = DesktopWorkflowResolvedDataScope(
+            workflowID: workItem.workflowID, workItemID: workItem.id,
+            runID: run.id, accountIDs: accountScopeIDs
+        )
+        let mutationIDs = commitProposal.stateMutations.map { "\($0.scope.rawValue):\($0.namespace):\($0.key)" }
+        guard Set(mutationIDs).count == mutationIDs.count,
+              commitProposal.stateMutations.allSatisfy({ mutation in
+                  guard let owner = scopeContext.identifier(for: mutation.scope) else { return false }
+                  let current = snapshot.operations.workflows.stateRecords.first {
+                      $0.matches(
+                          workflowID: workItem.workflowID, scopeID: owner,
+                          namespace: mutation.namespace, key: mutation.key
+                      )
+                  }
+                  return mutation.expectedRevision == current?.revision
+                      && (current == nil || mutation.schemaVersion >= current!.schemaVersion)
+              }),
+              commitProposal.knowledgeProposals.allSatisfy({ proposal in
+                  proposal.scope != .run && scopeContext.identifier(for: proposal.scope) != nil
+                      && (proposal.supersedesFactID == nil || snapshot.operations.workflows.facts.contains {
+                      $0.id == proposal.supersedesFactID && $0.workflowID == workItem.workflowID
+                  })
+              }),
+              commitProposal.artifactRoles.allSatisfy({ artifactIDs.contains($0.artifactDigest) }),
+              Set(commitProposal.artifactRoles.map(\.role)).count == commitProposal.artifactRoles.count else { return false }
+        var projectedState = snapshot.operations.workflows.stateRecords.filter { $0.workflowID == workItem.workflowID }
+        for mutation in commitProposal.stateMutations {
+            let owner = scopeContext.identifier(for: mutation.scope)!
+            projectedState.removeAll {
+                $0.matches(
+                    workflowID: workItem.workflowID, scopeID: owner,
+                    namespace: mutation.namespace, key: mutation.key
+                )
+            }
+            if let value = mutation.value {
+                projectedState.append(DesktopWorkflowStateRecord(
+                    workflowID: workItem.workflowID, namespace: mutation.namespace, key: mutation.key,
+                    scope: mutation.scope, scopeID: owner, schemaVersion: mutation.schemaVersion, schema: mutation.schema,
+                    value: value, revision: (mutation.expectedRevision ?? 0) + 1,
+                    updatedByRunID: run.id, updatedAtUnixMillis: now()
+                ))
+            }
+        }
+        guard projectedState.reduce(0, { $0 + $1.value.count }) <= DesktopWorkflowStorage.maximumValuesBytes else { return false }
         let timestamp = now()
         let failed = error != nil
         return mutate { state in
@@ -599,6 +657,64 @@ public extension DesktopAppModel {
             state.operations.workflows.stepAttempts[attemptIndex].errorSummary = error.map { String($0.prefix(8_192)) }
             state.operations.workflows.stepAttempts[attemptIndex].completedAtUnixMillis = timestamp
             state.operations.workflows.runs[runIndex].currentStepID = nil
+            if !failed {
+                for mutation in commitProposal.stateMutations {
+                    let owner = scopeContext.identifier(for: mutation.scope)!
+                    state.operations.workflows.stateRecords.removeAll {
+                        $0.matches(
+                            workflowID: workItem.workflowID, scopeID: owner,
+                            namespace: mutation.namespace, key: mutation.key
+                        )
+                    }
+                    if let value = mutation.value {
+                        state.operations.workflows.stateRecords.append(DesktopWorkflowStateRecord(
+                            workflowID: workItem.workflowID, namespace: mutation.namespace, key: mutation.key,
+                            scope: mutation.scope, scopeID: owner,
+                            schemaVersion: mutation.schemaVersion, schema: mutation.schema,
+                            value: value, revision: (mutation.expectedRevision ?? 0) + 1,
+                            updatedByRunID: run.id, updatedAtUnixMillis: timestamp
+                        ))
+                    }
+                }
+                for proposal in commitProposal.knowledgeProposals {
+                    let factID = UUID().uuidString.lowercased()
+                    state.operations.workflows.facts.append(DesktopWorkflowFactRecord(
+                        id: factID, workItemID: workItem.id, key: proposal.key, value: proposal.value,
+                        state: .proposed, sourceReferenceIDs: Array(Set(proposal.sourceReferenceIDs + [run.id, run.episodeID])).sorted(),
+                        verifiedBy: nil, episodeID: run.episodeID, supersededByFactID: nil,
+                        createdAtUnixMillis: timestamp, scope: proposal.scope, workflowID: workItem.workflowID,
+                        proposedSupersedesFactID: proposal.supersedesFactID,
+                        scopeID: scopeContext.identifier(for: proposal.scope)
+                    ))
+                }
+                for proposal in commitProposal.artifactRoles {
+                    let roleID = UUID().uuidString.lowercased()
+                    for index in state.operations.workflows.artifactRoles.indices
+                        where state.operations.workflows.artifactRoles[index].workflowID == workItem.workflowID
+                            && state.operations.workflows.artifactRoles[index].workItemID == workItem.id
+                            && state.operations.workflows.artifactRoles[index].role == proposal.role
+                            && state.operations.workflows.artifactRoles[index].active {
+                        state.operations.workflows.artifactRoles[index].active = false
+                        state.operations.workflows.artifactRoles[index].supersededByID = roleID
+                    }
+                    let metadata = artifactMetadata.first { $0.sha256 == proposal.artifactDigest }
+                    state.operations.workflows.artifactRoles.append(DesktopWorkflowArtifactRoleRecord(
+                        id: roleID, workflowID: workItem.workflowID, workItemID: workItem.id, episodeID: run.episodeID,
+                        role: proposal.role, artifactDigest: proposal.artifactDigest,
+                        filename: metadata?.filename ?? proposal.artifactDigest,
+                        mediaType: metadata?.mediaType ?? "application/octet-stream", active: true,
+                        supersededByID: nil, createdByRunID: run.id, createdAtUnixMillis: timestamp
+                    ))
+                }
+                if !commitProposal.isEmpty {
+                    state.appendAudit(
+                        domain: "workflow-data", action: "capability-commit", target: attemptID,
+                        state: .completed,
+                        detail: "\(commitProposal.stateMutations.count) state · \(commitProposal.knowledgeProposals.count) knowledge · \(commitProposal.artifactRoles.count) artifact role",
+                        recordedAtUnixMillis: timestamp
+                    )
+                }
+            }
             if failed && step.blocking {
                 state.operations.workflows.runs[runIndex].state = .failed
                 state.operations.workflows.runs[runIndex].completedAtUnixMillis = timestamp

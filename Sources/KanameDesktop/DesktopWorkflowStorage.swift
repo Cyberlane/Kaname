@@ -146,6 +146,15 @@ public struct DesktopWorkflowStorage: Sendable {
         return data
     }
 
+    public func artifactURL(sha256: String) throws -> URL {
+        _ = try artifactData(sha256: sha256)
+        let url = artifactsDirectory().appendingPathComponent(sha256).standardizedFileURL
+        guard url.deletingLastPathComponent() == artifactsDirectory().standardizedFileURL else {
+            throw DesktopWorkflowStorageError.unsafeStorage
+        }
+        return url
+    }
+
     private func validateKey(_ key: String) throws {
         guard key.range(of: #"^[a-z0-9][a-z0-9._-]{0,127}$"#, options: .regularExpression) != nil else {
             throw DesktopWorkflowStorageError.invalidKey

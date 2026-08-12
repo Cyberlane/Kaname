@@ -44,6 +44,13 @@ struct WorkflowStructuredModelRequest: Decodable {
         throw DesktopWorkflowCapabilityError.outputInvalid
     }
 
+    func prompt(including context: DesktopWorkflowContextSnapshotRecord?) throws -> String {
+        guard let compiled = DesktopWorkflowModelContextCompiler.augment(prompt: prompt, context: context) else {
+            throw DesktopWorkflowCapabilityError.inputTooLarge
+        }
+        return compiled
+    }
+
     private static func fencedJSON(_ text: String) -> String? {
         guard let opening = text.range(of: "```"),
               let closing = text.range(of: "```", range: opening.upperBound..<text.endIndex) else { return nil }

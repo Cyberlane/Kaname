@@ -282,6 +282,7 @@ public struct DesktopWorkflowCapabilityExecutionResult: Equatable, Sendable {
     public let standardOutput: String
     public let standardError: String
     public let elapsedMilliseconds: Int64
+    public let commitProposal: DesktopWorkflowCapabilityCommitProposal
 }
 
 public struct DesktopWorkflowCapabilityStore: Sendable {
@@ -513,6 +514,9 @@ public final class DesktopWorkflowCapabilityProcessRunner: @unchecked Sendable {
         manifest: DesktopWorkflowCapabilityManifest,
         installationDirectory: URL,
         input: Data,
+        artifactInputs: [DesktopWorkflowCapabilityArtifactInput] = [],
+        stateInputs: [DesktopWorkflowCapabilityStateInput] = [],
+        contextSnapshot: DesktopWorkflowContextSnapshotRecord? = nil,
         scratchRoot: URL
     ) throws -> DesktopWorkflowCapabilityExecutionResult {
         let resolvedInstallationDirectory = installationDirectory.resolvingSymlinksInPath().standardizedFileURL
@@ -537,7 +541,14 @@ public final class DesktopWorkflowCapabilityProcessRunner: @unchecked Sendable {
         defer { try? FileManager.default.removeItem(at: job) }
         let inputURL = inputs.appendingPathComponent("input.json")
         let outputURL = outputs.appendingPathComponent("output.json")
+        let artifactManifestURL = inputs.appendingPathComponent("artifacts.json")
+        let stateManifestURL = inputs.appendingPathComponent("state.json")
+        let contextURL = inputs.appendingPathComponent("context.json")
+        let commitURL = outputs.appendingPathComponent("kaname-commit.json")
         try writePrivate(input, to: inputURL)
+        try materializeArtifactInputs(artifactInputs, beneath: inputs, manifestURL: artifactManifestURL)
+        try writePrivate(try canonicalData(stateInputs), to: stateManifestURL)
+        try writePrivate(try canonicalData(contextSnapshot), to: contextURL)
         let executable = resolvedInstallationDirectory.appendingPathComponent(entrypoint).standardizedFileURL
         guard executable.path.hasPrefix(resolvedInstallationDirectory.path + "/") else {
             throw DesktopWorkflowCapabilityError.unsafeEntrypoint
@@ -569,6 +580,10 @@ public final class DesktopWorkflowCapabilityProcessRunner: @unchecked Sendable {
             "TMPDIR": temporary.path,
             "KANAME_CAPABILITY_ID": manifest.id,
             "KANAME_CAPABILITY_VERSION": manifest.version,
+            "KANAME_ARTIFACT_MANIFEST": artifactManifestURL.path,
+            "KANAME_STATE_MANIFEST": stateManifestURL.path,
+            "KANAME_CONTEXT_SNAPSHOT": contextURL.path,
+            "KANAME_COMMIT_PROPOSAL": commitURL.path,
         ]
         process.currentDirectoryURL = temporary
         process.standardOutput = stdout
@@ -606,6 +621,20 @@ public final class DesktopWorkflowCapabilityProcessRunner: @unchecked Sendable {
             beneath: outputs.appendingPathComponent("Artifacts", isDirectory: true),
             maximumBytes: manifest.limits.maximumArtifactBytes
         )
+        let commitProposal: DesktopWorkflowCapabilityCommitProposal
+        if FileManager.default.fileExists(atPath: commitURL.path) {
+            let commitData = try DesktopWorkflowFilesystem.requiredBoundedRegularData(
+                at: commitURL, maximumBytes: 1 * 1_024 * 1_024, requiresNonEmpty: true,
+                failure: DesktopWorkflowCapabilityError.outputInvalid
+            )
+            guard let decoded = try? JSONDecoder().decode(DesktopWorkflowCapabilityCommitProposal.self, from: commitData) else {
+                throw DesktopWorkflowCapabilityError.outputInvalid
+            }
+            try DesktopWorkflowDataPlaneValidation.validate(decoded)
+            commitProposal = decoded
+        } else {
+            commitProposal = .init()
+        }
         let finished = Int64(Date().timeIntervalSince1970 * 1_000)
         return DesktopWorkflowCapabilityExecutionResult(
             output: output,
@@ -613,8 +642,58 @@ public final class DesktopWorkflowCapabilityProcessRunner: @unchecked Sendable {
             artifacts: artifacts,
             standardOutput: boundedText(at: stdoutURL),
             standardError: boundedText(at: stderrURL),
-            elapsedMilliseconds: max(0, finished - started)
+            elapsedMilliseconds: max(0, finished - started),
+            commitProposal: commitProposal
         )
+    }
+
+    private struct MaterializedArtifact: Codable {
+        let role: String
+        let artifactDigest: String
+        let filename: String
+        let mediaType: String
+        let path: String
+    }
+
+    private func materializeArtifactInputs(
+        _ artifacts: [DesktopWorkflowCapabilityArtifactInput],
+        beneath inputs: URL,
+        manifestURL: URL
+    ) throws {
+        guard artifacts.count <= 50,
+              Set(artifacts.map(\.role)).count == artifacts.count,
+              artifacts.allSatisfy({ DesktopWorkflowDataPlaneValidation.validIdentifier($0.role) }),
+              artifacts.reduce(0, { $0 + $1.data.count }) <= DesktopWorkflowStorage.maximumArtifactBytes else {
+            throw DesktopWorkflowDataPlaneError.invalidDeclaration
+        }
+        let directory = inputs.appendingPathComponent("Artifacts", isDirectory: true)
+        try privateDirectory(directory)
+        var manifest: [MaterializedArtifact] = []
+        for artifact in artifacts.sorted(by: { $0.role < $1.role }) {
+            guard DesktopWorkflowCapabilityPackageCodec.digest(artifact.data) == artifact.artifactDigest else {
+                throw DesktopWorkflowCapabilityError.artifactInvalid
+            }
+            let suffix = URL(fileURLWithPath: artifact.filename).pathExtension
+            let target = directory.appendingPathComponent(
+                artifact.role + (suffix.isEmpty ? "" : ".\(suffix)"), isDirectory: false
+            ).standardizedFileURL
+            guard target.deletingLastPathComponent() == directory.standardizedFileURL else {
+                throw DesktopWorkflowCapabilityError.artifactInvalid
+            }
+            try writePrivate(artifact.data, to: target)
+#if os(macOS)
+            guard chmod(target.path, 0o400) == 0 else { throw DesktopWorkflowCapabilityError.artifactInvalid }
+#endif
+            manifest.append(MaterializedArtifact(
+                role: artifact.role, artifactDigest: artifact.artifactDigest,
+                filename: artifact.filename, mediaType: artifact.mediaType, path: target.path
+            ))
+        }
+        try writePrivate(try canonicalData(manifest), to: manifestURL)
+    }
+
+    private func canonicalData<T: Encodable>(_ value: T) throws -> Data {
+        try DesktopWorkflowCanonicalJSON.encode(value)
     }
 
     private func sandboxProfile(

@@ -36,6 +36,43 @@ Kaname separates the durable identities that make correction-heavy work understa
 
 Provider transcripts are supporting evidence, not canonical memory. Model steps receive a compiled context snapshot containing active facts and explicit exclusions for superseded material.
 
+## Artifacts, state, and knowledge
+
+Kaname keeps three installation-private data classes separate:
+
+- **Artifacts** are immutable evidence or deliverables. A logical role such as `trigger-payload`, `current-report`, or `validated-output` points to one content-addressed artifact. Publishing a replacement supersedes the old role binding without overwriting its bytes or provenance.
+- **State** is mutable operational memory. Every value is namespaced, JSON Schema validated, scoped, versioned, and guarded by an optimistic revision. The runtime commits accepted state mutations with successful step completion; stale revisions fail the step without partially advancing it.
+- **Knowledge** is reviewed durable truth. Capabilities may propose a fact with provenance and work-item, installation, or account-binding scope, but proposed facts are excluded from model context. A user must verify or reject them. Superseded, rejected, and expired facts remain evidence and become explicit negative constraints.
+
+A step declares only the artifact roles and state keys it needs:
+
+```json
+{
+  "id": "validate-report",
+  "name": "Validate report",
+  "kind": "invokeTool",
+  "capabilityID": "org.example.report-validator",
+  "artifactInputs": [{"role": "current-report", "required": true}],
+  "stateInputs": [{"namespace": "processing", "key": "mapping", "scope": "installation", "required": false}],
+  "retryLimit": 0,
+  "isIdempotent": true,
+  "blocking": true
+}
+```
+
+For an external capability, Kaname keeps `input.json` and `output.json` compatible with the capability's declared schemas and supplies additional read-only sidecars through environment variables:
+
+- `KANAME_ARTIFACT_MANIFEST` describes role, digest, original filename, media type, and the invocation-private read-only path.
+- `KANAME_STATE_MANIFEST` contains only the declared state values, schema versions, and optimistic revisions.
+- `KANAME_CONTEXT_SNAPSHOT` contains the frozen request, selected references, verified knowledge, open questions, negative constraints, authority, and egress summary.
+- `KANAME_COMMIT_PROPOSAL` is the optional output path for bounded state mutations, knowledge proposals, and artifact-role publications.
+
+The commit proposal is not an instruction to mutate storage directly. Kaname validates its schemas, quotas, expected revisions, knowledge provenance, and artifact digests, imports bounded output artifacts, and commits the complete receipt atomically. Imported bytes may remain as unreferenced content-addressed data after a rejected commit, but they cannot become current state or a current artifact role.
+
+State values appear as ordinary JSON in both sidecars. A mutation supplies `namespace`, `key`, `scope`, `expectedRevision`, `schemaVersion`, the JSON Schema string, and `value`; deletion uses `"delete": true` with the exact current revision. The first write uses no `expectedRevision`, while every replacement or deletion must name the revision it observed. Account-binding state or knowledge is accepted only when Kaname can resolve one unambiguous reviewed account for the work item.
+
+State and knowledge scopes are intentionally limited to a run, work item, workflow installation, or reviewed account binding. There is no automatic global promotion. Reusable `.kanameworkflow` exports exclude all three private data classes; encrypted `.kanameinstallation` exports and coherent whole-app backups include them.
+
 ## Capability and effect rules
 
 Workflow packages may reference only capabilities registered by Kaname. Executable behavior is installed separately as a `.kanamecapability` directory and is never embedded implicitly in a workflow manifest. Each capability has an immutable ID and version, a digest binding every package-relative file, a separately pinned entrypoint digest or reviewed code-signature requirement, JSON input and output schemas, deterministic/idempotent declarations, explicit permissions, and resource limits. Kaname rechecks the complete package digest before every invocation, so a changed helper, rule, or asset invalidates the reviewed receipt.

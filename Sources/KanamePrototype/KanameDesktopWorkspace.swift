@@ -6314,6 +6314,11 @@ private func seedSyntheticWorkflowFixture(model: DesktopAppModel, manifestPath: 
         state: .verified, sourceReferenceIDs: ["fixture-message-2"], verifiedBy: "Synthetic validator",
         supersedesFactID: oldFact
     )
+    _ = model.recordWorkflowFact(
+        workItemID: workID, episodeID: correctionEpisode, key: "Delivery preference",
+        value: "Include a concise change summary beside the editable document.",
+        state: .proposed, sourceReferenceIDs: ["fixture-message-2"], verifiedBy: nil
+    )
     guard let contextID = model.compileWorkflowContext(
         workItemID: workID, episodeID: correctionEpisode,
         request: "Create the corrected fictional document.",
@@ -7129,13 +7134,34 @@ private struct WorkflowWorkItemCard: View {
     }
 
     private var activeFacts: [DesktopWorkflowFactRecord] {
-        model.workflowFacts(workItemID: item.id)
+        let itemFacts = model.workflowFacts(workItemID: item.id).filter { $0.state == .verified }
+        let accountIDs = Set(model.snapshot.operations.workflows.conversationBindings.filter {
+            $0.workItemID == item.id && $0.relationship != .detached
+        }.map(\.accountID))
+        let installationFacts = model.workflowKnowledge(workflowID: item.workflowID).filter {
+            $0.state == .verified && ($0.scope == .installation
+                || ($0.scope == .accountBinding && $0.scopeID.map(accountIDs.contains) == true))
+        }
+        return Array(Dictionary(uniqueKeysWithValues: (itemFacts + installationFacts).map { ($0.id, $0) }).values)
+            .sorted { ($0.key, $0.createdAtUnixMillis, $0.id) < ($1.key, $1.createdAtUnixMillis, $1.id) }
+    }
+
+    private var proposedKnowledge: [DesktopWorkflowFactRecord] {
+        model.workflowFacts(workItemID: item.id).filter { $0.state == .proposed }
     }
 
     private var inactiveFacts: [DesktopWorkflowFactRecord] {
         model.workflowFacts(workItemID: item.id, includeInactive: true).filter {
-            $0.state == .rejected || $0.state == .superseded
+            $0.state == .rejected || $0.state == .superseded || $0.state == .expired
         }
+    }
+
+    private var artifactRoles: [DesktopWorkflowArtifactRoleRecord] {
+        model.workflowArtifactRoles(workItemID: item.id)
+    }
+
+    private var stateRecords: [DesktopWorkflowStateRecord] {
+        model.workflowStateRecords(workflowID: item.workflowID)
     }
 
     private var pendingEffects: [DesktopWorkflowEffectRecord] {
@@ -7193,8 +7219,12 @@ private struct WorkflowWorkItemCard: View {
                     }
                     WorkflowMetricsRow(metrics: [
                         WorkflowMetricValue(label: "Episodes", value: "\(episodes.count)", tint: Nord.frost1),
-                        WorkflowMetricValue(label: "Active facts", value: "\(activeFacts.count)", tint: Nord.auroraGreen),
-                        WorkflowMetricValue(label: "Superseded", value: "\(inactiveFacts.count)", tint: Nord.auroraYellow)
+                        WorkflowMetricValue(label: "Verified", value: "\(activeFacts.count)", tint: Nord.auroraGreen),
+                        WorkflowMetricValue(
+                            label: proposedKnowledge.isEmpty ? "Artifacts" : "To review",
+                            value: "\(proposedKnowledge.isEmpty ? artifactRoles.count : proposedKnowledge.count)",
+                            tint: proposedKnowledge.isEmpty ? Nord.frost1 : Nord.auroraYellow
+                        )
                     ])
                     if !episodes.isEmpty {
                         VStack(alignment: .leading, spacing: 8) {
@@ -7215,6 +7245,31 @@ private struct WorkflowWorkItemCard: View {
                                             .font(.caption.weight(.semibold))
                                             .foregroundStyle(fact.state == .verified ? Nord.auroraGreen : Nord.auroraYellow)
                                     }
+                                }
+                            }
+                            .padding(.top, 8)
+                        }
+                    }
+                    if !proposedKnowledge.isEmpty {
+                        WorkflowKnowledgeReviewSection(facts: proposedKnowledge) { id, accepted in
+                            _ = model.reviewWorkflowKnowledge(
+                                id: id, accepted: accepted, reviewer: "Kaname user"
+                            )
+                        }
+                    }
+                    if !artifactRoles.isEmpty {
+                        DisclosureGroup("Artifacts · \(artifactRoles.count)") {
+                            VStack(alignment: .leading, spacing: 7) {
+                                ForEach(artifactRoles) { WorkflowArtifactRoleRow(artifact: $0) }
+                            }
+                            .padding(.top, 8)
+                        }
+                    }
+                    if !stateRecords.isEmpty {
+                        DisclosureGroup("Operational state · \(stateRecords.count)") {
+                            VStack(alignment: .leading, spacing: 7) {
+                                ForEach(stateRecords) { record in
+                                    WorkflowStateRecordRow(record: record)
                                 }
                             }
                             .padding(.top, 8)
@@ -7409,6 +7464,12 @@ private struct WorkflowDefinitionCard: View {
                                     Text(step.name).font(.caption.weight(.semibold))
                                     Text(step.kind.label + (step.capabilityID.map { " · \($0)" } ?? ""))
                                         .font(.caption2).foregroundStyle(.secondary)
+                                    let artifactCount = step.artifactInputs?.count ?? 0
+                                    let stateCount = step.stateInputs?.count ?? 0
+                                    if artifactCount + stateCount > 0 {
+                                        Text("Declared inputs · \(artifactCount) artifact role\(artifactCount == 1 ? "" : "s") · \(stateCount) state value\(stateCount == 1 ? "" : "s")")
+                                            .font(.caption2).foregroundStyle(.secondary)
+                                    }
                                 }
                                 Spacer()
                                 if !step.isIdempotent { Text("No automatic retry").font(.caption2).foregroundStyle(Nord.auroraYellow) }

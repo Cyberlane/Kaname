@@ -85,6 +85,28 @@ struct DesktopWorkflowTransferTests {
             episodeID: episodeID,
             contextSnapshotID: contextID
         ))
+        let sourceStorage = try #require(source.workflowStorage(workflowID: manifest.id))
+        let artifact = try sourceStorage.importArtifact(
+            data: Data("private generated report".utf8), filename: "report.txt", mediaType: "text/plain",
+            createdAtUnixMillis: 2_000
+        )
+        let attemptID = try #require(source.beginWorkflowStep(
+            runID: runID, stepID: "draft", inputDigest: "input"
+        ))
+        let stateSchema = #"{"type":"object","required":["mode"],"properties":{"mode":{"type":"string"}},"additionalProperties":false}"#
+        #expect(source.completeWorkflowStep(
+            attemptID: attemptID, outputDigest: artifact.sha256, artifactIDs: [artifact.sha256],
+            commitProposal: .init(
+                stateMutations: [.init(
+                    namespace: "delivery", key: "preference", scope: .installation,
+                    expectedRevision: nil, schemaVersion: 1, schema: stateSchema,
+                    value: Data(#"{"mode":"reviewed"}"#.utf8)
+                )],
+                knowledgeProposals: [],
+                artifactRoles: [.init(role: "approved-report", artifactDigest: artifact.sha256)]
+            ),
+            artifactMetadata: [artifact]
+        ))
         let effectID = try #require(source.proposeWorkflowEffect(
             workItemID: workItemID,
             episodeID: episodeID,
@@ -109,6 +131,9 @@ struct DesktopWorkflowTransferTests {
         let target = DesktopAppModel(store: targetStore, now: { 3_000 })
         let payload = try target.previewWorkflowInstallation(encrypted, passphrase: passphrase)
         #expect(payload.state.workItems.count == 1)
+        #expect(payload.state.stateRecords.count == 1)
+        #expect(payload.state.artifactRoles.map(\.role) == ["approved-report"])
+        #expect(payload.artifacts.contains { $0.record.digest == artifact.sha256 && $0.data != nil })
         _ = try target.importWorkflowInstallation(payload, registeredCapabilityIDs: capabilities)
 
         let definition = try #require(target.workflowDefinitions.first)
@@ -122,6 +147,9 @@ struct DesktopWorkflowTransferTests {
         #expect(importedEffect.state == .cancelled)
         #expect(importedEffect.approvalID == nil)
         #expect(target.snapshot.operations.workflows.workItems.first?.state == .needsAttention)
+        #expect(target.workflowStateRecords(workflowID: manifest.id).first?.revision == 1)
+        #expect(target.workflowArtifactRoles(workItemID: workItemID).map(\.role) == ["approved-report"])
+        #expect(try target.workflowStorage(workflowID: manifest.id)?.artifactData(sha256: artifact.sha256) == Data("private generated report".utf8))
         #expect(target.snapshot.operations.audit.last?.action == "installation-imported")
     }
 

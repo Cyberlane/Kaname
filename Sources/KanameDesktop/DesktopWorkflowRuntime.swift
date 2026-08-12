@@ -27,11 +27,18 @@ public struct DesktopWorkflowCapabilityInvocation: Equatable, Sendable {
     public let step: DesktopWorkflowStepDefinition
     public let contextSnapshotID: String?
     public let input: Data
-
+    public let artifactInputs: [DesktopWorkflowCapabilityArtifactInput]
+    public let stateInputs: [DesktopWorkflowCapabilityStateInput]
+    public let contextSnapshot: DesktopWorkflowContextSnapshotRecord?
 }
 
 public enum DesktopWorkflowCapabilityInvocationResult: Equatable, Sendable {
-    case completed(output: Data, artifactIDs: [String])
+    case completed(
+        output: Data,
+        artifactIDs: [String],
+        commitProposal: DesktopWorkflowCapabilityCommitProposal = .init(),
+        artifactMetadata: [DesktopWorkflowStoredArtifact] = []
+    )
     case waiting(reason: String)
 }
 
@@ -116,9 +123,13 @@ public struct DesktopWorkflowInstalledCapabilityInvoker: DesktopWorkflowCapabili
                     manifest: manifest,
                     installationDirectory: directory,
                     input: invocation.input,
+                    artifactInputs: invocation.artifactInputs,
+                    stateInputs: invocation.stateInputs,
+                    contextSnapshot: invocation.contextSnapshot,
                     scratchRoot: scratchRoot
                 )
             }.value
+            var metadata: [DesktopWorkflowStoredArtifact] = []
             if !result.artifacts.isEmpty {
                 guard let workflowInstallationsRoot else { throw DesktopWorkflowCapabilityError.artifactInvalid }
                 let storage = DesktopWorkflowStorage(
@@ -134,9 +145,13 @@ public struct DesktopWorkflowInstalledCapabilityInvoker: DesktopWorkflowCapabili
                         createdAtUnixMillis: timestamp
                     )
                     guard stored.sha256 == artifact.sha256 else { throw DesktopWorkflowCapabilityError.artifactInvalid }
+                    metadata.append(stored)
                 }
             }
-            return .completed(output: result.output, artifactIDs: result.artifacts.map(\.sha256))
+            return .completed(
+                output: result.output, artifactIDs: result.artifacts.map(\.sha256),
+                commitProposal: result.commitProposal, artifactMetadata: metadata
+            )
         }
     }
 }
@@ -223,6 +238,14 @@ public final class DesktopWorkflowRuntime {
         guard let attemptID = model.beginWorkflowStep(runID: runID, stepID: step.id, inputDigest: inputDigest) else {
             return .unavailable(reason: "Kaname could not begin the next durable step.")
         }
+        let declaredInputs: (artifacts: [DesktopWorkflowCapabilityArtifactInput], state: [DesktopWorkflowCapabilityStateInput])
+        do {
+            declaredInputs = try workflowInputs(step: step, workItem: workItem, run: run)
+        } catch {
+            let reason = String(error.localizedDescription.prefix(8_192))
+            _ = model.completeWorkflowStep(attemptID: attemptID, outputDigest: nil, error: reason)
+            return .failed(stepID: step.id, reason: reason)
+        }
         if step.kind == .complete {
             guard model.completeWorkflowStep(attemptID: attemptID, outputDigest: inputDigest),
                   model.completeWorkflowRun(id: runID) else {
@@ -257,14 +280,20 @@ public final class DesktopWorkflowRuntime {
                     runID: run.id,
                     step: step,
                     contextSnapshotID: run.contextSnapshotID,
-                    input: input
+                    input: input,
+                    artifactInputs: declaredInputs.artifacts,
+                    stateInputs: declaredInputs.state,
+                    contextSnapshot: run.contextSnapshotID.flatMap { id in
+                        model.snapshot.operations.workflows.contextSnapshots.first { $0.id == id }
+                    }
                 ),
                 installation: installation
             )
             switch result {
-            case let .completed(output, artifactIDs):
+            case let .completed(output, artifactIDs, commitProposal, artifactMetadata):
                 let digest = SHA256.hash(data: output).map { String(format: "%02x", $0) }.joined()
                 var durableArtifactIDs = artifactIDs
+                var durableArtifactMetadata = artifactMetadata
                 if let storage = workflowStorage(workflowID: workItem.workflowID) {
                     let stored = try storage.importArtifact(
                         data: output,
@@ -274,12 +303,19 @@ public final class DesktopWorkflowRuntime {
                     )
                     guard stored.sha256 == digest else { throw DesktopWorkflowCapabilityError.artifactInvalid }
                     durableArtifactIDs.append(stored.sha256)
+                    durableArtifactMetadata.append(stored)
                 }
                 guard model.completeWorkflowStep(
                     attemptID: attemptID,
                     outputDigest: digest,
-                    artifactIDs: durableArtifactIDs
+                    artifactIDs: durableArtifactIDs,
+                    commitProposal: commitProposal,
+                    artifactMetadata: durableArtifactMetadata
                 ) else {
+                    _ = model.completeWorkflowStep(
+                        attemptID: attemptID, outputDigest: nil,
+                        error: DesktopWorkflowDataPlaneError.stateConflict.localizedDescription
+                    )
                     return .failed(stepID: step.id, reason: "Kaname could not commit the capability receipt.")
                 }
                 return .completedStep(stepID: step.id, output: output)
@@ -331,6 +367,55 @@ public final class DesktopWorkflowRuntime {
               let digest = attempt.outputDigest,
               attempt.artifactIDs.contains(digest) else { return nil }
         return try? storage.artifactData(sha256: digest)
+    }
+
+    private func workflowInputs(
+        step: DesktopWorkflowStepDefinition,
+        workItem: DesktopWorkflowWorkItemRecord,
+        run: DesktopWorkflowRunRecord
+    ) throws -> (artifacts: [DesktopWorkflowCapabilityArtifactInput], state: [DesktopWorkflowCapabilityStateInput]) {
+        let storage = workflowStorage(workflowID: workItem.workflowID)
+        let roles = model.snapshot.operations.workflows.artifactRoles.filter {
+            $0.workflowID == workItem.workflowID && $0.workItemID == workItem.id && $0.active
+        }
+        var artifacts: [DesktopWorkflowCapabilityArtifactInput] = []
+        for declaration in step.artifactInputs ?? [] {
+            guard let role = roles.first(where: { $0.role == declaration.role }), let storage else {
+                if declaration.required { throw DesktopWorkflowDataPlaneError.requiredInputMissing }
+                continue
+            }
+            artifacts.append(DesktopWorkflowCapabilityArtifactInput(
+                role: role.role, artifactDigest: role.artifactDigest, filename: role.filename,
+                mediaType: role.mediaType, data: try storage.artifactData(sha256: role.artifactDigest)
+            ))
+        }
+        let accountScopeIDs = Set(model.snapshot.operations.workflows.conversationBindings.filter {
+            $0.workItemID == workItem.id && $0.relationship != .detached
+        }.map(\.accountID))
+        let scopeContext = DesktopWorkflowResolvedDataScope(
+            workflowID: workItem.workflowID, workItemID: workItem.id,
+            runID: run.id, accountIDs: accountScopeIDs
+        )
+        let records = model.snapshot.operations.workflows.stateRecords.filter { $0.workflowID == workItem.workflowID }
+        var state: [DesktopWorkflowCapabilityStateInput] = []
+        for declaration in step.stateInputs ?? [] {
+            let scope = declaration.scope ?? .installation
+            guard let owner = scopeContext.identifier(for: scope) else {
+                if declaration.required { throw DesktopWorkflowDataPlaneError.requiredInputMissing }
+                continue
+            }
+            guard let record = records.first(where: {
+                $0.matches(
+                    workflowID: workItem.workflowID, scopeID: owner,
+                    namespace: declaration.namespace, key: declaration.key
+                )
+            }) else {
+                if declaration.required { throw DesktopWorkflowDataPlaneError.requiredInputMissing }
+                continue
+            }
+            state.append(DesktopWorkflowCapabilityStateInput(record: record))
+        }
+        return (artifacts, state)
     }
 
     private func workflowStorage(workflowID: String) -> DesktopWorkflowStorage? {

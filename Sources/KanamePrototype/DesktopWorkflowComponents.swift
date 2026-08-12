@@ -59,3 +59,70 @@ struct WorkflowHumanReviewRow: View {
         .background(Nord.polarNight1.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
     }
 }
+
+struct WorkflowKnowledgeReviewRow: View {
+    let fact: DesktopWorkflowFactRecord
+    let onAccept: () -> Void
+    let onReject: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Label("\(fact.key) · \((fact.scope ?? .workItem).label)", systemImage: "lightbulb.min")
+                .font(.caption.weight(.semibold))
+            Text(fact.value).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            Text("Provenance · \(fact.sourceReferenceIDs.count) source reference\(fact.sourceReferenceIDs.count == 1 ? "" : "s")")
+                .font(.caption2).foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                Button("Reject", action: onReject)
+                Button("Verify", action: onAccept).buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(10)
+        .background(Nord.polarNight1.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+struct WorkflowKnowledgeReviewSection: View {
+    let facts: [DesktopWorkflowFactRecord]
+    let review: (String, Bool) -> Void
+
+    var body: some View {
+        GroupBox("Knowledge to review · excluded until verified") {
+            ForEach(facts) { fact in
+                WorkflowKnowledgeReviewRow(
+                    fact: fact,
+                    onAccept: { review(fact.id, true) },
+                    onReject: { review(fact.id, false) }
+                )
+            }
+        }
+    }
+}
+
+struct WorkflowArtifactRoleRow: View {
+    let artifact: DesktopWorkflowArtifactRoleRecord
+
+    var body: some View {
+        LabeledContent(
+            artifact.role,
+            value: "\(artifact.filename) · \(artifact.artifactDigest.prefix(12))"
+        )
+        .font(.caption)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+struct WorkflowStateRecordRow: View {
+    let record: DesktopWorkflowStateRecord
+
+    var body: some View {
+        Label(
+            "\(record.namespace).\(record.key) · schema v\(record.schemaVersion) · revision \(record.revision) · \(record.scope.label)",
+            systemImage: "memorychip"
+        )
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .accessibilityElement(children: .combine)
+    }
+}

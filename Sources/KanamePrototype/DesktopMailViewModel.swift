@@ -211,6 +211,10 @@ final class DesktopMailViewModel: ObservableObject {
                createdAtUnixMillis: Int64(Date().timeIntervalSince1970 * 1_000)
            ) {
             artifactDigest = artifact.sha256
+            _ = model.bindWorkflowArtifactRole(
+                workflowID: binding.workflowID, workItemID: item.id, episodeID: episodeID,
+                role: "trigger-payload", artifact: artifact, createdByRunID: "gmail:\(message.id)"
+            )
         }
         let contextID = model.compileWorkflowContext(
             workItemID: item.id,
@@ -324,20 +328,21 @@ final class DesktopMailViewModel: ObservableObject {
         }
         await router.register(capabilityID: "kaname.model.structured") { invocation, _ in
             let request = try WorkflowStructuredModelRequest.decode(invocation.input)
+            let prompt = try request.prompt(including: invocation.contextSnapshot)
             let service = NativeProviderDiscussionService()
             let provider = try request.provider
             let providerText: String
             switch provider {
             case .codex:
                 providerText = try await service.runCodex(
-                    prompt: request.prompt,
+                    prompt: prompt,
                     workspace: workflowModelWorkspace,
                     executable: nil
                 )
             case let .native(driver):
                 providerText = try await service.run(
                     driver: driver,
-                    prompt: request.prompt,
+                    prompt: prompt,
                     workspace: workflowModelWorkspace
                 ).text
             }

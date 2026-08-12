@@ -80,6 +80,8 @@ public struct DesktopWorkflowStepDefinition: Codable, Equatable, Identifiable, S
     public var retryLimit: Int
     public var isIdempotent: Bool
     public var blocking: Bool
+    public var artifactInputs: [DesktopWorkflowArtifactInputDefinition]?
+    public var stateInputs: [DesktopWorkflowStateInputDefinition]?
 
     public init(
         id: String,
@@ -90,13 +92,17 @@ public struct DesktopWorkflowStepDefinition: Codable, Equatable, Identifiable, S
         outputSchemaReference: String? = nil,
         retryLimit: Int = 0,
         isIdempotent: Bool = true,
-        blocking: Bool = true
+        blocking: Bool = true,
+        artifactInputs: [DesktopWorkflowArtifactInputDefinition]? = nil,
+        stateInputs: [DesktopWorkflowStateInputDefinition]? = nil
     ) {
         (self.id, self.name, self.kind) = (id, name, kind)
         (self.capabilityID, self.inputSchemaReference, self.outputSchemaReference) = (
             capabilityID, inputSchemaReference, outputSchemaReference
         )
         (self.retryLimit, self.isIdempotent, self.blocking) = (retryLimit, isIdempotent, blocking)
+        self.artifactInputs = artifactInputs
+        self.stateInputs = stateInputs
     }
 }
 
@@ -363,6 +369,7 @@ public enum DesktopWorkflowFactState: String, Codable, CaseIterable, Equatable, 
     case verified
     case rejected
     case superseded
+    case expired
 
     public var label: String { rawValue.capitalized }
 }
@@ -378,6 +385,11 @@ public struct DesktopWorkflowFactRecord: Codable, Equatable, Identifiable, Senda
     public var episodeID: String
     public var supersededByFactID: String?
     public var createdAtUnixMillis: Int64
+    public var scope: DesktopWorkflowDataScope? = nil
+    public var workflowID: String? = nil
+    public var expiresAtUnixMillis: Int64? = nil
+    public var proposedSupersedesFactID: String? = nil
+    public var scopeID: String? = nil
 }
 
 public struct DesktopWorkflowContextReference: Codable, Equatable, Identifiable, Sendable {
@@ -409,6 +421,14 @@ public struct DesktopWorkflowContextReference: Codable, Equatable, Identifiable,
     }
 }
 
+public struct DesktopWorkflowContextKnowledge: Codable, Equatable, Identifiable, Sendable {
+    public var id: String
+    public var key: String
+    public var value: String
+    public var scope: DesktopWorkflowDataScope
+    public var sourceReferenceIDs: [String]
+}
+
 public struct DesktopWorkflowContextSnapshotRecord: Codable, Equatable, Identifiable, Sendable {
     public let id: String
     public var workItemID: String
@@ -423,6 +443,7 @@ public struct DesktopWorkflowContextSnapshotRecord: Codable, Equatable, Identifi
     public var estimatedTokens: Int
     public var digest: String
     public var createdAtUnixMillis: Int64
+    public var knowledge: [DesktopWorkflowContextKnowledge]? = nil
 }
 
 public enum DesktopWorkflowValidationSeverity: String, Codable, CaseIterable, Equatable, Sendable {
@@ -563,18 +584,22 @@ public struct DesktopWorkflowPlatformState: Codable, Equatable, Sendable {
     public var effects: [DesktopWorkflowEffectRecord]
     public var externalEvents: [DesktopWorkflowExternalEventRecord]
     public var artifactEdges: [DesktopWorkflowArtifactEdgeRecord]
+    public var stateRecords: [DesktopWorkflowStateRecord]
+    public var artifactRoles: [DesktopWorkflowArtifactRoleRecord]
     public var capabilityInstallations: [DesktopWorkflowCapabilityInstallationRecord]
     public var runtimeClaims: [DesktopWorkflowRuntimeClaimRecord]
 
     public static let empty = Self(
         definitions: [], revisions: [], triggerBindings: [], workItems: [], conversationBindings: [], episodes: [], runs: [],
         stepAttempts: [], facts: [], contextSnapshots: [], validations: [], effects: [], externalEvents: [], artifactEdges: [],
+        stateRecords: [], artifactRoles: [],
         capabilityInstallations: DesktopWorkflowBuiltinCapabilities.installations(at: 0), runtimeClaims: []
     )
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
         case definitions, revisions, triggerBindings, workItems, conversationBindings, episodes, runs, stepAttempts, facts
-        case contextSnapshots, validations, effects, externalEvents, artifactEdges, capabilityInstallations, runtimeClaims
+        case contextSnapshots, validations, effects, externalEvents, artifactEdges, stateRecords, artifactRoles
+        case capabilityInstallations, runtimeClaims
     }
 
     public init(
@@ -586,6 +611,7 @@ public struct DesktopWorkflowPlatformState: Codable, Equatable, Sendable {
         contextSnapshots: [DesktopWorkflowContextSnapshotRecord], validations: [DesktopWorkflowValidationRecord],
         effects: [DesktopWorkflowEffectRecord], externalEvents: [DesktopWorkflowExternalEventRecord],
         artifactEdges: [DesktopWorkflowArtifactEdgeRecord],
+        stateRecords: [DesktopWorkflowStateRecord] = [], artifactRoles: [DesktopWorkflowArtifactRoleRecord] = [],
         capabilityInstallations: [DesktopWorkflowCapabilityInstallationRecord] = [],
         runtimeClaims: [DesktopWorkflowRuntimeClaimRecord] = []
     ) {
@@ -594,6 +620,7 @@ public struct DesktopWorkflowPlatformState: Codable, Equatable, Sendable {
         (self.runs, self.stepAttempts, self.facts) = (runs, stepAttempts, facts)
         (self.contextSnapshots, self.validations, self.effects) = (contextSnapshots, validations, effects)
         (self.externalEvents, self.artifactEdges) = (externalEvents, artifactEdges)
+        (self.stateRecords, self.artifactRoles) = (stateRecords, artifactRoles)
         (self.capabilityInstallations, self.runtimeClaims) = (capabilityInstallations, runtimeClaims)
     }
 
@@ -613,6 +640,8 @@ public struct DesktopWorkflowPlatformState: Codable, Equatable, Sendable {
         effects = try container.decodeIfPresent([DesktopWorkflowEffectRecord].self, forKey: .effects) ?? []
         externalEvents = try container.decodeIfPresent([DesktopWorkflowExternalEventRecord].self, forKey: .externalEvents) ?? []
         artifactEdges = try container.decodeIfPresent([DesktopWorkflowArtifactEdgeRecord].self, forKey: .artifactEdges) ?? []
+        stateRecords = try container.decodeIfPresent([DesktopWorkflowStateRecord].self, forKey: .stateRecords) ?? []
+        artifactRoles = try container.decodeIfPresent([DesktopWorkflowArtifactRoleRecord].self, forKey: .artifactRoles) ?? []
         capabilityInstallations = try container.decodeIfPresent(
             [DesktopWorkflowCapabilityInstallationRecord].self,
             forKey: .capabilityInstallations
@@ -677,9 +706,7 @@ public enum DesktopWorkflowPackageCodec {
     }
 
     public static func canonicalData(_ manifest: DesktopWorkflowPackageManifest) throws -> Data {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        return try encoder.encode(manifest)
+        try DesktopWorkflowCanonicalJSON.encode(manifest)
     }
 
     public static func digest(_ data: Data) -> String {
@@ -717,6 +744,15 @@ public enum DesktopWorkflowPackageCodec {
         guard manifest.steps.allSatisfy({ (0...5).contains($0.retryLimit) && ($0.isIdempotent || $0.retryLimit == 0) }) else {
             throw DesktopWorkflowPackageError.invalidSteps
         }
+        guard manifest.steps.allSatisfy({ step in
+            let artifactRoles = step.artifactInputs?.map(\.role) ?? []
+            let stateKeys = step.stateInputs?.map { "\($0.namespace):\($0.key)" } ?? []
+            return artifactRoles.allSatisfy(validIdentifier) && Set(artifactRoles).count == artifactRoles.count
+                && (step.stateInputs ?? []).allSatisfy {
+                    validIdentifier($0.namespace) && validIdentifier($0.key)
+                }
+                && Set(stateKeys).count == stateKeys.count
+        }) else { throw DesktopWorkflowPackageError.invalidSteps }
     }
 
     private static func validIdentifier(_ value: String) -> Bool {
@@ -738,12 +774,20 @@ public enum DesktopWorkflowContextCompiler {
         openQuestions: [String],
         negativeConstraints: [String],
         authority: DesktopWorkflowPermissionEnvelope,
+        accountIDs: Set<String> = [],
         createdAtUnixMillis: Int64,
         tokenBudget: Int = 32_000
     ) -> DesktopWorkflowContextSnapshotRecord? {
         let cleanRequest = request.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanRequest.isEmpty else { return nil }
-        let activeFacts = facts.filter { $0.workItemID == workItem.id && ($0.state == .verified || $0.state == .proposed) }
+        let activeFacts = facts.filter {
+            ($0.workItemID == workItem.id
+                || ($0.scope == .installation && $0.workflowID == workItem.workflowID)
+                || ($0.scope == .accountBinding && $0.workflowID == workItem.workflowID
+                    && $0.scopeID.map(accountIDs.contains) == true))
+                && $0.state == .verified
+                && ($0.expiresAtUnixMillis == nil || $0.expiresAtUnixMillis! > createdAtUnixMillis)
+        }
             .sorted { ($0.key, $0.createdAtUnixMillis, $0.id) < ($1.key, $1.createdAtUnixMillis, $1.id) }
         let prioritized = references.sorted {
             if $0.included != $1.included { return $0.included && !$1.included }
@@ -760,7 +804,19 @@ public enum DesktopWorkflowContextCompiler {
             return selected
         }
         let includedTokens = boundedReferences.filter(\.included).reduce(0) { $0 + $1.estimatedTokens }
-        let factText = activeFacts.map { "\($0.key)=\($0.value) [\($0.state.rawValue)]" }.joined(separator: "\n")
+        let factText = activeFacts.map {
+            "\($0.key)=\($0.value) [verified; scope=\(($0.scope ?? .workItem).rawValue); sources=\($0.sourceReferenceIDs.sorted().joined(separator: ","))]"
+        }.joined(separator: "\n")
+        let superseded = facts.filter {
+            ($0.workItemID == workItem.id
+                || ($0.scope == .installation && $0.workflowID == workItem.workflowID)
+                || ($0.scope == .accountBinding && $0.workflowID == workItem.workflowID
+                    && $0.scopeID.map(accountIDs.contains) == true))
+                && [.rejected, .superseded, .expired].contains($0.state)
+        }
+            .sorted { ($0.key, $0.createdAtUnixMillis, $0.id) < ($1.key, $1.createdAtUnixMillis, $1.id) }
+            .map { "Do not use inactive knowledge \($0.key)=\($0.value)." }
+        let compiledNegativeConstraints = Array(Set(negativeConstraints + superseded)).sorted()
         let authoritySummary = authority.permissions.map(\.label).joined(separator: ", ")
         let egressSummary = authority.dataClassesLeavingDevice.isEmpty
             ? "No declared data leaves the device."
@@ -778,7 +834,7 @@ public enum DesktopWorkflowContextCompiler {
         }
         let payload = DigestPayload(
             workItemID: workItem.id, episodeID: episode.id, request: cleanRequest, facts: factText,
-            references: boundedReferences, openQuestions: openQuestions, negativeConstraints: negativeConstraints,
+            references: boundedReferences, openQuestions: openQuestions, negativeConstraints: compiledNegativeConstraints,
             authority: authoritySummary, egress: egressSummary
         )
         let encoder = JSONEncoder()
@@ -786,12 +842,18 @@ public enum DesktopWorkflowContextCompiler {
         guard let data = try? encoder.encode(payload) else { return nil }
         return DesktopWorkflowContextSnapshotRecord(
             id: UUID().uuidString.lowercased(), workItemID: workItem.id, episodeID: episode.id,
-            compilerVersion: 1, currentRequest: cleanRequest, openQuestions: openQuestions,
-            negativeConstraints: negativeConstraints, references: boundedReferences,
+            compilerVersion: 2, currentRequest: cleanRequest, openQuestions: openQuestions,
+            negativeConstraints: compiledNegativeConstraints, references: boundedReferences,
             authoritySummary: authoritySummary.isEmpty ? "Read-only local workflow" : authoritySummary,
             dataEgressSummary: egressSummary,
             estimatedTokens: includedTokens + max(1, cleanRequest.utf8.count / 4) + max(1, factText.utf8.count / 4),
-            digest: DesktopWorkflowPackageCodec.digest(data), createdAtUnixMillis: createdAtUnixMillis
+            digest: DesktopWorkflowPackageCodec.digest(data), createdAtUnixMillis: createdAtUnixMillis,
+            knowledge: activeFacts.map {
+                DesktopWorkflowContextKnowledge(
+                    id: $0.id, key: $0.key, value: $0.value, scope: $0.scope ?? .workItem,
+                    sourceReferenceIDs: $0.sourceReferenceIDs.sorted()
+                )
+            }
         )
     }
 }

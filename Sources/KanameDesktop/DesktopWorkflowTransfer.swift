@@ -212,7 +212,9 @@ public extension DesktopAppModel {
         let timestamp = now()
         removeImportedAuthority(from: &imported, timestamp: timestamp)
 
-        let restoredArtifacts = try restoreInstallationArtifacts(payload.artifacts, workflowID: workflowID)
+        let restoredArtifacts = try restoreInstallationArtifacts(
+            payload.artifacts, workflowID: workflowID, artifactRoles: imported.artifactRoles
+        )
         guard mutate({ state in
             state.operations.workflows.definitions.append(contentsOf: imported.definitions)
             state.operations.workflows.revisions.append(contentsOf: imported.revisions)
@@ -228,6 +230,8 @@ public extension DesktopAppModel {
             state.operations.workflows.effects.append(contentsOf: imported.effects)
             state.operations.workflows.externalEvents.append(contentsOf: imported.externalEvents)
             state.operations.workflows.artifactEdges.append(contentsOf: imported.artifactEdges)
+            state.operations.workflows.stateRecords.append(contentsOf: imported.stateRecords)
+            state.operations.workflows.artifactRoles.append(contentsOf: imported.artifactRoles)
             state.operations.artifacts.append(contentsOf: restoredArtifacts)
             state.appendAudit(
                 domain: "workflow-package",
@@ -350,6 +354,8 @@ public extension DesktopAppModel {
                 let referenced = referencedArtifactIDs(workItems: workItems, runs: runs)
                 return referenced.contains(edge.fromArtifactID) || referenced.contains(edge.toID)
             },
+            stateRecords: snapshot.operations.workflows.stateRecords.filter { $0.workflowID == workflowID },
+            artifactRoles: snapshot.operations.workflows.artifactRoles.filter { workItemIDs.contains($0.workItemID) },
             capabilityInstallations: [],
             runtimeClaims: []
         )
@@ -378,8 +384,22 @@ public extension DesktopAppModel {
         ids.formUnion(state.validations.flatMap(\.evidenceArtifactIDs))
         ids.formUnion(state.artifactEdges.map(\.fromArtifactID))
         ids.formUnion(state.artifactEdges.map(\.toID))
+        ids.formUnion(state.artifactRoles.map(\.artifactDigest))
+        var records = snapshot.operations.artifacts.filter { ids.contains($0.id) }
+        if let workflowID = state.definitions.first?.id,
+           let storage = workflowStorage(workflowID: workflowID),
+           let stored = try? storage.artifactRecords() {
+            for artifact in stored where ids.contains(artifact.sha256) && !records.contains(where: { $0.digest == artifact.sha256 }) {
+                records.append(DesktopArtifactRecord(
+                    id: artifact.sha256, threadID: nil, name: artifact.filename, kind: .file,
+                    localPath: (try? storage.artifactURL(sha256: artifact.sha256))?.path ?? "",
+                    digest: artifact.sha256, provenance: "Private workflow artifact",
+                    createdAtUnixMillis: artifact.createdAtUnixMillis
+                ))
+            }
+        }
         var remainingBytes = 128 * 1_024 * 1_024
-        return snapshot.operations.artifacts.filter { ids.contains($0.id) }.sorted { $0.id < $1.id }.map { artifact in
+        return records.sorted { $0.id < $1.id }.map { artifact in
             let url = URL(fileURLWithPath: artifact.localPath)
             guard !artifact.localPath.isEmpty,
                   let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]),
@@ -410,6 +430,7 @@ public extension DesktopAppModel {
         let contextIDs = Set(state.contextSnapshots.map(\.id))
         let externalEventIDs = Set(state.externalEvents.map(\.id))
         let artifactIDs = Set(payload.artifacts.map(\.record.id))
+        let activeArtifactRoles = state.artifactRoles.filter(\.active).map { "\($0.workItemID):\($0.role)" }
         guard payload.schemaVersion == DesktopWorkflowInstallationPayload.currentSchemaVersion,
               state.definitions.count == 1,
               state.definitions[0].id == payload.manifest.id,
@@ -422,11 +443,23 @@ public extension DesktopAppModel {
               uniqueIDs(state.conversationBindings), uniqueIDs(state.episodes), uniqueIDs(state.runs),
               uniqueIDs(state.stepAttempts), uniqueIDs(state.facts), uniqueIDs(state.contextSnapshots),
               uniqueIDs(state.validations), uniqueIDs(state.effects), uniqueIDs(state.externalEvents),
-              uniqueIDs(state.artifactEdges), artifactIDs.count == payload.artifacts.count,
+              uniqueIDs(state.artifactEdges), uniqueIDs(state.stateRecords), uniqueIDs(state.artifactRoles),
+              artifactIDs.count == payload.artifacts.count,
               state.capabilityInstallations.isEmpty, state.runtimeClaims.isEmpty,
               state.revisions.allSatisfy({ $0.workflowID == payload.manifest.id }),
               state.triggerBindings.allSatisfy({ $0.workflowID == payload.manifest.id }),
               state.workItems.allSatisfy({ $0.workflowID == payload.manifest.id }),
+              state.stateRecords.allSatisfy({ $0.workflowID == payload.manifest.id }),
+              state.stateRecords.allSatisfy({ record in
+                  record.revision > 0 && record.schemaVersion > 0 && record.scopeID?.isEmpty == false
+                      && DesktopWorkflowJSONSchemaValidator.validateSchema(Data(record.schema.utf8))
+                      && DesktopWorkflowJSONSchemaValidator.validates(instance: record.value, against: record.schema)
+              }),
+              Set(activeArtifactRoles).count == activeArtifactRoles.count,
+              state.artifactRoles.allSatisfy({
+                  $0.workflowID == payload.manifest.id && workItemIDs.contains($0.workItemID)
+                      && episodeIDs.contains($0.episodeID) && artifactIDs.contains($0.artifactDigest)
+              }),
               state.conversationBindings.allSatisfy({ workItemIDs.contains($0.workItemID) }),
               state.episodes.allSatisfy({
                   workItemIDs.contains($0.workItemID) && revisionIDs.contains($0.workflowRevisionID)
@@ -488,6 +521,8 @@ public extension DesktopAppModel {
             || intersects(payload.state.effects, current.effects)
             || intersects(payload.state.externalEvents, current.externalEvents)
             || intersects(payload.state.artifactEdges, current.artifactEdges)
+            || intersects(payload.state.stateRecords, current.stateRecords)
+            || intersects(payload.state.artifactRoles, current.artifactRoles)
             || !Set(payload.artifacts.map(\.record.id)).isDisjoint(with: snapshot.operations.artifacts.map(\.id))
     }
 
@@ -497,7 +532,8 @@ public extension DesktopAppModel {
 
     private func restoreInstallationArtifacts(
         _ artifacts: [DesktopWorkflowInstallationArtifact],
-        workflowID: String
+        workflowID: String,
+        artifactRoles: [DesktopWorkflowArtifactRoleRecord]
     ) throws -> [DesktopArtifactRecord] {
         guard let root = workflowInstallationStorageURL(workflowID: workflowID) else {
             return artifacts.map { artifact in
@@ -509,33 +545,21 @@ public extension DesktopAppModel {
         guard !FileManager.default.fileExists(atPath: root.path) else {
             throw DesktopWorkflowTransferError.installationConflict
         }
-        let artifactRoot = root.appendingPathComponent("Artifacts", isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: artifactRoot,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
+        let storage = DesktopWorkflowStorage(installationRoot: root)
         return try artifacts.map { artifact in
             var record = artifact.record
             guard let data = artifact.data else {
                 record.localPath = ""
                 return record
             }
-            let extensionValue = URL(fileURLWithPath: artifact.record.name).pathExtension
-            let suffix = extensionValue.isEmpty ? "" : ".\(extensionValue.prefix(24))"
-            let target = artifactRoot.appendingPathComponent("\(artifact.record.digest)\(suffix)")
-            guard target.deletingLastPathComponent().standardizedFileURL == artifactRoot.standardizedFileURL else {
-                throw DesktopWorkflowTransferError.unsafeArtifact
-            }
-            if FileManager.default.fileExists(atPath: target.path) {
-                guard DesktopRecoveryService.sha256(try Data(contentsOf: target)) == artifact.record.digest else {
-                    throw DesktopWorkflowTransferError.installationConflict
-                }
-            } else {
-                try data.write(to: target, options: [.atomic])
-                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: target.path)
-            }
-            record.localPath = target.path
+            let role = artifactRoles.first { $0.artifactDigest == artifact.record.digest }
+            let stored = try storage.importArtifact(
+                data: data, filename: role?.filename ?? artifact.record.name,
+                mediaType: role?.mediaType ?? "application/octet-stream",
+                createdAtUnixMillis: artifact.record.createdAtUnixMillis
+            )
+            guard stored.sha256 == artifact.record.digest else { throw DesktopWorkflowTransferError.unsafeArtifact }
+            record.localPath = try storage.artifactURL(sha256: stored.sha256).path
             return record
         }
     }

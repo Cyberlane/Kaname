@@ -60,6 +60,18 @@ struct DesktopWorkflowPlatformTests {
         #expect(throws: DesktopWorkflowPackageError.invalidSteps) {
             try DesktopWorkflowPackageCodec.decode(encoded(retry), registeredCapabilityIDs: capabilities)
         }
+
+        var duplicateInputs = manifest(version: "1.0.0", permissions: [.emailRead, .emailDraft])
+        duplicateInputs = replacingSteps(duplicateInputs, with: [
+            DesktopWorkflowStepDefinition(
+                id: "validate", name: "Validate", kind: .validate,
+                capabilityID: "kaname.validation.run",
+                artifactInputs: [.init(role: "current-report"), .init(role: "current-report")]
+            )
+        ])
+        #expect(throws: DesktopWorkflowPackageError.invalidSteps) {
+            try DesktopWorkflowPackageCodec.decode(encoded(duplicateInputs), registeredCapabilityIDs: capabilities)
+        }
     }
 
     @Test
@@ -172,8 +184,33 @@ struct DesktopWorkflowPlatformTests {
         let context = try #require(model.snapshot.operations.workflows.contextSnapshots.first { $0.id == contextID })
         #expect(context.references.first(where: { $0.id == "current" })?.included == true)
         #expect(context.references.first(where: { $0.id == "obsolete" })?.included == false)
-        #expect(context.negativeConstraints == ["Do not use the superseded PDF requirement"])
+        #expect(context.negativeConstraints == [
+            "Do not use inactive knowledge required-format=PDF.",
+            "Do not use the superseded PDF requirement",
+        ])
+        #expect(context.knowledge?.map(\.id) == [newFact])
+        let modelPrompt = try #require(DesktopWorkflowModelContextCompiler.augment(
+            prompt: "Produce structured output.", context: context
+        ))
+        #expect(modelPrompt.contains("required-format: DOCX"))
+        #expect(modelPrompt.contains("Do not use inactive knowledge required-format=PDF."))
+        #expect(modelPrompt.contains("Context digest: \(context.digest)"))
+        #expect(DesktopWorkflowModelContextCompiler.augment(
+            prompt: "Produce structured output.", context: context, maximumBytes: 16
+        ) == nil)
         #expect(!context.digest.isEmpty)
+
+        let proposal = try #require(model.recordWorkflowFact(
+            workItemID: workID, episodeID: correction, key: "required-format", value: "ODT",
+            state: .proposed, sourceReferenceIDs: ["message-2"], supersedesFactID: newFact
+        ))
+        #expect(model.workflowFacts(workItemID: workID).first(where: { $0.id == newFact })?.state == .verified)
+        #expect(model.reviewWorkflowKnowledge(id: proposal, accepted: true, reviewer: "fixture reviewer"))
+        #expect(model.workflowFacts(workItemID: workID, includeInactive: true).first(where: { $0.id == newFact })?.state == .superseded)
+        #expect(model.workflowFacts(workItemID: workID).first(where: { $0.id == proposal })?.state == .verified)
+        #expect(model.snapshot.operations.audit.contains {
+            $0.domain == "workflow-knowledge" && $0.action == "verified" && $0.target == proposal
+        })
     }
 
     @Test

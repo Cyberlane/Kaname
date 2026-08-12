@@ -1,3 +1,13 @@
+# Unreleased
+
+- Add declared cross-step artifact inputs: Kaname materializes immutable role-bound artifacts into a private read-only sandbox area and supplies a provenance manifest without exposing app storage paths.
+- Add schema-validated, revision-checked workflow state. Capability mutations and step completion commit together, and stale optimistic revisions fail closed instead of overwriting newer state.
+- Add reviewable workflow knowledge with work-item, installation, and account-binding scopes. Capability proposals remain outside model context until verified; rejected, expired, and superseded knowledge becomes an explicit negative constraint.
+- Add a bounded capability commit sidecar for state mutations, knowledge proposals, and artifact-role publication while retaining the existing JSON input/output schemas.
+- Show verified truth, pending knowledge review, current artifact roles, and collapsed operational-state metadata in the Workflow Work UI.
+- Preserve state records, artifact roles, and referenced private artifact bytes through encrypted installation export/import; reusable packages continue to exclude all private installation data.
+- Advance the durable workspace schema to 19 so older builds cannot silently discard the workflow data plane.
+
 # Kaname 0.23.0 build 43
 
 - Add immutable, separately installable local capability packages with a complete package-tree digest, executable digest or code-signature trust, JSON input/output contracts, quotas, and an explicit test-before-enable lifecycle.
