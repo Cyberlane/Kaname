@@ -41,7 +41,8 @@ struct CalendarWorkCodecTests {
                   "end": {"dateTime": "2026-08-14T10:00:00Z"}
                 }
               ],
-              "nextPageToken": "next-page"
+              "nextPageToken": "next-page",
+              "nextSyncToken": "next-sync"
             }
             """#.utf8
         )
@@ -53,6 +54,7 @@ struct CalendarWorkCodecTests {
         )
 
         #expect(page.nextPageToken == "next-page")
+        #expect(page.nextSyncToken == "next-sync")
         #expect(page.events.count == 2)
         let timed = try #require(page.events.first { $0.eventID == "timed-event" })
         #expect(timed.accountID == account.id)

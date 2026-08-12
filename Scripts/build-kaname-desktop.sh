@@ -31,6 +31,7 @@ binary_path="$project_dir/.build/$configuration/KanamePrototype"
 service_binary_path="$project_dir/.build/$configuration/KanameLocalControlService"
 update_helper_path="$project_dir/.build/$configuration/KanameUpdateHelper"
 conversation_worker_path="$project_dir/.build/$configuration/KanameConversationWorker"
+workflow_worker_path="$project_dir/.build/$configuration/KanameWorkflowWorker"
 core_configuration="$configuration"
 if [[ "$configuration" == "debug" ]]; then
     core_binary_path="$project_dir/Rust/KanameCore/target/debug/kaname-local-core"
@@ -44,7 +45,7 @@ iconset_path="$project_dir/.build/Kaname.iconset"
 service_requirement="identifier \"$service_identifier\""
 app_version="${KANAME_APP_VERSION:-0.23.0}"
 app_build="${KANAME_APP_BUILD:-43}"
-workspace_schema_version=21
+workspace_schema_version=22
 release_notarization="${KANAME_RELEASE_NOTARIZATION:-NO}"
 release_notes_path="${KANAME_RELEASE_NOTES_FILE:-$project_dir/Docs/KanameReleaseNotes.md}"
 google_oauth_config_path="${KANAME_GOOGLE_OAUTH_CONFIG:-$HOME/Library/Application Support/Kaname/Build/google-oauth-client.json}"
@@ -91,6 +92,7 @@ swift build -c "$configuration" --product KanamePrototype
 swift build -c "$configuration" --product KanameLocalControlService
 swift build -c "$configuration" --product KanameUpdateHelper
 swift build -c "$configuration" --product KanameConversationWorker
+swift build -c "$configuration" --product KanameWorkflowWorker
 if [[ "$core_configuration" == "debug" ]]; then
     cargo build --locked --manifest-path Rust/KanameCore/Cargo.toml --bin kaname-local-core
 else
@@ -159,6 +161,7 @@ cp "$binary_path" "$contents_path/MacOS/KanamePrototype"
 cp "$service_binary_path" "$resources_path/KanameLocalControlService"
 cp "$update_helper_path" "$resources_path/KanameUpdateHelper"
 cp "$conversation_worker_path" "$resources_path/KanameConversationWorker"
+cp "$workflow_worker_path" "$resources_path/KanameWorkflowWorker"
 cp "$core_binary_path" "$resources_path/kaname-local-core"
 cp "$project_dir/LICENSE" "$resources_path/LICENSE"
 cp "$release_notes_path" "$resources_path/ReleaseNotes.md"
@@ -173,10 +176,11 @@ jq -n \
     '{schemaVersion: 1, channel: $channel, bundleIdentifier: $bundleIdentifier, version: $version, build: $build, minimumWorkspaceSchema: 1, maximumWorkspaceSchema: $maximumWorkspaceSchema, releaseNotes: $releaseNotes}' \
     > "$resources_path/KanameUpdateManifest.json"
 chmod 755 "$contents_path/MacOS/KanamePrototype"
-chmod 755 "$resources_path/KanameLocalControlService" "$resources_path/KanameUpdateHelper" "$resources_path/KanameConversationWorker" "$resources_path/kaname-local-core"
+chmod 755 "$resources_path/KanameLocalControlService" "$resources_path/KanameUpdateHelper" "$resources_path/KanameConversationWorker" "$resources_path/KanameWorkflowWorker" "$resources_path/kaname-local-core"
 codesign "${codesign_arguments[@]}" --identifier "$service_identifier" "$resources_path/KanameLocalControlService"
 codesign "${codesign_arguments[@]}" --identifier "$identifier.update-helper" "$resources_path/KanameUpdateHelper"
 codesign "${codesign_arguments[@]}" --identifier "$identifier.conversation-worker" "$resources_path/KanameConversationWorker"
+codesign "${codesign_arguments[@]}" --identifier "$identifier.workflow-worker" "$resources_path/KanameWorkflowWorker"
 codesign "${codesign_arguments[@]}" --identifier "$core_identifier" "$resources_path/kaname-local-core"
 codesign "${codesign_arguments[@]}" --identifier "$identifier" "$app_path"
 codesign --verify --deep --strict "$app_path"

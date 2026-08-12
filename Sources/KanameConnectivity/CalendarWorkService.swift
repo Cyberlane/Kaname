@@ -6,6 +6,24 @@ public enum CalendarWorkProvider: String, Codable, Equatable, Sendable {
     case apple
 }
 
+public enum GoogleCalendarObservationError: Error, Equatable, LocalizedError, Sendable {
+    case fullSyncRequired
+
+    public var errorDescription: String? {
+        "The Google Calendar change cursor expired. Review and establish a new baseline before resuming this trigger."
+    }
+}
+
+public struct GoogleCalendarObservation: Equatable, Sendable {
+    public let events: [CalendarEventSnapshot]
+    public let nextSyncToken: String
+
+    public init(events: [CalendarEventSnapshot], nextSyncToken: String) {
+        self.events = events
+        self.nextSyncToken = nextSyncToken
+    }
+}
+
 public enum CalendarRecurrenceScope: String, Codable, CaseIterable, Equatable, Sendable {
     case thisEvent
     case thisAndFuture
@@ -254,6 +272,64 @@ public extension NativeGoogleIntegrationService {
             if pageToken == nil { break }
         }
         return CalendarWorkCodec.deduplicated(events)
+    }
+
+    /// Establishes or advances a Google Calendar incremental-sync cursor. The
+    /// initial response is suitable for a reviewed baseline; callers decide
+    /// whether its existing events should be ingested.
+    func observeCalendarEvents(
+        accountID: String,
+        calendarID: String,
+        syncToken: String?,
+        pageLimit: Int = 20
+    ) async throws -> GoogleCalendarObservation {
+        let account = try googleCalendarAccount(id: accountID)
+        let token = try await validAccessToken(for: account)
+        var events: [CalendarEventSnapshot] = []
+        var pageToken: String?
+        var nextSyncToken: String?
+        for _ in 0..<min(max(pageLimit, 1), 20) {
+            var components = URLComponents(
+                string: "https://www.googleapis.com/calendar/v3/calendars/\(CalendarWorkCodec.encodedPath(calendarID))/events"
+            )!
+            components.queryItems = [
+                URLQueryItem(name: "singleEvents", value: "true"),
+                URLQueryItem(name: "showDeleted", value: "true"),
+                URLQueryItem(name: "maxResults", value: "250"),
+            ]
+            if let syncToken {
+                components.queryItems?.append(URLQueryItem(name: "syncToken", value: syncToken))
+            } else {
+                components.queryItems?.append(URLQueryItem(
+                    name: "timeMin", value: CalendarWorkCodec.rfc3339(Date().addingTimeInterval(-86_400))
+                ))
+            }
+            if let pageToken { components.queryItems?.append(URLQueryItem(name: "pageToken", value: pageToken)) }
+            let data: Data
+            do {
+                data = try await authorizedData(
+                    url: components.url!, accessToken: token, service: "Google Calendar changes"
+                )
+            } catch let error as NativeGoogleIntegrationError {
+                if case let .httpStatus(_, status) = error, status == 410 {
+                    throw GoogleCalendarObservationError.fullSyncRequired
+                }
+                throw error
+            }
+            let page = try CalendarWorkCodec.googleEventPage(
+                data: data, account: account, calendarID: calendarID
+            )
+            events.append(contentsOf: page.events)
+            pageToken = page.nextPageToken
+            nextSyncToken = page.nextSyncToken ?? nextSyncToken
+            if pageToken == nil { break }
+        }
+        guard pageToken == nil, let nextSyncToken, !nextSyncToken.isEmpty else {
+            throw NativeGoogleIntegrationError.invalidResponse("Google Calendar changes")
+        }
+        return GoogleCalendarObservation(
+            events: CalendarWorkCodec.deduplicated(events), nextSyncToken: nextSyncToken
+        )
     }
 
     func googleCalendarEvent(
@@ -665,6 +741,7 @@ public enum CalendarWorkCodec {
     public struct GoogleEventPage: Equatable, Sendable {
         public let events: [CalendarEventSnapshot]
         public let nextPageToken: String?
+        public let nextSyncToken: String?
     }
 
     public static func canonicalPayload(_ mutation: CalendarMutation) throws -> Data {
@@ -700,13 +777,18 @@ public enum CalendarWorkCodec {
         account: NativeGoogleAccountSnapshot,
         calendarID: String
     ) throws -> GoogleEventPage {
-        struct Page: Decodable { let items: [GoogleWireEvent]?; let nextPageToken: String? }
+        struct Page: Decodable {
+            let items: [GoogleWireEvent]?
+            let nextPageToken: String?
+            let nextSyncToken: String?
+        }
         let page = try GoogleAPIResponseParser.decode(Page.self, from: data, service: "Google Calendar events")
         return GoogleEventPage(
             events: try (page.items ?? []).filter { $0.status != "cancelled" }.map {
                 try snapshot($0, account: account, calendarID: calendarID)
             },
-            nextPageToken: page.nextPageToken
+            nextPageToken: page.nextPageToken,
+            nextSyncToken: page.nextSyncToken
         )
     }
 

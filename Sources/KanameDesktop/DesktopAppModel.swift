@@ -586,7 +586,7 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
     }
 
     func migratedToCurrent(now: Int64) throws -> DesktopAppSnapshot {
-        guard (1...20).contains(version) else { throw DesktopModelError.unsupportedVersion }
+        guard (1..<Self.currentVersion).contains(version) else { throw DesktopModelError.unsupportedVersion }
         var migrated = self
         while migrated.version < Self.currentVersion {
             switch migrated.version {
@@ -668,6 +668,12 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
                     contentsOf: DesktopWorkflowBuiltinCapabilities.installations(at: now)
                         .filter { !installedIDs.contains($0.capabilityID) }
                 )
+            case 21:
+                // Trigger health, ownership, extension bindings, reusable
+                // components, schedules, and migration evidence are additive.
+                // They intentionally start empty so older workspaces do not
+                // silently gain observation or effect authority.
+                break
             default:
                 throw DesktopModelError.unsupportedVersion
             }
@@ -754,6 +760,32 @@ extension DesktopAppSnapshot {
             target: target, state: state, detail: detail,
             recordedAtUnixMillis: recordedAtUnixMillis
         ))
+    }
+
+    @discardableResult
+    mutating func rebaselineWorkflowTrigger(id: String, at timestamp: Int64) -> Bool {
+        guard changeRecord(
+            at: \.operations.workflows.triggerBindings, id: id,
+            change: { binding in
+                binding.lastCursor = nil
+                binding.updatedAtUnixMillis = timestamp
+            }
+        ) else { return false }
+        _ = changeRecord(at: \.operations.workflows.triggerHealth, id: id) { health in
+            health.state = .unknown
+            health.nextAttemptAtUnixMillis = nil
+            health.consecutiveFailures = 0
+            health.errorCode = nil
+            health.errorSummary = nil
+            health.authenticationRequired = false
+        }
+        appendAudit(
+            domain: "workflow-trigger", action: "rebaseline-requested", target: "binding:\(id)",
+            state: .completed,
+            detail: "The next trigger check will establish a new cursor without replaying existing remote items.",
+            recordedAtUnixMillis: timestamp
+        )
+        return true
     }
 
     @discardableResult
@@ -4336,11 +4368,13 @@ public final class DesktopAppModel: ObservableObject {
     func mutateRecord<Record: Identifiable>(
         at keyPath: WritableKeyPath<DesktopAppSnapshot, [Record]>,
         id: String,
-        change: (inout Record) -> Void
+        change: (inout Record) -> Void,
+        audit: DesktopAuditRecord? = nil
     ) -> Bool where Record.ID == String {
         var didFindRecord = false
         let persisted = mutate { snapshot in
             didFindRecord = snapshot.changeRecord(at: keyPath, id: id, change: change)
+            if didFindRecord, let audit { snapshot.operations.audit.append(audit) }
         }
         return didFindRecord && persisted
     }

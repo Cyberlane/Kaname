@@ -315,7 +315,7 @@ struct DesktopWorkflowRuntimeTests {
         try store.save(JSONEncoder().encode(old))
         var clock: Int64 = 10_000
         let model = DesktopAppModel(store: store, now: { clock })
-        #expect(model.snapshot.version == 21)
+        #expect(model.snapshot.version == DesktopAppSnapshot.currentVersion)
         #expect(Set(model.workflowCapabilityInstallations.map(\.capabilityID)) == DesktopWorkflowBuiltinCapabilities.identifiers)
         #expect(model.workflowCapabilityInstallation(capabilityID: "kaname.email.read")?.deterministic == false)
         #expect(model.workflowCapabilityInstallation(capabilityID: "kaname.agent.bounded")?.deterministic == false)
@@ -368,7 +368,7 @@ struct DesktopWorkflowRuntimeTests {
 
         let model = DesktopAppModel(store: store, now: { 2_000 })
 
-        #expect(model.snapshot.version == 21)
+        #expect(model.snapshot.version == DesktopAppSnapshot.currentVersion)
         #expect(Set(model.workflowCapabilityInstallations.map(\.capabilityID)) == DesktopWorkflowBuiltinCapabilities.identifiers)
         #expect(model.workflowCapabilityInstallations.first { $0.capabilityID == "kaname.email.send" } == preserved)
         #expect(model.workflowCapabilityInstallations.filter { $0.capabilityID == "kaname.email.read" }.count == 1)

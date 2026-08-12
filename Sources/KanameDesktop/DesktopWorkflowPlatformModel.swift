@@ -133,6 +133,18 @@ public extension DesktopAppModel {
         }
     }
 
+    /// Drops only the remote observation cursor. Existing events, episodes,
+    /// artifacts, and runs remain durable; the next check establishes a fresh
+    /// baseline without replaying the remote source.
+    func rebaselineWorkflowTrigger(id: String) -> Bool {
+        let timestamp = now()
+        var didRebaseline = false
+        let persisted = mutate { workspace in
+            didRebaseline = workspace.rebaselineWorkflowTrigger(id: id, at: timestamp)
+        }
+        return didRebaseline && persisted
+    }
+
     func workflowWorkItems(accountID: String, conversationID: String) -> [DesktopWorkflowWorkItemRecord] {
         let ids = Set(snapshot.operations.workflows.conversationBindings.compactMap { binding in
             binding.accountID == accountID && binding.conversationID == conversationID

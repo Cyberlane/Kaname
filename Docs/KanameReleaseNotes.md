@@ -1,5 +1,15 @@
 # Unreleased
 
+- Run email and incremental Google Calendar observation, queued workflow execution, wait expiry, scheduled invocation, retry, and recovery from a one-shot background worker while the app is closed; the desktop lock prevents concurrent workspace writers.
+- Add quiet per-trigger health with last verified success, bounded cursor lag, exponential backoff, authentication state, next attempt, pause/resume, and action-required escalation.
+- Add cross-workflow sender/query ownership policies, durable conversation claims, protected and exclusive precedence, collision blocking, and audited owner overrides.
+- Install out-of-tree connector adapters as pinned local capabilities: connector code remains network-denied while Kaname alone performs allowlisted HTTPS requests with Keychain secret injection, idempotency, redirects constrained to the reviewed host, preview, execution, and reconciliation.
+- Replace JSON-only capability smoke tests with artifact-aware fixture suites covering named artifacts, state, frozen context, expected structured output, artifact digests, and negative cases; adapters remain disabled until the complete suite passes.
+- Add executable renderer and recalculation adapters with selected sheet/range contracts, deterministic preview artifacts, structured findings, and blocking qualification receipts.
+- Add an outline-first, keyboard-accessible Workflow Studio with focused step forms, exact permission receipts, version-pinned reusable subflows, graph validation, immutable disabled publication, and an optional component library instead of a required canvas.
+- Connect schedule and exact-calendar triggers to the durable dispatcher without inheriting email, calendar-write, or connector authority; use no-replay baselines and explicit cursor recovery, and add staged observe-only through legacy-retired migration acceptance evidence.
+- Add bounded Gmail header projection for List-Unsubscribe and related reviewed headers plus exact incremental OAuth scope diffs and same-account reauthorization APIs.
+- Advance the durable workspace schema to 22 and keep new connector bindings, schedules, ownership, qualification, rendering, composition, and migration state authority-free on private installation import.
 - Connect installed workflows to production Gmail reads for bounded search, exact full-thread retrieval, labels, and message-bound attachment bytes.
 - Add deliberate manual runs and previewed processing of existing Gmail matches without silently changing mail or importing historical messages on observation enablement.
 - Add the trusted Gmail workflow connector for exact archive, Trash, mark-read, and label effects with frozen targets, explicit approval or standing authority, partial-result evidence, and postcondition re-reads.

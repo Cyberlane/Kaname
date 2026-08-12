@@ -1,4 +1,5 @@
 import KanameDesktop
+import KanameWorkflowHost
 import KanameConnectivity
 import KanameDomain
 import KanamePrototypeUI
@@ -6366,6 +6367,8 @@ private struct DesktopEmailView: View {
     @State private var workflowImportMessage: String?
     @State private var capabilityImportMessage: String?
     @State private var manualRunDefinition: DesktopWorkflowDefinitionRecord?
+    @State private var workflowStudioDraftID: String?
+    @State private var connectorToConfigure: DesktopWorkflowConnectorInstallationRecord?
 
     private var accounts: [DesktopAccountRecord] {
         model.snapshot.domains.accounts.filter { $0.service == .gmail }
@@ -6461,6 +6464,20 @@ private struct DesktopEmailView: View {
                     title: title, request: request, input: input
                 )
             }
+        }
+        .sheet(isPresented: Binding(
+            get: { workflowStudioDraftID != nil },
+            set: { if !$0 { workflowStudioDraftID = nil } }
+        )) {
+            if let draftID = workflowStudioDraftID {
+                WorkflowStudioSheet(model: model, draftID: draftID) { workflowID in
+                    workflowImportMessage = "Published \(workflowID) disabled. Review bindings and authority before enabling it."
+                    workflowCollection = .definitions
+                }
+            }
+        }
+        .sheet(item: $connectorToConfigure) { connector in
+            WorkflowConnectorBindingSheet(model: model, connector: connector)
         }
         .onAppear {
             if allowsAutomaticInitialRead,
@@ -6691,6 +6708,7 @@ private struct DesktopEmailView: View {
                     title: "Generic workflows, private behavior",
                     detail: "Kaname supplies durable work, context, checks, approvals, effects, and observability. Installed packages supply domain behavior; email content can never broaden their authority."
                 )
+                workflowOperationalSummary
                 Picker("Workflow collection", selection: $workflowCollection) {
                     ForEach(MailWorkflowCollection.allCases, id: \.self) { Text($0.label).tag($0) }
                 }
@@ -6708,6 +6726,44 @@ private struct DesktopEmailView: View {
             }
             .padding(24)
         }
+    }
+
+    private var workflowOperationalSummary: some View {
+        let health = model.workflowTriggerHealth
+        let actionRequired = health.filter { $0.state == .actionRequired }.count
+        let degraded = health.filter { $0.state == .degraded }.count
+        let waiting = model.snapshot.operations.workflows.waitSubscriptions.filter { $0.state == .active }.count
+        return DisclosureGroup {
+            VStack(alignment: .leading, spacing: 7) {
+                ForEach(health.filter { $0.state != .healthy && $0.state != .paused }) { record in
+                    LabeledContent(record.errorSummary ?? record.state.label) {
+                        Text(record.state.label).foregroundStyle(record.state == .actionRequired ? Nord.auroraYellow : .secondary)
+                    }
+                }
+                ForEach(mail.workflowComponentIssues, id: \.self) { issue in
+                    Label(issue, systemImage: "puzzlepiece.extension.fill")
+                        .font(.caption).foregroundStyle(Nord.auroraYellow)
+                }
+                if health.isEmpty && mail.workflowComponentIssues.isEmpty {
+                    Text("Health appears after the first enabled trigger check. Manual-only workflows stay quiet here.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .padding(.top, 8)
+        } label: {
+            HStack(spacing: 14) {
+                Label(actionRequired == 0 ? "No trigger action required" : "\(actionRequired) action required",
+                      systemImage: actionRequired == 0 ? "checkmark.circle" : "exclamationmark.triangle.fill")
+                    .foregroundStyle(actionRequired == 0 ? Nord.auroraGreen : Nord.auroraYellow)
+                if degraded > 0 { Text("\(degraded) retrying").foregroundStyle(.secondary) }
+                if waiting > 0 { Text("\(waiting) waiting").foregroundStyle(Nord.frost0) }
+                Spacer()
+                Text("Details").font(.caption).foregroundStyle(.secondary)
+            }
+            .font(.caption.weight(.semibold))
+        }
+        .padding(12)
+        .background(Nord.polarNight1.opacity(0.75), in: RoundedRectangle(cornerRadius: 12))
     }
 
     @ViewBuilder
@@ -6753,6 +6809,29 @@ private struct DesktopEmailView: View {
     private var workflowDefinitionList: some View {
         DisclosureGroup {
             VStack(alignment: .leading, spacing: 10) {
+                if !model.snapshot.operations.workflows.connectorInstallations.isEmpty {
+                    Text("Trusted connectors").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    ForEach(model.snapshot.operations.workflows.connectorInstallations) { connector in
+                        WorkflowConnectorInstallationRow(
+                            model: model, connector: connector,
+                            onConfigure: { connectorToConfigure = connector }
+                        )
+                    }
+                }
+                if !model.snapshot.operations.workflows.rendererInstallations.isEmpty {
+                    Text("Renderers and recalculation adapters").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    ForEach(model.snapshot.operations.workflows.rendererInstallations) { renderer in
+                        WorkflowRendererInstallationRow(model: model, renderer: renderer)
+                    }
+                }
+                if !model.snapshot.operations.workflows.subflows.isEmpty {
+                    Text("Reusable subflows").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    ForEach(model.snapshot.operations.workflows.subflows) { subflow in
+                        LabeledContent("\(subflow.name) · \(subflow.version)") {
+                            Text("\(subflow.steps.count) stages").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
                 ForEach(model.workflowCapabilityInstallations) { capability in
                     WorkflowCapabilityInstallationRow(
                         model: model,
@@ -6770,11 +6849,22 @@ private struct DesktopEmailView: View {
                     Label(capabilityImportMessage, systemImage: "info.circle")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+                let recentQualifications = model.snapshot.operations.workflows.qualificationRuns.suffix(12)
+                if !recentQualifications.isEmpty {
+                    DisclosureGroup("Recent qualification · \(recentQualifications.count)") {
+                        VStack(alignment: .leading, spacing: 7) {
+                            ForEach(recentQualifications.reversed()) { run in
+                                WorkflowQualificationSummaryRow(run: run)
+                            }
+                        }
+                        .padding(.top, 8)
+                    }
+                }
             }
             .padding(.top, 8)
         } label: {
             Label(
-                "Capability library · \(model.workflowCapabilityInstallations.count) installed",
+                "Component library · \(model.workflowCapabilityInstallations.count + model.snapshot.operations.workflows.connectorInstallations.count + model.snapshot.operations.workflows.rendererInstallations.count + model.snapshot.operations.workflows.subflows.count) installed",
                 systemImage: "puzzlepiece.extension"
             )
         }
@@ -6786,6 +6876,11 @@ private struct DesktopEmailView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
+            Button("Create workflow", systemImage: "plus") {
+                workflowStudioDraftID = model.createWorkflowStudioDraft(
+                    name: "Untitled workflow", summary: "A reusable workflow created in Kaname."
+                )
+            }
             Button("Install package…", systemImage: "shippingbox") { installWorkflowPackage() }
                 .buttonStyle(.borderedProminent)
         }
@@ -6793,7 +6888,7 @@ private struct DesktopEmailView: View {
             EmptyPanel(
                 symbol: "shippingbox",
                 title: "No workflow packages installed",
-                detail: "Install a schema-1 JSON package. Packages refer only to registered capability IDs and cannot embed arbitrary executable paths."
+                detail: "Create an outline in Workflow Studio or install a reviewed package. Definitions never embed credentials or silently inherit connector authority."
             )
         } else {
             ForEach(model.workflowDefinitions) { definition in
@@ -6946,7 +7041,20 @@ private struct DesktopEmailView: View {
                 capabilityImportMessage = "The capability bytes were installed, but Kaname could not commit its receipt."
                 return
             }
-            capabilityImportMessage = "Installed \(receipt.name) \(receipt.version) disabled. Run a representative schema test before enabling it."
+            let directory = store.installationDirectory(
+                capabilityID: receipt.capabilityID, version: receipt.version
+            )
+            var adapters: [String] = []
+            if let connector = try? DesktopWorkflowProcessConnector.loadPackageManifest(from: directory),
+               model.registerWorkflowConnector(package: connector, capability: receipt) {
+                adapters.append("trusted connector")
+            }
+            if let renderer = try? DesktopWorkflowRendererAdapter.loadManifest(from: directory),
+               model.registerWorkflowRenderer(package: renderer, capability: receipt) {
+                adapters.append("renderer")
+            }
+            let adapterDetail = adapters.isEmpty ? "" : " Registered as " + adapters.joined(separator: " and ") + "."
+            capabilityImportMessage = "Installed \(receipt.name) \(receipt.version) disabled.\(adapterDetail) Run its artifact fixture suite before enabling it."
         } catch {
             capabilityImportMessage = "Capability installation failed safely: \(error.localizedDescription)"
         }
@@ -6955,27 +7063,25 @@ private struct DesktopEmailView: View {
     private func testWorkflowCapability(_ capability: DesktopWorkflowCapabilityInstallationRecord) {
         guard let store = model.workflowCapabilityStore() else { return }
         let panel = NSOpenPanel()
-        panel.title = "Choose capability test input"
-        panel.message = "Choose representative JSON that matches the capability input schema. The test remains local and network-disabled."
-        panel.allowedContentTypes = [.json]
-        panel.canChooseDirectories = false
+        panel.title = "Choose capability qualification suite"
+        panel.message = "Choose a fixture directory containing qualification.json plus its declared inputs, artifacts, state, context, expected outputs, and negative cases."
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
-            let input = try Data(contentsOf: url, options: [.mappedIfSafe])
-            let manifest = try store.manifest(for: capability)
-            let result = try DesktopWorkflowCapabilityProcessRunner().execute(
-                manifest: manifest,
-                installationDirectory: store.installationDirectory(
-                    capabilityID: capability.capabilityID,
-                    version: capability.version
-                ),
-                input: input,
+            let runs = try DesktopWorkflowCapabilityQualifier().run(
+                suiteURL: url, installation: capability, capabilityStore: store,
                 scratchRoot: FileManager.default.temporaryDirectory
                     .appendingPathComponent("KanameWorkflowCapabilityTests", isDirectory: true)
             )
-            _ = model.recordWorkflowCapabilityTest(id: capability.id, passed: true)
-            capabilityImportMessage = "Test passed in \(result.elapsedMilliseconds) ms. Review and enable \(capability.name) when ready."
+            let passed = !runs.isEmpty && runs.allSatisfy { $0.outcome == .passed }
+            runs.forEach { _ = model.recordWorkflowQualification($0) }
+            _ = model.recordWorkflowCapabilityTest(id: capability.id, passed: passed)
+            let failedAssertions = runs.flatMap(\.assertions).filter { !$0.passed }.count
+            capabilityImportMessage = passed
+                ? "Qualification passed \(runs.count) fixture\(runs.count == 1 ? "" : "s"). Review bindings and enable \(capability.name) when ready."
+                : "Qualification failed with \(failedAssertions) assertion\(failedAssertions == 1 ? "" : "s"); the component remains disabled."
         } catch {
             _ = model.recordWorkflowCapabilityTest(id: capability.id, passed: false)
             capabilityImportMessage = "Test failed; the capability remains disabled: \(error.localizedDescription)"
@@ -7640,9 +7746,34 @@ private struct WorkflowDefinitionCard: View {
     @State private var selectedAccountID = ""
     @State private var emailFilter = ""
     @State private var transferMessage: String?
+    @State private var ownershipFilter = ""
+    @State private var ownershipMode = DesktopWorkflowOwnershipMode.protected
+    @State private var scheduleTime = Date()
+    @State private var scheduleZone = TimeZone.current.identifier
+    @State private var missedRunPolicy = DesktopAutomationRule.MissedRunPolicy.skip
+    @State private var selectedCalendarSourceID = ""
 
-    private var triggerBindings: [DesktopWorkflowTriggerBindingRecord] {
-        model.workflowTriggerBindings(workflowID: definition.id)
+    private var emailTriggerBindings: [DesktopWorkflowTriggerBindingRecord] {
+        model.workflowTriggerBindings(workflowID: definition.id).filter { $0.trigger == .email }
+    }
+
+    private var calendarTriggerBindings: [DesktopWorkflowTriggerBindingRecord] {
+        model.workflowTriggerBindings(workflowID: definition.id).filter { $0.trigger == .calendar }
+    }
+
+    private var googleCalendarSources: [DesktopCalendarSourceRecord] {
+        model.snapshot.domains.calendarSources.filter { source in
+            source.provider == .google && source.isEnabled
+                && googleAccounts.contains { $0.identity == source.ownerIdentity }
+        }
+    }
+
+    private var googleAccountPicker: some View {
+        Picker("Account", selection: $selectedAccountID) {
+            Text("Choose account").tag("")
+            ForEach(googleAccounts) { account in Text(account.identity).tag(account.id) }
+        }
+        .frame(maxWidth: 220)
     }
 
     private var revision: DesktopWorkflowRevisionRecord? {
@@ -7770,24 +7901,21 @@ private struct WorkflowDefinitionCard: View {
                 if definition.triggerKinds.contains(.email) {
                     DisclosureGroup("Email trigger scope") {
                         VStack(alignment: .leading, spacing: 10) {
-                            if triggerBindings.isEmpty {
+                            if emailTriggerBindings.isEmpty {
                                 Text("No mailbox is observed until you add and enable an account-scoped filter.")
                                     .font(.caption).foregroundStyle(.secondary)
                             } else {
-                                ForEach(triggerBindings) { binding in
+                                ForEach(emailTriggerBindings) { binding in
                                     WorkflowTriggerBindingRow(
                                         model: model, binding: binding,
-                                        processExistingMatches: { processExistingMatches(binding) }
+                                        processExistingMatches: { processExistingMatches(binding) },
+                                        rebaseline: nil
                                     )
                                 }
                             }
                             if !googleAccounts.isEmpty {
                                 HStack {
-                                    Picker("Account", selection: $selectedAccountID) {
-                                        Text("Choose account").tag("")
-                                        ForEach(googleAccounts) { account in Text(account.identity).tag(account.id) }
-                                    }
-                                    .frame(maxWidth: 220)
+                                    googleAccountPicker
                                     TextField("Gmail filter, for example from:sender@example.com", text: $emailFilter)
                                     Button("Add scope") {
                                         _ = model.bindWorkflowTrigger(
@@ -7805,10 +7933,165 @@ private struct WorkflowDefinitionCard: View {
                         }
                         .padding(.top, 8)
                     }
+                    DisclosureGroup("Ownership and exclusions") {
+                        Form {
+                            Section("Current policy") {
+                                let policies = model.snapshot.operations.workflows.ownershipPolicies.filter { $0.workflowID == definition.id }
+                                WorkflowOwnershipPolicySummary(policies: policies)
+                            }
+                            Section("Add policy") {
+                                HStack {
+                                    googleAccountPicker
+                                    TextField("Protected sender or exact query", text: $ownershipFilter)
+                                    Picker("Mode", selection: $ownershipMode) {
+                                        ForEach(DesktopWorkflowOwnershipMode.allCases, id: \.self) { Text($0.label).tag($0) }
+                                    }
+                                    Button("Add") {
+                                        _ = model.upsertWorkflowOwnershipPolicy(
+                                            workflowID: definition.id, accountID: selectedAccountID,
+                                            sourceFilter: ownershipFilter, mode: ownershipMode
+                                        )
+                                        ownershipFilter = ""
+                                    }
+                                    .disabled(selectedAccountID.isEmpty || ownershipFilter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                }
+                            }
+                        }
+                        .formStyle(.grouped)
+                    }
                 }
+                if definition.triggerKinds.contains(.calendar) {
+                    DisclosureGroup("Calendar trigger scope") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            if calendarTriggerBindings.isEmpty {
+                                Text("No calendar is observed until you add and enable an exact source.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            } else {
+                                ForEach(calendarTriggerBindings) { binding in
+                                    WorkflowTriggerBindingRow(
+                                        model: model, binding: binding,
+                                        processExistingMatches: nil,
+                                        rebaseline: { _ = model.rebaselineWorkflowTrigger(id: binding.id) }
+                                    )
+                                }
+                            }
+                            if googleCalendarSources.isEmpty {
+                                Text("Connect Google Calendar and enable a visible calendar first.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            } else {
+                                HStack {
+                                    Picker("Calendar", selection: $selectedCalendarSourceID) {
+                                        Text("Choose calendar").tag("")
+                                        ForEach(googleCalendarSources) { source in
+                                            Text("\(source.displayName) · \(source.ownerIdentity)").tag(source.id)
+                                        }
+                                    }
+                                    .frame(maxWidth: 360)
+                                    Button("Add scope") {
+                                        guard let source = googleCalendarSources.first(where: {
+                                            $0.id == selectedCalendarSourceID
+                                        }), let account = googleAccounts.first(where: {
+                                            $0.identity == source.ownerIdentity
+                                        }) else { return }
+                                        _ = model.bindWorkflowTrigger(
+                                            workflowID: definition.id, trigger: .calendar,
+                                            source: "google-calendar", accountIDs: [account.id],
+                                            sourceFilter: source.externalIdentifier, enabled: false
+                                        )
+                                        selectedCalendarSourceID = ""
+                                    }
+                                    .disabled(selectedCalendarSourceID.isEmpty)
+                                }
+                            }
+                            Text("The first enabled check establishes a baseline. Later event revisions create durable episodes; the trigger grants no calendar-write authority.")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                        .padding(.top, 8)
+                    }
+                }
+                if definition.triggerKinds.contains(.schedule) {
+                    DisclosureGroup("Schedule trigger") {
+                        Grid(alignment: .leading, verticalSpacing: 10) {
+                            let schedules = model.snapshot.operations.workflows.scheduleBindings.filter { $0.workflowID == definition.id }
+                            ForEach(schedules) { schedule in
+                                LabeledContent {
+                                    Text(schedule.enabled ? "Enabled" : "Paused")
+                                        .font(.caption).foregroundStyle(schedule.enabled ? Nord.auroraGreen : .secondary)
+                                } label: {
+                                    Text(DesktopScheduleEngine.humanSchedule(spec: schedule.spec, timeZoneIdentifier: schedule.timeZoneIdentifier))
+                                        .font(.caption)
+                                }
+                            }
+                            HStack {
+                                DatePicker("Daily at", selection: $scheduleTime, displayedComponents: .hourAndMinute)
+                                TextField("Time zone", text: $scheduleZone).frame(width: 180)
+                                Picker("Missed run", selection: $missedRunPolicy) {
+                                    ForEach(DesktopAutomationRule.MissedRunPolicy.allCases, id: \.self) { Text($0.label).tag($0) }
+                                }
+                                Button("Add schedule") {
+                                    var calendar = Calendar(identifier: .gregorian)
+                                    calendar.timeZone = TimeZone(identifier: scheduleZone) ?? .current
+                                    let components = calendar.dateComponents([.hour, .minute], from: scheduleTime)
+                                    _ = model.upsertWorkflowSchedule(
+                                        workflowID: definition.id,
+                                        spec: .anchored(frequency: .daily, hour: components.hour ?? 9, minute: components.minute ?? 0),
+                                        timeZoneIdentifier: scheduleZone, missedRunPolicy: missedRunPolicy, enabled: true
+                                    )
+                                }
+                                .disabled(TimeZone(identifier: scheduleZone) == nil)
+                            }
+                            Text("A schedule starts the workflow but never grants mailbox or connector authority by itself.")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                        .padding(.top, 8)
+                    }
+                }
+                workflowMigrationAcceptance
             }
         }
         .panelStyle()
+    }
+
+    @ViewBuilder
+    private var workflowMigrationAcceptance: some View {
+        let assessment = model.snapshot.operations.workflows.migrationAssessments.first { $0.workflowID == definition.id }
+        DisclosureGroup("Migration acceptance") {
+            VStack(alignment: .leading, spacing: 9) {
+                if let assessment {
+                    LabeledContent("Stage", value: assessment.stage.label)
+                    Text("\(assessment.passedScenarioIDs.count) of \(assessment.requiredScenarioIDs.count) required scenarios passed")
+                        .font(.caption).foregroundStyle(.secondary)
+                    ForEach(assessment.blockingFindings, id: \.self) { finding in
+                        Label(finding, systemImage: "xmark.octagon.fill").font(.caption).foregroundStyle(Nord.auroraYellow)
+                    }
+                    if let current = DesktopWorkflowMigrationStage.allCases.firstIndex(of: assessment.stage),
+                       DesktopWorkflowMigrationStage.allCases.indices.contains(current + 1) {
+                        Button("Advance to \(DesktopWorkflowMigrationStage.allCases[current + 1].label)") {
+                            do {
+                                try model.advanceWorkflowMigration(
+                                    id: assessment.id, to: DesktopWorkflowMigrationStage.allCases[current + 1]
+                                )
+                            } catch { transferMessage = error.localizedDescription }
+                        }
+                        .disabled(!assessment.blockingFindings.isEmpty
+                            || !Set(assessment.requiredScenarioIDs).isSubset(of: Set(assessment.passedScenarioIDs)))
+                    }
+                } else {
+                    Text("Start with observe-only evidence. Live effects remain outside the comparison harness.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button("Create acceptance checklist") {
+                        _ = model.createWorkflowMigrationAssessment(
+                            workflowID: definition.id,
+                            requiredScenarioIDs: [
+                                "fixture-parity", "backup-restore", "restart-resume", "unknown-outcome",
+                                "account-expiry", "large-artifact", "correction-thread", "rollback",
+                            ]
+                        )
+                    }
+                }
+            }
+            .padding(.top, 8)
+        }
     }
 
     private func readinessSymbol(_ state: DesktopWorkflowMigrationReadinessState) -> String {
@@ -7825,6 +8108,22 @@ private struct WorkflowDefinitionCard: View {
         case .attention: Nord.auroraYellow
         case .blocked: Nord.auroraRed
         }
+    }
+}
+
+private struct WorkflowOwnershipPolicySummary: View {
+    let policies: [DesktopWorkflowOwnershipPolicyRecord]
+
+    var body: some View {
+        Text(policies.isEmpty
+            ? "Protect correspondence from broad cleanup workflows, or allow shared read-only observation explicitly."
+            : policies.map {
+                "\($0.enabled ? "Active" : "Paused") · \($0.mode.label)\n\($0.sourceFilter) · \($0.accountID)"
+            }.joined(separator: "\n\n")
+        )
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .textSelection(.enabled)
     }
 }
 
@@ -7936,16 +8235,24 @@ private struct WorkflowDefinitionHeader: View {
 private struct WorkflowTriggerBindingRow: View {
     @ObservedObject var model: DesktopAppModel
     let binding: DesktopWorkflowTriggerBindingRecord
-    let processExistingMatches: () -> Void
+    let processExistingMatches: (() -> Void)?
+    let rebaseline: (() -> Void)?
 
     var body: some View {
+        let health = model.snapshot.operations.workflows.triggerHealth.first { $0.bindingID == binding.id }
         LabeledContent {
             HStack {
-                Button("Process existing…", action: processExistingMatches)
-                    .help("Preview and create workflow episodes for existing Gmail matches without changing mail")
+                if let processExistingMatches {
+                    Button("Process existing…", action: processExistingMatches)
+                        .help("Preview and create workflow episodes for existing Gmail matches without changing mail")
+                }
+                if let rebaseline {
+                    Button("Rebaseline", action: rebaseline)
+                        .help("Discard only the expired source cursor and establish a new baseline without replaying existing items")
+                }
                 Toggle("Observe", isOn: Binding(
                     get: { binding.enabled },
-                    set: { _ = model.setWorkflowTriggerBindingEnabled(id: binding.id, enabled: $0) }
+                    set: { _ = model.setWorkflowTriggerPaused(bindingID: binding.id, paused: !$0) }
                 ))
                 .labelsHidden()
             }
@@ -7954,12 +8261,19 @@ private struct WorkflowTriggerBindingRow: View {
                 Grid(alignment: .leading, verticalSpacing: 2) {
                     GridRow { Text(binding.sourceFilter).font(.caption.weight(.semibold)) }
                     GridRow {
-                        Text("\(binding.accountIDs.count) account scope · \(binding.lastCursor ?? "No cursor yet")")
+                        Text("\(binding.accountIDs.count) account scope · \(binding.lastCursor == nil ? "No cursor yet" : "Cursor established")")
                             .font(.caption2).foregroundStyle(.secondary)
+                    }
+                    if let health {
+                        GridRow {
+                            Text(health.state.label + (health.lastSuccessAtUnixMillis.map { " · last verified " + Date(timeIntervalSince1970: Double($0) / 1_000).formatted(date: .abbreviated, time: .shortened) } ?? ""))
+                                .font(.caption2)
+                                .foregroundStyle(health.state == .actionRequired ? Nord.auroraYellow : .secondary)
+                        }
                     }
                 }
             } icon: {
-                Image(systemName: "line.3.horizontal.decrease.circle")
+                Image(systemName: binding.trigger == .calendar ? "calendar.badge.clock" : "line.3.horizontal.decrease.circle")
             }
         }
     }
@@ -12940,10 +13254,7 @@ struct SurfaceHeader<Actions: View>: View {
     @ViewBuilder let actions: Actions
 
     init(title: String, detail: String, symbol: String, @ViewBuilder actions: () -> Actions) {
-        self.title = title
-        self.detail = detail
-        self.symbol = symbol
-        self.actions = actions()
+        (self.title, self.detail, self.symbol, self.actions) = (title, detail, symbol, actions())
     }
 
     var body: some View {

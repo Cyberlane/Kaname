@@ -167,6 +167,11 @@ struct WorkflowEmailReadRequest {
     let maximumPages: Int
     let maximumThreads: Int
     let maximumAttachmentBytes: Int
+    let headerProjection: [String]
+
+    static let allowedHeaderProjection = Set([
+        "List-Unsubscribe", "List-Unsubscribe-Post", "Auto-Submitted", "Precedence",
+    ])
 
     private struct Wire: Decodable {
         let operation: Operation
@@ -177,6 +182,7 @@ struct WorkflowEmailReadRequest {
         let maximumPages: Int?
         let maximumThreads: Int?
         let maximumAttachmentBytes: Int?
+        let headerProjection: [String]?
     }
 
     static func decode(_ data: Data) throws -> Self {
@@ -185,12 +191,14 @@ struct WorkflowEmailReadRequest {
                 operation: wire.operation, accountID: wire.accountID, query: wire.query,
                 threadID: wire.threadID, includeAttachmentBytes: wire.includeAttachmentBytes ?? false,
                 maximumPages: wire.maximumPages ?? 20, maximumThreads: wire.maximumThreads ?? 2_000,
-                maximumAttachmentBytes: wire.maximumAttachmentBytes ?? GmailOutboundAttachment.maximumTotalBytes
+                maximumAttachmentBytes: wire.maximumAttachmentBytes ?? GmailOutboundAttachment.maximumTotalBytes,
+                headerProjection: Array(Set(wire.headerProjection ?? [])).sorted()
             )
             guard !request.accountID.isEmpty,
                   (1...100).contains(request.maximumPages),
                   (1...10_000).contains(request.maximumThreads),
                   (0...GmailOutboundAttachment.maximumTotalBytes).contains(request.maximumAttachmentBytes),
+                  Set(request.headerProjection).isSubset(of: Self.allowedHeaderProjection),
                   request.query.map({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.utf8.count <= 2_048 })
                     ?? (request.operation != .search),
                   request.threadID.map({ (try? GmailAPIParser.validatedID($0)) != nil })
@@ -217,7 +225,9 @@ enum WorkflowEmailReadResponse {
             "complete": true,
             "pages": pages,
             "threadCount": threads.count,
-            "threads": threads.map { threadObject($0, attachmentPayloads: attachmentPayloads) },
+            "threads": threads.map {
+                threadObject($0, attachmentPayloads: attachmentPayloads, headerProjection: request.headerProjection)
+            },
             "labels": labels.map { ["id": $0.id, "name": $0.name, "type": $0.type] },
         ]
         return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
@@ -229,7 +239,8 @@ enum WorkflowEmailReadResponse {
 
     private static func threadObject(
         _ thread: GmailThreadDetailSnapshot,
-        attachmentPayloads: [String: Data]
+        attachmentPayloads: [String: Data],
+        headerProjection: [String]
     ) -> [String: Any] {
         [
             "id": thread.id,
@@ -238,7 +249,9 @@ enum WorkflowEmailReadResponse {
             "snippet": thread.snippet,
             "historyID": thread.historyID ?? "",
             "messages": thread.messages.map {
-                WorkflowGmailPayloadEncoder.messageObject($0, attachmentPayloads: attachmentPayloads)
+                WorkflowGmailPayloadEncoder.messageObject(
+                    $0, attachmentPayloads: attachmentPayloads, headerProjection: headerProjection
+                )
             },
         ]
     }
@@ -247,7 +260,8 @@ enum WorkflowEmailReadResponse {
 enum WorkflowGmailPayloadEncoder {
     static func messageObject(
         _ message: GmailMessageSnapshot,
-        attachmentPayloads: [String: Data]
+        attachmentPayloads: [String: Data],
+        headerProjection: [String] = []
     ) -> [String: Any] {
         [
             "id": message.id,
@@ -258,6 +272,7 @@ enum WorkflowGmailPayloadEncoder {
             "date": message.dateDescription,
             "body": message.body,
             "labels": message.labels,
+            "headers": message.projectedHeaders.filter { headerProjection.contains($0.key) },
             "attachments": message.attachments.map { attachment in
                 let key = WorkflowEmailReadResponse.attachmentKey(attachment)
                 let data = attachmentPayloads[key]

@@ -22,6 +22,9 @@ public struct GmailMessageSnapshot: Equatable, Identifiable, Sendable {
     public let attachments: [GmailAttachmentSnapshot]
     public let inReplyTo: String
     public let references: String
+    /// A deliberately bounded projection. Raw Gmail headers are never exposed
+    /// through the workflow surface merely because a message was fetched.
+    public let projectedHeaders: [String: String]
 }
 
 public struct GmailThreadDetailSnapshot: Equatable, Identifiable, Sendable {
@@ -862,7 +865,13 @@ public enum GmailAPIParser {
             id: try validatedID(message.id), threadID: try validatedID(message.threadId),
             sender: header("From"), recipients: header("To"), subject: header("Subject"),
             dateDescription: header("Date"), body: body, labels: message.labelIds ?? [],
-            attachments: attachments, inReplyTo: header("In-Reply-To"), references: header("References")
+            attachments: attachments, inReplyTo: header("In-Reply-To"), references: header("References"),
+            projectedHeaders: Dictionary(uniqueKeysWithValues: [
+                "List-Unsubscribe", "List-Unsubscribe-Post", "Auto-Submitted", "Precedence",
+            ].compactMap { name in
+                let value = header(name)
+                return value.isEmpty ? nil : (name, String(value.prefix(8_192)))
+            })
         )
     }
 

@@ -9,6 +9,7 @@ case "$channel" in
         support_name="Kaname"
         service_identifier="com.cyberlane.kaname.desktop.localcore.service"
         worker_identifier="com.cyberlane.kaname.desktop.conversation-worker"
+        workflow_worker_identifier="com.cyberlane.kaname.desktop.workflow-worker"
         local_device_id="mac-authority"
         local_key_id="mac-key-1"
         build_hint="Scripts/build-kaname-desktop.sh"
@@ -19,6 +20,7 @@ case "$channel" in
         support_name="Kaname Candidate"
         service_identifier="com.cyberlane.kaname.desktop.candidate.localcore.service"
         worker_identifier="com.cyberlane.kaname.desktop.candidate.conversation-worker"
+        workflow_worker_identifier="com.cyberlane.kaname.desktop.candidate.workflow-worker"
         local_device_id="candidate-mac-authority"
         local_key_id="candidate-mac-key-1"
         build_hint="KANAME_DESKTOP_CHANNEL=candidate Scripts/build-kaname-desktop.sh"
@@ -35,8 +37,9 @@ built_app="$project_dir/.build/$app_name.app"
 applications_directory="$HOME/Applications"
 installed_app="$applications_directory/$app_name.app"
 launch_agent_plist="$HOME/Library/LaunchAgents/$service_identifier.plist"
+workflow_launch_agent_plist="$HOME/Library/LaunchAgents/$workflow_worker_identifier.plist"
 journal_directory="$HOME/Library/Application Support/$support_name/LocalCore/journal"
-client_requirement="identifier \"$bundle_identifier\" or identifier \"$worker_identifier\""
+client_requirement="identifier \"$bundle_identifier\" or identifier \"$worker_identifier\" or identifier \"$workflow_worker_identifier\""
 
 if [[ ! -d "$built_app" ]]; then
     echo "Build Kaname first with $build_hint." >&2
@@ -66,5 +69,18 @@ codesign --verify --deep --strict "$installed_app"
     --local-device-id "$local_device_id" \
     --local-key-id "$local_key_id" \
     --launch-agent-plist "$launch_agent_plist"
+
+workflow_error_log="$HOME/Library/LaunchAgents/$workflow_worker_identifier.stderr.log"
+plutil -create xml1 "$workflow_launch_agent_plist"
+plutil -insert Label -string "$workflow_worker_identifier" "$workflow_launch_agent_plist"
+plutil -insert ProgramArguments -json "[\"$installed_app/Contents/Resources/KanameWorkflowWorker\",\"--channel\",\"$channel\"]" "$workflow_launch_agent_plist"
+plutil -insert RunAtLoad -bool YES "$workflow_launch_agent_plist"
+plutil -insert StartInterval -integer 60 "$workflow_launch_agent_plist"
+plutil -insert ProcessType -string Background "$workflow_launch_agent_plist"
+plutil -insert ThrottleInterval -integer 30 "$workflow_launch_agent_plist"
+plutil -insert StandardErrorPath -string "$workflow_error_log" "$workflow_launch_agent_plist"
+chmod 600 "$workflow_launch_agent_plist"
+launchctl bootout "gui/$(id -u)/$workflow_worker_identifier" >/dev/null 2>&1 || true
+launchctl bootstrap "gui/$(id -u)" "$workflow_launch_agent_plist"
 
 echo "$installed_app"

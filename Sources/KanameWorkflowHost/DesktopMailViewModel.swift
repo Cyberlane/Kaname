@@ -18,17 +18,18 @@ private func withWorkflowAgentTimeout<Value: Sendable>(
 }
 
 @MainActor
-final class DesktopMailViewModel: ObservableObject {
-    @Published private(set) var threads: [GmailThreadDetailSnapshot] = []
-    @Published private(set) var selectedThread: GmailThreadDetailSnapshot?
-    @Published private(set) var labels: [String: [GmailLabelSnapshot]] = [:]
-    @Published private(set) var nextPageTokens: [String: String] = [:]
-    @Published private(set) var failedAccounts: [String] = []
-    @Published private(set) var isBusy = false
-    @Published private(set) var message: String?
-    @Published private(set) var activeActionID: String?
-    @Published private(set) var localSummary: String?
-    @Published var query = "in:inbox"
+public final class DesktopMailViewModel: ObservableObject {
+    @Published public private(set) var threads: [GmailThreadDetailSnapshot] = []
+    @Published public private(set) var selectedThread: GmailThreadDetailSnapshot?
+    @Published public private(set) var labels: [String: [GmailLabelSnapshot]] = [:]
+    @Published public private(set) var nextPageTokens: [String: String] = [:]
+    @Published public private(set) var failedAccounts: [String] = []
+    @Published public private(set) var isBusy = false
+    @Published public private(set) var message: String?
+    @Published public private(set) var activeActionID: String?
+    @Published public private(set) var localSummary: String?
+    @Published public private(set) var workflowComponentIssues: [String] = []
+    @Published public var query = "in:inbox"
 
     private let service: NativeGoogleIntegrationService
     private let environment: KanameDesktopEnvironment
@@ -36,36 +37,45 @@ final class DesktopMailViewModel: ObservableObject {
     private var workflowRuntime: DesktopWorkflowRuntime?
     private var workflowEffectCoordinator: DesktopWorkflowEffectCoordinator?
 
-    init(environment: KanameDesktopEnvironment = .current) {
+    public init(
+        environment: KanameDesktopEnvironment = .current,
+        googleClientConfiguration: GoogleOAuthClientConfiguration? = nil
+    ) {
         self.environment = environment
         service = NativeGoogleIntegrationService(
             rootDirectory: environment.googleDirectory,
-            keychainService: environment.googleKeychainService
+            keychainService: environment.googleKeychainService,
+            clientConfiguration: googleClientConfiguration
         )
     }
 
-    func startWorkflowMonitoring(model: DesktopAppModel) {
+    public func startWorkflowMonitoring(model: DesktopAppModel) {
         guard workflowMonitoringTask == nil,
               !CommandLine.arguments.contains("--snapshot") else { return }
         workflowMonitoringTask = _Concurrency.Task { [weak self] in
             guard let self else { return }
-            _ = model.recoverExpiredWorkflowClaims()
-            await pollWorkflowBindings(model: model, announce: false)
-            await executeQueuedWorkflowRuns(model: model)
+            await runWorkflowMaintenanceCycle(model: model)
             while !_Concurrency.Task.isCancelled {
-                try? await _Concurrency.Task.sleep(for: .seconds(300))
+                try? await _Concurrency.Task.sleep(for: .seconds(60))
                 guard !_Concurrency.Task.isCancelled else { return }
-                await pollWorkflowBindings(model: model, announce: false)
-                await executeQueuedWorkflowRuns(model: model)
+                await runWorkflowMaintenanceCycle(model: model)
             }
         }
     }
 
-    func checkWorkflowTriggers(model: DesktopAppModel) {
+    public func runWorkflowMaintenanceCycle(model: DesktopAppModel) async {
+        _ = model.recoverExpiredWorkflowClaims()
+        _ = model.expireWorkflowWaits()
+        dispatchDueSchedules(model: model)
+        await pollWorkflowBindings(model: model, announce: false)
+        await executeQueuedWorkflowRuns(model: model)
+    }
+
+    public func checkWorkflowTriggers(model: DesktopAppModel) {
         _Concurrency.Task { await pollWorkflowBindings(model: model, announce: true) }
     }
 
-    func processExistingWorkflowMatches(
+    public func processExistingWorkflowMatches(
         model: DesktopAppModel,
         binding: DesktopWorkflowTriggerBindingRecord
     ) {
@@ -89,9 +99,22 @@ final class DesktopMailViewModel: ObservableObject {
                     return
                 }
                 let cursor = try await service.gmailHistoryCursor(accountID: accountID)
+                var ownership: [String: DesktopWorkflowOwnershipPolicyRecord] = [:]
+                let policies = model.snapshot.operations.workflows.ownershipPolicies
+                    .filter { $0.enabled && $0.accountID == accountID }
+                    .sorted { ($0.priority, $0.id) > ($1.priority, $1.id) }
+                for policy in policies {
+                    let threadIDs = try await service.matchingGmailThreadIDs(
+                        accountID: accountID, query: policy.sourceFilter
+                    )
+                    for threadID in threadIDs where ownership[threadID] == nil { ownership[threadID] = policy }
+                }
                 var ingested = 0
                 for threadID in matches {
                     let thread = try await service.readMailThread(accountID: accountID, threadID: threadID)
+                    guard mayObserveWorkflowThread(
+                        thread, binding: binding, matchingPolicy: ownership[thread.id], model: model
+                    ) else { continue }
                     guard let latest = thread.messages.last else { continue }
                     let event = GmailHistoryEvent.record(
                         id: "backfill:\(accountID):\(latest.id)", historyID: thread.historyID ?? cursor,
@@ -113,7 +136,7 @@ final class DesktopMailViewModel: ObservableObject {
     }
 
     @discardableResult
-    func runWorkflowManually(
+    public func runWorkflowManually(
         model: DesktopAppModel,
         workflowID: String,
         title: String,
@@ -169,20 +192,48 @@ final class DesktopMailViewModel: ObservableObject {
 
     private func pollWorkflowBindings(model: DesktopAppModel, announce: Bool) async {
         let definitions = Dictionary(uniqueKeysWithValues: model.workflowDefinitions.map { ($0.id, $0) })
-        let bindings = model.workflowTriggerBindings().filter {
-            $0.enabled && $0.trigger == .email && $0.source == "gmail" && definitions[$0.workflowID]?.enabled == true
+        let timestamp = Int64(Date().timeIntervalSince1970 * 1_000)
+        let health = Dictionary(uniqueKeysWithValues: model.workflowTriggerHealth.map { ($0.bindingID, $0) })
+        let eligibleBindings = model.workflowTriggerBindings().filter {
+            $0.enabled && definitions[$0.workflowID]?.enabled == true
+                && (health[$0.id]?.nextAttemptAtUnixMillis ?? Int64.min) <= timestamp
         }
-        guard !bindings.isEmpty else { return }
+        let emailBindings = eligibleBindings.filter { $0.trigger == .email && $0.source == "gmail" }
+        let calendarBindings = eligibleBindings.filter {
+            $0.trigger == .calendar && $0.source == "google-calendar"
+        }
+        guard !emailBindings.isEmpty || !calendarBindings.isEmpty else { return }
         var observedEpisodes = 0
         var failures: [String] = []
-        for binding in bindings {
+        var ownershipByAccount: [String: [String: DesktopWorkflowOwnershipPolicyRecord]] = [:]
+        for binding in emailBindings {
             for accountID in binding.accountIDs {
                 do {
+                    let ownership: [String: DesktopWorkflowOwnershipPolicyRecord]
+                    if let cached = ownershipByAccount[accountID] {
+                        ownership = cached
+                    } else {
+                        var resolved: [String: DesktopWorkflowOwnershipPolicyRecord] = [:]
+                        let policies = model.snapshot.operations.workflows.ownershipPolicies
+                            .filter { $0.enabled && $0.accountID == accountID }
+                            .sorted { ($0.priority, $0.id) > ($1.priority, $1.id) }
+                        for policy in policies {
+                            let threadIDs = try await service.matchingGmailThreadIDs(
+                                accountID: accountID, query: policy.sourceFilter
+                            )
+                            for threadID in threadIDs where resolved[threadID] == nil {
+                                resolved[threadID] = policy
+                            }
+                        }
+                        ownership = resolved
+                        ownershipByAccount[accountID] = resolved
+                    }
                     guard let cursor = binding.lastCursor else {
                         _ = model.advanceWorkflowTriggerCursor(
                             id: binding.id,
                             cursor: try await service.gmailHistoryCursor(accountID: accountID)
                         )
+                        _ = model.recordWorkflowTriggerSuccess(bindingID: binding.id, accountID: accountID)
                         continue
                     }
                     let matching = try await service.matchingGmailThreadIDs(
@@ -198,6 +249,9 @@ final class DesktopMailViewModel: ObservableObject {
                     case let .events(events, nextCursor):
                         for event in events where matching.contains(event.threadID) {
                             let thread = try await service.readMailThread(accountID: accountID, threadID: event.threadID)
+                            guard mayObserveWorkflowThread(
+                                thread, binding: binding, matchingPolicy: ownership[thread.id], model: model
+                            ) else { continue }
                             if try await ingestWorkflowThread(
                                 thread,
                                 event: event,
@@ -207,9 +261,16 @@ final class DesktopMailViewModel: ObservableObject {
                             ) { observedEpisodes += 1 }
                         }
                         _ = model.advanceWorkflowTriggerCursor(id: binding.id, cursor: nextCursor)
+                        _ = model.recordWorkflowTriggerSuccess(
+                            bindingID: binding.id, accountID: accountID,
+                            cursorLagEstimate: events.count
+                        )
                     case .fullSyncRequired:
                         for threadID in matching.sorted() {
                             let thread = try await service.readMailThread(accountID: accountID, threadID: threadID)
+                            guard mayObserveWorkflowThread(
+                                thread, binding: binding, matchingPolicy: ownership[thread.id], model: model
+                            ) else { continue }
                             guard let latest = thread.messages.last else { continue }
                             let event = GmailHistoryEvent.record(
                                 id: "full-sync:\(accountID):\(latest.id)",
@@ -231,9 +292,57 @@ final class DesktopMailViewModel: ObservableObject {
                             id: binding.id,
                             cursor: try await service.gmailHistoryCursor(accountID: accountID)
                         )
+                        _ = model.recordWorkflowTriggerSuccess(
+                            bindingID: binding.id, accountID: accountID,
+                            cursorLagEstimate: matching.count
+                        )
                     }
                 } catch {
                     failures.append("\(binding.workflowID): \(error.localizedDescription)")
+                    let detail = error.localizedDescription
+                    let lower = detail.lowercased()
+                    _ = model.recordWorkflowTriggerFailure(
+                        bindingID: binding.id, code: String(reflecting: type(of: error)),
+                        summary: detail, accountID: accountID,
+                        authenticationRequired: lower.contains("authoriz") || lower.contains("authentic")
+                            || lower.contains("credential") || lower.contains("token")
+                    )
+                }
+            }
+        }
+        for binding in calendarBindings {
+            for accountID in binding.accountIDs {
+                do {
+                    let observation = try await service.observeCalendarEvents(
+                        accountID: accountID,
+                        calendarID: binding.sourceFilter,
+                        syncToken: binding.lastCursor
+                    )
+                    if binding.lastCursor != nil {
+                        for event in observation.events {
+                            if ingestWorkflowCalendarEvent(event, binding: binding, model: model) {
+                                observedEpisodes += 1
+                            }
+                        }
+                    }
+                    _ = model.advanceWorkflowTriggerCursor(
+                        id: binding.id, cursor: observation.nextSyncToken
+                    )
+                    _ = model.recordWorkflowTriggerSuccess(
+                        bindingID: binding.id, accountID: accountID,
+                        cursorLagEstimate: observation.events.count
+                    )
+                } catch {
+                    failures.append("\(binding.workflowID): \(error.localizedDescription)")
+                    let detail = error.localizedDescription
+                    let lower = detail.lowercased()
+                    _ = model.recordWorkflowTriggerFailure(
+                        bindingID: binding.id,
+                        code: String(reflecting: type(of: error)), summary: detail,
+                        accountID: accountID,
+                        authenticationRequired: lower.contains("authoriz") || lower.contains("authentic")
+                            || lower.contains("credential") || lower.contains("token")
+                    )
                 }
             }
         }
@@ -243,6 +352,156 @@ final class DesktopMailViewModel: ObservableObject {
                 : "Observed \(observedEpisodes) new episode(s). \(failures.count) scoped trigger(s) need attention."
         }
         await executeQueuedWorkflowRuns(model: model)
+    }
+
+    private func ingestWorkflowCalendarEvent(
+        _ event: CalendarEventSnapshot,
+        binding: DesktopWorkflowTriggerBindingRecord,
+        model: DesktopAppModel
+    ) -> Bool {
+        guard let storage = model.workflowStorage(workflowID: binding.workflowID) else { return false }
+        let payloadObject: [String: Any] = [
+            "provider": event.provider.rawValue,
+            "accountID": event.accountID,
+            "calendarID": event.calendarID,
+            "eventID": event.eventID,
+            "revision": event.revision,
+            "title": event.title,
+            "startAtUnixMillis": event.startAtUnixMillis,
+            "endAtUnixMillis": event.endAtUnixMillis,
+            "timeZoneIdentifier": event.timeZoneIdentifier,
+            "isAllDay": event.isAllDay,
+            "recurrence": event.recurrence,
+        ]
+        let timestamp = Int64(Date().timeIntervalSince1970 * 1_000)
+        let eventDigest = SHA256.hash(data: Data(event.eventID.utf8))
+            .prefix(6).map { String(format: "%02x", $0) }.joined()
+        let revisionDigest = SHA256.hash(data: Data(event.revision.utf8))
+            .prefix(6).map { String(format: "%02x", $0) }.joined()
+        guard let payload = try? JSONSerialization.data(
+            withJSONObject: payloadObject, options: [.sortedKeys, .withoutEscapingSlashes]
+        ), let artifact = try? storage.importArtifact(
+            data: payload,
+            filename: "calendar-\(eventDigest)-\(revisionDigest).json",
+            mediaType: "application/json", createdAtUnixMillis: timestamp
+        ), let eventID = model.observeWorkflowExternalEvent(
+            source: "google-calendar", accountID: event.accountID,
+            conversationID: "\(event.calendarID):\(event.eventID)",
+            messageID: event.revision, cursor: binding.lastCursor,
+            payloadDigest: artifact.sha256,
+            deduplicationKey: "google-calendar:\(event.accountID):\(event.calendarID):\(event.eventID):\(event.revision)"
+        ) else { return false }
+        if model.snapshot.operations.workflows.episodes.contains(where: { $0.sourceEventID == eventID }) {
+            return false
+        }
+        let conversationID = "\(event.calendarID):\(event.eventID)"
+        var item = model.workflowWorkItems(accountID: event.accountID, conversationID: conversationID)
+            .first { $0.workflowID == binding.workflowID }
+        if item == nil, let workItemID = model.createWorkflowWorkItem(
+            workflowID: binding.workflowID, title: event.title,
+            goal: "Handle changes to this event under the installed workflow contract."
+        ) {
+            _ = model.bindWorkflowConversation(
+                workItemID: workItemID, source: "google-calendar", accountID: event.accountID,
+                conversationID: conversationID, relationship: .primary,
+                reason: "Matched the reviewed Google Calendar trigger scope.",
+                confidence: 1, requiresReview: false,
+                firstMessageID: event.revision, latestMessageID: event.revision
+            )
+            item = model.workflowWorkItems.first { $0.id == workItemID }
+        }
+        guard let item,
+              let episodeID = model.createWorkflowEpisode(
+                workItemID: item.id, sourceEventID: eventID, sourceMessageID: event.revision,
+                intent: model.workflowEpisodes(workItemID: item.id).isEmpty ? .request : .continuation,
+                summary: "Calendar event changed: \(event.title)",
+                deltaSummary: "Observed revision \(event.revision)"
+              ) else { return false }
+        _ = model.bindWorkflowArtifactRole(
+            workflowID: binding.workflowID, workItemID: item.id, episodeID: episodeID,
+            role: "trigger-payload", artifact: artifact,
+            createdByRunID: "google-calendar:\(event.eventID):\(event.revision)"
+        )
+        guard let contextID = model.compileWorkflowContext(
+            workItemID: item.id, episodeID: episodeID,
+            request: "Handle the observed change to \(event.title).",
+            references: [.reference(
+                id: eventID, kind: "calendar-event", label: event.title,
+                sourceID: "google-calendar:\(event.accountID):\(event.calendarID):\(event.eventID)",
+                digest: artifact.sha256, included: true,
+                reason: "Exact incremental Calendar event revision.",
+                estimatedTokens: max(1, min(payload.count / 4, 2_000)),
+                content: String(data: payload, encoding: .utf8)
+            )]
+        ) else { return false }
+        return model.queueWorkflowRun(
+            workItemID: item.id, episodeID: episodeID, contextSnapshotID: contextID
+        ) != nil
+    }
+
+    private func mayObserveWorkflowThread(
+        _ thread: GmailThreadDetailSnapshot,
+        binding: DesktopWorkflowTriggerBindingRecord,
+        matchingPolicy: DesktopWorkflowOwnershipPolicyRecord?,
+        model: DesktopAppModel
+    ) -> Bool {
+        if let matchingPolicy,
+           matchingPolicy.workflowID != binding.workflowID,
+           matchingPolicy.mode != .sharedObservation {
+            return false
+        }
+        let mode: DesktopWorkflowOwnershipMode = matchingPolicy?.workflowID == binding.workflowID
+            ? matchingPolicy?.mode ?? .sharedObservation
+            : .sharedObservation
+        return switch model.claimWorkflowConversation(
+            workflowID: binding.workflowID, accountID: thread.accountID,
+            conversationID: thread.id, mode: mode
+        ) {
+        case .acquired, .shared: true
+        case .blocked: false
+        }
+    }
+
+    private func dispatchDueSchedules(model: DesktopAppModel) {
+        for schedule in model.claimDueWorkflowSchedules() {
+            guard let definition = model.workflowDefinitions.first(where: {
+                $0.id == schedule.workflowID && $0.enabled
+            }), let scheduledAt = schedule.nextRunAtUnixMillis,
+                  let storage = model.workflowStorage(workflowID: schedule.workflowID) else { continue }
+            let payloadObject: [String: Any] = [
+                "trigger": "schedule", "scheduleID": schedule.id,
+                "scheduledAtUnixMillis": scheduledAt,
+                "timeZoneIdentifier": schedule.timeZoneIdentifier,
+            ]
+            guard let payload = try? JSONSerialization.data(
+                withJSONObject: payloadObject, options: [.sortedKeys, .withoutEscapingSlashes]
+            ), let artifact = try? storage.importArtifact(
+                data: payload, filename: "schedule-\(schedule.id)-\(scheduledAt).json",
+                mediaType: "application/json", createdAtUnixMillis: scheduledAt
+            ), let eventID = model.observeWorkflowExternalEvent(
+                source: "schedule", accountID: "local", conversationID: schedule.id,
+                messageID: "\(scheduledAt)", cursor: "\(scheduledAt)",
+                payloadDigest: artifact.sha256,
+                deduplicationKey: "workflow-schedule:\(schedule.id):\(scheduledAt)"
+            ), let workItemID = model.createWorkflowWorkItem(
+                workflowID: definition.id,
+                title: "\(definition.name) · \(Date(timeIntervalSince1970: Double(scheduledAt) / 1_000).formatted(date: .abbreviated, time: .shortened))",
+                goal: "Run the exact scheduled workflow revision."
+            ), let episodeID = model.createWorkflowEpisode(
+                workItemID: workItemID, sourceEventID: eventID, sourceMessageID: "\(scheduledAt)",
+                intent: .request, summary: "Scheduled invocation", deltaSummary: "Due schedule \(schedule.id)"
+            ), let contextID = model.compileWorkflowContext(
+                workItemID: workItemID, episodeID: episodeID,
+                request: "Run the scheduled workflow.", references: [.reference(
+                    id: eventID, kind: "schedule", label: "Scheduled invocation",
+                    sourceID: schedule.id, digest: artifact.sha256, included: true,
+                    reason: "Exact durable schedule occurrence", estimatedTokens: 32
+                )]
+            ) else { continue }
+            _ = model.queueWorkflowRun(
+                workItemID: workItemID, episodeID: episodeID, contextSnapshotID: contextID
+            )
+        }
     }
 
     private func ingestWorkflowThread(
@@ -469,6 +728,40 @@ final class DesktopMailViewModel: ObservableObject {
         let router = DesktopWorkflowCapabilityRouter(fallback: fallback)
         let effectCoordinator = DesktopWorkflowEffectCoordinator(model: model)
         effectCoordinator.register(DesktopGmailWorkflowConnector(service: service))
+        var componentIssues: [String] = []
+        for connector in model.snapshot.operations.workflows.connectorInstallations
+            .filter({ $0.enabled && $0.qualified }) {
+            guard let binding = model.snapshot.operations.workflows.connectorBindings.first(where: {
+                $0.connectorID == connector.connectorID && $0.enabled
+            }), let capability = model.workflowCapabilityInstallation(capabilityID: connector.connectorID),
+                  capability.enabled, capability.lastTestPassed else {
+                componentIssues.append("\(connector.name) needs an enabled, qualified capability and binding.")
+                continue
+            }
+            do {
+                let directory = capabilityStore.installationDirectory(
+                    capabilityID: capability.capabilityID, version: capability.version
+                )
+                let package = try DesktopWorkflowProcessConnector.loadPackageManifest(from: directory)
+                let manifest = try capabilityStore.manifest(for: capability)
+                #if canImport(Security)
+                let processConnector = try DesktopWorkflowProcessConnector(
+                    package: package, capability: manifest, installationDirectory: directory,
+                    scratchRoot: environment.applicationSupportRoot.appendingPathComponent("WorkflowScratch", isDirectory: true),
+                    binding: binding,
+                    secretResolver: DesktopWorkflowKeychainSecretResolver(
+                        service: "\(environment.bundleIdentifier).workflow-connector"
+                    )
+                )
+                effectCoordinator.register(processConnector)
+                #else
+                componentIssues.append("\(connector.name) requires Keychain support on this platform.")
+                #endif
+            } catch {
+                componentIssues.append("\(connector.name): \(error.localizedDescription)")
+            }
+        }
+        workflowComponentIssues = componentIssues
         workflowEffectCoordinator = effectCoordinator
         await router.register(capabilityID: "kaname.context.compile") { invocation, _ in
             .completed(output: invocation.input, artifactIDs: [])
@@ -772,7 +1065,7 @@ final class DesktopMailViewModel: ObservableObject {
         )
     }
 
-    func requestWorkflowEffectApproval(model: DesktopAppModel, effect: DesktopWorkflowEffectRecord) {
+    public func requestWorkflowEffectApproval(model: DesktopAppModel, effect: DesktopWorkflowEffectRecord) {
         let preview = model.snapshot.operations.workflows.effectPreviews.first(where: { $0.effectID == effect.id })
         guard effect.approvalID == nil,
               let approvalID = model.createApproval(
@@ -792,7 +1085,7 @@ final class DesktopMailViewModel: ObservableObject {
         message = "The exact workflow email effect is ready in Inbox."
     }
 
-    func executeWorkflowEffect(model: DesktopAppModel, effect: DesktopWorkflowEffectRecord) {
+    public func executeWorkflowEffect(model: DesktopAppModel, effect: DesktopWorkflowEffectRecord) {
         if model.snapshot.operations.workflows.effectPreviews.contains(where: {
             $0.effectID == effect.id && $0.connectorID == "kaname.gmail"
         }) {
@@ -878,7 +1171,7 @@ final class DesktopMailViewModel: ObservableObject {
         }
     }
 
-    func completeWorkflowHumanReview(model: DesktopAppModel, runID: String, stepID: String) {
+    public func completeWorkflowHumanReview(model: DesktopAppModel, runID: String, stepID: String) {
         let digest = SHA256.hash(data: Data("human-review:\(runID):\(stepID)".utf8))
             .map { String(format: "%02x", $0) }.joined()
         guard model.resumeWorkflowStepAfterEffect(runID: runID, stepID: stepID, outputDigest: digest) else {
@@ -889,7 +1182,7 @@ final class DesktopMailViewModel: ObservableObject {
         _Concurrency.Task { await executeQueuedWorkflowRuns(model: model) }
     }
 
-    func search(accounts: [NativeGoogleAccountSnapshot], model: DesktopAppModel, loadMore: Bool = false) {
+    public func search(accounts: [NativeGoogleAccountSnapshot], model: DesktopAppModel, loadMore: Bool = false) {
         guard !isBusy, !accounts.isEmpty else { return }
         isBusy = true
         if !loadMore {
@@ -928,20 +1221,20 @@ final class DesktopMailViewModel: ObservableObject {
         }
     }
 
-    func select(_ thread: GmailThreadDetailSnapshot) {
+    public func select(_ thread: GmailThreadDetailSnapshot) {
         selectedThread = thread
         activeActionID = nil
         localSummary = nil
     }
 
-    func summarize(_ thread: GmailThreadDetailSnapshot) {
+    public func summarize(_ thread: GmailThreadDetailSnapshot) {
         let participants = Array(Set(thread.messages.map(\.sender).filter { !$0.isEmpty })).sorted()
         let latest = thread.messages.last?.body.trimmingCharacters(in: .whitespacesAndNewlines) ?? thread.snippet
         let bounded = String(latest.prefix(600))
         localSummary = "\(thread.messages.count) message(s) involving \(participants.joined(separator: ", ")). Latest content: \(bounded)"
     }
 
-    func refreshSelected(model: DesktopAppModel) {
+    public func refreshSelected(model: DesktopAppModel) {
         guard !isBusy, let selectedThread else { return }
         isBusy = true
         Task {
@@ -959,14 +1252,14 @@ final class DesktopMailViewModel: ObservableObject {
         }
     }
 
-    func loadLabels(accountID: String) {
+    public func loadLabels(accountID: String) {
         Task {
             do { labels[accountID] = try await service.listGmailLabels(accountID: accountID) }
             catch { message = error.localizedDescription }
         }
     }
 
-    func proposeThreadMutation(
+    public func proposeThreadMutation(
         model: DesktopAppModel,
         thread: GmailThreadDetailSnapshot,
         mutation: GmailThreadMutation,
@@ -991,7 +1284,7 @@ final class DesktopMailViewModel: ObservableObject {
         message = standingRuleID == nil ? "Review the exact action before requesting approval." : "Standing-rule action is ready to run and reconcile."
     }
 
-    func requestActiveApproval(model: DesktopAppModel) {
+    public func requestActiveApproval(model: DesktopAppModel) {
         guard let action = activeAction(model: model), action.approvalID == nil else { return }
         guard let approvalID = model.createApproval(
             threadID: nil,
@@ -1006,7 +1299,7 @@ final class DesktopMailViewModel: ObservableObject {
         message = "This exact Gmail action is ready in Inbox."
     }
 
-    func executeActiveThreadMutation(model: DesktopAppModel, mutation: GmailThreadMutation) {
+    public func executeActiveThreadMutation(model: DesktopAppModel, mutation: GmailThreadMutation) {
         guard !isBusy, let action = authorizedAction(model: model), let threadID = action.threadID else {
             message = "Approve this exact action in Inbox first."
             return
@@ -1040,7 +1333,7 @@ final class DesktopMailViewModel: ObservableObject {
         }
     }
 
-    func proposeOutbound(model: DesktopAppModel, draft: DesktopEmailDraft, account: NativeGoogleAccountSnapshot, send: Bool) {
+    public func proposeOutbound(model: DesktopAppModel, draft: DesktopEmailDraft, account: NativeGoogleAccountSnapshot, send: Bool) {
         let outbound = GmailOutboundMessage(recipients: draft.recipients, subject: draft.subject, body: draft.body)
         do {
             let target = try send
@@ -1060,7 +1353,7 @@ final class DesktopMailViewModel: ObservableObject {
         } catch { message = error.localizedDescription }
     }
 
-    func executeOutbound(model: DesktopAppModel, draft: DesktopEmailDraft, send: Bool) {
+    public func executeOutbound(model: DesktopAppModel, draft: DesktopEmailDraft, send: Bool) {
         guard !isBusy, let action = authorizedAction(model: model) else {
             message = "Approve this exact outbound message in Inbox first."
             return
@@ -1089,7 +1382,7 @@ final class DesktopMailViewModel: ObservableObject {
         }
     }
 
-    func saveAttachment(accountID: String, attachment: GmailAttachmentSnapshot) {
+    public func saveAttachment(accountID: String, attachment: GmailAttachmentSnapshot) {
         let panel = NSSavePanel()
         panel.nameFieldStringValue = attachment.filename
         panel.message = "Save this attachment after downloading it from the selected Gmail account."
@@ -1109,7 +1402,7 @@ final class DesktopMailViewModel: ObservableObject {
         }
     }
 
-    func createStandingRule(
+    public func createStandingRule(
         model: DesktopAppModel,
         account: NativeGoogleAccountSnapshot,
         name: String,
@@ -1128,7 +1421,7 @@ final class DesktopMailViewModel: ObservableObject {
         message = "Standing rule saved visibly for \(account.identity); it can be paused at any time."
     }
 
-    func runStandingRule(model: DesktopAppModel, rule: DesktopMailStandingRule) {
+    public func runStandingRule(model: DesktopAppModel, rule: DesktopMailStandingRule) {
         guard !isBusy, rule.enabled else {
             message = rule.enabled ? "Another Gmail operation is still running." : "Enable this rule before running it."
             return

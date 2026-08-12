@@ -623,6 +623,18 @@ public struct DesktopWorkflowPlatformState: Codable, Equatable, Sendable {
     public var executionReceipts: [DesktopWorkflowExecutionReceiptRecord]
     public var authorityGrants: [DesktopWorkflowAuthorityGrantRecord]
     public var effectPreviews: [DesktopWorkflowEffectPreviewRecord]
+    public var triggerHealth: [DesktopWorkflowTriggerHealthRecord]
+    public var ownershipPolicies: [DesktopWorkflowOwnershipPolicyRecord]
+    public var ownershipClaims: [DesktopWorkflowOwnershipClaimRecord]
+    public var connectorInstallations: [DesktopWorkflowConnectorInstallationRecord]
+    public var connectorBindings: [DesktopWorkflowConnectorBindingRecord]
+    public var qualificationRuns: [DesktopWorkflowQualificationRunRecord]
+    public var rendererInstallations: [DesktopWorkflowRendererInstallationRecord]
+    public var renderReceipts: [DesktopWorkflowRenderReceiptRecord]
+    public var subflows: [DesktopWorkflowSubflowRecord]
+    public var studioDrafts: [DesktopWorkflowStudioDraftRecord]
+    public var scheduleBindings: [DesktopWorkflowScheduleBindingRecord]
+    public var migrationAssessments: [DesktopWorkflowMigrationAssessmentRecord]
 
     public static let empty = Self(
         definitions: [], revisions: [], triggerBindings: [], workItems: [], conversationBindings: [], episodes: [], runs: [],
@@ -630,14 +642,19 @@ public struct DesktopWorkflowPlatformState: Codable, Equatable, Sendable {
         stateRecords: [], artifactRoles: [],
         capabilityInstallations: DesktopWorkflowBuiltinCapabilities.installations(at: 0), runtimeClaims: [],
         transitionRecords: [], reviewRequests: [], waitSubscriptions: [], datasetRows: [], validatorReports: [],
-        executionReceipts: [], authorityGrants: [], effectPreviews: []
+        executionReceipts: [], authorityGrants: [], effectPreviews: [], triggerHealth: [], ownershipPolicies: [],
+        ownershipClaims: [], connectorInstallations: [], connectorBindings: [], qualificationRuns: [],
+        rendererInstallations: [], renderReceipts: [], subflows: [], studioDrafts: [], scheduleBindings: [],
+        migrationAssessments: []
     )
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
         case definitions, revisions, triggerBindings, workItems, conversationBindings, episodes, runs, stepAttempts, facts
         case contextSnapshots, validations, effects, externalEvents, artifactEdges, stateRecords, artifactRoles
         case capabilityInstallations, runtimeClaims, transitionRecords, reviewRequests, waitSubscriptions, datasetRows
-        case validatorReports, executionReceipts, authorityGrants, effectPreviews
+        case validatorReports, executionReceipts, authorityGrants, effectPreviews, triggerHealth, ownershipPolicies
+        case ownershipClaims, connectorInstallations, connectorBindings, qualificationRuns, rendererInstallations
+        case renderReceipts, subflows, studioDrafts, scheduleBindings, migrationAssessments
     }
 
 }
@@ -673,6 +690,18 @@ extension DesktopWorkflowPlatformState {
         executionReceipts = try Self.decodeArray([DesktopWorkflowExecutionReceiptRecord].self, key: .executionReceipts, from: container)
         authorityGrants = try Self.decodeArray([DesktopWorkflowAuthorityGrantRecord].self, key: .authorityGrants, from: container)
         effectPreviews = try Self.decodeArray([DesktopWorkflowEffectPreviewRecord].self, key: .effectPreviews, from: container)
+        triggerHealth = try Self.decodeArray([DesktopWorkflowTriggerHealthRecord].self, key: .triggerHealth, from: container)
+        ownershipPolicies = try Self.decodeArray([DesktopWorkflowOwnershipPolicyRecord].self, key: .ownershipPolicies, from: container)
+        ownershipClaims = try Self.decodeArray([DesktopWorkflowOwnershipClaimRecord].self, key: .ownershipClaims, from: container)
+        connectorInstallations = try Self.decodeArray([DesktopWorkflowConnectorInstallationRecord].self, key: .connectorInstallations, from: container)
+        connectorBindings = try Self.decodeArray([DesktopWorkflowConnectorBindingRecord].self, key: .connectorBindings, from: container)
+        qualificationRuns = try Self.decodeArray([DesktopWorkflowQualificationRunRecord].self, key: .qualificationRuns, from: container)
+        rendererInstallations = try Self.decodeArray([DesktopWorkflowRendererInstallationRecord].self, key: .rendererInstallations, from: container)
+        renderReceipts = try Self.decodeArray([DesktopWorkflowRenderReceiptRecord].self, key: .renderReceipts, from: container)
+        subflows = try Self.decodeArray([DesktopWorkflowSubflowRecord].self, key: .subflows, from: container)
+        studioDrafts = try Self.decodeArray([DesktopWorkflowStudioDraftRecord].self, key: .studioDrafts, from: container)
+        scheduleBindings = try Self.decodeArray([DesktopWorkflowScheduleBindingRecord].self, key: .scheduleBindings, from: container)
+        migrationAssessments = try Self.decodeArray([DesktopWorkflowMigrationAssessmentRecord].self, key: .migrationAssessments, from: container)
     }
 
     private static func decodeArray<Element: Decodable>(

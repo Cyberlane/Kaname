@@ -1,6 +1,10 @@
+import KanameConnectivity
 import KanameDesktop
 import KanamePrototypeUI
 import SwiftUI
+#if canImport(Security)
+import Security
+#endif
 
 struct WorkflowCapabilityInstallationRow: View {
     @ObservedObject var model: DesktopAppModel
@@ -38,6 +42,487 @@ struct WorkflowCapabilityInstallationRow: View {
         }
         .padding(10)
         .background(Nord.polarNight1.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+struct WorkflowConnectorInstallationRow: View {
+    @ObservedObject var model: DesktopAppModel
+    let connector: DesktopWorkflowConnectorInstallationRecord
+    let onConfigure: () -> Void
+
+    private var bindingCount: Int {
+        model.snapshot.operations.workflows.connectorBindings.filter {
+            $0.connectorID == connector.connectorID && $0.enabled
+        }.count
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: connector.qualified ? "cable.connector.horizontal" : "cable.connector.slash")
+                .foregroundStyle(connector.qualified ? Nord.auroraGreen : Nord.auroraYellow)
+                .frame(width: 22)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(connector.name).font(.subheadline.weight(.semibold))
+                Text("\(connector.connectorID) · \(connector.version) · \(connector.trust.rawValue)")
+                    .font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
+                Text("\(connector.effectKinds.count) effect contract\(connector.effectKinds.count == 1 ? "" : "s") · \(connector.allowedHosts.count) reviewed host\(connector.allowedHosts.count == 1 ? "" : "s") · \(bindingCount) binding\(bindingCount == 1 ? "" : "s")")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Configure…", action: onConfigure)
+            Toggle("Enabled", isOn: Binding(
+                get: { connector.enabled },
+                set: { _ = model.setWorkflowConnectorEnabled(id: connector.id, enabled: $0) }
+            ))
+            .labelsHidden()
+            .disabled(!connector.qualified || bindingCount == 0)
+        }
+        .padding(10)
+        .background(Nord.polarNight1.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+struct WorkflowConnectorBindingSheet: View {
+    @ObservedObject var model: DesktopAppModel
+    let connector: DesktopWorkflowConnectorInstallationRecord
+    @Environment(\.dismiss) private var dismiss
+    @State private var accountID = ""
+    @State private var secretValues: [String: String] = [:]
+    @State private var message: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Configure \(connector.name)").font(.title2.weight(.bold))
+            Text("This binding grants only the listed hosts and effect contracts. Secret values are stored in Keychain; workflows receive references, never credentials.")
+                .font(.callout).foregroundStyle(.secondary)
+            TextField("Optional account identity", text: $accountID)
+            if !connector.allowedHosts.isEmpty {
+                LabeledContent("Network hosts", value: connector.allowedHosts.joined(separator: ", "))
+            }
+            LabeledContent("Effects", value: connector.effectKinds.joined(separator: ", "))
+            ForEach(connector.secretSlots, id: \.self) { slot in
+                SecureField("Secret for \(slot)", text: Binding(
+                    get: { secretValues[slot, default: ""] },
+                    set: { secretValues[slot] = $0 }
+                ))
+                .textContentType(.password)
+            }
+            if let message {
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(Nord.auroraYellow)
+            }
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                Button("Save binding", action: save)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!connector.secretSlots.allSatisfy {
+                        secretValues[$0]?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                    })
+            }
+        }
+        .padding(24)
+        .frame(width: 560)
+    }
+
+    private func save() {
+        #if canImport(Security)
+        do {
+            var references: [String: String] = [:]
+            for slot in connector.secretSlots {
+                guard let value = secretValues[slot], let data = value.data(using: .utf8), !data.isEmpty else {
+                    throw DesktopWorkflowOperationalError.invalidConfiguration("every declared secret is required")
+                }
+                let reference = "\(connector.connectorID).\(UUID().uuidString.lowercased())"
+                let query: [String: Any] = [
+                    kSecClass as String: kSecClassGenericPassword,
+                    kSecAttrService as String: "\(KanameDesktopEnvironment.current.bundleIdentifier).workflow-connector",
+                    kSecAttrAccount as String: reference,
+                ]
+                SecItemDelete(query as CFDictionary)
+                var addition = query
+                addition[kSecValueData as String] = data
+                guard SecItemAdd(addition as CFDictionary, nil) == errSecSuccess else {
+                    throw DesktopWorkflowOperationalError.componentUnavailable
+                }
+                references[slot] = reference
+            }
+            guard model.bindWorkflowConnector(
+                connectorID: connector.connectorID,
+                accountID: accountID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : accountID,
+                secretReferences: references,
+                grantedHosts: connector.allowedHosts,
+                grantedEffectKinds: connector.effectKinds
+            ) != nil else { throw DesktopWorkflowOperationalError.componentUnavailable }
+            dismiss()
+        } catch { message = error.localizedDescription }
+        #else
+        message = "Keychain is unavailable on this platform."
+        #endif
+    }
+}
+
+struct WorkflowRendererInstallationRow: View {
+    @ObservedObject var model: DesktopAppModel
+    let renderer: DesktopWorkflowRendererInstallationRecord
+
+    var body: some View {
+        LabeledContent {
+            Toggle("Enabled", isOn: Binding(
+                get: { renderer.enabled },
+                set: { _ = model.setWorkflowRendererEnabled(id: renderer.id, enabled: $0) }
+            ))
+            .labelsHidden()
+            .disabled(!renderer.qualified)
+        } label: {
+            Label {
+                Grid(alignment: .leading, verticalSpacing: 3) {
+                    GridRow { Text(renderer.name).font(.subheadline.weight(.semibold)) }
+                    GridRow {
+                        Text("\(renderer.rendererID) · \(renderer.version)")
+                            .font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
+                    }
+                    GridRow {
+                        Text([
+                            renderer.supportsRecalculation ? "Recalculation" : nil,
+                            renderer.supportsRangeSelection ? "Range selection" : nil,
+                            renderer.mediaTypes.joined(separator: ", "),
+                        ].compactMap { $0 }.joined(separator: " · "))
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                    }
+                }
+            } icon: {
+                Image(systemName: renderer.qualified ? "rectangle.3.group.fill" : "rectangle.3.group.bubble")
+                    .foregroundStyle(renderer.qualified ? Nord.auroraGreen : Nord.auroraYellow)
+            }
+        }
+        .padding(10)
+        .background(Nord.polarNight1.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+struct WorkflowQualificationSummaryRow: View {
+    let run: DesktopWorkflowQualificationRunRecord
+
+    var body: some View {
+        DisclosureGroup {
+            VStack(alignment: .leading, spacing: 5) {
+                ForEach(run.assertions) { assertion in
+                    Label(assertion.detail, systemImage: assertion.passed ? "checkmark.circle" : "xmark.circle")
+                        .foregroundStyle(assertion.passed ? Nord.auroraGreen : Nord.auroraYellow)
+                }
+                Text("Input artifacts \(run.artifactDigests.count) · output artifacts \(run.outputArtifactDigests.count) · \(run.elapsedMilliseconds) ms")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            .padding(.top, 6)
+        } label: {
+            HStack {
+                Label(run.fixtureName, systemImage: run.outcome == .passed ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                    .foregroundStyle(run.outcome == .passed ? Nord.auroraGreen : Nord.auroraYellow)
+                Spacer()
+                Text(run.componentID).font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+        .font(.caption)
+    }
+}
+
+struct WorkflowStudioSheet: View {
+    @ObservedObject var model: DesktopAppModel
+    let draftID: String
+    let onPublished: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var steps: [DesktopWorkflowStepDefinition] = []
+    @State private var selectedStepID: String?
+    @State private var selectedSubflowIDs = Set<String>()
+    @State private var selectedTriggers: Set<DesktopWorkflowTriggerKind> = [.manual]
+    @State private var selectedPermissions = Set<DesktopWorkflowPermission>()
+    @State private var message: String?
+
+    private var draft: DesktopWorkflowStudioDraftRecord? {
+        model.snapshot.operations.workflows.studioDrafts.first { $0.id == draftID }
+    }
+
+    private var selectedStepIndex: Int? {
+        selectedStepID.flatMap { id in steps.firstIndex { $0.id == id } }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .top) {
+                Grid(alignment: .leading, verticalSpacing: 4) {
+                    GridRow { Text(draft?.name ?? "Workflow Studio").font(.title2.weight(.bold)) }
+                    GridRow {
+                        Text("Build a readable outline; Kaname generates and validates the exact graph and permission receipt.")
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
+                if let summary = draft?.validationSummary {
+                    Label(summary, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundStyle(Nord.auroraYellow).frame(maxWidth: 300, alignment: .trailing)
+                } else {
+                    Label("Ready to publish", systemImage: "checkmark.seal.fill")
+                        .font(.caption).foregroundStyle(Nord.auroraGreen)
+                }
+            }
+            .padding(20)
+            Divider()
+            HSplitView {
+                studioOutline.frame(minWidth: 320, idealWidth: 380)
+                studioInspector.frame(minWidth: 360, idealWidth: 430)
+            }
+            Divider()
+            HStack {
+                if let message { Label(message, systemImage: "info.circle").font(.caption).foregroundStyle(.secondary) }
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                Button("Publish disabled") {
+                    save()
+                    if let workflowID = model.publishWorkflowStudioDraft(id: draftID) {
+                        onPublished(workflowID)
+                        dismiss()
+                    } else { message = "Resolve the validation summary before publishing." }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(draft?.validationSummary != nil)
+            }
+            .padding(16)
+        }
+        .frame(width: 900, height: 650)
+        .onAppear(perform: load)
+    }
+
+    private var studioOutline: some View {
+        GroupBox {
+            List(selection: $selectedStepID) {
+                ForEach(Array(steps.enumerated()), id: \.element.id) { index, step in
+                    HStack {
+                        Text("\(index + 1)").font(.caption2.monospacedDigit()).foregroundStyle(.secondary).frame(width: 22)
+                        Image(systemName: studioSymbol(step.kind)).foregroundStyle(Nord.frost1).frame(width: 22)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(step.name)
+                            Text(step.kind.label).font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
+                    .tag(step.id)
+                }
+                .onMove { source, destination in
+                    steps.move(fromOffsets: source, toOffset: destination)
+                    save()
+                }
+                .onDelete { offsets in
+                    steps.remove(atOffsets: offsets)
+                    selectedStepID = steps.first?.id
+                    save()
+                }
+            }
+            .listStyle(.inset)
+            Text("The default outline is keyboard accessible. A canvas is optional and does not own the graph.")
+                .font(.caption2).foregroundStyle(.secondary)
+        } label: {
+            HStack {
+                Text("Outline").font(.headline)
+                Spacer()
+                Menu("Add step", systemImage: "plus") {
+                    ForEach(editableKinds, id: \.self) { kind in
+                        Button(kind.label) { addStep(kind) }
+                    }
+                }
+            }
+        }
+        .padding(18)
+    }
+
+    @ViewBuilder
+    private var studioInspector: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                if let index = selectedStepIndex {
+                    Text("Step inspector").font(.headline)
+                    TextField("Step name", text: Binding(
+                        get: { steps[index].name },
+                        set: { steps[index].name = $0; save() }
+                    ))
+                    Picker("Type", selection: Binding(
+                        get: { steps[index].kind },
+                        set: { replaceKind(at: index, with: $0) }
+                    )) {
+                        ForEach(editableKinds, id: \.self) { Text($0.label).tag($0) }
+                        Text(DesktopWorkflowStepKind.complete.label).tag(DesktopWorkflowStepKind.complete)
+                    }
+                    if steps[index].kind != .complete {
+                        Picker("Capability", selection: Binding(
+                            get: { steps[index].capabilityID ?? "" },
+                            set: { steps[index].capabilityID = $0.isEmpty ? nil : $0; save() }
+                        )) {
+                            Text("Structural step").tag("")
+                            ForEach(model.workflowCapabilityInstallations.filter(\.enabled)) { capability in
+                                Text(capability.name).tag(capability.capabilityID)
+                            }
+                        }
+                    }
+                    Toggle("Blocking", isOn: Binding(
+                        get: { steps[index].blocking },
+                        set: { steps[index].blocking = $0; save() }
+                    ))
+                    Toggle("Safe to retry", isOn: Binding(
+                        get: { steps[index].isIdempotent },
+                        set: { steps[index].isIdempotent = $0; if !$0 { steps[index].retryLimit = 0 }; save() }
+                    ))
+                } else {
+                    BoundaryCallout(
+                        title: "Choose a step",
+                        detail: "Edit one focused stage without losing the workflow outline."
+                    )
+                    .frame(maxWidth: .infinity)
+                    .padding(24)
+                }
+                Divider()
+                Text("Triggers").font(.headline)
+                ForEach(DesktopWorkflowTriggerKind.allCases, id: \.self) { trigger in
+                    Toggle(trigger.label, isOn: setBinding(trigger, in: $selectedTriggers, minimumOne: true))
+                }
+                Divider()
+                DisclosureGroup("Reusable subflows · \(selectedSubflowIDs.count)") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if model.snapshot.operations.workflows.subflows.isEmpty {
+                            Text("Installed subflows appear here with an exact version and typed contract.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        ForEach(model.snapshot.operations.workflows.subflows.filter(\.enabled)) { subflow in
+                            Toggle("\(subflow.name) · \(subflow.version)", isOn: Binding(
+                                get: { selectedSubflowIDs.contains(subflow.id) },
+                                set: { selected in
+                                    if selected { selectedSubflowIDs.insert(subflow.id) }
+                                    else { selectedSubflowIDs.remove(subflow.id) }
+                                    save()
+                                }
+                            ))
+                        }
+                    }
+                    .padding(.top, 8)
+                }
+                DisclosureGroup("Authority · \(selectedPermissions.count)") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(DesktopWorkflowPermission.allCases, id: \.self) { permission in
+                            Toggle(permission.label, isOn: setBinding(permission, in: $selectedPermissions))
+                        }
+                    }
+                    .padding(.top, 8)
+                }
+            }
+            .padding(18)
+        }
+    }
+
+    private var editableKinds: [DesktopWorkflowStepKind] {
+        [.classifyEvent, .correlateWork, .compileContext, .structuredModel, .invokeTool,
+         .registerArtifact, .validate, .effect, .createEmailDraft, .sendEmail]
+    }
+
+    private func load() {
+        guard let draft else { return }
+        selectedTriggers = Set(draft.triggerKinds)
+        selectedPermissions = Set(draft.permissions.permissions)
+        selectedSubflowIDs = Set(draft.subflows.map { "\($0.subflowID)@\($0.version)" })
+        steps = draft.steps
+        if steps.isEmpty {
+            steps = [
+                .init(id: "prepare", name: "Prepare input", kind: .classifyEvent),
+                .init(id: "complete", name: "Complete", kind: .complete),
+            ]
+            save()
+        }
+        selectedStepID = steps.first?.id
+    }
+
+    private func addStep(_ kind: DesktopWorkflowStepKind) {
+        let id = "step-\(UUID().uuidString.lowercased().prefix(8))"
+        let step = DesktopWorkflowStepDefinition(
+            id: id, name: kind.label, kind: kind, capabilityID: defaultCapability(for: kind)
+        )
+        if let terminal = steps.firstIndex(where: { $0.kind == .complete }) { steps.insert(step, at: terminal) }
+        else { steps.append(step); steps.append(.init(id: "complete", name: "Complete", kind: .complete)) }
+        selectedStepID = id
+        save()
+    }
+
+    private func replaceKind(at index: Int, with kind: DesktopWorkflowStepKind) {
+        steps[index].kind = kind
+        steps[index].capabilityID = defaultCapability(for: kind)
+        if kind == .complete {
+            steps.removeAll { $0.id != steps[index].id && $0.kind == .complete }
+            if let moved = steps.firstIndex(where: { $0.id == selectedStepID }) {
+                let terminal = steps.remove(at: moved)
+                steps.append(terminal)
+            }
+        }
+        save()
+    }
+
+    private func save() {
+        guard draft != nil else { return }
+        var chained = steps
+        for index in chained.indices {
+            chained[index].transitions = chained[index].kind == .complete || !chained.indices.contains(index + 1)
+                ? nil : [.init(outcome: .always, targetStepID: chained[index + 1].id)]
+        }
+        steps = chained
+        let subflowRecords = model.snapshot.operations.workflows.subflows.filter { selectedSubflowIDs.contains($0.id) }
+        let references = subflowRecords.map {
+            DesktopWorkflowSubflowReference.pinned(
+                subflowID: $0.subflowID, version: $0.version,
+                inputSchema: $0.inputSchema, outputSchema: $0.outputSchema
+            )
+        }
+        var permissionSet = selectedPermissions
+        subflowRecords.forEach { permissionSet.formUnion($0.permissions.permissions) }
+        let capabilities = Set(chained.compactMap(\.capabilityID))
+            .union(subflowRecords.flatMap { $0.permissions.capabilityIDs })
+        _ = model.updateWorkflowStudioDraft(
+            id: draftID, triggerKinds: Array(selectedTriggers), steps: chained,
+            permissions: .init(permissions: Array(permissionSet), capabilityIDs: Array(capabilities)),
+            subflows: references
+        )
+    }
+
+    private func defaultCapability(for kind: DesktopWorkflowStepKind) -> String? {
+        switch kind {
+        case .compileContext: "kaname.context.compile"
+        case .structuredModel: "kaname.model.structured"
+        case .registerArtifact: "kaname.artifact.register"
+        case .validate: "kaname.validation.run"
+        case .effect: "kaname.connector.effect"
+        case .createEmailDraft: "kaname.email.draft"
+        case .sendEmail: "kaname.email.send"
+        default: nil
+        }
+    }
+
+    private func setBinding<Value: Hashable>(
+        _ value: Value,
+        in selection: Binding<Set<Value>>,
+        minimumOne: Bool = false
+    ) -> Binding<Bool> {
+        Binding(
+            get: { selection.wrappedValue.contains(value) },
+            set: { selected in
+                if selected { selection.wrappedValue.insert(value) }
+                else if !minimumOne || selection.wrappedValue.count > 1 { selection.wrappedValue.remove(value) }
+                save()
+            }
+        )
+    }
+
+    private func studioSymbol(_ kind: DesktopWorkflowStepKind) -> String {
+        switch kind {
+        case .complete: "checkmark.circle"
+        case .effect, .sendEmail, .createEmailDraft: "bolt.horizontal.circle"
+        case .validate: "checkmark.shield"
+        case .structuredModel, .agent: "brain"
+        default: "square.stack.3d.forward.dottedline"
+        }
     }
 }
 
@@ -126,13 +611,18 @@ struct WorkflowWaitRow: View {
     let wait: DesktopWorkflowWaitSubscriptionRecord
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text("Waiting for \(wait.source) · \(wait.state.rawValue)")
+        LabeledContent {
+            Text(
+                [
+                    [wait.accountID, wait.conversationID, wait.correlationValue]
+                        .compactMap { $0 }.joined(separator: " · "),
+                    "Durable correlated subscription",
+                ].joined(separator: "\n")
+            )
+            .font(.caption2).foregroundStyle(.secondary).lineLimit(3).textSelection(.enabled)
+        } label: {
+            Label("Waiting for \(wait.source) · \(wait.state.rawValue)", systemImage: "envelope.badge.clock")
                 .font(.caption.weight(.semibold)).foregroundStyle(Nord.frost1)
-            Divider().opacity(0.35)
-            Text([wait.accountID, wait.conversationID, wait.correlationValue].compactMap { $0 }.joined(separator: " · "))
-                .font(.caption2).foregroundStyle(.secondary).lineLimit(2).textSelection(.enabled)
-            Text("Durable correlated subscription").font(.caption2).foregroundStyle(.secondary)
         }
         .padding(10)
         .background(Nord.polarNight1.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))

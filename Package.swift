@@ -15,6 +15,7 @@ let package = Package(
         .library(name: "KanameConnectivity", targets: ["KanameConnectivity"]),
         .library(name: "KanameMobileSync", targets: ["KanameMobileSync"]),
         .library(name: "KanameDesktop", targets: ["KanameDesktop"]),
+        .library(name: "KanameWorkflowHost", targets: ["KanameWorkflowHost"]),
         .library(name: "KanameFixtures", targets: ["KanameFixtures"]),
         .library(name: "KanamePrototypeUI", targets: ["KanamePrototypeUI"]),
         .executable(name: "KanamePrototype", targets: ["KanamePrototype"]),
@@ -26,6 +27,7 @@ let package = Package(
         .executable(name: "KanameUpdateHelper", targets: ["KanameUpdateHelper"]),
         .executable(name: "KanameDogfoodUpdatePublisher", targets: ["KanameDogfoodUpdatePublisher"]),
         .executable(name: "KanameConversationWorker", targets: ["KanameConversationWorker"]),
+        .executable(name: "KanameWorkflowWorker", targets: ["KanameWorkflowWorker"]),
         .executable(name: "KanameProtocolFixtureTool", targets: ["KanameProtocolFixtureTool"]),
         .executable(name: "KanamePhase3Qualification", targets: ["KanamePhase3Qualification"]),
     ],
@@ -75,6 +77,10 @@ let package = Package(
             name: "KanameDesktop",
             dependencies: ["KanameDomain", "KanameLocalCore", "KanameMobileSync"]
         ),
+        .target(
+            name: "KanameWorkflowHost",
+            dependencies: ["KanameDesktop", "KanameConnectivity"]
+        ),
         .executableTarget(
             name: "KanamePrototype",
             dependencies: [
@@ -84,6 +90,7 @@ let package = Package(
                 "KanamePrototypeUI",
                 "KanameLocalCore",
                 "KanameConnectivity",
+                "KanameWorkflowHost",
             ]
         ),
         .executableTarget(
@@ -111,6 +118,10 @@ let package = Package(
         .executableTarget(
             name: "KanameConversationWorker",
             dependencies: ["KanameConnectivity", "KanameDomain", "KanameLocalCore"]
+        ),
+        .executableTarget(
+            name: "KanameWorkflowWorker",
+            dependencies: ["KanameWorkflowHost", "KanameConnectivity", "KanameDesktop"]
         ),
         .executableTarget(
             name: "KanameProtocolFixtureTool",

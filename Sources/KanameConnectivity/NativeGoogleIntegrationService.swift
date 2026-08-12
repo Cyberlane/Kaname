@@ -27,6 +27,18 @@ public struct GoogleOAuthClientConfiguration: Equatable, Sendable {
     public let authorizationEndpoint: URL
     public let tokenEndpoint: URL
 
+    public static func desktop(
+        clientID: String,
+        clientSecret: String?,
+        authorizationEndpoint: URL,
+        tokenEndpoint: URL
+    ) -> Self {
+        Self(
+            clientID: clientID, clientSecret: clientSecret,
+            authorizationEndpoint: authorizationEndpoint, tokenEndpoint: tokenEndpoint
+        )
+    }
+
     public static func decode(downloadedJSON data: Data) throws -> Self {
         struct Envelope: Decodable {
             struct Installed: Decodable {
@@ -111,6 +123,17 @@ public struct GoogleAuthorizationRequest: Equatable, Sendable {
     public let state: String
 }
 
+public struct GoogleAuthorizationScopeDiff: Equatable, Sendable {
+    public let accountID: String
+    public let grantedScopes: [String]
+    public let requestedScopes: [String]
+    public let addedScopes: [String]
+    public let reason: String
+    public let affectedWorkflowIDs: [String]
+
+    public var isReady: Bool { addedScopes.isEmpty }
+}
+
 public enum GoogleOAuthRequestBuilder {
     public static let scopes = [
         "openid",
@@ -125,6 +148,8 @@ public enum GoogleOAuthRequestBuilder {
     public static func make(
         configuration: GoogleOAuthClientConfiguration,
         redirectURI: URL,
+        scopes requestedScopes: [String] = scopes,
+        includeGrantedScopes: Bool = false,
         verifier: String = randomURLSafeString(byteCount: 48),
         state: String = randomURLSafeString(byteCount: 32)
     ) throws -> GoogleAuthorizationRequest {
@@ -138,13 +163,16 @@ public enum GoogleOAuthRequestBuilder {
             URLQueryItem(name: "client_id", value: configuration.clientID),
             URLQueryItem(name: "redirect_uri", value: redirectURI.absoluteString),
             URLQueryItem(name: "response_type", value: "code"),
-            URLQueryItem(name: "scope", value: scopes.joined(separator: " ")),
+            URLQueryItem(name: "scope", value: Array(Set(requestedScopes)).sorted().joined(separator: " ")),
             URLQueryItem(name: "access_type", value: "offline"),
             URLQueryItem(name: "prompt", value: "consent select_account"),
             URLQueryItem(name: "code_challenge", value: challenge),
             URLQueryItem(name: "code_challenge_method", value: "S256"),
             URLQueryItem(name: "state", value: state),
         ]
+        if includeGrantedScopes {
+            components?.queryItems?.append(URLQueryItem(name: "include_granted_scopes", value: "true"))
+        }
         guard let url = components?.url else {
             throw NativeGoogleIntegrationError.authorizationUnavailable
         }
@@ -300,20 +328,24 @@ public actor NativeGoogleIntegrationService {
     private let rootDirectory: URL
     private let session: URLSession
     private let tokenStore: GoogleTokenKeychainStore
+    private let clientConfigurationOverride: GoogleOAuthClientConfiguration?
 
     public init(
         rootDirectory: URL? = nil,
         session: URLSession = .shared,
-        keychainService: String = "com.cyberlane.kaname.desktop.google-oauth"
+        keychainService: String = "com.cyberlane.kaname.desktop.google-oauth",
+        clientConfiguration: GoogleOAuthClientConfiguration? = nil
     ) {
         let applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         self.rootDirectory = rootDirectory ?? applicationSupport.appending(path: "Kaname/Google", directoryHint: .isDirectory)
         self.session = session
         self.tokenStore = GoogleTokenKeychainStore(service: keychainService)
+        self.clientConfigurationOverride = clientConfiguration
     }
 
     public var hasClientConfiguration: Bool {
-        bundledClientConfiguration() != nil
+        clientConfigurationOverride != nil
+            || bundledClientConfiguration() != nil
             || FileManager.default.fileExists(atPath: clientConfigurationURL.path)
     }
 
@@ -364,6 +396,81 @@ public actor NativeGoogleIntegrationService {
             )
             try tokenStore.store(try JSONEncoder().encode(tokenRecord), accountID: account.id)
             try upsertAccount(account)
+            receiver.finish(connected: true)
+            return account
+        } catch {
+            receiver.finish(connected: false)
+            throw error
+        }
+    }
+
+    public func authorizationScopeDiff(
+        accountID: String,
+        requestedScopes: [String],
+        reason: String,
+        affectedWorkflowIDs: [String],
+        allowKeychainInteraction: Bool = true
+    ) throws -> GoogleAuthorizationScopeDiff {
+        guard let account = try accounts().first(where: { $0.id == accountID }) else {
+            throw NativeGoogleIntegrationError.tokenUnavailable(accountID)
+        }
+        let stored = try tokenStore.load(
+            accountID: account.id, identity: account.identity, allowInteraction: allowKeychainInteraction
+        )
+        let token = try JSONDecoder().decode(GoogleTokenRecord.self, from: stored)
+        let granted = Set(token.grantedScopes ?? [])
+        let requested = Set(requestedScopes)
+        guard requested.isSubset(of: Set(GoogleOAuthRequestBuilder.scopes)),
+              !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw NativeGoogleIntegrationError.authorizationUnavailable
+        }
+        return GoogleAuthorizationScopeDiff(
+            accountID: accountID, grantedScopes: granted.sorted(), requestedScopes: requested.sorted(),
+            addedScopes: requested.subtracting(granted).sorted(), reason: String(reason.prefix(2_048)),
+            affectedWorkflowIDs: Array(Set(affectedWorkflowIDs)).sorted()
+        )
+    }
+
+    public func reauthorizeAccount(
+        accountID: String,
+        requestedScopes: [String],
+        reason: String,
+        affectedWorkflowIDs: [String]
+    ) async throws -> NativeGoogleAccountSnapshot {
+        let diff = try authorizationScopeDiff(
+            accountID: accountID, requestedScopes: requestedScopes, reason: reason,
+            affectedWorkflowIDs: affectedWorkflowIDs
+        )
+        guard let account = try accounts().first(where: { $0.id == accountID }) else {
+            throw NativeGoogleIntegrationError.tokenUnavailable(accountID)
+        }
+        if diff.isReady { return account }
+        let oldData = try tokenStore.load(accountID: account.id, identity: account.identity, allowInteraction: true)
+        let oldToken = try JSONDecoder().decode(GoogleTokenRecord.self, from: oldData)
+        let configuration = try loadClientConfiguration()
+        let receiver = try await GoogleLoopbackReceiver.start()
+        let completeScope = Set(diff.grantedScopes).union(diff.requestedScopes).sorted()
+        let request = try GoogleOAuthRequestBuilder.make(
+            configuration: configuration, redirectURI: receiver.redirectURI,
+            scopes: completeScope, includeGrantedScopes: true
+        )
+        guard NSWorkspace.shared.open(request.url) else {
+            receiver.cancel()
+            throw NativeGoogleIntegrationError.authorizationUnavailable
+        }
+        do {
+            let code = try await AsyncDeadline.first(timeout: .seconds(300), onTimeout: receiver.cancel) {
+                try await receiver.waitForCode(expectedState: request.state)
+            }
+            let token = try await exchangeCode(code, request: request, configuration: configuration)
+            let user = try await fetchUserInfo(accessToken: token.accessToken)
+            guard user.subject == account.id, user.email == account.identity else {
+                throw NativeGoogleIntegrationError.invalidResponse("Google OAuth account")
+            }
+            try tokenStore.store(try JSONEncoder().encode(GoogleTokenRecord(
+                accessToken: token.accessToken, refreshToken: token.refreshToken ?? oldToken.refreshToken,
+                expiresAt: Date().addingTimeInterval(token.expiresIn), grantedScopes: completeScope
+            )), accountID: account.id)
             receiver.finish(connected: true)
             return account
         } catch {
@@ -444,6 +551,7 @@ public actor NativeGoogleIntegrationService {
     }
 
     private func loadClientConfiguration() throws -> GoogleOAuthClientConfiguration {
+        if let clientConfigurationOverride { return clientConfigurationOverride }
         if let bundled = bundledClientConfiguration() { return bundled }
         guard let data = try? Data(contentsOf: clientConfigurationURL) else {
             throw NativeGoogleIntegrationError.clientConfigurationMissing
@@ -458,7 +566,7 @@ public actor NativeGoogleIntegrationService {
         }
         let clientSecret = (Bundle.main.object(forInfoDictionaryKey: "KanameGoogleOAuthClientSecret") as? String)
             .flatMap { $0.isEmpty ? nil : $0 }
-        return GoogleOAuthClientConfiguration(
+        return GoogleOAuthClientConfiguration.desktop(
             clientID: clientID,
             clientSecret: clientSecret,
             authorizationEndpoint: URL(string: "https://accounts.google.com/o/oauth2/v2/auth")!,

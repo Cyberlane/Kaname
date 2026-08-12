@@ -240,6 +240,10 @@ public extension DesktopAppModel {
             state.operations.workflows.executionReceipts.append(contentsOf: imported.executionReceipts)
             state.operations.workflows.authorityGrants.append(contentsOf: imported.authorityGrants)
             state.operations.workflows.effectPreviews.append(contentsOf: imported.effectPreviews)
+            state.operations.workflows.ownershipPolicies.append(contentsOf: imported.ownershipPolicies)
+            state.operations.workflows.ownershipClaims.append(contentsOf: imported.ownershipClaims)
+            state.operations.workflows.renderReceipts.append(contentsOf: imported.renderReceipts)
+            state.operations.workflows.scheduleBindings.append(contentsOf: imported.scheduleBindings)
             state.operations.artifacts.append(contentsOf: restoredArtifacts)
             state.appendAudit(
                 domain: "workflow-package",
@@ -300,6 +304,19 @@ public extension DesktopAppModel {
             state.triggerBindings[index].enabled = false
             state.triggerBindings[index].lastCursor = nil
             state.triggerBindings[index].updatedAtUnixMillis = timestamp
+        }
+        for index in state.ownershipPolicies.indices {
+            state.ownershipPolicies[index].enabled = false
+            state.ownershipPolicies[index].updatedAtUnixMillis = timestamp
+        }
+        for index in state.ownershipClaims.indices where state.ownershipClaims[index].releasedAtUnixMillis == nil {
+            state.ownershipClaims[index].releasedAtUnixMillis = timestamp
+            state.ownershipClaims[index].overrideReason = "Released during import; ownership must be reviewed locally."
+        }
+        for index in state.scheduleBindings.indices {
+            state.scheduleBindings[index].enabled = false
+            state.scheduleBindings[index].nextRunAtUnixMillis = nil
+            state.scheduleBindings[index].updatedAtUnixMillis = timestamp
         }
         for index in state.workItems.indices where !state.workItems[index].state.isHistorical {
             state.workItems[index].state = .needsAttention
@@ -389,7 +406,19 @@ public extension DesktopAppModel {
             authorityGrants: snapshot.operations.workflows.authorityGrants.filter { $0.workflowID == workflowID },
             effectPreviews: snapshot.operations.workflows.effectPreviews.filter { preview in
                 snapshot.operations.workflows.effects.contains { $0.id == preview.effectID && runIDs.contains($0.runID) }
-            }
+            },
+            triggerHealth: [],
+            ownershipPolicies: snapshot.operations.workflows.ownershipPolicies.filter { $0.workflowID == workflowID },
+            ownershipClaims: snapshot.operations.workflows.ownershipClaims.filter { $0.workflowID == workflowID },
+            connectorInstallations: [],
+            connectorBindings: [],
+            qualificationRuns: [],
+            rendererInstallations: [],
+            renderReceipts: snapshot.operations.workflows.renderReceipts.filter { $0.workflowID == workflowID },
+            subflows: [],
+            studioDrafts: [],
+            scheduleBindings: snapshot.operations.workflows.scheduleBindings.filter { $0.workflowID == workflowID },
+            migrationAssessments: []
         )
     }
 
@@ -482,8 +511,17 @@ public extension DesktopAppModel {
               uniqueIDs(state.transitionRecords), uniqueIDs(state.reviewRequests), uniqueIDs(state.waitSubscriptions),
               uniqueIDs(state.datasetRows), uniqueIDs(state.validatorReports), uniqueIDs(state.executionReceipts),
               uniqueIDs(state.authorityGrants), uniqueIDs(state.effectPreviews),
+              uniqueIDs(state.triggerHealth), uniqueIDs(state.ownershipPolicies), uniqueIDs(state.ownershipClaims),
+              uniqueIDs(state.connectorInstallations), uniqueIDs(state.connectorBindings),
+              uniqueIDs(state.qualificationRuns), uniqueIDs(state.rendererInstallations),
+              uniqueIDs(state.renderReceipts), uniqueIDs(state.subflows), uniqueIDs(state.studioDrafts),
+              uniqueIDs(state.scheduleBindings), uniqueIDs(state.migrationAssessments),
               artifactIDs.count == payload.artifacts.count,
               state.capabilityInstallations.isEmpty, state.runtimeClaims.isEmpty,
+              state.triggerHealth.isEmpty, state.connectorInstallations.isEmpty,
+              state.connectorBindings.isEmpty, state.qualificationRuns.isEmpty,
+              state.rendererInstallations.isEmpty, state.subflows.isEmpty,
+              state.studioDrafts.isEmpty, state.migrationAssessments.isEmpty,
               state.revisions.allSatisfy({ $0.workflowID == payload.manifest.id }),
               state.triggerBindings.allSatisfy({ $0.workflowID == payload.manifest.id }),
               state.workItems.allSatisfy({ $0.workflowID == payload.manifest.id }),
@@ -537,6 +575,15 @@ public extension DesktopAppModel {
                   runIDs.contains($0.runID) && stepAttemptIDs.contains($0.stepAttemptID)
               }),
               state.authorityGrants.allSatisfy({ $0.workflowID == payload.manifest.id }),
+              state.ownershipPolicies.allSatisfy({ $0.workflowID == payload.manifest.id }),
+              state.ownershipClaims.allSatisfy({
+                  $0.workflowID == payload.manifest.id
+                      && ($0.workItemID == nil || workItemIDs.contains($0.workItemID!))
+              }),
+              state.renderReceipts.allSatisfy({
+                  $0.workflowID == payload.manifest.id && workItemIDs.contains($0.workItemID)
+              }),
+              state.scheduleBindings.allSatisfy({ $0.workflowID == payload.manifest.id }),
               state.effectPreviews.allSatisfy({
                   effectIDs.contains($0.effectID) && $0.request.workflowID == payload.manifest.id
                       && $0.structuredTarget.count <= 1 * 1_024 * 1_024
@@ -621,6 +668,10 @@ public extension DesktopAppModel {
             || intersects(payload.state.executionReceipts, current.executionReceipts)
             || intersects(payload.state.authorityGrants, current.authorityGrants)
             || intersects(payload.state.effectPreviews, current.effectPreviews)
+            || intersects(payload.state.ownershipPolicies, current.ownershipPolicies)
+            || intersects(payload.state.ownershipClaims, current.ownershipClaims)
+            || intersects(payload.state.renderReceipts, current.renderReceipts)
+            || intersects(payload.state.scheduleBindings, current.scheduleBindings)
             || !Set(payload.artifacts.map(\.record.id)).isDisjoint(with: snapshot.operations.artifacts.map(\.id))
     }
 

@@ -546,6 +546,7 @@ public final class DesktopWorkflowCapabilityProcessRunner: @unchecked Sendable {
         let temporary = job.appendingPathComponent("Temporary", isDirectory: true)
         try privateDirectory(inputs)
         try privateDirectory(outputs)
+        try privateDirectory(outputs.appendingPathComponent("Artifacts", isDirectory: true))
         try privateDirectory(temporary)
         defer { try? FileManager.default.removeItem(at: job) }
         let inputURL = inputs.appendingPathComponent("input.json")
@@ -730,8 +731,14 @@ public final class DesktopWorkflowCapabilityProcessRunner: @unchecked Sendable {
     }
 
     private func sandboxAliases(for path: String) -> [String] {
-        guard path == "/var" || path.hasPrefix("/var/") else { return [path] }
-        return [path, "/private\(path)"]
+        if path == "/var" || path.hasPrefix("/var/") || path == "/tmp" || path.hasPrefix("/tmp/") {
+            return [path, "/private\(path)"]
+        }
+        if path == "/private/var" || path.hasPrefix("/private/var/")
+            || path == "/private/tmp" || path.hasPrefix("/private/tmp/") {
+            return [path, String(path.dropFirst("/private".count))]
+        }
+        return [path]
     }
 
     private func escape(_ value: String) -> String {
@@ -769,6 +776,7 @@ public final class DesktopWorkflowCapabilityProcessRunner: @unchecked Sendable {
 
     private func collectArtifacts(beneath root: URL, maximumBytes: Int) throws -> [DesktopWorkflowCapabilityArtifact] {
         guard FileManager.default.fileExists(atPath: root.path) else { return [] }
+        let canonicalRoot = root.resolvingSymlinksInPath().standardizedFileURL
         let values = try root.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
         guard values.isDirectory == true, values.isSymbolicLink != true else { throw DesktopWorkflowCapabilityError.artifactInvalid }
         guard let enumerator = FileManager.default.enumerator(
@@ -785,7 +793,11 @@ public final class DesktopWorkflowCapabilityProcessRunner: @unchecked Sendable {
             let size = item.fileSize ?? 0
             total += size
             guard artifacts.count < 50, size >= 0, total <= maximumBytes else { throw DesktopWorkflowCapabilityError.artifactInvalid }
-            let relative = String(url.path.dropFirst(root.path.count + 1))
+            let canonicalURL = url.resolvingSymlinksInPath().standardizedFileURL
+            guard canonicalURL.path.hasPrefix(canonicalRoot.path + "/") else {
+                throw DesktopWorkflowCapabilityError.artifactInvalid
+            }
+            let relative = String(canonicalURL.path.dropFirst(canonicalRoot.path.count + 1))
             guard DesktopWorkflowCapabilityPackageCodec.safeRelativePath(relative) else { throw DesktopWorkflowCapabilityError.artifactInvalid }
             let data = try Data(contentsOf: url)
             artifacts.append(DesktopWorkflowCapabilityArtifact(
