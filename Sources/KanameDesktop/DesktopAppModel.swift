@@ -1560,6 +1560,46 @@ public final class DesktopAppModel: ObservableObject {
         return thread.id
     }
 
+    public func createOrReuseConversationDraft(
+        kind: DesktopWorkKind,
+        projectID: String?,
+        provider: String? = nil,
+        model: String? = nil,
+        reasoningEffort: String = "medium",
+        runtimeMode: ConversationRuntimeMode = .approvalRequired,
+        networkAccess: Bool = false
+    ) -> String {
+        let selectedProvider = provider ?? project(id: projectID)?.context.defaultProvider ?? "Codex"
+        let selectedModel = model ?? project(id: projectID)?.context.defaultModel ?? "Use provider default"
+        if let existing = snapshot.threads.last(where: { thread in
+            thread.projectID == projectID
+                && thread.kind == kind
+                && thread.titleSource == .placeholder
+                && thread.messages.isEmpty
+                && !snapshot.operations.providerRuns.contains { $0.threadID == thread.id }
+        }) {
+            mutate { snapshot in
+                guard let index = snapshot.threads.firstIndex(where: { $0.id == existing.id }) else { return }
+                snapshot.threads[index].provider = selectedProvider
+                snapshot.threads[index].model = selectedModel
+                snapshot.threads[index].reasoningEffort = reasoningEffort
+                snapshot.threads[index].runtimeMode = runtimeMode
+                snapshot.threads[index].networkAccess = runtimeMode == .fullAccess ? true : networkAccess
+                snapshot.threads[index].updatedAtUnixMillis = now()
+            }
+            return existing.id
+        }
+        return createConversation(
+            kind: kind,
+            projectID: projectID,
+            provider: selectedProvider,
+            model: selectedModel,
+            reasoningEffort: reasoningEffort,
+            runtimeMode: runtimeMode,
+            networkAccess: networkAccess
+        )
+    }
+
     @discardableResult
     public func appendUserMessage(
         threadID: String,

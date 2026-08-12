@@ -120,6 +120,10 @@ mkdir -p "$output_directory"
 "$executable" \
     --desktop-destination home \
     --desktop-global-search \
+    --snapshot "$output_directory/command-center.png"
+"$executable" \
+    --desktop-destination home \
+    --desktop-global-search \
     --desktop-search-query Kaname \
     --snapshot "$output_directory/global-search.png"
 "$executable" \
@@ -132,6 +136,10 @@ mkdir -p "$output_directory"
     --desktop-window-size 1080x700 \
     --snapshot "$output_directory/projects-large-text.png"
 "$executable" --desktop-destination settings --snapshot "$output_directory/settings.png"
+"$executable" \
+    --desktop-destination settings \
+    --desktop-settings-category commands \
+    --snapshot "$output_directory/settings-commands.png"
 "$executable" \
     --desktop-destination settings \
     --desktop-settings-category integrations \
@@ -165,10 +173,12 @@ for snapshot in \
     "$output_directory/project-overview.png" \
     "$output_directory/knowledge.png" \
     "$output_directory/coding.png" \
+    "$output_directory/command-center.png" \
     "$output_directory/global-search.png" \
     "$output_directory/diagnostics.png" \
     "$output_directory/projects-large-text.png" \
     "$output_directory/settings.png" \
+    "$output_directory/settings-commands.png" \
     "$output_directory/settings-integrations.png" \
     "$output_directory/settings-providers.png" \
     "$output_directory/settings-updates.png" \

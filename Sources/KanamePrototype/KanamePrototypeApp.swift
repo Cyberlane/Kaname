@@ -61,7 +61,7 @@ struct KanamePrototypeApp: App {
                 .keyboardShortcut("r", modifiers: [.command, .shift])
             }
             CommandMenu("Navigate") {
-                Button("Search Kaname…") {
+                Button("Open Command Center…") {
                     NotificationCenter.default.post(name: .kanamePresentGlobalSearch, object: nil)
                 }
                 .keyboardShortcut("k", modifiers: .command)

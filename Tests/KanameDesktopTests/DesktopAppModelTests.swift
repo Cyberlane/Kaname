@@ -6,6 +6,34 @@ import Testing
 @MainActor
 struct DesktopAppModelTests {
     @Test
+    func createOrReuseConversationDraftReusesOnlyEmptyMatchingContext() throws {
+        let model = DesktopAppModel(store: MemoryDesktopStateStore(), now: { 1_000 })
+        let projectID = try #require(model.snapshot.projects.first?.id)
+
+        let first = model.createOrReuseConversationDraft(kind: .coding, projectID: projectID)
+        let reused = model.createOrReuseConversationDraft(
+            kind: .coding,
+            projectID: projectID,
+            provider: "OpenCode",
+            model: "opencode/default",
+            reasoningEffort: "high"
+        )
+
+        #expect(reused == first)
+        #expect(model.snapshot.threads.filter { $0.id == first }.count == 1)
+        #expect(model.thread(id: first)?.provider == "OpenCode")
+        #expect(model.thread(id: first)?.model == "opencode/default")
+        #expect(model.thread(id: first)?.reasoningEffort == "high")
+
+        _ = model.appendUserMessage(threadID: first, body: "Keep this draft")
+        let second = model.createOrReuseConversationDraft(kind: .coding, projectID: projectID)
+        #expect(second != first)
+
+        let standalone = model.createOrReuseConversationDraft(kind: .coding, projectID: nil)
+        #expect(standalone != second)
+    }
+
+    @Test
     func streamingActivityNeverReordersTheThreadDirectory() throws {
         let store = MemoryDesktopStateStore()
         var clock: Int64 = 10_000

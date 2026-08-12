@@ -107,6 +107,55 @@ private struct DesktopSearchFallbackNotice: Equatable {
     let detail: String
 }
 
+private enum DesktopCommandCenterAction: Identifiable, Equatable {
+    case newConversation(projectID: String?, projectName: String?)
+    case configureConversation(projectID: String?, projectName: String?)
+    case newProject
+    case open(DesktopDestination)
+
+    var id: String {
+        switch self {
+        case let .newConversation(projectID, _): "new-conversation:\(projectID ?? "standalone")"
+        case let .configureConversation(projectID, _): "configure-conversation:\(projectID ?? "standalone")"
+        case .newProject: "new-project"
+        case let .open(destination): "open:\(destination.rawValue)"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case let .newConversation(_, projectName):
+            projectName.map { "New conversation in \($0)" } ?? "New standalone conversation"
+        case let .configureConversation(_, projectName):
+            projectName.map { "Configure conversation in \($0)…" } ?? "Configure standalone conversation…"
+        case .newProject: "Add project"
+        case let .open(destination): "Open \(destination.title)"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .newConversation:
+            "Open or reuse a local draft and focus the composer"
+        case .configureConversation:
+            "Choose kind, provider, model, thinking, and authority before opening"
+        case .newProject:
+            "Local folder, GitHub repository, Git URL, or folderless context"
+        case let .open(destination):
+            "Go to the \(destination.title) workspace"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .newConversation: "square.and.pencil"
+        case .configureConversation: "slider.horizontal.3"
+        case .newProject: "folder.badge.plus"
+        case let .open(destination): destination.symbol
+        }
+    }
+}
+
 private struct DesktopUIRestoreState: Codable {
     var destination: String
     var selectedThreadID: String?
@@ -172,6 +221,7 @@ struct KanameDesktopWorkspace: View {
     @State private var newConversationRequest: NewConversationRequest?
     @State private var showsNewProject = false
     @State private var showsInspector = true
+    @State private var showsThreadDirectory = true
     @State private var showsSettings = false
     @State private var showsGlobalSearch = false
     @State private var showsDiagnostics = false
@@ -223,7 +273,11 @@ struct KanameDesktopWorkspace: View {
             .flatMap { arguments.indices.contains($0 + 1) ? arguments[$0 + 1] : nil }
         _destination = State(initialValue: requestedDestination == .settings ? .home : requestedDestination)
         _showsSettings = State(initialValue: requestedDestination == .settings)
-        _showsInspector = State(initialValue: restoredUI?.showsInspector ?? true)
+        let startsWithContextualInspector = requestedDestination == .threads
+            || (requestedDestination == .projects && (requestedProjectID ?? restoredUI?.selectedProjectID) != nil)
+        _showsInspector = State(initialValue: startsWithContextualInspector
+            ? (restoredUI?.showsInspector ?? true)
+            : false)
         _newConversationRequest = State(initialValue: arguments.contains("--desktop-new-conversation")
             ? NewConversationRequest(projectID: requestedProjectID)
             : nil)
@@ -276,9 +330,11 @@ struct KanameDesktopWorkspace: View {
                 DesktopModalBackdrop(dismiss: { dismissGlobalSearch(restoringFocus: true) }) {
                     DesktopGlobalSearchPalette(
                         snapshot: model.snapshot,
+                        currentProjectID: inheritedProjectID ?? selectedProjectID,
                         initialQuery: initialGlobalSearchQuery,
                         dismiss: { dismissGlobalSearch(restoringFocus: true) },
-                        open: openSearchResult
+                        open: openSearchResult,
+                        perform: performCommandCenterAction
                     )
                 }
                 .transition(reduceMotion ? .identity : .opacity.combined(with: .scale(scale: 0.985)))
@@ -520,16 +576,18 @@ struct KanameDesktopWorkspace: View {
 
     @ViewBuilder
     private var workspaceColumns: some View {
-        if showsInspector {
-            HSplitView {
-                centerColumn
-                    .frame(minWidth: 500, maxWidth: .infinity, maxHeight: .infinity)
+        GeometryReader { geometry in
+            if showsInspector && geometry.size.width >= 980 {
+                HSplitView {
+                    centerColumn
+                        .frame(minWidth: 560, maxWidth: .infinity, maxHeight: .infinity)
 
-                inspectorColumn
-                    .frame(minWidth: 280, idealWidth: 340, maxWidth: 380)
+                    inspectorColumn
+                        .frame(minWidth: 280, idealWidth: 340, maxWidth: 380)
+                }
+            } else {
+                centerColumn
             }
-        } else {
-            centerColumn
         }
     }
 
@@ -579,12 +637,23 @@ struct KanameDesktopWorkspace: View {
             Spacer()
 
             ControlGroup {
+                if destination == .threads {
+                    Button {
+                        showsThreadDirectory.toggle()
+                    } label: {
+                        Label(
+                            showsThreadDirectory ? "Hide thread directory" : "Show thread directory",
+                            systemImage: "sidebar.left"
+                        )
+                    }
+                    .help(showsThreadDirectory ? "Hide thread directory" : "Show thread directory")
+                }
                 Button {
                     presentGlobalSearch()
                 } label: {
-                    Label("Search workspace", systemImage: "magnifyingglass")
+                    Label("Open Command Center", systemImage: "command")
                 }
-                .help("Search workspace (Command-K)")
+                .help("Open Command Center (Command-K)")
 
                 Button {
                     beginConversation(projectID: inheritedProjectID)
@@ -595,6 +664,9 @@ struct KanameDesktopWorkspace: View {
 
                 Menu {
                     Button("New project") { presentNewProject() }
+                    Button("Configure new conversation…") {
+                        beginConfiguredConversation(projectID: inheritedProjectID)
+                    }
                     Divider()
                     Button("Start research") { navigate(to: .research) }
                     Button("Draft email") { navigate(to: .email) }
@@ -750,7 +822,8 @@ struct KanameDesktopWorkspace: View {
                     model: model,
                     searchText: searchText,
                     openThread: { openThread($0) },
-                    openDestination: navigate
+                    openDestination: navigate,
+                    startConversation: { beginConversation(projectID: inheritedProjectID) }
                 )
             case .threads:
                 DesktopThreadsView(
@@ -761,7 +834,8 @@ struct KanameDesktopWorkspace: View {
                     selectedThreadID: threadSelection,
                     selectedRunID: $selectedThreadRunID,
                     conversationAnchorID: $selectedConversationAnchorID,
-                    composerFocusRequest: composerFocusRequest
+                    composerFocusRequest: composerFocusRequest,
+                    showsDirectory: $showsThreadDirectory
                 )
             case .inbox:
                 DesktopInboxView(
@@ -815,7 +889,8 @@ struct KanameDesktopWorkspace: View {
                     model: model,
                     integrations: personalIntegrations,
                     runtime: conversationRuntime,
-                    openThread: { openThread($0) }
+                    openThread: { openThread($0) },
+                    startConversation: { beginConversation(projectID: $0) }
                 )
             case .localCore:
                 LocalCoreWorkspace()
@@ -914,8 +989,48 @@ struct KanameDesktopWorkspace: View {
 
     private func beginConversation(projectID: String?) {
         guard acceptsNonRecoveryCommands else { return }
+        let project = model.project(id: projectID)
+        let kind = project?.context.defaultKind ?? .coding
+        let provider = project?.context.defaultProvider ?? "Codex"
+        let runtimeModel = ConversationRuntimeCatalog.selectedModel(
+            provider: provider,
+            requested: project?.context.defaultModel ?? "Use provider default",
+            capabilities: personalIntegrations.providerCapabilities
+        )
+        let reasoning = ConversationRuntimeCatalog.selectedReasoning(
+            provider: provider,
+            model: runtimeModel,
+            capabilities: personalIntegrations.providerCapabilities
+        )
+        let threadID = model.createOrReuseConversationDraft(
+            kind: kind,
+            projectID: projectID,
+            provider: provider,
+            model: runtimeModel,
+            reasoningEffort: reasoning
+        )
+        openThread(threadID, restoringComposerFocus: true)
+        announce("Draft ready in \(project?.name ?? "standalone context").")
+    }
+
+    private func beginConfiguredConversation(projectID: String?) {
+        guard acceptsNonRecoveryCommands else { return }
         captureModalFocus()
         newConversationRequest = NewConversationRequest(projectID: projectID)
+    }
+
+    private func performCommandCenterAction(_ action: DesktopCommandCenterAction) {
+        dismissGlobalSearch(restoringFocus: false)
+        switch action {
+        case let .newConversation(projectID, _):
+            beginConversation(projectID: projectID)
+        case let .configureConversation(projectID, _):
+            beginConfiguredConversation(projectID: projectID)
+        case .newProject:
+            presentNewProject()
+        case let .open(destination):
+            navigateFromSearch(to: destination)
+        }
     }
 
     private func presentNewProject() {
@@ -1185,10 +1300,23 @@ struct KanameDesktopWorkspace: View {
     }
 
     private func apply(_ target: DesktopNavigationLocation) {
+        let destinationChanged = target.destination != destination
+        let entersThread = target.destination == .threads
+            && target.selectedThreadID != nil
+            && (destination != .threads || selectedThreadID == nil)
+        let entersProject = target.destination == .projects
+            && target.selectedProjectID != nil
+            && (destination != .projects || selectedProjectID == nil)
         preservingWindowFrame {
             destination = target.destination
             selectedThreadID = target.selectedThreadID
             selectedProjectID = target.selectedProjectID
+            if destinationChanged {
+                showsInspector = target.destination == .threads && target.selectedThreadID != nil
+                    || target.destination == .projects && target.selectedProjectID != nil
+            } else if entersThread || entersProject {
+                showsInspector = true
+            }
         }
     }
 
@@ -1427,8 +1555,10 @@ private struct DesktopGlobalSearchScheduledOutput: Sendable {
 private struct DesktopGlobalSearchPalette: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let snapshot: DesktopAppSnapshot
+    let currentProjectID: String?
     let dismiss: () -> Void
     let open: (DesktopGlobalSearchResult) -> Void
+    let perform: (DesktopCommandCenterAction) -> Void
     @State private var query = ""
     @State private var selection = DesktopGlobalSearchSelectionState()
     @State private var sections: [DesktopGlobalSearchSection] = []
@@ -1436,17 +1566,22 @@ private struct DesktopGlobalSearchPalette: View {
     @State private var generationGate = DesktopGlobalSearchGenerationGate()
     @State private var scheduledRequest: DesktopGlobalSearchScheduledRequest?
     @State private var isSearching = false
+    @State private var selectedCommandIndex = 0
     @FocusState private var queryFocused: Bool
 
     init(
         snapshot: DesktopAppSnapshot,
+        currentProjectID: String?,
         initialQuery: String = "",
         dismiss: @escaping () -> Void,
-        open: @escaping (DesktopGlobalSearchResult) -> Void
+        open: @escaping (DesktopGlobalSearchResult) -> Void,
+        perform: @escaping (DesktopCommandCenterAction) -> Void
     ) {
         self.snapshot = snapshot
+        self.currentProjectID = currentProjectID
         self.dismiss = dismiss
         self.open = open
+        self.perform = perform
         _query = State(initialValue: initialQuery)
     }
 
@@ -1454,12 +1589,52 @@ private struct DesktopGlobalSearchPalette: View {
         sections.reduce(0) { $0 + $1.results.count }
     }
 
+    private var commandQuery: String {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix(">") else { return "" }
+        return String(trimmed.dropFirst()).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private var showsCommands: Bool {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty || trimmed.hasPrefix(">")
+    }
+
+    private var commandActions: [DesktopCommandCenterAction] {
+        let activeProjects = snapshot.projects
+            .filter { $0.archivedAtUnixMillis == nil }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        let currentProject = activeProjects.first { $0.id == currentProjectID }
+        var actions: [DesktopCommandCenterAction] = []
+        if let currentProject {
+            actions.append(.newConversation(projectID: currentProject.id, projectName: currentProject.name))
+        }
+        actions.append(.newConversation(projectID: nil, projectName: nil))
+        if query.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix(">") {
+            actions.append(contentsOf: activeProjects
+                .filter { $0.id != currentProjectID }
+                .map { .newConversation(projectID: $0.id, projectName: $0.name) })
+        }
+        actions.append(.configureConversation(projectID: currentProject?.id, projectName: currentProject?.name))
+        actions.append(.newProject)
+        actions.append(contentsOf: [
+            .open(.inbox), .open(.projects), .open(.research), .open(.liveCodex),
+            .open(.github), .open(.knowledge), .open(.calendar), .open(.automations),
+            .open(.skills), .open(.devices),
+        ])
+        guard !commandQuery.isEmpty else { return Array(actions.prefix(8)) }
+        return actions.filter {
+            $0.title.lowercased().contains(commandQuery)
+                || $0.detail.lowercased().contains(commandQuery)
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(Nord.frost1)
-                TextField("Search conversations, projects, and local snapshots", text: $query)
+                TextField("Search Kaname or type > for actions", text: $query)
                     .textFieldStyle(.plain)
                     .font(.title3)
                     .focused($queryFocused)
@@ -1487,8 +1662,8 @@ private struct DesktopGlobalSearchPalette: View {
             Divider()
 
             Group {
-                if DesktopGlobalSearchQuery(query).isEmpty {
-                    searchPrompt
+                if showsCommands {
+                    commandPrompt
                 } else if sections.isEmpty && isSearching {
                     ProgressView("Searching the local snapshot…")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1509,7 +1684,7 @@ private struct DesktopGlobalSearchPalette: View {
 
             Divider()
             HStack(spacing: 14) {
-                Label("Local snapshot only", systemImage: "lock.shield")
+                Label("Local actions and snapshots", systemImage: "lock.shield")
                     .foregroundStyle(Nord.auroraGreen)
                 Text("No providers, accounts, credentials, or vaults are contacted")
                     .foregroundStyle(.secondary)
@@ -1533,7 +1708,10 @@ private struct DesktopGlobalSearchPalette: View {
             scheduleSearch()
             DispatchQueue.main.async { queryFocused = true }
         }
-        .onChange(of: query) { _ in scheduleSearch() }
+        .onChange(of: query) { _ in
+            selectedCommandIndex = 0
+            scheduleSearch()
+        }
         .onChange(of: snapshot.lastSavedAtUnixMillis) { _ in
             cachedCorpus = nil
             scheduleSearch()
@@ -1549,8 +1727,8 @@ private struct DesktopGlobalSearchPalette: View {
         .onMoveCommand { direction in
             guard !isSearching else { return }
             switch direction {
-            case .up: selection.move(.previous, in: sections)
-            case .down: selection.move(.next, in: sections)
+            case .up: moveSelection(.previous)
+            case .down: moveSelection(.next)
             default: break
             }
         }
@@ -1558,7 +1736,7 @@ private struct DesktopGlobalSearchPalette: View {
 #if os(macOS)
             DesktopPaletteKeyMonitor { direction in
                 guard !isSearching else { return }
-                selection.move(direction, in: sections)
+                moveSelection(direction)
             }
             .frame(width: 0, height: 0)
 #endif
@@ -1570,6 +1748,13 @@ private struct DesktopGlobalSearchPalette: View {
 
     private func scheduleSearch() {
         let generation = generationGate.schedule()
+        if showsCommands {
+            sections = []
+            selection.reconcile(with: [])
+            scheduledRequest = nil
+            isSearching = false
+            return
+        }
         let searchQuery = DesktopGlobalSearchQuery(query)
         guard !searchQuery.isEmpty else {
             sections = []
@@ -1625,19 +1810,65 @@ private struct DesktopGlobalSearchPalette: View {
         selection.reconcile(with: output.sections)
     }
 
-    private var searchPrompt: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "command")
-                .font(.system(size: 30, weight: .medium))
-                .foregroundStyle(Nord.frost1)
-            Text("Find anything already in Kaname")
-                .font(.headline)
-            Text("Search conversations, projects, research, knowledge, email, calendar, automations, GitHub, skills, approvals, and artifacts.")
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: 520)
+    private var commandPrompt: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Label(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Suggested actions" : "Actions", systemImage: "command")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text("Type > to find every command")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.bottom, 4)
+
+                    if commandActions.isEmpty {
+                        EmptyPanel(
+                            symbol: "command",
+                            title: "No matching actions",
+                            detail: "Try a project, destination, or workflow name. Remove > to search saved content."
+                        )
+                        .frame(minHeight: 220)
+                    } else {
+                        ForEach(Array(commandActions.enumerated()), id: \.element.id) { index, action in
+                            commandRow(action, isSelected: index == selectedCommandIndex)
+                                .id(action.id)
+                        }
+                    }
+                }
+                .padding(14)
+            }
+            .onChange(of: selectedCommandIndex) { index in
+                guard commandActions.indices.contains(index) else { return }
+                if reduceMotion {
+                    proxy.scrollTo(commandActions[index].id, anchor: .center)
+                } else {
+                    withAnimation(.easeOut(duration: 0.12)) {
+                        proxy.scrollTo(commandActions[index].id, anchor: .center)
+                    }
+                }
+            }
         }
-        .padding(32)
+        .accessibilityLabel("\(commandActions.count) Command Center actions")
+    }
+
+    private func commandRow(_ action: DesktopCommandCenterAction, isSelected: Bool) -> some View {
+        Button { perform(action) } label: {
+            CommandCenterSelectableLabel(
+                symbol: action.symbol,
+                title: action.title,
+                detail: action.detail,
+                provenance: nil,
+                isSelected: isSelected
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
     private var searchResults: some View {
@@ -1688,37 +1919,13 @@ private struct DesktopGlobalSearchPalette: View {
         return Button {
             open(result)
         } label: {
-            HStack(alignment: .top, spacing: 12) {
-                Image(systemName: symbol(for: result.domain))
-                    .foregroundStyle(isSelected ? Nord.polarNight0 : Nord.frost1)
-                    .frame(width: 22, height: 22)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(result.document.title)
-                        .font(.body.weight(.semibold))
-                        .foregroundStyle(isSelected ? Nord.polarNight0 : .primary)
-                        .lineLimit(1)
-                    if !result.document.summary.isEmpty {
-                        Text(result.document.summary)
-                            .font(.subheadline)
-                            .foregroundStyle(isSelected ? Nord.polarNight1 : .secondary)
-                            .lineLimit(1)
-                    }
-                    Text(provenanceText(result.provenance))
-                        .font(.caption)
-                        .foregroundStyle(isSelected ? Nord.polarNight2 : Nord.frost1)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 8)
-                if isSelected {
-                    Image(systemName: "return")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(Nord.polarNight1)
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .contentShape(Rectangle())
-            .background(isSelected ? Nord.frost1 : Color.clear, in: RoundedRectangle(cornerRadius: 10))
+            CommandCenterSelectableLabel(
+                symbol: symbol(for: result.domain),
+                title: result.document.title,
+                detail: result.document.summary,
+                provenance: provenanceText(result.provenance),
+                isSelected: isSelected
+            )
         }
         .buttonStyle(.plain)
         .disabled(isSearching)
@@ -1730,8 +1937,34 @@ private struct DesktopGlobalSearchPalette: View {
 
     private func openSelection() {
         guard !isSearching else { return }
+        if showsCommands {
+            guard commandActions.indices.contains(selectedCommandIndex) else { return }
+            perform(commandActions[selectedCommandIndex])
+            return
+        }
         guard let result = selection.result(in: sections) ?? sections.first?.results.first else { return }
         open(result)
+    }
+
+    private func moveSelection(_ direction: DesktopGlobalSearchSelectionDirection) {
+        guard showsCommands else {
+            selection.move(direction, in: sections)
+            return
+        }
+        guard !commandActions.isEmpty else {
+            selectedCommandIndex = 0
+            return
+        }
+        switch direction {
+        case .previous:
+            selectedCommandIndex = selectedCommandIndex == 0
+                ? commandActions.count - 1
+                : selectedCommandIndex - 1
+        case .next:
+            selectedCommandIndex = selectedCommandIndex + 1 == commandActions.count
+                ? 0
+                : selectedCommandIndex + 1
+        }
     }
 
     private func provenanceText(_ provenance: DesktopGlobalSearchProvenance) -> String {
@@ -1762,6 +1995,53 @@ private struct DesktopGlobalSearchPalette: View {
         case .approvals: "checkmark.shield"
         case .artifacts: "doc"
         }
+    }
+}
+
+private struct CommandCenterSelectableLabel: View {
+    let symbol: String
+    let title: String
+    let detail: String
+    let provenance: String?
+    let isSelected: Bool
+
+    var body: some View {
+        Label {
+            HStack(alignment: .center, spacing: 8) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(isSelected ? Nord.polarNight0 : .primary)
+                        .lineLimit(1)
+                    if !detail.isEmpty {
+                        Text(detail)
+                            .font(.caption)
+                            .foregroundStyle(isSelected ? Nord.polarNight1 : .secondary)
+                            .lineLimit(1)
+                    }
+                    if let provenance {
+                        Text(provenance)
+                            .font(.caption2)
+                            .foregroundStyle(isSelected ? Nord.polarNight2 : Nord.frost1)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 8)
+                if isSelected {
+                    Image(systemName: "return")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Nord.polarNight1)
+                }
+            }
+        } icon: {
+            Image(systemName: symbol)
+                .foregroundStyle(isSelected ? Nord.polarNight0 : Nord.frost1)
+                .frame(width: 22)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .contentShape(Rectangle())
+        .background(isSelected ? Nord.frost1 : Color.clear, in: RoundedRectangle(cornerRadius: 10))
     }
 }
 
@@ -1860,6 +2140,7 @@ private struct DesktopHomeView: View {
     let searchText: String
     let openThread: (String) -> Void
     let openDestination: (DesktopDestination) -> Void
+    let startConversation: () -> Void
 
     private var attentionThreads: [DesktopThread] {
         model.threads(matching: searchText).filter {
@@ -1869,19 +2150,26 @@ private struct DesktopHomeView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                HStack(alignment: .top, spacing: 24) {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack(alignment: .top, spacing: 18) {
                     VStack(alignment: .leading, spacing: 7) {
                         ProductStatusPill()
                         Text("Command centre")
                             .font(.largeTitle.weight(.bold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.82)
                         Text("Your local work, attention, evidence, and device health in one place.")
-                            .font(.title3)
+                            .font(.body)
                             .foregroundStyle(.secondary)
                     }
+                    .layoutPriority(1)
                     Spacer()
-                    DesktopAuthorityCard(remote: model.snapshot.remote)
-                        .frame(width: 320)
+                    VStack(alignment: .trailing, spacing: 10) {
+                        Button("New conversation", systemImage: "square.and.pencil", action: startConversation)
+                            .buttonStyle(.borderedProminent)
+                        DesktopAuthorityCard(remote: model.snapshot.remote)
+                            .frame(width: 286)
+                    }
                 }
 
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 190), spacing: 12)], spacing: 12) {
@@ -1987,7 +2275,7 @@ private struct DesktopHomeView: View {
                     .frame(width: 360, alignment: .topLeading)
                 }
             }
-            .padding(26)
+            .padding(22)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Nord.polarNight0)
@@ -2003,31 +2291,34 @@ private struct DesktopThreadsView: View {
     @Binding var selectedRunID: String?
     @Binding var conversationAnchorID: String?
     let composerFocusRequest: DesktopComposerFocusRequest?
+    @Binding var showsDirectory: Bool
 
     var body: some View {
         HSplitView {
-            VStack(alignment: .leading, spacing: 0) {
-                SurfaceHeader(
-                    title: "Threads",
-                    detail: "Durable conversations and project continuity",
-                    symbol: DesktopDestination.threads.symbol
-                )
-                List(selection: $selectedThreadID) {
-                    let matching = model.threads(matching: searchText)
-                    let active = matching.filter { $0.attention != .completed }
-                    let completed = matching.filter { $0.attention == .completed }
-                    Section("Active") {
-                        ForEach(active) { thread in threadDirectoryRow(thread) }
-                    }
-                    if !completed.isEmpty {
-                        Section("Completed") {
-                            ForEach(completed) { thread in threadDirectoryRow(thread) }
+            if showsDirectory {
+                VStack(alignment: .leading, spacing: 0) {
+                    SurfaceHeader(
+                        title: "Threads",
+                        detail: "Durable conversations and project continuity",
+                        symbol: DesktopDestination.threads.symbol
+                    )
+                    List(selection: $selectedThreadID) {
+                        let matching = model.threads(matching: searchText)
+                        let active = matching.filter { $0.attention != .completed }
+                        let completed = matching.filter { $0.attention == .completed }
+                        Section("Active") {
+                            ForEach(active) { thread in threadDirectoryRow(thread) }
+                        }
+                        if !completed.isEmpty {
+                            Section("Completed") {
+                                ForEach(completed) { thread in threadDirectoryRow(thread) }
+                            }
                         }
                     }
+                    .listStyle(.inset)
                 }
-                .listStyle(.inset)
+                .frame(minWidth: 200, idealWidth: 260, maxWidth: 310)
             }
-            .frame(minWidth: 200, idealWidth: 280, maxWidth: 320)
 
             if let thread = model.thread(id: selectedThreadID) {
                 DesktopThreadConversation(
@@ -6486,41 +6777,34 @@ private struct DesktopCalendarView: View {
                     }
                 }
 
-                AccountStrip(accounts: accounts)
-
-                BoundaryCallout(
-                    title: "Exact calendar authority",
-                    detail: "Refresh is read-only. Create, change, and delete bind the exact account, calendar, event revision, recurrence scope, and resolved event fields before approval."
-                )
-
-                if !model.snapshot.domains.calendarSources.isEmpty {
-                    SectionHeading(
-                        title: "Visible calendars",
-                        detail: "Enable every calendar you want Kaname to show. This selection remains private on this Mac."
-                    )
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 300), spacing: 12)], spacing: 12) {
-                        ForEach(model.snapshot.domains.calendarSources) { source in
-                            HStack(spacing: 12) {
-                                Image(systemName: source.provider == .apple ? "apple.logo" : "g.circle.fill")
-                                    .foregroundStyle(source.isEnabled ? Nord.frost1 : .secondary)
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text(source.displayName).font(.subheadline.weight(.semibold))
-                                    Text("\(source.ownerIdentity) · \(source.accessLevel)")
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(1)
+                DisclosureGroup {
+                    VStack(alignment: .leading, spacing: 14) {
+                        AccountStrip(accounts: accounts)
+                        BoundaryCallout(
+                            title: "Exact calendar authority",
+                            detail: "Refresh is read-only. Create, change, and delete bind the exact account, calendar, event revision, recurrence scope, and resolved event fields before approval."
+                        )
+                        if !model.snapshot.domains.calendarSources.isEmpty {
+                            SectionHeading(
+                                title: "Visible calendars",
+                                detail: "These private visibility choices never hide or delete calendars at the provider."
+                            )
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 280), spacing: 10)], spacing: 10) {
+                                ForEach(model.snapshot.domains.calendarSources) { source in
+                                    CalendarSourceVisibilityCard(model: model, source: source)
                                 }
-                                Spacer()
-                                Toggle("Visible", isOn: Binding(
-                                    get: { source.isEnabled },
-                                    set: { model.setCalendarSourceEnabled(id: source.id, enabled: $0) }
-                                ))
-                                .labelsHidden()
                             }
-                            .panelStyle()
                         }
                     }
+                    .padding(.top, 12)
+                } label: {
+                    Label(
+                        "Accounts & visible calendars",
+                        systemImage: "calendar.badge.checkmark"
+                    )
+                    .font(.headline)
                 }
+                .panelStyle()
 
                 SectionHeading(
                     title: "Upcoming events",
@@ -6699,6 +6983,39 @@ private struct DesktopCalendarView: View {
                 && $0.provider.rawValue == event.provider.rawValue
                 && $0.ownerIdentity == event.accountIdentity
         }
+    }
+}
+
+private struct CalendarSourceVisibilityCard: View {
+    @ObservedObject var model: DesktopAppModel
+    let source: DesktopCalendarSourceRecord
+
+    var body: some View {
+        LabeledContent {
+            Toggle(
+                "Visible",
+                isOn: Binding(
+                    get: { source.isEnabled },
+                    set: { model.setCalendarSourceEnabled(id: source.id, enabled: $0) }
+                )
+            )
+            .labelsHidden()
+        } label: {
+            Label {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(source.displayName).font(.subheadline.weight(.semibold))
+                    Text("\(source.ownerIdentity) · \(source.accessLevel)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            } icon: {
+                Image(systemName: source.provider == .apple ? "apple.logo" : "g.circle.fill")
+                    .foregroundStyle(source.isEnabled ? Nord.frost1 : .secondary)
+            }
+        }
+        .padding(12)
+        .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 10))
     }
 }
 
@@ -7270,57 +7587,84 @@ private struct DesktopGitHubView: View {
 
 private struct DesktopSkillsView: View {
     @ObservedObject var model: DesktopAppModel
+    @State private var query = ""
+
+    private var filteredSkills: [DesktopSkillRecord] {
+        let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return model.snapshot.domains.skills }
+        return model.snapshot.domains.skills.filter {
+            $0.name.lowercased().contains(normalized)
+                || $0.kind.label.lowercased().contains(normalized)
+                || $0.scope.lowercased().contains(normalized)
+                || $0.source.lowercased().contains(normalized)
+        }
+    }
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                SurfaceHeader(
-                    title: "Skills & Tools",
-                    detail: "Progressive disclosure, provenance, scope, permissions, and update review",
-                    symbol: DesktopDestination.skills.symbol
-                )
-
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 340), spacing: 14)], spacing: 14) {
-                    ForEach(model.snapshot.domains.skills) { skill in
-                        VStack(alignment: .leading, spacing: 11) {
-                            HStack {
-                                Image(systemName: skill.kind.symbol)
-                                    .font(.title2)
-                                    .foregroundStyle(skill.enabled ? Nord.frost1 : .secondary)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(skill.name).font(.headline)
-                                    Text(skill.kind.label)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
+            LazyVStack(alignment: .leading, spacing: 18) {
+                Section {
+                    if filteredSkills.isEmpty {
+                        EmptyPanel(
+                            symbol: "hammer",
+                            title: "No matching skills or tools",
+                            detail: "Search by name, kind, source, or scope."
+                        )
+                        .frame(minHeight: 220)
+                    } else {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 300), spacing: 12)], spacing: 12) {
+                            ForEach(filteredSkills) { skill in
+                                VStack(alignment: .leading, spacing: 11) {
+                                    HStack {
+                                        Image(systemName: skill.kind.symbol)
+                                            .font(.title2)
+                                            .foregroundStyle(skill.enabled ? Nord.frost1 : .secondary)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(skill.name).font(.headline)
+                                            Text(skill.kind.label)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        Spacer()
+                                        Toggle("Enabled", isOn: Binding(
+                                            get: { skill.enabled },
+                                            set: { model.setSkillEnabled(id: skill.id, enabled: $0) }
+                                        ))
+                                        .labelsHidden()
+                                    }
+                                    Divider()
+                                    LabeledContent("Scope", value: skill.scope)
+                                    LabeledContent("Source", value: skill.source)
+                                    LabeledContent("Revision", value: skill.revision)
+                                    HStack {
+                                        Text("Trust")
+                                        Spacer()
+                                        RecordStatusPill(state: skill.status)
+                                    }
                                 }
-                                Spacer()
-                                Toggle("Enabled", isOn: Binding(
-                                    get: { skill.enabled },
-                                    set: { model.setSkillEnabled(id: skill.id, enabled: $0) }
-                                ))
-                                .labelsHidden()
-                            }
-                            Divider()
-                            LabeledContent("Scope", value: skill.scope)
-                            LabeledContent("Source", value: skill.source)
-                            LabeledContent("Revision", value: skill.revision)
-                            HStack {
-                                Text("Trust")
-                                Spacer()
-                                RecordStatusPill(state: skill.status)
+                                .font(.caption)
+                                .panelStyle()
                             }
                         }
-                        .font(.caption)
-                        .panelStyle()
+                    }
+                    BoundaryCallout(
+                        title: "Updates are reviewable",
+                        detail: "Behavioral instructions and executables are pinned with source, revision, licence, requested capabilities, and a diff before installation or activation."
+                    )
+                } header: {
+                    SurfaceHeader(
+                        title: "Skills & Tools",
+                        detail: "Progressive disclosure, provenance, scope, permissions, and update review",
+                        symbol: DesktopDestination.skills.symbol
+                    ) {
+                        TextField("Search skills and tools", text: $query)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 260)
+                            .accessibilityLabel("Search skills and tools")
                     }
                 }
-
-                BoundaryCallout(
-                    title: "Updates are reviewable",
-                    detail: "Behavioral instructions and executables are pinned with source, revision, licence, requested capabilities, and a diff before installation or activation."
-                )
             }
-            .padding(24)
+            .padding(22)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Nord.polarNight0)
@@ -7332,6 +7676,7 @@ private struct DesktopCodingView: View {
     @ObservedObject var integrations: DesktopPersonalIntegrationViewModel
     @ObservedObject var runtime: DesktopConversationRuntime
     let openThread: (String) -> Void
+    let startConversation: (String?) -> Void
     @StateObject private var control = DesktopCodingControlViewModel()
     @State private var panel = Panel.overview
     @State private var showsNewComparison = false
@@ -7428,6 +7773,15 @@ private struct DesktopCodingView: View {
                     symbol: DesktopDestination.liveCodex.symbol
                 ) {
                     ControlGroup {
+                        Menu("New coding conversation", systemImage: "square.and.pencil") {
+                            Button("Standalone") { startConversation(nil) }
+                            if !model.activeProjects.isEmpty {
+                                Divider()
+                                ForEach(model.activeProjects) { project in
+                                    Button(project.name) { startConversation(project.id) }
+                                }
+                            }
+                        }
                         Button("Refresh sessions", systemImage: "arrow.clockwise") {
                             integrations.refreshProviders()
                         }
@@ -7437,6 +7791,35 @@ private struct DesktopCodingView: View {
                         }
                     }
                     .controlGroupStyle(.navigation)
+                }
+
+                HStack(spacing: 12) {
+                    codingPulse(
+                        title: "Running",
+                        value: model.activeThreads.filter { $0.kind == .coding && $0.attention == .running }.count,
+                        symbol: "bolt.fill",
+                        tint: Nord.frost1
+                    )
+                    codingPulse(
+                        title: "Needs input",
+                        value: model.activeThreads.filter {
+                            $0.kind == .coding && ($0.attention == .needsInput || $0.attention == .needsApproval)
+                        }.count,
+                        symbol: "person.crop.circle.badge.questionmark",
+                        tint: Nord.auroraYellow
+                    )
+                    codingPulse(
+                        title: "Worktrees",
+                        value: model.snapshot.operations.worktrees.filter { $0.state != .removed }.count,
+                        symbol: "arrow.triangle.branch",
+                        tint: Nord.frost2
+                    )
+                    codingPulse(
+                        title: "Checks",
+                        value: model.snapshot.operations.qualityGates.count,
+                        symbol: "checkmark.seal.fill",
+                        tint: Nord.auroraGreen
+                    )
                 }
 
                 SectionHeading(
@@ -7567,6 +7950,22 @@ private struct DesktopCodingView: View {
         .sheet(isPresented: $showsNewWorktree) {
             NewManagedWorktreeSheet(model: model)
         }
+    }
+
+    private func codingPulse(title: String, value: Int, symbol: String, tint: Color) -> some View {
+        Label {
+            LabeledContent(title) {
+                Text("\(value)").font(.headline.monospacedDigit())
+            }
+            .font(.caption2)
+        } icon: {
+            Image(systemName: symbol).foregroundStyle(tint)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity)
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(title), \(value)")
     }
 
     private var sessions: some View {
@@ -7856,7 +8255,8 @@ private struct ProviderCapabilityCard: View {
     private var status: DesktopRecordState {
         guard let snapshot else { return provider.executableURL == nil ? .disconnected : .ready }
         switch snapshot.state {
-        case .ready, .degraded: return .ready
+        case .ready: return .ready
+        case .degraded: return .needsReview
         case .authenticationRequired: return .needsReview
         case .unavailable, .unsupported: return .disconnected
         }
@@ -8056,11 +8456,12 @@ private struct DesktopSettingsShell: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.desktopQALargeText) private var usesQALargeText
     private enum Category: String, CaseIterable, Identifiable {
-        case general, integrations, providers, updates, calendars, scheduling, privacy, diagnostics
+        case general, commands, integrations, providers, updates, calendars, scheduling, privacy, diagnostics
         var id: String { rawValue }
         var label: String {
             switch self {
             case .general: "General"
+            case .commands: "Commands & Shortcuts"
             case .integrations: "Integrations"
             case .providers: "Coding providers"
             case .updates: "Updates"
@@ -8073,6 +8474,7 @@ private struct DesktopSettingsShell: View {
         var symbol: String {
             switch self {
             case .general: "gearshape.fill"
+            case .commands: "command"
             case .integrations: "link"
             case .providers: "chevron.left.forwardslash.chevron.right"
             case .updates: "arrow.triangle.2.circlepath.circle.fill"
@@ -8090,6 +8492,7 @@ private struct DesktopSettingsShell: View {
     @Binding var draft: DesktopPreferences
     let dismiss: () -> Void
     @State private var category: Category = .general
+    @State private var settingsQuery = ""
     @State private var showsUpdateInstallConfirmation = false
     @StateObject private var recoveryActions = DesktopRecoveryViewModel()
     @FocusState private var focusedCategory: Category?
@@ -8152,6 +8555,11 @@ private struct DesktopSettingsShell: View {
         .onChange(of: category) { selected in
             if selected == .updates { updates.checkForUpdates(manual: false) }
         }
+        .onChange(of: settingsQuery) { _ in
+            if !filteredCategories.contains(category), let first = filteredCategories.first {
+                category = first
+            }
+        }
         .alert(
             updateInstallConfirmationTitle,
             isPresented: $showsUpdateInstallConfirmation
@@ -8168,8 +8576,13 @@ private struct DesktopSettingsShell: View {
             Label("Settings", systemImage: "gearshape.fill")
                 .font(.title3.weight(.bold))
                 .padding(.horizontal, 12)
-                .padding(.bottom, 10)
-            ForEach(Category.allCases) { item in
+                .padding(.bottom, 4)
+            TextField("Search settings", text: $settingsQuery)
+                .textFieldStyle(.roundedBorder)
+                .padding(.horizontal, 8)
+                .padding(.bottom, 8)
+                .accessibilityLabel("Search settings categories")
+            ForEach(filteredCategories) { item in
                 Button { category = item } label: {
                     Label(item.label, systemImage: item.symbol)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -8247,9 +8660,23 @@ private struct DesktopSettingsShell: View {
         usesQALargeText || dynamicTypeSize.isAccessibilitySize
     }
 
+    private var filteredCategories: [Category] {
+        let query = settingsQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !query.isEmpty else { return Category.allCases }
+        return Category.allCases.filter {
+            $0.label.lowercased().contains(query)
+                || pageDetail(for: $0).lowercased().contains(query)
+        }
+    }
+
     private var pageDetail: String {
+        pageDetail(for: category)
+    }
+
+    private func pageDetail(for category: Category) -> String {
         switch category {
         case .general: "Workspace presentation and review defaults"
+        case .commands: "Keyboard-first navigation and the Kaname Command Center"
         case .integrations: "Personal services, account health, and explicit authorization"
         case .providers: "Local coding agents available to Kaname"
         case .updates: "Verified switching, health checks, and rollback"
@@ -8263,6 +8690,7 @@ private struct DesktopSettingsShell: View {
     @ViewBuilder private var categoryPage: some View {
         switch category {
         case .general: generalPage
+        case .commands: commandsPage
         case .integrations: integrationsPage
         case .providers: providersPage
         case .updates: updatesPage
@@ -8278,6 +8706,41 @@ private struct DesktopSettingsShell: View {
             Toggle("Show technical details by default", isOn: $draft.showTechnicalDetails)
             Toggle("Use compact thread rows", isOn: $draft.compactRows)
             Toggle("Confirm before archiving", isOn: $draft.confirmBeforeArchiving)
+        }
+    }
+
+    private var commandsPage: some View {
+        SettingsSection(title: "Commands & shortcuts", symbol: "command") {
+            Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 10) {
+                GridRow {
+                    Text("Create and find").font(.subheadline.weight(.semibold))
+                    Color.clear.frame(height: 1)
+                }
+                LabeledContent("Command Center", value: "⌘K")
+                LabeledContent("New conversation draft", value: "⌘N")
+                LabeledContent("Focus current composer", value: "⌘L")
+                GridRow {
+                    Text("Navigate and steer").font(.subheadline.weight(.semibold))
+                    Color.clear.frame(height: 1)
+                }
+                LabeledContent("Home / Threads / Inbox / Projects", value: "⌘1 / ⌘2 / ⌘3 / ⌘4")
+                LabeledContent("Back", value: "⌘[")
+                LabeledContent("Toggle inspector", value: "⌘⌥I")
+                LabeledContent("Interrupt current run", value: "⌘.")
+                LabeledContent("Retry current turn", value: "⌘⇧R")
+                GridRow {
+                    Text("Contextual behavior").font(.subheadline.weight(.semibold))
+                    Color.clear.frame(height: 1)
+                }
+                Text("Type > in the Command Center to find local actions. Plain text searches saved conversations, projects, domains, approvals, and artifacts without contacting a provider.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .gridCellColumns(2)
+                Text("The default new-conversation path uses the selected project's kind, provider, model, and safe authority. Choose Configure new conversation from the toolbar menu or Command Center when you need to override them before opening the draft.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .gridCellColumns(2)
+            }
         }
     }
 
@@ -8645,8 +9108,10 @@ private struct SettingsProviderRow: View {
     let provider: SettingsProviderDescriptor
     let snapshot: ProviderCapabilitySnapshot?
 
-    private var connected: Bool { snapshot?.state == .ready || snapshot?.state == .degraded }
-    private var needsAttention: Bool { snapshot?.state == .authenticationRequired }
+    private var connected: Bool { snapshot?.state == .ready }
+    private var needsAttention: Bool {
+        snapshot?.state == .authenticationRequired || snapshot?.state == .degraded
+    }
     private var summary: String {
         guard let snapshot else { return "Not checked" }
         let version = snapshot.version.map { "v\($0) · " } ?? ""

@@ -1,7 +1,9 @@
-# Kaname 0.19.0 build 37
+# Kaname 0.20.0 build 38
 
-- Keep the Threads directory fixed while providers stream, with separate Active and Completed sections and stable creation-time ordering.
-- Show explicit running, queued, waiting-for-input, approval-required, failed, response-ready, and complete states in fixed-height rows.
-- Attach, paste, or drop up to eight images in Codex, Claude, and OpenCode conversations, with previews, draft persistence, private normalized storage, and image-only messages.
-- Send provider-specific image inputs without embedding image bytes in workspace or service request JSON.
-- Protect schema-changing updates with digest-bound workspace snapshots, migration-aware health timing, and bundle-plus-workspace rollback.
+- Turn Command-K into a keyboard-first Command Center for new work, project actions, destination navigation, and the existing privacy-bounded saved-content search.
+- Make Command-N open or reuse a project-aware conversation draft immediately, focus the composer, and preserve the full provider and authority setup as an advanced path.
+- Reclaim working space by opening the inspector only for selected conversation or project context while keeping its manual toggle available everywhere.
+- Let the Threads directory collapse independently so dense conversations, diffs, plans, and checks can use the full workspace width.
+- Tighten the Home hierarchy around new work and attention, add coding-workbench pulse metrics and project-aware creation, and collapse Calendar account configuration behind the agenda workflow.
+- Add search to Skills and Settings, document every primary shortcut in-app, and distinguish degraded provider capability from a genuinely ready provider.
+- Preserve the approved mobile command-centre, intervention, editable queue, approval, diff, and reachability behavior without changing its five-area information architecture.
