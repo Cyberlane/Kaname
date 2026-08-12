@@ -117,6 +117,17 @@ run_qualified_app \
     --snapshot "$output_directory/threads-compact.png"
 run_qualified_app --desktop-destination localCore --load-local-core --snapshot "$output_directory/local-core.png"
 run_qualified_app --desktop-destination email --snapshot "$output_directory/email.png"
+run_qualified_app \
+    --desktop-destination email \
+    --desktop-email-workflows \
+    --desktop-workflow-fixture "$PWD/Examples/Workflows/document-revision.workflow.json" \
+    --snapshot "$output_directory/workflow-work.png"
+run_qualified_app \
+    --desktop-destination email \
+    --desktop-email-workflows \
+    --desktop-workflow-definitions \
+    --desktop-workflow-fixture "$PWD/Examples/Workflows/document-revision.workflow.json" \
+    --snapshot "$output_directory/workflow-definitions.png"
 run_qualified_app --desktop-destination calendar --snapshot "$output_directory/calendar.png"
 run_qualified_app --desktop-destination automations --snapshot "$output_directory/automations.png"
 run_qualified_app --desktop-destination projects --snapshot "$output_directory/projects.png"
@@ -177,6 +188,8 @@ for snapshot in \
     "$output_directory/threads-compact.png" \
     "$output_directory/local-core.png" \
     "$output_directory/email.png" \
+    "$output_directory/workflow-work.png" \
+    "$output_directory/workflow-definitions.png" \
     "$output_directory/calendar.png" \
     "$output_directory/automations.png" \
     "$output_directory/projects.png" \

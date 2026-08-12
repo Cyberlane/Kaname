@@ -151,8 +151,10 @@ struct DesktopAutomaticBackupSettings: View {
                     .foregroundStyle(.secondary)
             }
         }
-        TextField("Private object prefix", text: configurationBinding(\.prefix))
-            .textFieldStyle(.roundedBorder)
+        LabeledContent("Object prefix") {
+            TextField("Private prefix", text: configurationBinding(\.prefix))
+                .textFieldStyle(.roundedBorder)
+        }
     }
 
     @ViewBuilder
