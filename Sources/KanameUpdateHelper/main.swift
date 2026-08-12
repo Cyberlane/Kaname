@@ -37,10 +37,12 @@ private enum KanameUpdateHelper {
         let backup = try appURL(values["--backup"])
         let health = try fileURL(values["--health"])
         let receipt = try fileURL(values["--receipt"])
+        let workspaceContext = try switchWorkspaceContext(values, receipt: receipt)
         try validateUpdatePaths(installed: installed, staged: staged, backup: backup, replaced: nil, receipt: receipt)
         let pid = try processID(values["--pid"])
-        let timeout = Double(values["--timeout"] ?? "12") ?? 12
-        try waitForExit(pid: pid, timeout: timeout)
+        let parentTimeout = Double(values["--parent-timeout"] ?? values["--timeout"] ?? "12") ?? 12
+        let healthTimeout = Double(values["--health-timeout"] ?? values["--timeout"] ?? "12") ?? 12
+        try waitForExit(pid: pid, timeout: parentTimeout)
         try verifyStagedBundle(
             staged,
             expectedVersion: values["--version"],
@@ -48,6 +50,13 @@ private enum KanameUpdateHelper {
             expectedBundleDigest: values["--bundle-digest"],
             expectedSignerDigest: values["--signer-digest"]
         )
+        if let workspaceContext {
+            try createWorkspaceRollbackSnapshot(
+                workspace: workspaceContext.workspace,
+                snapshot: workspaceContext.rollback,
+                expectedDigest: workspaceContext.expectedDigest
+            )
+        }
         try verifyStagedBundle(
             installed,
             expectedVersion: values["--rollback-version"],
@@ -81,7 +90,7 @@ private enum KanameUpdateHelper {
                 healthNonce: values["--health-nonce"],
                 bundleDigest: values["--bundle-digest"],
                 workspaceSchemaVersion: Int(values["--workspace-schema"] ?? ""),
-                timeout: timeout
+                timeout: healthTimeout
             )
             try writeReceipt(.healthy, detail: "The updated UI passed its health handshake. Rollback remains available.", to: receipt)
         } catch {
@@ -95,6 +104,14 @@ private enum KanameUpdateHelper {
             )
             try? FileManager.default.removeItem(at: installed)
             try FileManager.default.moveItem(at: backup, to: installed)
+            if let workspaceContext {
+                try restoreWorkspaceRollbackSnapshot(
+                    workspace: workspaceContext.workspace,
+                    snapshot: workspaceContext.rollback,
+                    replaced: workspaceContext.replaced,
+                    expectedDigest: workspaceContext.expectedDigest
+                )
+            }
             try? FileManager.default.removeItem(at: health)
             let launchedAfter = Int64(Date().timeIntervalSince1970 * 1_000)
             let restoredPID = try launchExecutable(in: installed)
@@ -105,7 +122,8 @@ private enum KanameUpdateHelper {
                 channel: values["--channel"],
                 processIdentifier: restoredPID,
                 launchedAfterUnixMillis: launchedAfter,
-                timeout: timeout
+                workspaceSchemaVersion: workspaceContext.flatMap { workspaceSchemaVersion(in: $0.workspace) },
+                timeout: healthTimeout
             )
             try writeReceipt(.rolledBack, detail: "The candidate missed its health deadline. Kaname restored the previous bundle.", to: receipt)
             throw error
@@ -117,6 +135,7 @@ private enum KanameUpdateHelper {
         let backup = try appURL(values["--backup"])
         let health = try fileURL(values["--health"])
         let receipt = try fileURL(values["--receipt"])
+        let workspaceContext = try rollbackWorkspaceContext(values, receipt: receipt)
         guard let currentDigest = values["--bundle-digest"],
               currentDigest.count == 64,
               currentDigest.allSatisfy(\Character.isHexDigit) else {
@@ -133,8 +152,9 @@ private enum KanameUpdateHelper {
             receipt: receipt
         )
         let pid = try processID(values["--pid"])
-        let timeout = Double(values["--timeout"] ?? "12") ?? 12
-        try waitForExit(pid: pid, timeout: timeout)
+        let parentTimeout = Double(values["--parent-timeout"] ?? values["--timeout"] ?? "12") ?? 12
+        let healthTimeout = Double(values["--health-timeout"] ?? values["--timeout"] ?? "12") ?? 12
+        try waitForExit(pid: pid, timeout: parentTimeout)
         try verifyStagedBundle(
             installed,
             expectedVersion: values["--version"],
@@ -142,6 +162,12 @@ private enum KanameUpdateHelper {
             expectedBundleDigest: currentDigest,
             expectedSignerDigest: values["--signer-digest"]
         )
+        if let workspaceContext {
+            try verifyWorkspaceRollbackSnapshot(
+                workspaceContext.rollback,
+                expectedDigest: workspaceContext.expectedDigest
+            )
+        }
         try verifyStagedBundle(
             backup,
             expectedVersion: values["--rollback-version"],
@@ -152,8 +178,20 @@ private enum KanameUpdateHelper {
         guard !FileManager.default.fileExists(atPath: replaced.path) else {
             throw UpdateHelperError.invalidPath
         }
+        if let workspaceContext {
+            guard !FileManager.default.fileExists(atPath: workspaceContext.replaced.path),
+                  FileManager.default.fileExists(atPath: workspaceContext.workspace.path),
+                  try isRegularNonSymlink(workspaceContext.workspace) else {
+                throw UpdateHelperError.invalidPath
+            }
+        }
         try prepareParent(of: replaced)
         try FileManager.default.moveItem(at: installed, to: replaced)
+        if let workspaceContext {
+            try prepareParent(of: workspaceContext.replaced)
+            try FileManager.default.moveItem(at: workspaceContext.workspace, to: workspaceContext.replaced)
+            try copyPrivateFile(from: workspaceContext.rollback, to: workspaceContext.workspace)
+        }
         var restoredPID: Int32?
         do {
             try FileManager.default.moveItem(at: backup, to: installed)
@@ -168,7 +206,8 @@ private enum KanameUpdateHelper {
                 channel: values["--channel"],
                 processIdentifier: launchedPID,
                 launchedAfterUnixMillis: launchedAfter,
-                timeout: timeout
+                workspaceSchemaVersion: workspaceContext.flatMap { workspaceSchemaVersion(in: $0.workspace) },
+                timeout: healthTimeout
             )
             try writeReceipt(.rolledBack, detail: "The previous Kaname bundle is active.", to: receipt)
         } catch {
@@ -188,6 +227,10 @@ private enum KanameUpdateHelper {
                 try FileManager.default.moveItem(at: installed, to: backup)
             }
             try FileManager.default.moveItem(at: replaced, to: installed)
+            if let workspaceContext {
+                try? FileManager.default.removeItem(at: workspaceContext.workspace)
+                try FileManager.default.moveItem(at: workspaceContext.replaced, to: workspaceContext.workspace)
+            }
             try? FileManager.default.removeItem(at: health)
             let launchedAfter = Int64(Date().timeIntervalSince1970 * 1_000)
             let currentPID = try launchExecutable(in: installed)
@@ -198,7 +241,8 @@ private enum KanameUpdateHelper {
                 channel: values["--channel"],
                 processIdentifier: currentPID,
                 launchedAfterUnixMillis: launchedAfter,
-                timeout: timeout
+                workspaceSchemaVersion: workspaceContext.flatMap { workspaceSchemaVersion(in: $0.workspace) },
+                timeout: healthTimeout
             )
             try writeReceipt(.healthy, detail: "Rollback failed safely. The current Kaname bundle was restored.", to: receipt)
             throw error
@@ -206,6 +250,108 @@ private enum KanameUpdateHelper {
     }
 
     private enum ReceiptStatus: String { case healthy, rolledBack }
+
+    private struct WorkspaceContext {
+        let workspace: URL
+        let rollback: URL
+        let replaced: URL
+        let expectedDigest: String
+    }
+
+    private static func switchWorkspaceContext(
+        _ values: [String: String],
+        receipt: URL
+    ) throws -> WorkspaceContext? {
+        try workspaceContext(values, replacedKey: "--workspace-failed", receipt: receipt)
+    }
+
+    private static func rollbackWorkspaceContext(
+        _ values: [String: String],
+        receipt: URL
+    ) throws -> WorkspaceContext? {
+        try workspaceContext(values, replacedKey: "--workspace-replaced", receipt: receipt)
+    }
+
+    private static func workspaceContext(
+        _ values: [String: String],
+        replacedKey: String,
+        receipt: URL
+    ) throws -> WorkspaceContext? {
+        let keys = ["--workspace", "--workspace-rollback", replacedKey, "--workspace-rollback-digest"]
+        guard keys.contains(where: { values[$0] != nil }) else { return nil }
+        guard let digest = values["--workspace-rollback-digest"] else {
+            throw UpdateHelperError.invalidArguments
+        }
+        let context = WorkspaceContext(
+            workspace: try fileURL(values["--workspace"]),
+            rollback: try fileURL(values["--workspace-rollback"]),
+            replaced: try fileURL(values[replacedKey]),
+            expectedDigest: digest
+        )
+        try validateWorkspacePaths(
+            workspace: context.workspace,
+            managed: [context.rollback, context.replaced],
+            receipt: receipt
+        )
+        return context
+    }
+
+    private static func createWorkspaceRollbackSnapshot(
+        workspace: URL,
+        snapshot: URL,
+        expectedDigest: String?
+    ) throws {
+        try verifyWorkspaceFile(workspace, expectedDigest: expectedDigest)
+        guard !FileManager.default.fileExists(atPath: snapshot.path) else {
+            throw UpdateHelperError.invalidPath
+        }
+        try copyPrivateFile(from: workspace, to: snapshot)
+        try verifyWorkspaceFile(snapshot, expectedDigest: expectedDigest)
+    }
+
+    private static func restoreWorkspaceRollbackSnapshot(
+        workspace: URL,
+        snapshot: URL,
+        replaced: URL,
+        expectedDigest: String?
+    ) throws {
+        try verifyWorkspaceRollbackSnapshot(snapshot, expectedDigest: expectedDigest)
+        guard !FileManager.default.fileExists(atPath: replaced.path) else {
+            throw UpdateHelperError.invalidPath
+        }
+        if FileManager.default.fileExists(atPath: workspace.path) {
+            try prepareParent(of: replaced)
+            try FileManager.default.moveItem(at: workspace, to: replaced)
+        }
+        try copyPrivateFile(from: snapshot, to: workspace)
+    }
+
+    private static func verifyWorkspaceRollbackSnapshot(_ snapshot: URL, expectedDigest: String?) throws {
+        try verifyWorkspaceFile(snapshot, expectedDigest: expectedDigest)
+    }
+
+    private static func verifyWorkspaceFile(_ url: URL, expectedDigest: String?) throws {
+        guard let expectedDigest,
+              expectedDigest.count == 64,
+              expectedDigest.allSatisfy(\Character.isHexDigit),
+              FileManager.default.fileExists(atPath: url.path),
+              try isRegularNonSymlink(url),
+              sha256(try Data(contentsOf: url, options: [.mappedIfSafe])) == expectedDigest else {
+            throw UpdateHelperError.trustValidationFailed
+        }
+    }
+
+    private static func copyPrivateFile(from source: URL, to destination: URL) throws {
+        try prepareParent(of: destination)
+        try FileManager.default.copyItem(at: source, to: destination)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
+    }
+
+    private static func workspaceSchemaVersion(in workspace: URL) -> Int? {
+        guard let data = try? Data(contentsOf: workspace),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return (object["schemaVersion"] as? NSNumber)?.intValue
+    }
 
     private static func writeReceipt(_ status: ReceiptStatus, detail: String, to url: URL) throws {
         var payload = ((try? Data(contentsOf: url))
@@ -487,6 +633,35 @@ private enum KanameUpdateHelper {
             let values = try url.resourceValues(forKeys: [.isSymbolicLinkKey])
             guard values.isSymbolicLink != true else { throw UpdateHelperError.invalidPath }
         }
+    }
+
+    private static func validateWorkspacePaths(
+        workspace: URL,
+        managed: [URL],
+        receipt: URL
+    ) throws {
+        let updateRoot = canonicalPath(receipt.deletingLastPathComponent())
+        let workspacePath = canonicalPath(workspace)
+        let managedPaths = managed.map(canonicalPath)
+        guard !workspacePath.hasPrefix(updateRoot + "/"),
+              managedPaths.allSatisfy({ $0.hasPrefix(updateRoot + "/") }),
+              Set([workspacePath] + managedPaths).count == managedPaths.count + 1 else {
+            throw UpdateHelperError.invalidPath
+        }
+        for path in managedPaths {
+            guard !path.hasPrefix(workspacePath + "/"), !workspacePath.hasPrefix(path + "/") else {
+                throw UpdateHelperError.invalidPath
+            }
+        }
+        for url in [workspace] + managed where FileManager.default.fileExists(atPath: url.path) {
+            let values = try url.resourceValues(forKeys: [.isSymbolicLinkKey])
+            guard values.isSymbolicLink != true else { throw UpdateHelperError.invalidPath }
+        }
+    }
+
+    private static func isRegularNonSymlink(_ url: URL) throws -> Bool {
+        let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+        return values.isRegularFile == true && values.isSymbolicLink != true
     }
 
     private static func canonicalPath(_ url: URL) -> String {

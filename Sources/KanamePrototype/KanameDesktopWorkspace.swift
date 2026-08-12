@@ -2013,17 +2013,16 @@ private struct DesktopThreadsView: View {
                     symbol: DesktopDestination.threads.symbol
                 )
                 List(selection: $selectedThreadID) {
-                    ForEach(model.threads(matching: searchText)) { thread in
-                        ThreadDirectoryLabel(thread: thread)
-                            .tag(thread.id as String?)
-                            .contextMenu {
-                                Button("Mark complete") {
-                                    model.setAttention(threadID: thread.id, attention: .completed)
-                                }
-                                Button("Archive") {
-                                    model.setAttention(threadID: thread.id, attention: .archived)
-                                }
-                            }
+                    let matching = model.threads(matching: searchText)
+                    let active = matching.filter { $0.attention != .completed }
+                    let completed = matching.filter { $0.attention == .completed }
+                    Section("Active") {
+                        ForEach(active) { thread in threadDirectoryRow(thread) }
+                    }
+                    if !completed.isEmpty {
+                        Section("Completed") {
+                            ForEach(completed) { thread in threadDirectoryRow(thread) }
+                        }
                     }
                 }
                 .listStyle(.inset)
@@ -2055,6 +2054,25 @@ private struct DesktopThreadsView: View {
         .onChange(of: selectedThreadID) { _ in
             selectedRunID = nil
             conversationAnchorID = nil
+        }
+    }
+
+    private func threadDirectoryRow(_ thread: DesktopThread) -> some View {
+        ThreadDirectoryLabel(
+            thread: thread,
+            runs: model.providerRuns(threadID: thread.id)
+        )
+        .tag(thread.id as String?)
+        .contextMenu {
+            Button(thread.attention == .completed ? "Mark active" : "Mark complete") {
+                model.setAttention(
+                    threadID: thread.id,
+                    attention: thread.attention == .completed ? .needsResponse : .completed
+                )
+            }
+            Button("Archive") {
+                model.setAttention(threadID: thread.id, attention: .archived)
+            }
         }
     }
 }
@@ -2135,6 +2153,9 @@ private struct DesktopThreadConversation: View {
     @Binding var conversationAnchorID: String?
     let composerFocusRequest: DesktopComposerFocusRequest?
     @State private var draft = ""
+    @State private var attachments: [ConversationImageAttachment] = []
+    @State private var attachmentError: String?
+    @State private var isImportingAttachments = false
     @State private var questionAnswer = ""
     @State private var panel: Panel = .conversation
     @State private var showsRename = false
@@ -2152,6 +2173,7 @@ private struct DesktopThreadConversation: View {
     @FocusState private var composerFocused: Bool
 #if os(macOS)
     @State private var sheetPreviousResponder: NSResponder?
+    @State private var pasteMonitor: Any?
 #endif
 
     init(
@@ -2171,6 +2193,7 @@ private struct DesktopThreadConversation: View {
         _conversationAnchorID = conversationAnchorID
         self.composerFocusRequest = composerFocusRequest
         _draft = State(initialValue: model.composerDraft(threadID: thread.id))
+        _attachments = State(initialValue: model.composerAttachments(threadID: thread.id))
     }
 
     private enum Panel: String, CaseIterable, Identifiable {
@@ -2237,7 +2260,17 @@ private struct DesktopThreadConversation: View {
                 }
             )
         }
-        .onAppear(perform: applyComposerFocusRequest)
+        .onAppear {
+            applyComposerFocusRequest()
+#if os(macOS)
+            installImagePasteMonitor()
+#endif
+        }
+        .onDisappear {
+#if os(macOS)
+            removeImagePasteMonitor()
+#endif
+        }
         .onChange(of: composerFocusRequest) { _ in applyComposerFocusRequest() }
         .onChange(of: thread.id) { _ in
             narrativeRowLimit = DesktopConversationNarrativePresentation.defaultMaximumRows
@@ -2246,6 +2279,8 @@ private struct DesktopThreadConversation: View {
             conversationAnchorID = nil
             followsLatest = true
             hasNewNarrativeContent = false
+            attachments = model.composerAttachments(threadID: thread.id)
+            attachmentError = nil
         }
         .onChange(of: thread.plan.count) { count in
             if count > 0 { panel = .plan }
@@ -2390,7 +2425,7 @@ private struct DesktopThreadConversation: View {
                                 ForEach(narrative) { item in
                                     switch item {
                                     case let .message(message):
-                                        DesktopMessageBubble(message: message)
+                                        DesktopMessageBubble(message: message, threadID: thread.id)
                                             .id(item.id)
                                     case let .criticalEvent(event):
                                         DesktopProviderEventCard(
@@ -2480,6 +2515,32 @@ private struct DesktopThreadConversation: View {
                 .padding(.top, 10)
             }
             VStack(alignment: .leading, spacing: 0) {
+                if !attachments.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(attachments) { attachment in
+                                DesktopComposerImageThumbnail(
+                                    threadID: thread.id,
+                                    attachment: attachment,
+                                    remove: { removeAttachment(attachment) }
+                                )
+                            }
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.top, 10)
+                    }
+                    .frame(height: 74)
+                }
+
+                if let attachmentError {
+                    Label(attachmentError, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(Nord.auroraRed)
+                        .lineLimit(2)
+                        .padding(.horizontal, 12)
+                        .padding(.top, 8)
+                }
+
                 TextField("Message \(thread.provider)", text: $draft, axis: .vertical)
                     .textFieldStyle(.plain)
                     .lineLimit(1...6)
@@ -2505,6 +2566,11 @@ private struct DesktopThreadConversation: View {
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .strokeBorder(Nord.polarNight3.opacity(0.55), lineWidth: 1)
             }
+#if os(macOS)
+            .dropDestination(for: URL.self) { urls, _ in
+                importImageURLs(urls)
+            }
+#endif
             .padding(14)
             .background(Nord.polarNight0)
             .onChange(of: runtime.isRunning(threadID: thread.id)) { isRunning in
@@ -2564,6 +2630,24 @@ private struct DesktopThreadConversation: View {
 
     private func composerAccessoryRow(compact: Bool) -> some View {
         HStack(spacing: 4) {
+#if os(macOS)
+            Button(action: chooseImages) {
+                Image(systemName: "paperclip")
+            }
+            .buttonStyle(.plain)
+            .disabled(
+                !imageAttachmentsSupported
+                    || isImportingAttachments
+                    || attachments.count >= ConversationImageAttachment.maximumCountPerMessage
+            )
+            .help(
+                imageAttachmentsSupported
+                    ? "Attach images, or paste with Command-V"
+                    : "Choose Codex, Claude, or OpenCode to attach images"
+            )
+            .accessibilityLabel("Attach images")
+#endif
+
             DesktopComposerRuntimeControls(
                 thread: thread,
                 capabilities: capabilities,
@@ -2576,6 +2660,13 @@ private struct DesktopThreadConversation: View {
 
             Spacer(minLength: 8)
 
+            if isImportingAttachments {
+                ProgressView()
+                    .controlSize(.small)
+                    .help("Preparing image attachments")
+                    .accessibilityLabel("Preparing image attachments")
+            }
+
             if runtime.isRunning(threadID: thread.id) {
                 ProgressView()
                     .controlSize(.small)
@@ -2587,13 +2678,13 @@ private struct DesktopThreadConversation: View {
                 Image(systemName: "arrow.up.circle.fill")
                     .font(.title2)
                     .foregroundStyle(
-                        draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        !hasSendableContent
                             ? Color.secondary
                             : Nord.frost1
                     )
             }
             .buttonStyle(.plain)
-            .disabled(!canSendMessage || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .disabled(!canSendMessage || !hasSendableContent || isImportingAttachments)
             .accessibilityLabel(runtime.isRunning(threadID: thread.id) ? "Queue follow-up" : "Send message")
         }
     }
@@ -2605,11 +2696,23 @@ private struct DesktopThreadConversation: View {
         )
     }
 
+    private var hasSendableContent: Bool {
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
+    }
+
+    private var imageAttachmentsSupported: Bool {
+        DesktopConversationRuntime.supportsImageAttachments(provider: thread.provider)
+    }
+
     private func send() {
         let body = draft
-        if canSendMessage, runtime.send(threadID: thread.id, body: body) {
+        if canSendMessage,
+           hasSendableContent,
+           runtime.send(threadID: thread.id, body: body, attachments: attachments) {
             draft = ""
-            model.updateComposerDraft(threadID: thread.id, body: "")
+            attachments = []
+            attachmentError = nil
+            model.clearComposerDraft(threadID: thread.id)
         }
     }
 
@@ -2621,6 +2724,125 @@ private struct DesktopThreadConversation: View {
         )
         questionAnswer = ""
     }
+
+    private var attachmentStore: KanameConversationAttachmentStore {
+        KanameConversationAttachmentStore(
+            rootDirectory: KanameDesktopEnvironment.current.applicationSupportRoot
+                .appending(path: "ConversationService", directoryHint: .isDirectory)
+        )
+    }
+
+    private func removeAttachment(_ attachment: ConversationImageAttachment) {
+        try? attachmentStore.remove(threadID: thread.id, attachment: attachment)
+        _ = model.removeComposerAttachment(threadID: thread.id, attachmentID: attachment.id)
+        attachments = model.composerAttachments(threadID: thread.id)
+        attachmentError = nil
+    }
+
+#if os(macOS)
+    private func chooseImages() {
+        guard imageAttachmentsSupported, !isImportingAttachments else { return }
+        let panel = NSOpenPanel()
+        panel.title = "Attach images"
+        panel.message = "Images are copied into Kaname's private conversation storage and sent only with this message."
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        guard panel.runModal() == .OK else { return }
+        _ = importImageURLs(panel.urls)
+    }
+
+    @discardableResult
+    private func importImageURLs(_ urls: [URL]) -> Bool {
+        guard imageAttachmentsSupported, !isImportingAttachments else { return false }
+        let remaining = ConversationImageAttachment.maximumCountPerMessage - attachments.count
+        let candidates = Array(urls.filter(Self.isImageURL).prefix(max(0, remaining)))
+        guard !candidates.isEmpty else {
+            attachmentError = remaining == 0 ? "A message can contain up to eight images." : "Choose a readable image file."
+            return false
+        }
+        beginImageImport(candidates.map { ($0, nil, $0.lastPathComponent) })
+        return true
+    }
+
+    private func importClipboardImage(_ data: Data, filename: String) {
+        beginImageImport([(nil, data, filename)])
+    }
+
+    private func beginImageImport(_ inputs: [(URL?, Data?, String)]) {
+        guard !inputs.isEmpty else { return }
+        isImportingAttachments = true
+        attachmentError = nil
+        let store = attachmentStore
+        let threadID = thread.id
+        _Concurrency.Task {
+            let results = await _Concurrency.Task.detached(priority: .userInitiated) {
+                inputs.map { url, suppliedData, filename -> (ConversationImageAttachment?, String?) in
+                    let accessed = url?.startAccessingSecurityScopedResource() ?? false
+                    defer { if accessed { url?.stopAccessingSecurityScopedResource() } }
+                    do {
+                        let data: Data
+                        if let suppliedData {
+                            data = suppliedData
+                        } else if let url {
+                            data = try Data(contentsOf: url, options: .mappedIfSafe)
+                        } else {
+                            throw KanameConversationAttachmentError.invalidImage
+                        }
+                        return (try store.importImage(data: data, suggestedFilename: filename, threadID: threadID), nil)
+                    } catch {
+                        return (nil, error.localizedDescription)
+                    }
+                }
+            }.value
+            for result in results {
+                if let attachment = result.0 {
+                    if !model.addComposerAttachment(threadID: threadID, attachment: attachment) {
+                        try? store.remove(threadID: threadID, attachment: attachment)
+                        attachmentError = "Kaname could not save that attachment in the draft."
+                    }
+                } else if let error = result.1 {
+                    attachmentError = error
+                }
+            }
+            attachments = model.composerAttachments(threadID: threadID)
+            isImportingAttachments = false
+        }
+    }
+
+    private func installImagePasteMonitor() {
+        guard pasteMonitor == nil else { return }
+        pasteMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            guard composerFocused,
+                  modifiers.contains(.command),
+                  event.charactersIgnoringModifiers?.lowercased() == "v" else { return event }
+            return handleImagePasteboard() ? nil : event
+        }
+    }
+
+    private func removeImagePasteMonitor() {
+        if let pasteMonitor { NSEvent.removeMonitor(pasteMonitor) }
+        pasteMonitor = nil
+    }
+
+    private func handleImagePasteboard() -> Bool {
+        guard imageAttachmentsSupported, !isImportingAttachments else { return false }
+        let pasteboard = NSPasteboard.general
+        let urls = (pasteboard.readObjects(forClasses: [NSURL.self]) as? [URL] ?? []).filter(Self.isImageURL)
+        if !urls.isEmpty { return importImageURLs(urls) }
+        guard let image = NSImage(pasteboard: pasteboard), let data = image.tiffRepresentation else { return false }
+        importClipboardImage(data, filename: "Pasted image.png")
+        return true
+    }
+
+    private static func isImageURL(_ url: URL) -> Bool {
+        guard url.isFileURL,
+              let type = UTType(filenameExtension: url.pathExtension) else { return false }
+        return type.conforms(to: .image)
+    }
+#endif
 
 }
 
@@ -10334,13 +10556,13 @@ private struct ThreadRow: View {
 
 private struct ThreadDirectoryLabel: View {
     let thread: DesktopThread
+    let runs: [DesktopProviderRunRecord]
 
     var body: some View {
-        HStack(alignment: .top, spacing: 11) {
+        HStack(alignment: .center, spacing: 11) {
             Image(systemName: thread.kind.symbol)
-                .foregroundStyle(thread.attention.tint)
+                .foregroundStyle(ThreadDirectoryStatus(thread: thread, runs: runs).tint)
                 .frame(width: 24)
-                .padding(.top, 3)
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Text(thread.title)
@@ -10348,22 +10570,89 @@ private struct ThreadDirectoryLabel: View {
                         .lineLimit(1)
                     if thread.unread { Circle().fill(Nord.frost1).frame(width: 7, height: 7) }
                 }
-                Text(thread.summary)
+                Text("\(thread.provider) · \(thread.kind.label)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                HStack {
-                    Text(thread.attention.label)
-                    Text("·")
-                    RelativeTime(unixMillis: thread.updatedAtUnixMillis)
-                }
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                ThreadDirectoryStatusView(status: ThreadDirectoryStatus(thread: thread, runs: runs))
             }
         }
         .padding(.vertical, 5)
+        .frame(height: 70, alignment: .center)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(thread.unread ? "Unread. " : "")\(thread.title). \(thread.summary). Attention: \(thread.attention.label)")
+        .accessibilityLabel(
+            "\(thread.unread ? "Unread. " : "")\(thread.title). \(thread.provider). \(ThreadDirectoryStatus(thread: thread, runs: runs).label)"
+        )
+    }
+}
+
+private struct ThreadDirectoryStatus {
+    let label: String
+    let symbol: String
+    let tint: Color
+    let runningSinceUnixMillis: Int64?
+
+    init(thread: DesktopThread, runs: [DesktopProviderRunRecord]) {
+        let runningSince = runs.last(where: { $0.state == .running })?.startedAtUnixMillis
+        switch thread.attention {
+        case .needsApproval:
+            (label, symbol, tint, runningSinceUnixMillis) = ("Approval required", "hand.raised.fill", Nord.auroraYellow, nil)
+        case .needsInput:
+            (label, symbol, tint, runningSinceUnixMillis) = ("Waiting for input", "questionmark.bubble.fill", Nord.auroraPurple, nil)
+        case .failed:
+            (label, symbol, tint, runningSinceUnixMillis) = ("Failed", "exclamationmark.circle.fill", Nord.auroraRed, nil)
+        case .running:
+            (label, symbol, tint, runningSinceUnixMillis) = ("Running", "circle.dashed", Nord.frost1, runningSince)
+        case .queued:
+            (label, symbol, tint, runningSinceUnixMillis) = ("Queued", "clock", .secondary, nil)
+        case .needsResponse:
+            (label, symbol, tint, runningSinceUnixMillis) = (
+                thread.unread ? "Response ready" : "Ready",
+                thread.unread ? "checkmark.circle.fill" : "circle",
+                thread.unread ? Nord.auroraGreen : .secondary,
+                nil
+            )
+        case .completed:
+            (label, symbol, tint, runningSinceUnixMillis) = ("Complete", "checkmark", .secondary, nil)
+        case .archived:
+            (label, symbol, tint, runningSinceUnixMillis) = ("Archived", "archivebox", .secondary, nil)
+        }
+    }
+}
+
+private struct ThreadDirectoryStatusView: View {
+    let status: ThreadDirectoryStatus
+
+    var body: some View {
+        Group {
+            if let started = status.runningSinceUnixMillis {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    statusLabel(duration: max(0, Int64(context.date.timeIntervalSince1970 * 1_000) - started))
+                }
+            } else {
+                statusLabel(duration: nil)
+            }
+        }
+        .font(.caption2.weight(.medium))
+        .foregroundStyle(status.tint)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func statusLabel(duration: Int64?) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: status.symbol)
+            Text(status.label)
+            if let duration {
+                Text(Self.durationLabel(milliseconds: duration))
+                    .monospacedDigit()
+            }
+        }
+        .lineLimit(1)
+    }
+
+    private static func durationLabel(milliseconds: Int64) -> String {
+        let seconds = milliseconds / 1_000
+        return String(format: "%lld:%02lld", seconds / 60, seconds % 60)
     }
 }
 
@@ -10699,6 +10988,7 @@ private struct ThreadEvidenceView: View {
 
 private struct DesktopMessageBubble: View {
     let message: DesktopMessage
+    let threadID: String
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -10720,11 +11010,106 @@ private struct DesktopMessageBubble: View {
                 Text(message.body)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
+                if !message.attachments.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(message.attachments) { attachment in
+                                DesktopConversationImagePreview(
+                                    threadID: threadID,
+                                    attachment: attachment,
+                                    size: CGSize(width: 140, height: 96)
+                                )
+                            }
+                        }
+                    }
+                }
             }
             .padding(13)
             .background(message.role.background, in: RoundedRectangle(cornerRadius: 15))
             if message.role != .user { Spacer(minLength: 42) }
         }
+    }
+}
+
+private struct DesktopComposerImageThumbnail: View {
+    let threadID: String
+    let attachment: ConversationImageAttachment
+    let remove: () -> Void
+    @State private var showsPreview = false
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Button { showsPreview = true } label: {
+                DesktopConversationImagePreview(
+                    threadID: threadID,
+                    attachment: attachment,
+                    size: CGSize(width: 58, height: 58)
+                )
+            }
+            .buttonStyle(.plain)
+            .help("Preview \(attachment.filename)")
+
+            Button(action: remove) {
+                Image(systemName: "xmark.circle.fill")
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(.white, Color.black.opacity(0.72))
+            }
+            .buttonStyle(.plain)
+            .offset(x: 5, y: -5)
+            .accessibilityLabel("Remove \(attachment.filename)")
+        }
+        .popover(isPresented: $showsPreview) {
+            VStack(alignment: .leading, spacing: 10) {
+                DesktopConversationImagePreview(
+                    threadID: threadID,
+                    attachment: attachment,
+                    size: CGSize(width: 520, height: 420)
+                )
+                Text(attachment.filename)
+                    .font(.caption)
+                Text("\(attachment.pixelWidth) × \(attachment.pixelHeight) · \(ByteCountFormatter.string(fromByteCount: Int64(attachment.byteCount), countStyle: .file))")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(14)
+        }
+    }
+}
+
+private struct DesktopConversationImagePreview: View {
+    let threadID: String
+    let attachment: ConversationImageAttachment
+    let size: CGSize
+
+    private var imageURL: URL? {
+        let environment = KanameDesktopEnvironment.current
+        let store = KanameConversationAttachmentStore(
+            rootDirectory: environment.applicationSupportRoot
+                .appending(path: "ConversationService", directoryHint: .isDirectory)
+        )
+        return try? store.attachmentURL(threadID: threadID, attachment: attachment)
+    }
+
+    var body: some View {
+#if os(macOS)
+        Group {
+            if let imageURL, let image = NSImage(contentsOf: imageURL) {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFit()
+            } else {
+                Image(systemName: "photo.badge.exclamationmark")
+                    .font(.title2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(width: size.width, height: size.height)
+        .background(Nord.polarNight2, in: RoundedRectangle(cornerRadius: 9))
+        .clipShape(RoundedRectangle(cornerRadius: 9))
+        .accessibilityLabel("Attached image \(attachment.filename)")
+#else
+        EmptyView()
+#endif
     }
 }
 
@@ -11022,6 +11407,7 @@ private extension DesktopAttention {
         switch self {
         case .needsResponse: "bubble.left"
         case .needsApproval: "checkmark.shield"
+        case .needsInput: "questionmark.bubble"
         case .running: "progress.indicator"
         case .queued: "clock"
         case .completed: "checkmark.circle"
@@ -11087,6 +11473,7 @@ private extension DesktopAttention {
     var tint: Color {
         switch self {
         case .needsResponse, .needsApproval: Nord.auroraYellow
+        case .needsInput: Nord.auroraPurple
         case .running: Nord.frost0
         case .queued: Nord.frost3
         case .completed: Nord.auroraGreen

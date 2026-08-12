@@ -206,7 +206,11 @@ private enum KanameConversationWorker {
         }
         var didStartSession = false
         do {
-            let codingRequest = request.codexCodingRequest()
+            let attachmentStore = KanameConversationAttachmentStore(rootDirectory: store.rootDirectory)
+            let attachmentPaths = try request.attachments.map {
+                try attachmentStore.attachmentURL(threadID: request.threadID, attachment: $0).path
+            }
+            let codingRequest = request.codexCodingRequest(attachmentPaths: attachmentPaths)
             let liveRun: CodexLiveRun
             if continueExistingSession {
                 liveRun = try await session.continueRun(
@@ -264,10 +268,21 @@ private enum KanameConversationWorker {
                 providerInstance: provider
             )
         )
+        let attachmentStore = KanameConversationAttachmentStore(rootDirectory: store.rootDirectory)
+        let attachmentPaths: [String]
+        do {
+            attachmentPaths = try request.attachments.map {
+                try attachmentStore.attachmentURL(threadID: request.threadID, attachment: $0).path
+            }
+        } catch {
+            try? await writer.append(kind: .serviceFailed, text: error.localizedDescription)
+            return false
+        }
         let session = NativeProviderConversationSession()
         let stream = await session.events(for: NativeConversationRequest(
             driver: driver,
             prompt: request.prompt,
+            attachmentPaths: attachmentPaths,
             workspace: URL(fileURLWithPath: request.workspacePath),
             model: request.model,
             reasoningEffort: request.reasoningEffort,

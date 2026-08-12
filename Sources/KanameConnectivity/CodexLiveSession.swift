@@ -85,6 +85,7 @@ public struct CodexCodingRequest: Sendable {
     public static let maximumPromptBytes = 32 * 1024
 
     public let prompt: String
+    public let imagePaths: [String]
     public let model: String
     public let reasoningEffort: String
     public let sandbox: CodexSandboxPolicy
@@ -95,6 +96,7 @@ public struct CodexCodingRequest: Sendable {
 
     public init(
         prompt: String,
+        imagePaths: [String] = [],
         model: String = "gpt-5.6-terra",
         reasoningEffort: String = "xhigh",
         sandbox: CodexSandboxPolicy = .readOnly,
@@ -103,8 +105,9 @@ public struct CodexCodingRequest: Sendable {
         approvalsReviewer: CodexApprovalsReviewer = .user,
         runtimeAuthority: CodexRuntimeAuthority = .workflowApprovalRequired
     ) {
-        (self.prompt, self.model, self.reasoningEffort, self.sandbox) =
-            (prompt, model, reasoningEffort, sandbox)
+        self.prompt = prompt
+        self.imagePaths = imagePaths
+        (self.model, self.reasoningEffort, self.sandbox) = (model, reasoningEffort, sandbox)
         self.networkAccess = sandbox == .dangerFullAccess ? true : networkAccess
         self.approvalPolicy = approvalPolicy
         self.approvalsReviewer = approvalsReviewer
@@ -113,6 +116,7 @@ public struct CodexCodingRequest: Sendable {
 
     public static func conversation(
         prompt: String,
+        imagePaths: [String] = [],
         model: String,
         reasoningEffort: String,
         runtimeMode: ConversationRuntimeMode,
@@ -131,6 +135,7 @@ public struct CodexCodingRequest: Sendable {
         }
         return Self(
             prompt: prompt,
+            imagePaths: imagePaths,
             model: model,
             reasoningEffort: reasoningEffort,
             sandbox: settings.0,
@@ -656,9 +661,14 @@ public actor CodexLiveSession {
         request: CodexCodingRequest,
         threadID: String
     ) -> [String: Any] {
-        [
+        var input: [[String: Any]] = []
+        if !request.prompt.isEmpty {
+            input.append(["type": "text", "text": request.prompt])
+        }
+        input.append(contentsOf: request.imagePaths.map { ["type": "localImage", "path": $0] })
+        return [
             "threadId": threadID,
-            "input": [["type": "text", "text": request.prompt]],
+            "input": input,
             "model": request.model,
             "effort": request.reasoningEffort,
             "approvalPolicy": request.approvalPolicy.rawValue,
@@ -671,10 +681,12 @@ public actor CodexLiveSession {
     }
 
     private static func validate(_ request: CodexCodingRequest) throws {
-        guard !request.prompt.isEmpty,
-              request.prompt.lengthOfBytes(using: .utf8) <= CodexCodingRequest.maximumPromptBytes
+        guard (!request.prompt.isEmpty || !request.imagePaths.isEmpty),
+              request.prompt.lengthOfBytes(using: .utf8) <= CodexCodingRequest.maximumPromptBytes,
+              request.imagePaths.count <= ConversationImageAttachment.maximumCountPerMessage,
+              request.imagePaths.allSatisfy({ $0.hasPrefix("/") && !$0.contains("\u{0}") })
         else {
-            throw CodexLiveSessionError.invalidRequest("prompt must be 1–\(CodexCodingRequest.maximumPromptBytes) UTF-8 bytes")
+            throw CodexLiveSessionError.invalidRequest("a bounded prompt or up to eight local images is required")
         }
         let identifierPattern = "^[A-Za-z0-9._-]{1,128}$"
         guard request.model.range(of: identifierPattern, options: .regularExpression) != nil,

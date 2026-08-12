@@ -24,6 +24,7 @@ public enum NativeConversationDriver: String, Codable, CaseIterable, Sendable {
 public struct NativeConversationRequest: Sendable {
     public let driver: NativeConversationDriver
     public let prompt: String
+    public let attachmentPaths: [String]
     public let workspace: URL
     public let model: String?
     public let reasoningEffort: String
@@ -34,6 +35,7 @@ public struct NativeConversationRequest: Sendable {
     public init(
         driver: NativeConversationDriver,
         prompt: String,
+        attachmentPaths: [String] = [],
         workspace: URL,
         model: String?,
         reasoningEffort: String,
@@ -43,6 +45,7 @@ public struct NativeConversationRequest: Sendable {
     ) {
         self.driver = driver
         self.prompt = String(prompt.prefix(262_144))
+        self.attachmentPaths = Array(attachmentPaths.prefix(ConversationImageAttachment.maximumCountPerMessage))
         self.workspace = workspace.standardizedFileURL
         self.model = model
         self.reasoningEffort = reasoningEffort
@@ -154,6 +157,8 @@ public actor NativeProviderConversationSession {
                 "--max-budget-usd", "2",
                 "--effort", request.reasoningEffort,
             ]
+            let directories = Set(request.attachmentPaths.map { URL(fileURLWithPath: $0).deletingLastPathComponent().path })
+            if !directories.isEmpty { arguments += ["--add-dir"] + directories.sorted() }
             if let model = request.model, !model.isEmpty, model != "Use provider default" {
                 arguments += ["--model", model]
             }
@@ -162,7 +167,14 @@ public actor NativeProviderConversationSession {
             } else {
                 arguments += ["--session-id", UUID().uuidString.lowercased()]
             }
-            arguments.append(request.prompt)
+            let attachmentContext = request.attachmentPaths.enumerated().map { index, path in
+                "Image \(index + 1) (inspect with the Read tool): `\(path)`"
+            }.joined(separator: "\n")
+            arguments.append(
+                attachmentContext.isEmpty
+                    ? request.prompt
+                    : [request.prompt, "Attached images:", attachmentContext].filter { !$0.isEmpty }.joined(separator: "\n\n")
+            )
             return arguments
         case .openCode:
             let agent = request.runtimeMode == .approvalRequired ? "plan" : "build"
@@ -182,6 +194,7 @@ public actor NativeProviderConversationSession {
             if let sessionID = request.resumableSessionID {
                 arguments += ["--session", sessionID]
             }
+            for path in request.attachmentPaths { arguments += ["--file", path] }
             arguments.append(request.prompt)
             return arguments
         }

@@ -130,6 +130,7 @@ struct DesktopRecoveryIntegrationTests {
             #expect(migrated.attention == .completed)
             #expect(migrated.unread == false)
             #expect(migrated.updatedAtUnixMillis == 777)
+            #expect(migrated.createdAtUnixMillis == 700)
             #expect(migrated.messages.map(\.body) == ["User content v\(version)"])
             #expect(migrated.plan.map(\.title) == ["User plan"])
             #expect(migrated.evidence.map(\.label) == ["User evidence"])

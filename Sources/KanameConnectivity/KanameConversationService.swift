@@ -14,6 +14,7 @@ public struct KanameConversationServiceRequest: Codable, Equatable, Sendable {
     public let runtimeMode: ConversationRuntimeMode
     public let networkAccess: Bool
     public let prompt: String
+    public let attachments: [ConversationImageAttachment]
     public let workspacePath: String
     public let providerStatePath: String
     public let resumableNativeThreadID: String?
@@ -33,6 +34,7 @@ public struct KanameConversationServiceRequest: Codable, Equatable, Sendable {
         runtimeMode: ConversationRuntimeMode = .approvalRequired,
         networkAccess: Bool = false,
         prompt: String,
+        attachments: [ConversationImageAttachment] = [],
         workspacePath: String,
         providerStatePath: String,
         resumableNativeThreadID: String?,
@@ -45,7 +47,9 @@ public struct KanameConversationServiceRequest: Codable, Equatable, Sendable {
         (self.runID, self.threadID, self.projectID) = (runID, threadID, projectID)
         (self.provider, self.model, self.reasoningEffort) = (provider, model, reasoningEffort)
         (self.runtimeMode, self.networkAccess) = (runtimeMode, runtimeMode == .fullAccess ? true : networkAccess)
-        (self.prompt, self.workspacePath, self.providerStatePath) = (prompt, workspacePath, providerStatePath)
+        self.prompt = prompt
+        self.attachments = attachments
+        (self.workspacePath, self.providerStatePath) = (workspacePath, providerStatePath)
         (self.resumableNativeThreadID, self.localCoreMachService, self.localCoreRequirement) = (
             resumableNativeThreadID, localCoreMachService, localCoreRequirement
         )
@@ -56,7 +60,7 @@ public struct KanameConversationServiceRequest: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case runID, threadID, projectID, provider, model, reasoningEffort
-        case runtimeMode, networkAccess, prompt, workspacePath, providerStatePath
+        case runtimeMode, networkAccess, prompt, attachments, workspacePath, providerStatePath
         case resumableNativeThreadID, localCoreMachService, localCoreRequirement, workspaceAuthorization, isCodingPlan, createdAtUnixMillis
     }
 
@@ -73,6 +77,7 @@ public struct KanameConversationServiceRequest: Codable, Equatable, Sendable {
             ? true
             : try container.decodeIfPresent(Bool.self, forKey: .networkAccess) ?? false
         prompt = try container.decode(String.self, forKey: .prompt)
+        attachments = try container.decodeIfPresent([ConversationImageAttachment].self, forKey: .attachments) ?? []
         workspacePath = try container.decode(String.self, forKey: .workspacePath)
         providerStatePath = try container.decode(String.self, forKey: .providerStatePath)
         resumableNativeThreadID = try container.decodeIfPresent(String.self, forKey: .resumableNativeThreadID)
@@ -85,10 +90,11 @@ public struct KanameConversationServiceRequest: Codable, Equatable, Sendable {
 }
 
 public extension KanameConversationServiceRequest {
-    func codexCodingRequest() -> CodexCodingRequest {
+    func codexCodingRequest(attachmentPaths: [String] = []) -> CodexCodingRequest {
         if workspaceAuthorization != nil {
             return CodexCodingRequest(
                 prompt: prompt,
+                imagePaths: attachmentPaths,
                 model: model,
                 reasoningEffort: reasoningEffort,
                 sandbox: .workspaceWrite,
@@ -98,6 +104,7 @@ public extension KanameConversationServiceRequest {
         if isCodingPlan {
             return CodexCodingRequest(
                 prompt: prompt,
+                imagePaths: attachmentPaths,
                 model: model,
                 reasoningEffort: reasoningEffort,
                 sandbox: .readOnly,
@@ -107,6 +114,7 @@ public extension KanameConversationServiceRequest {
         }
         return CodexCodingRequest.conversation(
             prompt: prompt,
+            imagePaths: attachmentPaths,
             model: model,
             reasoningEffort: reasoningEffort,
             runtimeMode: runtimeMode,
@@ -220,6 +228,13 @@ public struct KanameConversationServiceStore: Sendable {
     public func enqueue(_ request: KanameConversationServiceRequest) throws {
         try validate(request.threadID)
         try validate(request.runID)
+        guard request.attachments.count <= ConversationImageAttachment.maximumCountPerMessage else {
+            throw KanameConversationServiceError.requestTooLarge
+        }
+        let attachmentStore = KanameConversationAttachmentStore(rootDirectory: rootDirectory)
+        for attachment in request.attachments {
+            _ = try attachmentStore.attachmentURL(threadID: request.threadID, attachment: attachment)
+        }
         let data = try JSONEncoder().encode(request)
         guard data.count <= 128 * 1024 else { throw KanameConversationServiceError.requestTooLarge }
         let inbox = try privateDirectory(threadDirectory(request.threadID).appending(path: "Inbox", directoryHint: .isDirectory))

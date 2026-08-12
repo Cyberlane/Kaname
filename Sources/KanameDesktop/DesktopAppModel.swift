@@ -10,6 +10,7 @@ import Darwin
 public enum DesktopAttention: String, Codable, CaseIterable, Equatable, Sendable {
     case needsResponse
     case needsApproval
+    case needsInput
     case running
     case queued
     case completed
@@ -20,6 +21,7 @@ public enum DesktopAttention: String, Codable, CaseIterable, Equatable, Sendable
         switch self {
         case .needsResponse: "Needs response"
         case .needsApproval: "Needs approval"
+        case .needsInput: "Waiting for input"
         case .running: "Running"
         case .queued: "Queued"
         case .completed: "Completed"
@@ -69,6 +71,7 @@ private struct DesktopThreadPayload: Decodable {
     let runtimeMode: ConversationRuntimeMode?
     let networkAccess: Bool?
     let titleSource: DesktopConversationTitleSource?
+    let createdAtUnixMillis: Int64?
     let updatedAtUnixMillis: Int64
     let unread: Bool
     let messages: [DesktopMessage]
@@ -80,18 +83,34 @@ public struct DesktopMessage: Codable, Equatable, Identifiable, Sendable {
     public let id: String
     public let role: DesktopMessageRole
     public let body: String
+    public let attachments: [ConversationImageAttachment]
     public let createdAtUnixMillis: Int64
 
     public init(
         id: String = UUID().uuidString.lowercased(),
         role: DesktopMessageRole,
         body: String,
+        attachments: [ConversationImageAttachment] = [],
         createdAtUnixMillis: Int64
     ) {
         self.id = id
         self.role = role
         self.body = body
+        self.attachments = attachments
         self.createdAtUnixMillis = createdAtUnixMillis
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, role, body, attachments, createdAtUnixMillis
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        role = try container.decode(DesktopMessageRole.self, forKey: .role)
+        body = try container.decode(String.self, forKey: .body)
+        attachments = try container.decodeIfPresent([ConversationImageAttachment].self, forKey: .attachments) ?? []
+        createdAtUnixMillis = try container.decode(Int64.self, forKey: .createdAtUnixMillis)
     }
 }
 
@@ -153,6 +172,7 @@ public struct DesktopThread: Codable, Equatable, Identifiable, Sendable {
     public var runtimeMode: ConversationRuntimeMode
     public var networkAccess: Bool
     public var titleSource: DesktopConversationTitleSource
+    public var createdAtUnixMillis: Int64
     public var updatedAtUnixMillis: Int64
     public var unread: Bool
     public var messages: [DesktopMessage]
@@ -172,6 +192,7 @@ public struct DesktopThread: Codable, Equatable, Identifiable, Sendable {
         runtimeMode: ConversationRuntimeMode = .approvalRequired,
         networkAccess: Bool = false,
         titleSource: DesktopConversationTitleSource = .manual,
+        createdAtUnixMillis: Int64? = nil,
         updatedAtUnixMillis: Int64,
         unread: Bool = false,
         messages: [DesktopMessage] = [],
@@ -190,6 +211,7 @@ public struct DesktopThread: Codable, Equatable, Identifiable, Sendable {
         self.runtimeMode = runtimeMode
         self.networkAccess = networkAccess
         self.titleSource = titleSource
+        self.createdAtUnixMillis = createdAtUnixMillis ?? updatedAtUnixMillis
         self.updatedAtUnixMillis = updatedAtUnixMillis
         self.unread = unread
         self.messages = messages
@@ -212,6 +234,9 @@ public struct DesktopThread: Codable, Equatable, Identifiable, Sendable {
             runtimeMode: payload.runtimeMode ?? .approvalRequired,
             networkAccess: payload.networkAccess ?? false,
             titleSource: payload.titleSource ?? .manual,
+            createdAtUnixMillis: payload.createdAtUnixMillis
+                ?? payload.messages.map(\.createdAtUnixMillis).min()
+                ?? payload.updatedAtUnixMillis,
             updatedAtUnixMillis: payload.updatedAtUnixMillis,
             unread: payload.unread,
             messages: payload.messages,
@@ -561,7 +586,7 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
     }
 
     func migratedToCurrent(now: Int64) throws -> DesktopAppSnapshot {
-        guard (1...14).contains(version) else { throw DesktopModelError.unsupportedVersion }
+        guard (1...15).contains(version) else { throw DesktopModelError.unsupportedVersion }
         var migrated = self
         while migrated.version < Self.currentVersion {
             switch migrated.version {
@@ -600,6 +625,12 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
                 for index in migrated.operations.providerEvents.indices
                     where terminalRunIDs.contains(migrated.operations.providerEvents[index].runID) {
                     migrated.operations.providerEvents[index].rawPayloadBase64 = nil
+                }
+            case 15:
+                for index in migrated.threads.indices {
+                    migrated.threads[index].createdAtUnixMillis = migrated.threads[index].messages
+                        .map(\.createdAtUnixMillis)
+                        .min() ?? migrated.threads[index].updatedAtUnixMillis
                 }
             default:
                 throw DesktopModelError.unsupportedVersion
@@ -1412,7 +1443,11 @@ public final class DesktopAppModel: ObservableObject {
     public var activeThreads: [DesktopThread] {
         snapshot.threads
             .filter { $0.attention != .archived }
-            .sorted { $0.updatedAtUnixMillis > $1.updatedAtUnixMillis }
+            .sorted {
+                $0.createdAtUnixMillis == $1.createdAtUnixMillis
+                    ? $0.id < $1.id
+                    : $0.createdAtUnixMillis > $1.createdAtUnixMillis
+            }
     }
 
     public var archivedThreads: [DesktopThread] {
@@ -1526,21 +1561,36 @@ public final class DesktopAppModel: ObservableObject {
     }
 
     @discardableResult
-    public func appendUserMessage(threadID: String, body: String) -> String? {
+    public func appendUserMessage(
+        threadID: String,
+        body: String,
+        attachments: [ConversationImageAttachment] = []
+    ) -> String? {
         let cleanBody = body.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanBody.isEmpty, cleanBody.utf8.count <= 32_000 else { return nil }
+        guard (!cleanBody.isEmpty || !attachments.isEmpty),
+              cleanBody.utf8.count <= 32_000,
+              attachments.count <= ConversationImageAttachment.maximumCountPerMessage else { return nil }
         let timestamp = now()
-        let message = DesktopMessage(role: .user, body: cleanBody, createdAtUnixMillis: timestamp)
+        let message = DesktopMessage(
+            role: .user,
+            body: cleanBody,
+            attachments: attachments,
+            createdAtUnixMillis: timestamp
+        )
         mutate { snapshot in
             guard let index = snapshot.threads.firstIndex(where: { $0.id == threadID }) else { return }
             let shouldProjectTitle = snapshot.threads[index].title == snapshot.threads[index].kind.newConversationTitle
                 && !snapshot.threads[index].messages.contains { $0.role == .user }
             snapshot.threads[index].messages.append(message)
             if shouldProjectTitle {
-                snapshot.threads[index].title = Self.provisionalConversationTitle(from: cleanBody)
+                snapshot.threads[index].title = Self.provisionalConversationTitle(
+                    from: cleanBody.isEmpty ? attachments.first?.filename ?? "Image conversation" : cleanBody
+                )
                 snapshot.threads[index].titleSource = .provisional
             }
-            snapshot.threads[index].summary = cleanBody
+            snapshot.threads[index].summary = cleanBody.isEmpty
+                ? "\(attachments.count) image\(attachments.count == 1 ? "" : "s") attached"
+                : cleanBody
             snapshot.threads[index].attention = .queued
             snapshot.threads[index].updatedAtUnixMillis = timestamp
             snapshot.threads[index].unread = false
@@ -1625,6 +1675,10 @@ public final class DesktopAppModel: ObservableObject {
         snapshot.operations.composerDrafts[threadID] ?? ""
     }
 
+    public func composerAttachments(threadID: String) -> [ConversationImageAttachment] {
+        snapshot.operations.composerAttachmentDrafts[threadID] ?? []
+    }
+
     @discardableResult
     public func updateComposerDraft(threadID: String, body: String) -> Bool {
         guard snapshot.threads.contains(where: { $0.id == threadID }), body.utf8.count <= 32_000 else { return false }
@@ -1636,6 +1690,45 @@ public final class DesktopAppModel: ObservableObject {
             }
         }
         return persistenceError == nil
+    }
+
+    @discardableResult
+    public func addComposerAttachment(
+        threadID: String,
+        attachment: ConversationImageAttachment
+    ) -> Bool {
+        guard snapshot.threads.contains(where: { $0.id == threadID }) else { return false }
+        let current = composerAttachments(threadID: threadID)
+        guard current.count < ConversationImageAttachment.maximumCountPerMessage,
+              !current.contains(where: { $0.id == attachment.id }) else { return false }
+        mutate { $0.operations.composerAttachmentDrafts[threadID, default: []].append(attachment) }
+        return persistenceError == nil
+    }
+
+    @discardableResult
+    public func removeComposerAttachment(
+        threadID: String,
+        attachmentID: String
+    ) -> ConversationImageAttachment? {
+        var removed: ConversationImageAttachment?
+        mutate { snapshot in
+            guard var attachments = snapshot.operations.composerAttachmentDrafts[threadID],
+                  let index = attachments.firstIndex(where: { $0.id == attachmentID }) else { return }
+            removed = attachments.remove(at: index)
+            if attachments.isEmpty {
+                snapshot.operations.composerAttachmentDrafts.removeValue(forKey: threadID)
+            } else {
+                snapshot.operations.composerAttachmentDrafts[threadID] = attachments
+            }
+        }
+        return removed
+    }
+
+    public func clearComposerDraft(threadID: String) {
+        mutate { snapshot in
+            snapshot.operations.composerDrafts.removeValue(forKey: threadID)
+            snapshot.operations.composerAttachmentDrafts.removeValue(forKey: threadID)
+        }
     }
 
     public func message(threadID: String, id: String) -> DesktopMessage? {
@@ -1819,6 +1912,15 @@ public final class DesktopAppModel: ObservableObject {
         let persisted = mutate { snapshot in
             for item in acceptedItems {
                 snapshot.operations.providerEvents.append(item.event)
+                if item.event.kind == .approval {
+                    if let index = snapshot.threads.firstIndex(where: { $0.id == item.event.threadID }) {
+                        snapshot.threads[index].attention = item.event.title == "Approval requested" ? .needsApproval : .running
+                    }
+                } else if item.event.kind == .question {
+                    if let index = snapshot.threads.firstIndex(where: { $0.id == item.event.threadID }) {
+                        snapshot.threads[index].attention = item.event.title == "Question answered" ? .running : .needsInput
+                    }
+                }
                 Self.applyAssistantDelta(item.assistantDelta, for: item.event, to: &snapshot)
             }
         }
@@ -1857,7 +1959,6 @@ public final class DesktopAppModel: ObservableObject {
             )
         }
         snapshot.threads[threadIndex].summary = "Kaname is responding…"
-        snapshot.threads[threadIndex].updatedAtUnixMillis = event.createdAtUnixMillis
     }
 
     public func completeProviderRun(id: String, tokenUsage: Int? = nil) {

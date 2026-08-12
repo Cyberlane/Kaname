@@ -379,6 +379,12 @@ struct ProviderConnectivityTests {
             .appending(path: "kaname-conversation-service-\(UUID().uuidString)", directoryHint: .isDirectory)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = KanameConversationServiceStore(rootDirectory: root)
+        let attachmentStore = KanameConversationAttachmentStore(rootDirectory: root)
+        let attachment = try attachmentStore.importImage(
+            data: Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")!,
+            suggestedFilename: "context.png",
+            threadID: "thread-1"
+        )
         let request = KanameConversationServiceRequest(
             runID: "run-1",
             threadID: "thread-1",
@@ -389,6 +395,7 @@ struct ProviderConnectivityTests {
             runtimeMode: .auto,
             networkAccess: true,
             prompt: "Read-only check",
+            attachments: [attachment],
             workspacePath: "/tmp/workspace",
             providerStatePath: "/tmp/provider",
             resumableNativeThreadID: nil,
@@ -401,6 +408,7 @@ struct ProviderConnectivityTests {
         #expect(queued.map(\.1) == [request])
         #expect(queued.first?.1.runtimeMode == .auto)
         #expect(queued.first?.1.networkAccess == true)
+        #expect(queued.first?.1.attachments == [attachment])
         #expect((try FileManager.default.attributesOfItem(atPath: root.path)[.posixPermissions] as? NSNumber)?.intValue == 0o700)
 
         let event = KanameConversationServiceEvent.record(
@@ -526,6 +534,7 @@ struct ProviderConnectivityTests {
         let claude = NativeConversationRequest(
             driver: .claude,
             prompt: "Inspect only",
+            attachmentPaths: ["/tmp/kaname-attachments/design.png"],
             workspace: workspace,
             model: "Use provider default",
             reasoningEffort: "high",
@@ -536,6 +545,10 @@ struct ProviderConnectivityTests {
         #expect(claudeArguments.contains("stream-json"))
         #expect(claudeArguments.contains("--resume"))
         #expect(!claudeArguments.contains("--dangerously-skip-permissions"))
+        #expect(claudeArguments.contains("--add-dir"))
+        #expect(claudeArguments.last?.contains("`/tmp/kaname-attachments/design.png`") == true)
+        let addDirectoryIndex = try #require(claudeArguments.firstIndex(of: "--add-dir"))
+        #expect(claudeArguments[addDirectoryIndex + 2] == "--resume")
 
         var claudeParser = NativeProviderStreamParser(driver: .claude)
         let system = Data(#"{"type":"system","session_id":"session-1"}"#.utf8)
@@ -549,6 +562,7 @@ struct ProviderConnectivityTests {
         let openCode = NativeConversationRequest(
             driver: .openCode,
             prompt: "Inspect only",
+            attachmentPaths: ["/tmp/kaname-attachments/design.png"],
             workspace: workspace,
             model: "openai/gpt-5",
             reasoningEffort: "high",
@@ -558,6 +572,8 @@ struct ProviderConnectivityTests {
         #expect(openCodeArguments.contains("plan"))
         #expect(openCodeArguments.contains("--session"))
         #expect(!openCodeArguments.contains("--auto"))
+        #expect(openCodeArguments.contains("--file"))
+        #expect(openCodeArguments.contains("/tmp/kaname-attachments/design.png"))
 
         let claudeFullAccess = NativeConversationRequest(
             driver: .claude,

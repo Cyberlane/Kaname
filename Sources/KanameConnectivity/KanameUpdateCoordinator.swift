@@ -21,6 +21,7 @@ public struct KanameUpdateReceipt: Codable, Equatable, Sendable {
     public var rollbackSignerDigest: String?
     public var rollbackVersion: String?
     public var rollbackBuild: String?
+    public var workspaceRollbackDigest: String?
     public var releaseNotes: String?
     public var detail: String
     public var updatedAtUnixMillis: Int64
@@ -35,6 +36,7 @@ public struct KanameUpdateReceipt: Codable, Equatable, Sendable {
         rollbackSignerDigest: String? = nil,
         rollbackVersion: String? = nil,
         rollbackBuild: String? = nil,
+        workspaceRollbackDigest: String? = nil,
         releaseNotes: String? = nil,
         detail: String,
         updatedAtUnixMillis: Int64
@@ -43,6 +45,7 @@ public struct KanameUpdateReceipt: Codable, Equatable, Sendable {
         (self.bundleDigest, self.signerDigest) = (bundleDigest, signerDigest)
         (self.rollbackBundleDigest, self.rollbackSignerDigest) = (rollbackBundleDigest, rollbackSignerDigest)
         (self.rollbackVersion, self.rollbackBuild) = (rollbackVersion, rollbackBuild)
+        self.workspaceRollbackDigest = workspaceRollbackDigest
         self.releaseNotes = releaseNotes
         (self.detail, self.updatedAtUnixMillis) = (detail, updatedAtUnixMillis)
     }
@@ -86,6 +89,7 @@ public enum KanameUpdateError: Error, Equatable, LocalizedError, Sendable {
     case activeApproval
     case unsavedComposer
     case helperUnavailable
+    case workspaceCheckpointUnavailable
 
     public var errorDescription: String? {
         switch self {
@@ -103,6 +107,7 @@ public enum KanameUpdateError: Error, Equatable, LocalizedError, Sendable {
         case .activeApproval: "Resolve or dismiss the active approval before switching Kaname."
         case .unsavedComposer: "Wait for the current composer draft to finish saving before switching Kaname."
         case .helperUnavailable: "The signed update helper is unavailable in this build."
+        case .workspaceCheckpointUnavailable: "Kaname could not verify a private workspace checkpoint for rollback."
         }
     }
 }
@@ -128,6 +133,9 @@ public actor KanameUpdateCoordinator {
     public var receiptURL: URL { environment.updateDirectory.appending(path: "receipt.json") }
     public var stagedBundleURL: URL { environment.updateDirectory.appending(path: "Staged/Kaname.app", directoryHint: .isDirectory) }
     public var backupBundleURL: URL { environment.updateDirectory.appending(path: "Previous/Kaname.app", directoryHint: .isDirectory) }
+    public var workspaceRollbackDirectoryURL: URL { environment.updateDirectory.appending(path: "WorkspaceRollback", directoryHint: .isDirectory) }
+    public var workspaceReplacedDirectoryURL: URL { environment.updateDirectory.appending(path: "WorkspaceReplaced", directoryHint: .isDirectory) }
+    public var workspaceFailedDirectoryURL: URL { environment.updateDirectory.appending(path: "WorkspaceFailed", directoryHint: .isDirectory) }
 
     public func receipt() -> KanameUpdateReceipt {
         guard let data = try? Data(contentsOf: receiptURL),
@@ -257,6 +265,17 @@ public actor KanameUpdateCoordinator {
         }
         guard let helperURL = Bundle.main.url(forResource: "KanameUpdateHelper", withExtension: nil),
               fileManager.isExecutableFile(atPath: helperURL.path) else { throw KanameUpdateError.helperUnavailable }
+        let workspaceURL = environment.workspaceFileURL.standardizedFileURL
+        guard let workspaceData = try? Data(contentsOf: workspaceURL),
+              !workspaceData.isEmpty else { throw KanameUpdateError.workspaceCheckpointUnavailable }
+        let workspaceRollbackDigest = SHA256.hash(data: workspaceData)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        let healthNonce = UUID().uuidString.lowercased()
+        let workspaceRollbackURL = workspaceRollbackDirectoryURL
+            .appending(path: "\(receipt.bundleDigest ?? "unknown").json")
+        let failedWorkspaceURL = workspaceFailedDirectoryURL
+            .appending(path: "\(healthNonce).json")
         try save(KanameUpdateReceipt(
             status: .switching,
             version: receipt.version,
@@ -267,11 +286,11 @@ public actor KanameUpdateCoordinator {
             rollbackSignerDigest: rollbackSignerDigest,
             rollbackVersion: rollbackVersion,
             rollbackBuild: rollbackBuild,
+            workspaceRollbackDigest: workspaceRollbackDigest,
             releaseNotes: receipt.releaseNotes,
             detail: "Switching after an explicit UI checkpoint.",
             updatedAtUnixMillis: now()
         ))
-        let healthNonce = UUID().uuidString.lowercased()
         return KanameUpdateLaunchRequest(
             helperURL: helperURL,
             arguments: [
@@ -289,11 +308,16 @@ public actor KanameUpdateCoordinator {
                 "--health-nonce", healthNonce,
                 "--channel", environment.channel.rawValue,
                 "--workspace-schema", String(KanameDesktopStateSchema.currentVersion),
+                "--workspace", workspaceURL.path,
+                "--workspace-rollback", workspaceRollbackURL.path,
+                "--workspace-failed", failedWorkspaceURL.path,
+                "--workspace-rollback-digest", workspaceRollbackDigest,
                 "--rollback-version", rollbackVersion,
                 "--rollback-build", rollbackBuild,
                 "--rollback-bundle-digest", rollbackDigest,
                 "--rollback-signer-digest", rollbackSignerDigest,
-                "--timeout", "12",
+                "--parent-timeout", "12",
+                "--health-timeout", "45",
             ]
         )
     }
@@ -328,12 +352,15 @@ public actor KanameUpdateCoordinator {
               let rollbackSignerDigest = receipt.rollbackSignerDigest,
               let rollbackVersion = receipt.rollbackVersion,
               let rollbackBuild = receipt.rollbackBuild,
+              let workspaceRollbackDigest = receipt.workspaceRollbackDigest,
               rollbackDigest == (try Self.bundleDigest(at: backupBundleURL, fileManager: fileManager)),
               rollbackSignerDigest == Self.sha256(try await verifiedIdentity(at: backupBundleURL)) else {
             throw KanameUpdateError.stagedBundleChanged
         }
         guard let helperURL = Bundle.main.url(forResource: "KanameUpdateHelper", withExtension: nil),
               fileManager.isExecutableFile(atPath: helperURL.path) else { throw KanameUpdateError.helperUnavailable }
+        let workspaceRollbackURL = workspaceRollbackDirectoryURL.appending(path: "\(currentDigest).json")
+        let workspaceReplacedURL = workspaceReplacedDirectoryURL.appending(path: "\(currentDigest).json")
         return KanameUpdateLaunchRequest(
             helperURL: helperURL,
             arguments: [
@@ -353,7 +380,12 @@ public actor KanameUpdateCoordinator {
                 "--rollback-signer-digest", rollbackSignerDigest,
                 "--channel", environment.channel.rawValue,
                 "--workspace-schema", String(KanameDesktopStateSchema.currentVersion),
-                "--timeout", "12",
+                "--workspace", environment.workspaceFileURL.standardizedFileURL.path,
+                "--workspace-rollback", workspaceRollbackURL.path,
+                "--workspace-replaced", workspaceReplacedURL.path,
+                "--workspace-rollback-digest", workspaceRollbackDigest,
+                "--parent-timeout", "12",
+                "--health-timeout", "45",
             ]
         )
     }

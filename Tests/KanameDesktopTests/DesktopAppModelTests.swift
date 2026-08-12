@@ -6,6 +6,108 @@ import Testing
 @MainActor
 struct DesktopAppModelTests {
     @Test
+    func streamingActivityNeverReordersTheThreadDirectory() throws {
+        let store = MemoryDesktopStateStore()
+        var clock: Int64 = 10_000
+        let model = DesktopAppModel(store: store, now: { clock })
+        let projectID = try #require(model.snapshot.projects.first?.id)
+        let olderID = model.createConversation(kind: .research, projectID: projectID)
+        clock += 1_000
+        let newerID = model.createConversation(kind: .planning, projectID: projectID)
+        let originalOrder = model.activeThreads.filter { $0.id == olderID || $0.id == newerID }.map(\.id)
+        #expect(originalOrder == [newerID, olderID])
+
+        clock += 1_000
+        let messageID = try #require(model.appendUserMessage(threadID: olderID, body: "Stream without moving"))
+        let runID = try #require(model.enqueueProviderRun(threadID: olderID, sourceMessageID: messageID))
+        _ = model.beginProviderRun(id: runID)
+        for ordinal in 1...200 {
+            let event = DesktopProviderEventRecord(
+                id: "stable-order-\(ordinal)",
+                threadID: olderID,
+                runID: runID,
+                kind: .assistantText,
+                title: "Response",
+                detail: "delta",
+                nativeType: "item/agentMessage/delta",
+                nativeThreadID: "native",
+                nativeTurnID: "turn",
+                approvalID: nil,
+                rawPayloadBase64: nil,
+                payloadWasTruncated: false,
+                createdAtUnixMillis: 50_000 + Int64(ordinal)
+            )
+            #expect(model.recordProviderEvent(event, assistantDelta: "x"))
+        }
+
+        #expect(model.activeThreads.filter { $0.id == olderID || $0.id == newerID }.map(\.id) == originalOrder)
+        #expect(model.thread(id: olderID)?.messages.last?.body.count == 200)
+    }
+
+    @Test
+    func imageOnlyDraftsPersistAndBecomeOneDurableUserMessage() throws {
+        let store = MemoryDesktopStateStore()
+        let model = DesktopAppModel(store: store, now: { 1_000 })
+        let threadID = model.createConversation(kind: .research, projectID: model.snapshot.projects.first?.id)
+        let attachment = ConversationImageAttachment(
+            id: "image-1",
+            filename: "screenshot.png",
+            mimeType: "image/png",
+            byteCount: 128,
+            pixelWidth: 20,
+            pixelHeight: 10,
+            relativePath: "Threads/\(threadID)/Attachments/image-1.png"
+        )
+
+        #expect(model.addComposerAttachment(threadID: threadID, attachment: attachment))
+        let restored = DesktopAppModel(store: store, now: { 2_000 })
+        #expect(restored.composerAttachments(threadID: threadID) == [attachment])
+        let messageID = try #require(restored.appendUserMessage(threadID: threadID, body: "", attachments: [attachment]))
+        restored.clearComposerDraft(threadID: threadID)
+
+        #expect(restored.message(threadID: threadID, id: messageID)?.body.isEmpty == true)
+        #expect(restored.message(threadID: threadID, id: messageID)?.attachments == [attachment])
+        #expect(restored.composerAttachments(threadID: threadID).isEmpty)
+        #expect(restored.thread(id: threadID)?.summary == "1 image attached")
+    }
+
+    @Test
+    func questionsAndApprovalsExposeDistinctBlockingAttention() throws {
+        let model = DesktopAppModel(store: MemoryDesktopStateStore(), now: { 1_000 })
+        let threadID = model.createConversation(kind: .research, projectID: model.snapshot.projects.first?.id)
+        let messageID = try #require(model.appendUserMessage(threadID: threadID, body: "Ask when blocked"))
+        let runID = try #require(model.enqueueProviderRun(threadID: threadID, sourceMessageID: messageID))
+        _ = model.beginProviderRun(id: runID)
+
+        func event(id: String, kind: DesktopProviderEventKind, title: String) -> DesktopProviderEventRecord {
+            DesktopProviderEventRecord(
+                id: id,
+                threadID: threadID,
+                runID: runID,
+                kind: kind,
+                title: title,
+                detail: title,
+                nativeType: title,
+                nativeThreadID: nil,
+                nativeTurnID: nil,
+                approvalID: nil,
+                rawPayloadBase64: nil,
+                payloadWasTruncated: false,
+                createdAtUnixMillis: 2_000
+            )
+        }
+
+        #expect(model.recordProviderEvent(event(id: "question", kind: .question, title: "Codex has a question")))
+        #expect(model.thread(id: threadID)?.attention == .needsInput)
+        #expect(model.recordProviderEvent(event(id: "answer", kind: .question, title: "Question answered")))
+        #expect(model.thread(id: threadID)?.attention == .running)
+        #expect(model.recordProviderEvent(event(id: "approval", kind: .approval, title: "Approval requested")))
+        #expect(model.thread(id: threadID)?.attention == .needsApproval)
+        #expect(model.recordProviderEvent(event(id: "declined", kind: .approval, title: "Approval declined")))
+        #expect(model.thread(id: threadID)?.attention == .running)
+    }
+
+    @Test
     func projectCreationPersistsReviewedContextAndRejectsCanonicalDuplicateFolders() throws {
         let root = FileManager.default.temporaryDirectory
             .appending(path: "kaname-project-model-\(UUID().uuidString)", directoryHint: .isDirectory)

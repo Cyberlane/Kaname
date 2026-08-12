@@ -487,6 +487,7 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
     public var providerRuns: [DesktopProviderRunRecord]
     public var providerEvents: [DesktopProviderEventRecord]
     public var composerDrafts: [String: String]
+    public var composerAttachmentDrafts: [String: [ConversationImageAttachment]]
     public var comparisons: [DesktopComparisonRecord]
     public var automationRuns: [DesktopAutomationRunRecord]
     public var providerSessions: [DesktopProviderSessionRecord]
@@ -513,6 +514,7 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         providerRuns: [],
         providerEvents: [],
         composerDrafts: [:],
+        composerAttachmentDrafts: [:],
         comparisons: [],
         automationRuns: [],
         providerSessions: [],
@@ -540,6 +542,7 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         case providerRuns
         case providerEvents
         case composerDrafts
+        case composerAttachmentDrafts
         case comparisons
         case automationRuns
         case providerSessions
@@ -567,6 +570,7 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         providerRuns: [DesktopProviderRunRecord],
         providerEvents: [DesktopProviderEventRecord],
         composerDrafts: [String: String],
+        composerAttachmentDrafts: [String: [ConversationImageAttachment]] = [:],
         comparisons: [DesktopComparisonRecord],
         automationRuns: [DesktopAutomationRunRecord],
         providerSessions: [DesktopProviderSessionRecord],
@@ -592,6 +596,7 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         self.providerRuns = providerRuns
         self.providerEvents = providerEvents
         self.composerDrafts = composerDrafts
+        self.composerAttachmentDrafts = composerAttachmentDrafts
         self.comparisons = comparisons
         self.automationRuns = automationRuns
         self.providerSessions = providerSessions
@@ -620,6 +625,10 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         providerRuns = try container.decode([DesktopProviderRunRecord].self, forKey: .providerRuns)
         providerEvents = try container.decodeIfPresent([DesktopProviderEventRecord].self, forKey: .providerEvents) ?? []
         composerDrafts = try container.decodeIfPresent([String: String].self, forKey: .composerDrafts) ?? [:]
+        composerAttachmentDrafts = try container.decodeIfPresent(
+            [String: [ConversationImageAttachment]].self,
+            forKey: .composerAttachmentDrafts
+        ) ?? [:]
         comparisons = try container.decode([DesktopComparisonRecord].self, forKey: .comparisons)
         automationRuns = try container.decode([DesktopAutomationRunRecord].self, forKey: .automationRuns)
         providerSessions = try container.decodeIfPresent([DesktopProviderSessionRecord].self, forKey: .providerSessions) ?? []

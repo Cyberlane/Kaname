@@ -178,6 +178,7 @@ struct KanameUpdateCoordinatorTests {
         #expect(receipt.rollbackSignerDigest == nil)
         #expect(receipt.rollbackVersion == nil)
         #expect(receipt.rollbackBuild == nil)
+        #expect(receipt.workspaceRollbackDigest == nil)
         #expect(receipt.releaseNotes == nil)
     }
 
@@ -193,6 +194,7 @@ struct KanameUpdateCoordinatorTests {
             rollbackSignerDigest: String(repeating: "d", count: 64),
             rollbackVersion: "0.13.0",
             rollbackBuild: "22",
+            workspaceRollbackDigest: String(repeating: "e", count: 64),
             releaseNotes: "Verified update",
             detail: "Switching",
             updatedAtUnixMillis: 1

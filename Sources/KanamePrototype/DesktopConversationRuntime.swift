@@ -86,13 +86,21 @@ final class DesktopConversationRuntime: ObservableObject {
     }
 
     @discardableResult
-    func send(threadID: String, body: String) -> Bool {
-        enqueue(threadID: threadID, body: body) != nil
+    func send(
+        threadID: String,
+        body: String,
+        attachments: [ConversationImageAttachment] = []
+    ) -> Bool {
+        enqueue(threadID: threadID, body: body, attachments: attachments) != nil
     }
 
     @discardableResult
-    func enqueue(threadID: String, body: String) -> String? {
-        guard let runID = prepareEnqueue(threadID: threadID, body: body) else { return nil }
+    func enqueue(
+        threadID: String,
+        body: String,
+        attachments: [ConversationImageAttachment] = []
+    ) -> String? {
+        guard let runID = prepareEnqueue(threadID: threadID, body: body, attachments: attachments) else { return nil }
         resumePrepared(runID: runID)
         return runID
     }
@@ -100,17 +108,22 @@ final class DesktopConversationRuntime: ObservableObject {
     func prepareEnqueue(
         threadID: String,
         body: String,
+        attachments: [ConversationImageAttachment] = [],
         usesProjectContext: Bool = true,
         workspacePathOverride: String? = nil
     ) -> String? {
         guard let thread = model.thread(id: threadID) else { return nil }
+        guard attachments.isEmpty || Self.supportsImageAttachments(provider: thread.provider) else {
+            codingWorkflowErrors[threadID] = "\(thread.provider) does not have a Kaname image adapter. Remove the images or choose Codex, Claude, or OpenCode."
+            return nil
+        }
         if thread.kind == .coding,
            [.planning, .preparing, .implementing, .evidenceReview].contains(codingStage(threadID: threadID)) {
             codingWorkflowErrors[threadID] = "Finish the current Coding stage before starting another plan."
             return nil
         }
         let purpose: DesktopProviderRunPurpose = thread.kind == .coding ? .codingPlan : .conversation
-        guard let messageID = model.appendUserMessage(threadID: threadID, body: body),
+        guard let messageID = model.appendUserMessage(threadID: threadID, body: body, attachments: attachments),
               let runID = model.enqueueProviderRun(
                 threadID: threadID,
                 sourceMessageID: messageID,
@@ -420,6 +433,7 @@ final class DesktopConversationRuntime: ObservableObject {
                 networkAccess: run.networkAccess,
                 purpose: run.purpose
             ),
+            attachments: message.attachments,
             workspacePath: workspace.path,
             providerStatePath: environment.providerStateDirectory.path,
             resumableNativeThreadID: model.latestNativeThreadID(threadID: threadID, provider: run.provider),
@@ -1154,6 +1168,10 @@ final class DesktopConversationRuntime: ObservableObject {
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let questions = object["questions"] as? [[String: Any]] else { return [] }
         return questions.compactMap { $0["id"] as? String }.filter { !$0.isEmpty }
+    }
+
+    static func supportsImageAttachments(provider: String) -> Bool {
+        ["codex", "claude", "opencode", "open code"].contains(provider.lowercased())
     }
 
     private func prepareStandaloneWorkspace() throws -> URL {

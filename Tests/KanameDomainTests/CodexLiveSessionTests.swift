@@ -6,6 +6,31 @@ import Testing
 
 struct CodexLiveSessionTests {
     @Test
+    func turnInputPreservesTextAndLocalImagesInProviderOrder() throws {
+        let configuration = CodexLiveSessionConfiguration(
+            instance: codexInstance(),
+            workspaceURL: URL(fileURLWithPath: "/private/tmp/kaname-images")
+        )
+        let request = CodexCodingRequest(
+            prompt: "Compare these screenshots",
+            imagePaths: ["/private/tmp/one.png", "/private/tmp/two.jpg"]
+        )
+        let parameters = CodexLiveSession.turnStartParameters(
+            configuration: configuration,
+            request: request,
+            threadID: "thread-images"
+        )
+        let input = try #require(parameters["input"] as? [[String: Any]])
+
+        #expect(input.count == 3)
+        #expect(input[0]["type"] as? String == "text")
+        #expect(input[0]["text"] as? String == "Compare these screenshots")
+        #expect(input[1]["type"] as? String == "localImage")
+        #expect(input[1]["path"] as? String == "/private/tmp/one.png")
+        #expect(input[2]["path"] as? String == "/private/tmp/two.jpg")
+    }
+
+    @Test
     func structuredPlanUpdatePreservesEveryVisibleStepAndStatus() throws {
         let event = try notification(
             method: "turn/plan/updated",

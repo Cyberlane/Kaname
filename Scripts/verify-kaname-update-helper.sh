@@ -284,4 +284,81 @@ parent_pid=$!
 [[ ! -e "$fixture_root/Installed/Kaname Replaced.app" ]]
 [[ "$(jq -r .status "$receipt")" == rolledBack ]]
 
-printf '%s\n' 'Kaname update helper switch and automatic rollback passed.'
+workspace="$fixture_root/Desktop/workspace.json"
+workspace_rollback="$fixture_root/Updates/WorkspaceRollback/schema-14.json"
+workspace_failed="$fixture_root/Updates/WorkspaceFailed/schema-14.json"
+mkdir -p "$(dirname "$workspace")"
+printf '%s' '{"schemaVersion":13,"marker":"before-migration"}' > "$workspace"
+chmod 600 "$workspace"
+workspace_rollback_digest="$(shasum -a 256 "$workspace" | awk '{print $1}')"
+make_fixture_app "$staged" 5.0 5 broken
+printf '%s\n' '#!/bin/sh' \
+  "printf '%s' '{\"schemaVersion\":14,\"marker\":\"failed-migration\"}' > '$workspace'" \
+  'exit 0' > "$staged/Contents/MacOS/Fixture"
+chmod 755 "$staged/Contents/MacOS/Fixture"
+codesign --force --sign - "$staged"
+rollback_bundle_digest="$(bundle_digest "$installed")"
+rollback_signer_digest="$(signer_digest "$installed")"
+/bin/sleep 0.2 &
+parent_pid=$!
+if "$helper" --switch \
+  --installed "$installed" --staged "$staged" --backup "$backup" \
+  --health "$health" --receipt "$receipt" --pid "$parent_pid" \
+  --version 5.0 --build 5 \
+  --bundle-digest "$(bundle_digest "$staged")" \
+  --signer-digest "$(signer_digest "$staged")" \
+  --health-nonce fixture-schema-14 \
+  --channel stable --workspace-schema 14 \
+  --workspace "$workspace" \
+  --workspace-rollback "$workspace_rollback" \
+  --workspace-failed "$workspace_failed" \
+  --workspace-rollback-digest "$workspace_rollback_digest" \
+  --rollback-version 1.0 --rollback-build 1 \
+  --rollback-bundle-digest "$rollback_bundle_digest" \
+  --rollback-signer-digest "$rollback_signer_digest" \
+  --parent-timeout 5 --health-timeout 1; then
+  printf '%s\n' 'broken schema-changing update unexpectedly passed' >&2
+  exit 1
+fi
+[[ "$(jq -r .schemaVersion "$workspace")" == 13 ]]
+[[ "$(jq -r .marker "$workspace")" == before-migration ]]
+[[ "$(jq -r .schemaVersion "$workspace_failed")" == 14 ]]
+[[ "$(shasum -a 256 "$workspace_rollback" | awk '{print $1}')" == "$workspace_rollback_digest" ]]
+[[ "$(plutil -extract CFBundleShortVersionString raw "$installed/Contents/Info.plist")" == 1.0 ]]
+
+make_fixture_app "$backup" 0.5 0 healthy
+sed -i '' 's/workspaceSchemaVersion\":13/workspaceSchemaVersion\":12/' "$backup/Contents/MacOS/Fixture"
+codesign --force --sign - "$backup"
+printf '%s' '{"schemaVersion":13,"marker":"current-after-update"}' > "$workspace"
+workspace_rollback="$fixture_root/Updates/WorkspaceRollback/manual.json"
+workspace_replaced="$fixture_root/Updates/WorkspaceReplaced/manual.json"
+printf '%s' '{"schemaVersion":12,"marker":"before-update"}' > "$workspace_rollback"
+chmod 600 "$workspace_rollback"
+workspace_rollback_digest="$(shasum -a 256 "$workspace_rollback" | awk '{print $1}')"
+current_bundle_digest="$(bundle_digest "$installed")"
+current_signer_digest="$(signer_digest "$installed")"
+rollback_bundle_digest="$(bundle_digest "$backup")"
+rollback_signer_digest="$(signer_digest "$backup")"
+/bin/sleep 0.2 &
+parent_pid=$!
+"$helper" --rollback \
+  --installed "$installed" --backup "$backup" \
+  --health "$health" --receipt "$receipt" --pid "$parent_pid" \
+  --version 1.0 --build 1 \
+  --bundle-digest "$current_bundle_digest" \
+  --signer-digest "$current_signer_digest" \
+  --rollback-version 0.5 --rollback-build 0 \
+  --rollback-bundle-digest "$rollback_bundle_digest" \
+  --rollback-signer-digest "$rollback_signer_digest" \
+  --channel stable --workspace-schema 13 \
+  --workspace "$workspace" \
+  --workspace-rollback "$workspace_rollback" \
+  --workspace-replaced "$workspace_replaced" \
+  --workspace-rollback-digest "$workspace_rollback_digest" \
+  --parent-timeout 5 --health-timeout 5
+[[ "$(jq -r .schemaVersion "$workspace")" == 12 ]]
+[[ "$(jq -r .marker "$workspace")" == before-update ]]
+[[ "$(jq -r .schemaVersion "$workspace_replaced")" == 13 ]]
+[[ "$(plutil -extract CFBundleShortVersionString raw "$installed/Contents/Info.plist")" == 0.5 ]]
+
+printf '%s\n' 'Kaname update helper switch, workspace migration, and rollback passed.'

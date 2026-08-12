@@ -1,7 +1,7 @@
-# Kaname 0.18.0 build 36
+# Kaname 0.19.0 build 37
 
-- Add projects from a searchable, keyboard-friendly source palette without leaving the workspace.
-- Choose a local folder and review its canonical path, Git root, branch, working state, and detected instructions before saving.
-- Clone a GitHub repository or validated HTTPS/SSH Git URL into an explicitly chosen destination, with cancellable private staging and failed-clone cleanup.
-- Create planning, research, coding, or personal projects that deliberately have no folder.
-- Prevent symlink aliases from creating duplicate project boundaries and open every new project directly on its overview.
+- Keep the Threads directory fixed while providers stream, with separate Active and Completed sections and stable creation-time ordering.
+- Show explicit running, queued, waiting-for-input, approval-required, failed, response-ready, and complete states in fixed-height rows.
+- Attach, paste, or drop up to eight images in Codex, Claude, and OpenCode conversations, with previews, draft persistence, private normalized storage, and image-only messages.
+- Send provider-specific image inputs without embedding image bytes in workspace or service request JSON.
+- Protect schema-changing updates with digest-bound workspace snapshots, migration-aware health timing, and bundle-plus-workspace rollback.
