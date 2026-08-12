@@ -21,14 +21,20 @@ case "$channel" in
         ;;
     *) echo "Unknown Kaname desktop channel: $channel" >&2; exit 1 ;;
 esac
-state_directory="$HOME/Library/Application Support/$support_name/Desktop"
-state_file="$state_directory/workspace.json"
 journal_directory="$HOME/Library/Application Support/$support_name/LocalCore/journal"
 error_log="$HOME/Library/LaunchAgents/kaname-local-control-service.stderr.log"
 output_directory="$(cd "$(dirname "$0")/.." && pwd)/.build/desktop-qa/$channel"
-instance_lock="$HOME/Library/Application Support/$support_name/Runtime/desktop-instance.lock"
+qa_application_support_base="$output_directory/ApplicationSupport"
+qa_support_root="$qa_application_support_base/$support_name"
+state_directory="$qa_support_root/Desktop"
+state_file="$state_directory/workspace.json"
+instance_lock="$qa_support_root/Runtime/desktop-instance.lock"
 restore_running_app=false
 qualification_pid=""
+
+run_qualified_app() {
+    "$executable" --desktop-qa-application-support-base "$qa_application_support_base" "$@"
+}
 
 bundle_pids() {
     pgrep -f "^$executable([[:space:]]|$)" || true
@@ -92,67 +98,68 @@ if [[ "$channel" == stable ]]; then
 fi
 
 mkdir -p "$output_directory"
-"$executable" \
+rm -rf "$qa_application_support_base"
+run_qualified_app \
     --desktop-destination home \
     --desktop-window-size 1520x940 \
     --snapshot "$output_directory/home-wide.png"
-"$executable" \
+run_qualified_app \
     --desktop-destination home \
     --desktop-window-size 1080x700 \
     --snapshot "$output_directory/home-compact.png"
-"$executable" \
+run_qualified_app \
     --desktop-destination threads \
     --desktop-window-size 1520x940 \
     --snapshot "$output_directory/threads-wide.png"
-"$executable" \
+run_qualified_app \
     --desktop-destination threads \
     --desktop-window-size 1080x700 \
     --snapshot "$output_directory/threads-compact.png"
-"$executable" --desktop-destination localCore --load-local-core --snapshot "$output_directory/local-core.png"
-"$executable" --desktop-destination email --snapshot "$output_directory/email.png"
-"$executable" --desktop-destination calendar --snapshot "$output_directory/calendar.png"
-"$executable" --desktop-destination automations --snapshot "$output_directory/automations.png"
-"$executable" --desktop-destination projects --snapshot "$output_directory/projects.png"
-"$executable" --desktop-new-conversation --snapshot "$output_directory/new-conversation.png"
-"$executable" --desktop-destination projects --desktop-project-id project-kaname --snapshot "$output_directory/project-overview.png"
-"$executable" --desktop-destination knowledge --snapshot "$output_directory/knowledge.png"
-"$executable" --desktop-destination liveCodex --snapshot "$output_directory/coding.png"
-"$executable" \
+run_qualified_app --desktop-destination localCore --load-local-core --snapshot "$output_directory/local-core.png"
+run_qualified_app --desktop-destination email --snapshot "$output_directory/email.png"
+run_qualified_app --desktop-destination calendar --snapshot "$output_directory/calendar.png"
+run_qualified_app --desktop-destination automations --snapshot "$output_directory/automations.png"
+run_qualified_app --desktop-destination projects --snapshot "$output_directory/projects.png"
+run_qualified_app --desktop-new-conversation --snapshot "$output_directory/new-conversation.png"
+run_qualified_app --desktop-destination projects --desktop-project-id project-kaname --snapshot "$output_directory/project-overview.png"
+run_qualified_app --desktop-destination knowledge --snapshot "$output_directory/knowledge.png"
+run_qualified_app --desktop-destination liveCodex --snapshot "$output_directory/coding.png"
+run_qualified_app \
     --desktop-destination home \
     --desktop-global-search \
     --snapshot "$output_directory/command-center.png"
-"$executable" \
+run_qualified_app \
     --desktop-destination home \
     --desktop-global-search \
     --desktop-search-query Kaname \
     --snapshot "$output_directory/global-search.png"
-"$executable" \
+run_qualified_app \
     --desktop-destination home \
     --desktop-diagnostics \
     --snapshot "$output_directory/diagnostics.png"
-"$executable" \
+run_qualified_app \
     --desktop-destination projects \
     --desktop-large-text \
     --desktop-window-size 1080x700 \
     --snapshot "$output_directory/projects-large-text.png"
-"$executable" --desktop-destination settings --snapshot "$output_directory/settings.png"
-"$executable" \
+run_qualified_app --desktop-destination settings --snapshot "$output_directory/settings.png"
+run_qualified_app \
     --desktop-destination settings \
     --desktop-settings-category commands \
     --snapshot "$output_directory/settings-commands.png"
-"$executable" \
+run_qualified_app \
     --desktop-destination settings \
     --desktop-settings-category integrations \
     --snapshot "$output_directory/settings-integrations.png"
-"$executable" \
+run_qualified_app \
     --desktop-destination settings \
     --desktop-settings-category providers \
     --snapshot "$output_directory/settings-providers.png"
-"$executable" \
+run_qualified_app \
     --desktop-destination settings \
     --desktop-settings-category updates \
     --snapshot "$output_directory/settings-updates.png"
-"$executable" \
+run_qualified_app \
     --desktop-destination calendar \
     --desktop-back-target home \
     --post-mouse-back \
@@ -188,7 +195,7 @@ do
     [[ "$(stat -f %z "$snapshot")" -gt 100000 ]]
 done
 
-"$executable" --desktop-destination home >/dev/null 2>&1 &
+run_qualified_app --desktop-destination home >/dev/null 2>&1 &
 qualification_pid=$!
 for _ in {1..100}; do
     if lsof -a -p "$qualification_pid" "$instance_lock" >/dev/null 2>&1; then break; fi
@@ -203,7 +210,7 @@ if ! lsof -a -p "$qualification_pid" "$instance_lock" >/dev/null 2>&1; then
     exit 1
 fi
 
-"$executable" --desktop-destination settings >/dev/null 2>&1 &
+run_qualified_app --desktop-destination settings >/dev/null 2>&1 &
 second_instance_pid=$!
 if ! wait "$second_instance_pid"; then
     echo "The second Kaname launch did not exit cleanly." >&2
