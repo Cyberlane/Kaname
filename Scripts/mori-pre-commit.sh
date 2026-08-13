@@ -38,7 +38,7 @@ if [[ -n "$receipt_mode" ]]; then
   fi
   receipt_path=$(git rev-parse --git-path mori/staged-review.json)
   if [[ ! -f "$receipt_path" ]]; then
-    echo "No local staged review receipt exists. Inspect the report, then run 'mori review acknowledge --staged --accept-focused .' only with explicit owner authorization." >&2
+    echo "No local staged review receipt exists. Inspect the report, then run 'mori review acknowledge --staged --include-focused --require-focused-coverage --accept-focused .' only with explicit owner authorization." >&2
     exit 1
   fi
   arguments+=(--review-receipt "$receipt_path")
