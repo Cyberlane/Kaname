@@ -250,6 +250,7 @@ public extension DesktopAppModel {
             state.operations.workflows.dependencyLockRevisions.append(contentsOf: imported.dependencyLockRevisions)
             state.operations.workflows.capturePolicyRevisions.append(contentsOf: imported.capturePolicyRevisions)
             state.operations.workflows.retentionPolicyRevisions.append(contentsOf: imported.retentionPolicyRevisions)
+            state.operations.workflows.batchItems.append(contentsOf: imported.batchItems)
             state.operations.artifacts.append(contentsOf: restoredArtifacts)
             state.appendAudit(
                 domain: "workflow-package",
@@ -458,7 +459,8 @@ public extension DesktopAppModel {
             },
             retentionPolicyRevisions: snapshot.operations.workflows.retentionPolicyRevisions.filter { record in
                 snapshot.operations.workflows.installations.contains { $0.workflowID == workflowID && $0.id == record.installationID }
-            }
+            },
+            batchItems: snapshot.operations.workflows.batchItems.filter { runIDs.contains($0.runID) }
         )
     }
 
@@ -560,6 +562,7 @@ public extension DesktopAppModel {
               uniqueIDs(state.installations), uniqueIDs(state.configurationRevisions),
               uniqueIDs(state.bindingRevisions), uniqueIDs(state.dependencyLockRevisions),
               uniqueIDs(state.capturePolicyRevisions), uniqueIDs(state.retentionPolicyRevisions),
+              uniqueIDs(state.batchItems),
               artifactIDs.count == payload.artifacts.count,
               state.capabilityInstallations.isEmpty, state.runtimeClaims.isEmpty,
               state.triggerHealth.isEmpty, state.connectorInstallations.isEmpty,
@@ -594,6 +597,7 @@ public extension DesktopAppModel {
                       && ($0.contextSnapshotID == nil || contextIDs.contains($0.contextSnapshotID!))
               }),
               state.stepAttempts.allSatisfy({ runIDs.contains($0.runID) }),
+              state.batchItems.allSatisfy({ runIDs.contains($0.runID) }),
               state.facts.allSatisfy({ workItemIDs.contains($0.workItemID) && episodeIDs.contains($0.episodeID) }),
               state.contextSnapshots.allSatisfy({ workItemIDs.contains($0.workItemID) && episodeIDs.contains($0.episodeID) }),
               state.validations.allSatisfy({
@@ -728,6 +732,7 @@ public extension DesktopAppModel {
             || intersects(payload.state.ownershipPolicies, current.ownershipPolicies)
             || intersects(payload.state.ownershipClaims, current.ownershipClaims)
             || intersects(payload.state.renderReceipts, current.renderReceipts)
+            || intersects(payload.state.batchItems, current.batchItems)
             || intersects(payload.state.scheduleBindings, current.scheduleBindings)
             || intersects(payload.state.installations, current.installations)
             || intersects(payload.state.configurationRevisions, current.configurationRevisions)

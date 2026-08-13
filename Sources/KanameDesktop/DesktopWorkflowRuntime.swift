@@ -305,6 +305,32 @@ public final class DesktopWorkflowRuntime {
             }
             return .completedRun
         }
+        if step.kind == .forEach {
+            do {
+                let output = try await executeBatch(
+                    step: step, revision: revision, workItem: workItem, run: run, input: input,
+                    artifactInputs: declaredInputs.artifacts, stateInputs: declaredInputs.state
+                )
+                let digest = DesktopWorkflowStructuredValue.digest(output)
+                if revision.schemaVersion >= 2,
+                   model.recordWorkflowTransition(
+                       runID: runID, fromStepID: step.id, outcome: .succeeded, value: output
+                   ) == nil {
+                    throw DesktopWorkflowHostFrameworkError.predicateFailed
+                }
+                guard model.completeWorkflowStep(attemptID: attemptID, outputDigest: digest) else {
+                    throw DesktopWorkflowDataPlaneError.stateConflict
+                }
+                return .completedStep(stepID: step.id, output: output)
+            } catch {
+                let reason = String(error.localizedDescription.prefix(8_192))
+                if let failureValue = model.routeWorkflowStepFailure(attemptID: attemptID, error: reason) {
+                    return .completedStep(stepID: step.id, output: failureValue)
+                }
+                _ = model.completeWorkflowStep(attemptID: attemptID, outputDigest: nil, error: reason)
+                return .failed(stepID: step.id, reason: reason)
+            }
+        }
         guard let capabilityID = step.capabilityID else {
             let structuralKinds: Set<DesktopWorkflowStepKind> = [.classifyEvent, .correlateWork, .branch, .registerArtifact]
             guard structuralKinds.contains(step.kind) else {
@@ -445,6 +471,99 @@ public final class DesktopWorkflowRuntime {
         case .waitForEmail: "The run is waiting for a correlated email episode."
         default: "The workflow is waiting for a host decision."
         }
+    }
+
+    private func executeBatch(
+        step: DesktopWorkflowStepDefinition,
+        revision: DesktopWorkflowRevisionRecord,
+        workItem: DesktopWorkflowWorkItemRecord,
+        run: DesktopWorkflowRunRecord,
+        input: Data,
+        artifactInputs: [DesktopWorkflowCapabilityArtifactInput],
+        stateInputs: [DesktopWorkflowCapabilityStateInput]
+    ) async throws -> Data {
+        guard let policy = step.batchPolicy,
+              let value = try DesktopWorkflowStructuredValue.value(at: policy.itemsPointer, in: input),
+              let values = value as? [Any] else {
+            throw DesktopWorkflowHostFrameworkError.invalidContract("The batch item pointer does not resolve to an array.")
+        }
+        let records = try model.prepareWorkflowBatch(runID: run.id, stepID: step.id, input: input)
+        var outputs: [Any] = []
+        var failures = 0
+        let installation: DesktopWorkflowCapabilityInstallationRecord?
+        if let capabilityID = step.capabilityID {
+            guard revision.permissions.capabilityIDs.contains(capabilityID),
+                  let resolved = model.workflowCapabilityInstallation(capabilityID: capabilityID), resolved.enabled,
+                  !resolved.permissions.broadens(revision.permissions) else {
+                throw DesktopWorkflowCapabilityError.packageUnavailable
+            }
+            installation = resolved
+        } else {
+            installation = nil
+        }
+        for record in records.sorted(by: { $0.ordinal < $1.ordinal }) {
+            guard values.indices.contains(record.ordinal) else { throw DesktopWorkflowDataPlaneError.requiredInputMissing }
+            if record.state == .succeeded {
+                outputs.append(["ordinal": record.ordinal, "outputDigest": record.outputDigest ?? "", "state": "succeeded"])
+                continue
+            }
+            if policy.aggregation == .stopOnFirstFailure, failures > 0 {
+                _ = model.updateWorkflowBatchItem(id: record.id, state: .cancelled, error: "A prior item failed.")
+                outputs.append(["ordinal": record.ordinal, "state": "cancelled"])
+                continue
+            }
+            _ = model.updateWorkflowBatchItem(id: record.id, state: .running)
+            let itemData = try JSONSerialization.data(
+                withJSONObject: values[record.ordinal], options: [.sortedKeys, .withoutEscapingSlashes, .fragmentsAllowed]
+            )
+            do {
+                let output: Data
+                if let installation {
+                    let result = try await invoker.invoke(
+                        DesktopWorkflowCapabilityInvocation(
+                            workflowID: workItem.workflowID, workItemID: workItem.id, episodeID: run.episodeID,
+                            runID: run.id, step: step, contextSnapshotID: run.contextSnapshotID,
+                            input: itemData, artifactInputs: artifactInputs, stateInputs: stateInputs,
+                            contextSnapshot: run.contextSnapshotID.flatMap { id in
+                                model.snapshot.operations.workflows.contextSnapshots.first { $0.id == id }
+                            }
+                        ),
+                        installation: installation
+                    )
+                    switch result {
+                    case let .completed(value, _, proposal, artifacts, _):
+                        guard proposal == .init(), artifacts.isEmpty else {
+                            throw DesktopWorkflowHostFrameworkError.invalidContract(
+                                "Batch item capabilities cannot commit state or artifacts outside item receipts."
+                            )
+                        }
+                        output = value
+                    case .waiting:
+                        throw DesktopWorkflowHostFrameworkError.invalidContract("Batch items cannot enter an ambient wait.")
+                    }
+                } else {
+                    output = itemData
+                }
+                let digest = DesktopWorkflowStructuredValue.digest(output)
+                _ = model.updateWorkflowBatchItem(id: record.id, state: .succeeded, outputDigest: digest)
+                let decoded = try JSONSerialization.jsonObject(with: output, options: [.fragmentsAllowed])
+                outputs.append(["ordinal": record.ordinal, "state": "succeeded", "value": decoded])
+            } catch {
+                failures += 1
+                _ = model.updateWorkflowBatchItem(id: record.id, state: .failed, error: error.localizedDescription)
+                outputs.append(["ordinal": record.ordinal, "state": "failed", "error": String(error.localizedDescription.prefix(2_048))])
+            }
+        }
+        if failures > 0 && policy.aggregation == .requireAll {
+            throw DesktopWorkflowHostFrameworkError.invalidContract("\(failures) batch item(s) failed under the require-all policy.")
+        }
+        return try JSONSerialization.data(
+            withJSONObject: [
+                "items": outputs,
+                "summary": ["total": records.count, "failed": failures, "succeeded": records.count - failures],
+            ],
+            options: [.sortedKeys, .withoutEscapingSlashes]
+        )
     }
 
     private func durablePriorOutput(runID: String) -> Data? {

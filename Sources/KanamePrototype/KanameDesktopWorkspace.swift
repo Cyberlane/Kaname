@@ -7263,6 +7263,11 @@ private struct WorkflowWorkItemCard: View {
         item.currentEpisodeID.flatMap { id in episodes.first { $0.id == id } }
     }
 
+    private var runs: [DesktopWorkflowRunRecord] {
+        model.snapshot.operations.workflows.runs.filter { $0.workItemID == item.id }
+            .sorted { ($0.startedAtUnixMillis ?? 0, $0.id) < ($1.startedAtUnixMillis ?? 0, $1.id) }
+    }
+
     private var activeFacts: [DesktopWorkflowFactRecord] {
         let itemFacts = model.workflowFacts(workItemID: item.id).filter { $0.state == .verified }
         let accountIDs = Set(model.snapshot.operations.workflows.conversationBindings.filter {
@@ -7391,6 +7396,24 @@ private struct WorkflowWorkItemCard: View {
                             ForEach(episodes.suffix(12)) { episode in
                                 WorkflowEpisodeRow(model: model, episode: episode)
                             }
+                        }
+                    }
+                    if !runs.isEmpty {
+                        DisclosureGroup("Run graph and history · \(runs.count)") {
+                            VStack(alignment: .leading, spacing: 10) {
+                                ForEach(runs.suffix(8)) { run in
+                                    WorkflowRunGraphProjectionView(model: model, run: run)
+                                }
+                                if runs.count >= 2 {
+                                    WorkflowRunComparisonView(
+                                        comparisons: model.compareWorkflowRuns(
+                                            leftRunID: runs[runs.count - 2].id,
+                                            rightRunID: runs[runs.count - 1].id
+                                        )
+                                    )
+                                }
+                            }
+                            .padding(.top, 8)
                         }
                     }
                     if !activeFacts.isEmpty {
@@ -7656,6 +7679,169 @@ private struct WorkflowWorkItemCard: View {
         panel.message = "Export a verified copy. Kaname keeps the immutable workflow artifact in private storage."
         guard panel.runModal() == .OK, let url = panel.url else { return }
         try? data.write(to: url, options: .atomic)
+    }
+}
+
+private struct WorkflowRunGraphProjectionView: View {
+    @ObservedObject var model: DesktopAppModel
+    let run: DesktopWorkflowRunRecord
+
+    private var nodes: [DesktopWorkflowRunNodeProjection] { model.workflowRunProjection(runID: run.id) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label(run.retryMode.label, systemImage: "point.3.connected.trianglepath.dotted")
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                Text(run.state.label).font(.caption2).foregroundStyle(.secondary)
+                Button("Reprocess current revision") {
+                    _ = model.queueWorkflowDebugRun(priorRunID: run.id, action: .reprocessCurrentRevision)
+                }
+                .font(.caption2)
+                .disabled(![.completed, .failed, .cancelled].contains(run.state))
+            }
+            ScrollView(.horizontal) {
+                HStack(spacing: 8) {
+                    ForEach(nodes) { node in
+                        let step = revision?.steps.first { $0.id == node.stepID }
+                        let attempts = model.snapshot.operations.workflows.stepAttempts.filter {
+                            $0.runID == run.id && $0.stepID == node.stepID
+                        }.sorted { $0.attempt < $1.attempt }
+                        let transition = model.snapshot.operations.workflows.transitionRecords.last {
+                            $0.runID == run.id && $0.fromStepID == node.stepID
+                        }
+                        let effects = model.snapshot.operations.workflows.effects.filter {
+                            $0.runID == run.id && $0.stepID == node.stepID
+                        }
+                        let eligibility = step.map {
+                            DesktopWorkflowRunProjection.debugEligibility(
+                                step: $0, projection: node,
+                                hasUnknownEffect: effects.contains { $0.state == .outcomeUnknown }
+                            )
+                        }
+                        VStack(alignment: .leading, spacing: 4) {
+                            Label(node.stepID, systemImage: symbol(node.state))
+                                .font(.caption.weight(.semibold))
+                            Text(node.state.label).font(.caption2)
+                            if let elapsed = node.elapsedMilliseconds {
+                                Text("\(elapsed) ms · attempt \(node.attempt)").font(.caption2).foregroundStyle(.secondary)
+                            }
+                            if node.totalItems > 0 {
+                                Text("Batch \(node.completedItems)/\(node.totalItems) · \(node.failedItems) failed · \(node.unknownItems) unknown")
+                                    .font(.caption2).foregroundStyle(.secondary)
+                            }
+                            Text(node.detail).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+                            DisclosureGroup("Inspect step") {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    if let step {
+                                        Text("\(step.kind.label) · \(step.capabilityID ?? "host structural step")")
+                                        Text("Retry limit \(step.retryLimit) · \(step.isIdempotent ? "idempotent" : "not idempotent")")
+                                    }
+                                    ForEach(attempts) { attempt in
+                                        Text("Attempt \(attempt.attempt) · \(attempt.state.label) · input \(attempt.inputDigest.prefix(10)) · output \(attempt.outputDigest?.prefix(10) ?? "none")")
+                                    }
+                                    if let transition {
+                                        Text("Branch \(transition.outcome.rawValue) → \(transition.toStepID ?? "terminal")")
+                                    }
+                                    if !effects.isEmpty {
+                                        Text("Effects: \(effects.map { $0.state.rawValue }.joined(separator: ", "))")
+                                    }
+                                    HStack {
+                                        Button("Retry step") {
+                                            _ = model.queueWorkflowDebugRun(
+                                                priorRunID: run.id, action: .retryFailedStep, stepID: node.stepID
+                                            )
+                                        }
+                                        .disabled(eligibility?.allowed.contains(.retryFailedStep) != true)
+                                        Button("Restart after") {
+                                            _ = model.queueWorkflowDebugRun(
+                                                priorRunID: run.id, action: .restartFromCheckpoint, stepID: node.stepID
+                                            )
+                                        }
+                                        .disabled(eligibility?.allowed.contains(.restartFromCheckpoint) != true)
+                                    }
+                                    if node.state == .outcomeUnknown {
+                                        Label("Reconcile this effect in Effects before retrying.", systemImage: "exclamationmark.arrow.triangle.2.circlepath")
+                                            .foregroundStyle(Nord.auroraRed)
+                                    }
+                                }
+                                .font(.caption2)
+                                .padding(.top, 4)
+                            }
+                        }
+                        .padding(9)
+                        .frame(width: 250, alignment: .leading)
+                        .background(tint(node.state).opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
+                        .overlay(RoundedRectangle(cornerRadius: 9).stroke(tint(node.state), lineWidth: 1))
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel("\(node.stepID), \(node.state.label). \(node.detail)")
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .background(Nord.polarNight1.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private var revision: DesktopWorkflowRevisionRecord? {
+        model.snapshot.operations.workflows.revisions.first { $0.id == run.workflowRevisionID }
+    }
+
+    private func symbol(_ state: DesktopWorkflowRunNodeState) -> String {
+        switch state {
+        case .notRun: "circle"
+        case .queued: "list.number"
+        case .running: "progress.indicator"
+        case .waiting: "clock.badge"
+        case .needsReview: "person.crop.circle.badge.exclamationmark"
+        case .retrying: "arrow.clockwise.circle"
+        case .succeeded: "checkmark.circle.fill"
+        case .skipped: "forward.end.circle"
+        case .failed: "xmark.octagon.fill"
+        case .outcomeUnknown: "exclamationmark.arrow.triangle.2.circlepath"
+        case .cancelled: "stop.circle"
+        }
+    }
+
+    private func tint(_ state: DesktopWorkflowRunNodeState) -> Color {
+        switch state {
+        case .succeeded: Nord.auroraGreen
+        case .failed, .outcomeUnknown: Nord.auroraRed
+        case .waiting, .retrying: Nord.auroraYellow
+        case .needsReview: Nord.auroraPurple
+        case .running, .queued: Nord.frost1
+        default: .secondary
+        }
+    }
+}
+
+private struct WorkflowRunComparisonView: View {
+    let comparisons: [DesktopWorkflowRunStepComparison]
+
+    var body: some View {
+        DisclosureGroup("Compare latest two runs") {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(comparisons) { comparison in
+                    HStack {
+                        Text(comparison.stepID).font(.caption.weight(.semibold)).frame(width: 160, alignment: .leading)
+                        Text(comparison.leftState.label).font(.caption2)
+                        Image(systemName: "arrow.right").foregroundStyle(.secondary)
+                        Text(comparison.rightState.label).font(.caption2)
+                        Spacer()
+                        if comparison.inputChanged { Label("Input", systemImage: "arrow.triangle.2.circlepath").font(.caption2) }
+                        if comparison.outputChanged { Label("Output", systemImage: "arrow.triangle.2.circlepath").font(.caption2) }
+                        if comparison.branchChanged { Label("Branch", systemImage: "arrow.triangle.branch").font(.caption2) }
+                        if let delta = comparison.durationDeltaMilliseconds {
+                            Text("\(delta >= 0 ? "+" : "")\(delta) ms").font(.caption2.monospacedDigit())
+                        }
+                    }
+                    .accessibilityElement(children: .combine)
+                }
+            }
+            .padding(.top, 8)
+        }
+        .font(.caption)
     }
 }
 
@@ -8431,6 +8617,7 @@ private extension DesktopWorkflowStepKind {
         case .registerArtifact: "doc.badge.plus"
         case .validate: "checkmark.shield"
         case .branch: "arrow.triangle.branch"
+        case .forEach: "square.stack.3d.down.right"
         case .agent: "brain.head.profile"
         case .effect: "bolt.horizontal.circle"
         case .humanReview: "person.crop.circle.badge.questionmark"

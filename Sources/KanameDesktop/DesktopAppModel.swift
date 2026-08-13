@@ -680,6 +680,11 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
                 // definitions retain their legacy behavior and gain no new
                 // observation, secret, or effect authority during migration.
                 break
+            case 23:
+                // Studio presentation metadata, typed mappings, undo history,
+                // and durable batch items decode additively. No graph is
+                // rewritten and no execution or effect authority is granted.
+                break
             default:
                 throw DesktopModelError.unsupportedVersion
             }

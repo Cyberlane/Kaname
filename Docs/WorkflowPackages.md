@@ -49,6 +49,16 @@ The host recognizes structural, capability, model, validation, human-decision, c
 
 Reusable subflows remain ordinary v2 packages connected through declared capability boundaries. This keeps graph execution deterministic and makes retries, evidence, and authority visible without adding an unrestricted scripting runtime to Kaname core.
 
+## Visual authoring and inspection
+
+Workflow Studio keeps one semantic graph behind three synchronized projections: a keyboard-friendly outline, a draggable canvas, and canonical manifest source. Opening and saving an imported graph preserves its explicit transitions and predicates; Studio does not infer a linear pipeline from array order. Every host step kind can be added from the outline, with focused inspectors for routes, typed JSON Pointer mappings, schemas, artifacts, state, reviews, waits, execution limits, bounded agents, and batches. Source replacement is validated before it becomes the draft, while undo and redo retain bounded graph snapshots.
+
+The canvas is an alternate view, not a second workflow representation. Its nodes expose names, kinds, and outgoing-route counts to accessibility APIs, and the outline remains the complete keyboard path. Run cards project the same graph with an icon and text label for queued, running, waiting, review, retry, success, skipped, failure, unknown-outcome, and cancellation states. Historical runs can be replayed visually and compared by state, input/output digest, duration, and selected branch. The step inspector exposes durable attempts and selected routes; it can queue a new exact-revision run after a completed checkpoint, retry an idempotent failed step, or reprocess with the current revision. These controls always create a new run, and they remain disabled when the prior run is active, the step is non-idempotent, or an effect outcome is unknown.
+
+Typed input mappings declare a source class, optional source identity, JSON Pointer, target pointer, required flag, and Draft 2020-12 schema. Studio rejects malformed pointers, duplicate targets, invalid schemas, and references to a later step before publication. The manifest therefore keeps trigger, configuration, binding, step-output, artifact, state, dataset, and batch-item data dependencies explicit rather than hiding them in canvas presentation state.
+
+A `forEach` step declares its item pointer, reviewed item and concurrency bounds, and one of three aggregation policies: require all, allow partial results, or stop after the first failure. Each item has its own durable identity, ordinal, input/output digests, attempt count, timestamps, state, and bounded error summary. Restarting the worker resumes from those item receipts rather than treating the entire collection as one opaque attempt. Batch capabilities cannot create ambient waits or commit state and artifacts outside their item receipts.
+
 ## Structured review and low-noise attention
 
 A human-review node declares input and output JSON Schemas, allowed actions, presentation hints, and whether edits invalidate prior validation. Kaname persists the proposed value and digest, renders one editable decision card in the work item, validates the result, records the reviewer and selected action, and resumes along the declared edge. Generic actions are approve, reject, edit, select, acknowledge, and escalate.

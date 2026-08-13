@@ -120,6 +120,24 @@ public struct DesktopWorkflowReviewContract: Codable, Equatable, Sendable {
     public var actions: [DesktopWorkflowReviewActionDefinition]
     public var invalidateValidationOnEdit: Bool = true
 
+    public init(
+        title: String,
+        summary: String,
+        inputSchema: String,
+        outputSchema: String,
+        presentationHints: [String: String] = [:],
+        actions: [DesktopWorkflowReviewActionDefinition],
+        invalidateValidationOnEdit: Bool = true
+    ) {
+        self.title = title
+        self.summary = summary
+        self.inputSchema = inputSchema
+        self.outputSchema = outputSchema
+        self.presentationHints = presentationHints
+        self.actions = actions
+        self.invalidateValidationOnEdit = invalidateValidationOnEdit
+    }
+
 }
 
 public enum DesktopWorkflowReviewState: String, Codable, CaseIterable, Equatable, Sendable {
@@ -157,6 +175,24 @@ public struct DesktopWorkflowWaitContract: Codable, Equatable, Sendable {
     public var correlationPointer: String? = nil
     public var timeoutSeconds: Int = 604_800
     public var supersedePrior: Bool = true
+
+    public init(
+        connectorID: String,
+        source: String,
+        accountPointer: String? = nil,
+        conversationPointer: String? = nil,
+        correlationPointer: String? = nil,
+        timeoutSeconds: Int = 604_800,
+        supersedePrior: Bool = true
+    ) {
+        self.connectorID = connectorID
+        self.source = source
+        self.accountPointer = accountPointer
+        self.conversationPointer = conversationPointer
+        self.correlationPointer = correlationPointer
+        self.timeoutSeconds = timeoutSeconds
+        self.supersedePrior = supersedePrior
+    }
 
 }
 
@@ -705,6 +741,20 @@ public enum DesktopWorkflowHostContractValidation {
             }
         } else if step.kind == .agent {
             throw DesktopWorkflowHostFrameworkError.invalidContract("agent step \(step.id) needs a bounded agent policy")
+        }
+        if let batch = step.batchPolicy {
+            guard step.kind == .forEach, batch.itemsPointer.hasPrefix("/"),
+                  (1...10_000).contains(batch.maximumItems),
+                  (1...32).contains(batch.maximumConcurrency) else {
+                throw DesktopWorkflowHostFrameworkError.invalidContract("step \(step.id) has an invalid batch policy")
+            }
+        } else if step.kind == .forEach {
+            throw DesktopWorkflowHostFrameworkError.invalidContract("batch step \(step.id) needs bounded item and aggregation policy")
+        }
+        let mappings = step.inputMappings ?? []
+        guard mappings.count <= 128, Set(mappings.map(\.id)).count == mappings.count,
+              Set(mappings.map(\.targetPointer)).count == mappings.count else {
+            throw DesktopWorkflowHostFrameworkError.invalidContract("step \(step.id) has duplicate or excessive input mappings")
         }
     }
 

@@ -211,6 +211,10 @@ public struct DesktopWorkflowStudioDraftRecord: Codable, Equatable, Identifiable
     public var permissions: DesktopWorkflowPermissionEnvelope
     public var subflows: [DesktopWorkflowSubflowReference]
     public var validationSummary: String?
+    public var canvasPositions: [DesktopWorkflowCanvasNodePosition]? = nil
+    public var manifestMetadata: DesktopWorkflowStudioManifestMetadata? = nil
+    public var undoHistory: [DesktopWorkflowStudioSnapshot]? = nil
+    public var redoHistory: [DesktopWorkflowStudioSnapshot]? = nil
     public var createdAtUnixMillis: Int64
     public var updatedAtUnixMillis: Int64
 }
@@ -643,7 +647,9 @@ public extension DesktopAppModel {
             validationSummary: "Add at least one step and a terminal Complete step.",
             createdAtUnixMillis: timestamp, updatedAtUnixMillis: timestamp
         )
-        guard mutate({ $0.operations.workflows.studioDrafts.append(draft) }) else { return nil }
+        var prepared = draft
+        prepared.manifestMetadata = .newDraft
+        guard mutate({ $0.operations.workflows.studioDrafts.append(prepared) }) else { return nil }
         return id
     }
 
@@ -653,7 +659,10 @@ public extension DesktopAppModel {
         triggerKinds: [DesktopWorkflowTriggerKind],
         steps: [DesktopWorkflowStepDefinition],
         permissions: DesktopWorkflowPermissionEnvelope,
-        subflows: [DesktopWorkflowSubflowReference]
+        subflows: [DesktopWorkflowSubflowReference],
+        canvasPositions: [DesktopWorkflowCanvasNodePosition]? = nil,
+        manifestMetadata: DesktopWorkflowStudioManifestMetadata? = nil,
+        recordUndo: Bool = true
     ) -> Bool {
         guard !triggerKinds.isEmpty, Set(steps.map(\.id)).count == steps.count,
               Set(subflows.map { "\($0.subflowID)@\($0.version)" }).count == subflows.count,
@@ -662,6 +671,10 @@ public extension DesktopAppModel {
                       $0.subflowID == reference.subflowID && $0.version == reference.version && $0.enabled
                   }
               }) else { return false }
+        let metadata = manifestMetadata
+            ?? snapshot.operations.workflows.studioDrafts.first(where: { $0.id == id })?.manifestMetadata
+            ?? .newDraft
+        let diagnostics = DesktopWorkflowStudioValidation.diagnostics(steps: steps, metadata: metadata)
         let validation: String?
         do {
             try DesktopWorkflowHostContractValidation.validateGraph(steps)
@@ -671,18 +684,115 @@ public extension DesktopAppModel {
                     $0.subflowID == reference.subflowID && $0.version == reference.version
                 }
             }.first { $0.permissions.broadens(permissions) }
-            validation = broadened == nil ? nil : "Subflow \(broadened!.name) requires authority outside the draft envelope."
+            validation = diagnostics.first(where: { $0.severity == .error })?.message
+                ?? (broadened == nil ? nil : "Subflow \(broadened!.name) requires authority outside the draft envelope.")
         } catch {
             validation = error.localizedDescription
         }
         let timestamp = now()
         return mutateRecord(at: \.operations.workflows.studioDrafts, id: id) { draft in
+            if recordUndo {
+                var undo = draft.undoHistory ?? []
+                undo.append(Self.studioSnapshot(draft))
+                draft.undoHistory = Array(undo.suffix(50))
+                draft.redoHistory = []
+            }
             draft.triggerKinds = Array(Set(triggerKinds)).sorted { $0.rawValue < $1.rawValue }
             draft.steps = steps
             draft.permissions = permissions
             draft.subflows = subflows
+            draft.canvasPositions = canvasPositions ?? draft.canvasPositions
+            draft.manifestMetadata = metadata
             draft.validationSummary = validation
             draft.updatedAtUnixMillis = timestamp
+        }
+    }
+
+    @discardableResult
+    func forkWorkflowRevisionToStudio(revisionID: String) -> String? {
+        guard let revision = snapshot.operations.workflows.revisions.first(where: { $0.id == revisionID }),
+              let definition = snapshot.operations.workflows.definitions.first(where: { $0.id == revision.workflowID }) else { return nil }
+        let timestamp = now()
+        let id = UUID().uuidString.lowercased()
+        var draft = DesktopWorkflowStudioDraftRecord(
+            id: id, workflowID: "local.\(id)", name: definition.name + " copy",
+            summary: definition.summary, icon: definition.icon, version: revision.version,
+            triggerKinds: definition.triggerKinds, steps: revision.steps, permissions: revision.permissions,
+            subflows: [], validationSummary: nil, createdAtUnixMillis: timestamp, updatedAtUnixMillis: timestamp
+        )
+        draft.canvasPositions = Self.defaultCanvasPositions(revision.steps)
+        draft.manifestMetadata = Self.studioMetadata(definition: definition, revision: revision)
+        let diagnostics = DesktopWorkflowStudioValidation.diagnostics(
+            steps: revision.steps, metadata: draft.manifestMetadata ?? .newDraft
+        )
+        draft.validationSummary = diagnostics.first(where: { $0.severity == .error })?.message
+        guard mutate({ $0.operations.workflows.studioDrafts.append(draft) }) else { return nil }
+        return id
+    }
+
+    func workflowStudioManifest(draftID: String) -> DesktopWorkflowPackageManifest? {
+        guard let draft = snapshot.operations.workflows.studioDrafts.first(where: { $0.id == draftID }) else { return nil }
+        return Self.studioManifest(draft)
+    }
+
+    func workflowStudioCanonicalSource(draftID: String) -> String? {
+        guard let manifest = workflowStudioManifest(draftID: draftID),
+              let data = try? DesktopWorkflowPackageCodec.canonicalData(manifest) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    func workflowStudioDiagnostics(draftID: String) -> [DesktopWorkflowStudioDiagnostic] {
+        guard let draft = snapshot.operations.workflows.studioDrafts.first(where: { $0.id == draftID }) else { return [] }
+        return DesktopWorkflowStudioValidation.diagnostics(
+            steps: draft.steps, metadata: draft.manifestMetadata ?? .newDraft
+        )
+    }
+
+    @discardableResult
+    func replaceWorkflowStudioDraftSource(id: String, source: String) -> Bool {
+        guard let data = source.data(using: .utf8), data.count <= DesktopWorkflowPackageCodec.maximumManifestBytes,
+              let manifest = try? DesktopWorkflowPackageCodec.decode(
+                  data,
+                  registeredCapabilityIDs: Set(snapshot.operations.workflows.capabilityInstallations.map(\.capabilityID))
+              ),
+              let draft = snapshot.operations.workflows.studioDrafts.first(where: { $0.id == id }) else { return false }
+        return mutateRecord(at: \.operations.workflows.studioDrafts, id: id) { stored in
+            var undo = stored.undoHistory ?? []
+            undo.append(Self.studioSnapshot(draft))
+            stored.undoHistory = Array(undo.suffix(50))
+            stored.redoHistory = []
+            stored.workflowID = manifest.id
+            stored.name = manifest.name
+            stored.summary = manifest.summary
+            stored.icon = manifest.icon
+            stored.version = manifest.version
+            stored.triggerKinds = manifest.triggers
+            stored.steps = manifest.steps
+            stored.permissions = manifest.permissions
+            stored.subflows = []
+            stored.canvasPositions = Self.defaultCanvasPositions(manifest.steps)
+            stored.manifestMetadata = Self.studioMetadata(manifest)
+            stored.validationSummary = nil
+            stored.updatedAtUnixMillis = now()
+        }
+    }
+
+    @discardableResult
+    func undoWorkflowStudioDraft(id: String) -> Bool { moveStudioHistory(id: id, undo: true) }
+
+    @discardableResult
+    func redoWorkflowStudioDraft(id: String) -> Bool { moveStudioHistory(id: id, undo: false) }
+
+    private func moveStudioHistory(id: String, undo: Bool) -> Bool {
+        mutateRecord(at: \.operations.workflows.studioDrafts, id: id) { draft in
+            var source = undo ? (draft.undoHistory ?? []) : (draft.redoHistory ?? [])
+            guard let selected = source.popLast() else { return }
+            var destination = undo ? (draft.redoHistory ?? []) : (draft.undoHistory ?? [])
+            destination.append(Self.studioSnapshot(draft))
+            if undo { draft.undoHistory = source; draft.redoHistory = Array(destination.suffix(50)) }
+            else { draft.redoHistory = source; draft.undoHistory = Array(destination.suffix(50)) }
+            Self.restoreStudioSnapshot(selected, into: &draft)
+            draft.updatedAtUnixMillis = now()
         }
     }
 
@@ -691,14 +801,9 @@ public extension DesktopAppModel {
         guard let draft = snapshot.operations.workflows.studioDrafts.first(where: { $0.id == id }),
               draft.validationSummary == nil else { return nil }
         guard let steps = flattenedStudioSteps(draft) else { return nil }
-        let manifest = DesktopWorkflowPackageManifest(
-            schemaVersion: 2, id: draft.workflowID, name: draft.name, summary: draft.summary,
-            icon: draft.icon, version: draft.version, source: "Kaname Workflow Studio", license: "Private",
-            triggers: draft.triggerKinds, steps: steps, permissions: draft.permissions,
-            correlationSummary: "Configured in Workflow Studio",
-            contextSummary: "Compile declared workflow context and current artifacts.",
-            completionSummary: "Complete after declared validators, reviews, and effects.", datasets: nil
-        )
+        var publishDraft = draft
+        publishDraft.steps = steps
+        let manifest = Self.studioManifest(publishDraft)
         guard let data = try? DesktopWorkflowPackageCodec.canonicalData(manifest),
               (try? installWorkflowPackage(
                   manifestData: data,
@@ -706,6 +811,83 @@ public extension DesktopAppModel {
                   enable: false
               )) != nil else { return nil }
         return draft.workflowID
+    }
+
+    private static func studioManifest(_ draft: DesktopWorkflowStudioDraftRecord) -> DesktopWorkflowPackageManifest {
+        let metadata = draft.manifestMetadata ?? .newDraft
+        return DesktopWorkflowPackageManifest(
+            schemaVersion: metadata.schemaVersion, id: draft.workflowID, name: draft.name, summary: draft.summary,
+            icon: draft.icon, version: draft.version, source: metadata.source, license: metadata.license,
+            triggers: draft.triggerKinds, steps: draft.steps, permissions: draft.permissions,
+            correlationSummary: metadata.correlationSummary, contextSummary: metadata.contextSummary,
+            completionSummary: metadata.completionSummary, datasets: metadata.datasets,
+            configurationSchema: metadata.configurationSchema,
+            configurationSchemaVersion: metadata.configurationSchemaVersion,
+            manualRunInputSchema: metadata.manualRunInputSchema, bindingSlots: metadata.bindingSlots,
+            providerFeatures: metadata.providerFeatures, hostCompatibility: metadata.hostCompatibility,
+            dependencies: metadata.dependencies, publisher: metadata.publisher, provenance: metadata.provenance,
+            uiHints: metadata.uiHints, configurationMigrations: metadata.configurationMigrations
+        )
+    }
+
+    private static func studioMetadata(_ manifest: DesktopWorkflowPackageManifest) -> DesktopWorkflowStudioManifestMetadata {
+        .init(
+            schemaVersion: manifest.schemaVersion, source: manifest.source, license: manifest.license,
+            correlationSummary: manifest.correlationSummary, contextSummary: manifest.contextSummary,
+            completionSummary: manifest.completionSummary, datasets: manifest.datasets,
+            configurationSchema: manifest.configurationSchema,
+            configurationSchemaVersion: manifest.configurationSchemaVersion,
+            manualRunInputSchema: manifest.manualRunInputSchema, bindingSlots: manifest.bindingSlots,
+            providerFeatures: manifest.providerFeatures, hostCompatibility: manifest.hostCompatibility,
+            dependencies: manifest.dependencies, publisher: manifest.publisher, provenance: manifest.provenance,
+            uiHints: manifest.uiHints, configurationMigrations: manifest.configurationMigrations
+        )
+    }
+
+    private static func studioMetadata(
+        definition: DesktopWorkflowDefinitionRecord,
+        revision: DesktopWorkflowRevisionRecord
+    ) -> DesktopWorkflowStudioManifestMetadata {
+        .init(
+            schemaVersion: revision.schemaVersion, source: definition.source, license: definition.license,
+            correlationSummary: revision.correlationSummary, contextSummary: revision.contextSummary,
+            completionSummary: revision.completionSummary, datasets: revision.datasetDefinitions,
+            configurationSchema: revision.configurationSchema,
+            configurationSchemaVersion: revision.configurationSchemaVersion,
+            manualRunInputSchema: revision.manualRunInputSchema, bindingSlots: revision.bindingSlots,
+            providerFeatures: revision.providerFeatures, hostCompatibility: revision.hostCompatibility,
+            dependencies: revision.dependencies, publisher: revision.publisher, provenance: revision.provenance,
+            uiHints: revision.uiHints, configurationMigrations: revision.configurationMigrations
+        )
+    }
+
+    private static func studioSnapshot(_ draft: DesktopWorkflowStudioDraftRecord) -> DesktopWorkflowStudioSnapshot {
+        .init(
+            steps: draft.steps, triggerKinds: draft.triggerKinds, permissions: draft.permissions,
+            subflows: draft.subflows, canvasPositions: draft.canvasPositions ?? [],
+            metadata: draft.manifestMetadata ?? .newDraft
+        )
+    }
+
+    private static func restoreStudioSnapshot(
+        _ snapshot: DesktopWorkflowStudioSnapshot,
+        into draft: inout DesktopWorkflowStudioDraftRecord
+    ) {
+        draft.steps = snapshot.steps
+        draft.triggerKinds = snapshot.triggerKinds
+        draft.permissions = snapshot.permissions
+        draft.subflows = snapshot.subflows
+        draft.canvasPositions = snapshot.canvasPositions
+        draft.manifestMetadata = snapshot.metadata
+        draft.validationSummary = DesktopWorkflowStudioValidation.diagnostics(
+            steps: snapshot.steps, metadata: snapshot.metadata
+        ).first(where: { $0.severity == .error })?.message
+    }
+
+    private static func defaultCanvasPositions(_ steps: [DesktopWorkflowStepDefinition]) -> [DesktopWorkflowCanvasNodePosition] {
+        steps.enumerated().map { index, step in
+            .init(stepID: step.id, x: Double(index % 4) * 230 + 30, y: Double(index / 4) * 130 + 30)
+        }
     }
 
     private func flattenedStudioSteps(_ draft: DesktopWorkflowStudioDraftRecord) -> [DesktopWorkflowStepDefinition]? {
@@ -741,7 +923,8 @@ public extension DesktopAppModel {
                             predicates: transition.predicates
                         )
                     }, reviewContract: step.reviewContract, waitContract: step.waitContract,
-                    executionPolicy: step.executionPolicy, agentPolicy: step.agentPolicy
+                    executionPolicy: step.executionPolicy, agentPolicy: step.agentPolicy,
+                    inputMappings: step.inputMappings, batchPolicy: step.batchPolicy
                 )
                 flattened.append(step)
             }

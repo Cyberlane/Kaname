@@ -19,6 +19,7 @@ public enum DesktopWorkflowStepKind: String, Codable, CaseIterable, Equatable, S
     case registerArtifact
     case validate
     case branch
+    case forEach
     case agent
     case effect
     case humanReview
@@ -38,6 +39,7 @@ public enum DesktopWorkflowStepKind: String, Codable, CaseIterable, Equatable, S
         case .registerArtifact: "Register artifact"
         case .validate: "Validate"
         case .branch: "Decision branch"
+        case .forEach: "For each / batch"
         case .agent: "Bounded agent"
         case .effect: "Connector effect"
         case .humanReview: "Human review"
@@ -93,6 +95,8 @@ public struct DesktopWorkflowStepDefinition: Codable, Equatable, Identifiable, S
     public var waitContract: DesktopWorkflowWaitContract?
     public var executionPolicy: DesktopWorkflowExecutionPolicy?
     public var agentPolicy: DesktopWorkflowAgentPolicy?
+    public var inputMappings: [DesktopWorkflowDataMapping]?
+    public var batchPolicy: DesktopWorkflowBatchPolicy?
 
     public init(
         id: String,
@@ -110,7 +114,9 @@ public struct DesktopWorkflowStepDefinition: Codable, Equatable, Identifiable, S
         reviewContract: DesktopWorkflowReviewContract? = nil,
         waitContract: DesktopWorkflowWaitContract? = nil,
         executionPolicy: DesktopWorkflowExecutionPolicy? = nil,
-        agentPolicy: DesktopWorkflowAgentPolicy? = nil
+        agentPolicy: DesktopWorkflowAgentPolicy? = nil,
+        inputMappings: [DesktopWorkflowDataMapping]? = nil,
+        batchPolicy: DesktopWorkflowBatchPolicy? = nil
     ) {
         (self.id, self.name, self.kind) = (id, name, kind)
         (self.capabilityID, self.inputSchemaReference, self.outputSchemaReference) = (
@@ -124,6 +130,8 @@ public struct DesktopWorkflowStepDefinition: Codable, Equatable, Identifiable, S
         self.waitContract = waitContract
         self.executionPolicy = executionPolicy
         self.agentPolicy = agentPolicy
+        self.inputMappings = inputMappings
+        self.batchPolicy = batchPolicy
     }
 }
 
@@ -373,6 +381,7 @@ public struct DesktopWorkflowRunRecord: Codable, Equatable, Identifiable, Sendab
     public var workflowRevisionID: String
     public var retryMode: DesktopWorkflowRetryMode
     public var priorRunID: String?
+    public var startStepID: String? = nil
     public var contextSnapshotID: String?
     public var state: DesktopWorkflowRunState
     public var currentStepID: String?
@@ -653,6 +662,7 @@ public struct DesktopWorkflowPlatformState: Codable, Equatable, Sendable {
     public var dependencyLockRevisions: [DesktopWorkflowDependencyLockRevisionRecord]
     public var capturePolicyRevisions: [DesktopWorkflowCapturePolicyRevisionRecord]
     public var retentionPolicyRevisions: [DesktopWorkflowRetentionPolicyRevisionRecord]
+    public var batchItems: [DesktopWorkflowBatchItemRecord]
 
     public static let empty = Self(
         definitions: [], revisions: [], triggerBindings: [], workItems: [], conversationBindings: [], episodes: [], runs: [],
@@ -664,7 +674,7 @@ public struct DesktopWorkflowPlatformState: Codable, Equatable, Sendable {
         ownershipClaims: [], connectorInstallations: [], connectorBindings: [], qualificationRuns: [],
         rendererInstallations: [], renderReceipts: [], subflows: [], studioDrafts: [], scheduleBindings: [],
         migrationAssessments: [], installations: [], configurationRevisions: [], bindingRevisions: [],
-        dependencyLockRevisions: [], capturePolicyRevisions: [], retentionPolicyRevisions: []
+        dependencyLockRevisions: [], capturePolicyRevisions: [], retentionPolicyRevisions: [], batchItems: []
     )
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
@@ -676,6 +686,7 @@ public struct DesktopWorkflowPlatformState: Codable, Equatable, Sendable {
         case renderReceipts, subflows, studioDrafts, scheduleBindings, migrationAssessments
         case installations, configurationRevisions, bindingRevisions, dependencyLockRevisions
         case capturePolicyRevisions, retentionPolicyRevisions
+        case batchItems
     }
 
 }
@@ -729,6 +740,7 @@ extension DesktopWorkflowPlatformState {
         dependencyLockRevisions = try Self.decodeArray([DesktopWorkflowDependencyLockRevisionRecord].self, key: .dependencyLockRevisions, from: container)
         capturePolicyRevisions = try Self.decodeArray([DesktopWorkflowCapturePolicyRevisionRecord].self, key: .capturePolicyRevisions, from: container)
         retentionPolicyRevisions = try Self.decodeArray([DesktopWorkflowRetentionPolicyRevisionRecord].self, key: .retentionPolicyRevisions, from: container)
+        batchItems = try Self.decodeArray([DesktopWorkflowBatchItemRecord].self, key: .batchItems, from: container)
     }
 
     private static func decodeArray<Element: Decodable>(

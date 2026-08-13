@@ -536,18 +536,26 @@ public extension DesktopAppModel {
         episodeID: String,
         contextSnapshotID: String,
         retryMode: DesktopWorkflowRetryMode = .initial,
-        priorRunID: String? = nil
+        priorRunID: String? = nil,
+        startStepID: String? = nil
     ) -> String? {
         guard let episode = snapshot.operations.workflows.episodes.first(where: { $0.id == episodeID && $0.workItemID == workItemID }),
               snapshot.operations.workflows.contextSnapshots.contains(where: {
                   $0.id == contextSnapshotID && $0.workItemID == workItemID && $0.episodeID == episodeID
               }), retryMode == .initial || priorRunID != nil else { return nil }
+        let revisionID = retryMode == .currentRevision
+            ? snapshot.operations.workflows.definitions.first(where: {
+                $0.id == snapshot.operations.workflows.workItems.first(where: { $0.id == workItemID })?.workflowID
+            })?.currentRevisionID ?? episode.workflowRevisionID
+            : episode.workflowRevisionID
+        guard startStepID == nil || snapshot.operations.workflows.revisions.contains(where: {
+            $0.id == revisionID && $0.steps.contains(where: { $0.id == startStepID })
+        }) else { return nil }
         let run = DesktopWorkflowRunRecord(
             id: UUID().uuidString.lowercased(), workItemID: workItemID, episodeID: episodeID,
-            workflowRevisionID: retryMode == .currentRevision
-                ? snapshot.operations.workflows.definitions.first(where: { $0.id == snapshot.operations.workflows.workItems.first(where: { $0.id == workItemID })?.workflowID })?.currentRevisionID ?? episode.workflowRevisionID
-                : episode.workflowRevisionID,
-            retryMode: retryMode, priorRunID: priorRunID, contextSnapshotID: contextSnapshotID,
+            workflowRevisionID: revisionID,
+            retryMode: retryMode, priorRunID: priorRunID, startStepID: startStepID,
+            contextSnapshotID: contextSnapshotID,
             state: .queued, currentStepID: nil, traceID: UUID().uuidString.lowercased(),
             startedAtUnixMillis: nil, completedAtUnixMillis: nil
         )
@@ -574,7 +582,7 @@ public extension DesktopAppModel {
         }
         let attempts = snapshot.operations.workflows.stepAttempts.filter { $0.runID == runID }
         if revision.schemaVersion >= 2 {
-            var stepID = revision.steps.first?.id
+            var stepID = run.startStepID ?? revision.steps.first?.id
             var visited = Set<String>()
             while let currentID = stepID, visited.insert(currentID).inserted,
                   let step = revision.steps.first(where: { $0.id == currentID }) {

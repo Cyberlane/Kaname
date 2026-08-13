@@ -580,6 +580,7 @@ struct WorkflowQualificationSummaryRow: View {
 }
 
 struct WorkflowStudioSheet: View {
+    private enum Projection: String, CaseIterable { case outline = "Outline"; case canvas = "Canvas"; case source = "Source" }
     @ObservedObject var model: DesktopAppModel
     let draftID: String
     let onPublished: (String) -> Void
@@ -590,6 +591,10 @@ struct WorkflowStudioSheet: View {
     @State private var selectedTriggers: Set<DesktopWorkflowTriggerKind> = [.manual]
     @State private var selectedPermissions = Set<DesktopWorkflowPermission>()
     @State private var message: String?
+    @State private var projection = Projection.outline
+    @State private var canvasPositions: [DesktopWorkflowCanvasNodePosition] = []
+    @State private var sourceText = ""
+    @State private var sourceMessage: String?
 
     private var draft: DesktopWorkflowStudioDraftRecord? {
         model.snapshot.operations.workflows.studioDrafts.first { $0.id == draftID }
@@ -621,12 +626,38 @@ struct WorkflowStudioSheet: View {
             .padding(20)
             Divider()
             HSplitView {
-                studioOutline.frame(minWidth: 320, idealWidth: 380)
+                VStack(spacing: 10) {
+                    Picker("Projection", selection: $projection) {
+                        ForEach(Projection.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    switch projection {
+                    case .outline: studioOutline
+                    case .canvas:
+                        WorkflowStudioCanvas(
+                            steps: $steps, positions: $canvasPositions, selection: $selectedStepID,
+                            onChange: { save() }
+                        )
+                    case .source: studioSource
+                    }
+                }
+                .padding(18)
+                .frame(minWidth: 430, idealWidth: 520)
                 studioInspector.frame(minWidth: 360, idealWidth: 430)
             }
             Divider()
             HStack {
                 if let message { Label(message, systemImage: "info.circle").font(.caption).foregroundStyle(.secondary) }
+                Button("Undo", systemImage: "arrow.uturn.backward") {
+                    if model.undoWorkflowStudioDraft(id: draftID) { load() }
+                }
+                .keyboardShortcut("z", modifiers: [.command])
+                .disabled(draft?.undoHistory?.isEmpty != false)
+                Button("Redo", systemImage: "arrow.uturn.forward") {
+                    if model.redoWorkflowStudioDraft(id: draftID) { load() }
+                }
+                .keyboardShortcut("z", modifiers: [.command, .shift])
+                .disabled(draft?.redoHistory?.isEmpty != false)
                 Spacer()
                 Button("Cancel", role: .cancel) { dismiss() }
                 Button("Publish disabled") {
@@ -664,7 +695,12 @@ struct WorkflowStudioSheet: View {
                     save()
                 }
                 .onDelete { offsets in
+                    let removed = Set(offsets.map { steps[$0].id })
                     steps.remove(atOffsets: offsets)
+                    for index in steps.indices {
+                        steps[index].transitions?.removeAll { removed.contains($0.targetStepID) }
+                    }
+                    canvasPositions.removeAll { removed.contains($0.stepID) }
                     selectedStepID = steps.first?.id
                     save()
                 }
@@ -683,7 +719,34 @@ struct WorkflowStudioSheet: View {
                 }
             }
         }
-        .padding(18)
+    }
+
+    private var studioSource: some View {
+        GroupBox("Canonical manifest source") {
+            VStack(alignment: .leading, spacing: 10) {
+                TextEditor(text: $sourceText)
+                    .font(.system(.caption, design: .monospaced))
+                    .frame(minHeight: 450)
+                    .accessibilityLabel("Workflow manifest source")
+                if let sourceMessage {
+                    Label(sourceMessage, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundStyle(Nord.auroraYellow)
+                }
+                HStack {
+                    Button("Reload canonical") { sourceText = model.workflowStudioCanonicalSource(draftID: draftID) ?? "" }
+                    Spacer()
+                    Button("Validate and apply") {
+                        if model.replaceWorkflowStudioDraftSource(id: draftID, source: sourceText) {
+                            sourceMessage = nil
+                            load()
+                        } else {
+                            sourceMessage = "Source is invalid, unsafe, oversized, or refers to unavailable capabilities."
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+        }
     }
 
     @ViewBuilder
@@ -722,6 +785,11 @@ struct WorkflowStudioSheet: View {
                         get: { steps[index].isIdempotent },
                         set: { steps[index].isIdempotent = $0; if !$0 { steps[index].retryLimit = 0 }; save() }
                     ))
+                    Stepper("Retry limit · \(steps[index].retryLimit)", value: Binding(
+                        get: { steps[index].retryLimit },
+                        set: { steps[index].retryLimit = $0; save() }
+                    ), in: 0...5)
+                    studioStepContracts(index: index)
                 } else {
                     BoundaryCallout(
                         title: "Choose a step",
@@ -768,9 +836,256 @@ struct WorkflowStudioSheet: View {
         }
     }
 
+    @ViewBuilder
+    private func studioStepContracts(index: Int) -> some View {
+        let stepID = steps[index].id
+        DisclosureGroup("Transitions · \(steps[index].transitions?.count ?? 0)") {
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(Array((steps[index].transitions ?? []).enumerated()), id: \.offset) { transitionIndex, _ in
+                    HStack {
+                        Picker("Outcome", selection: Binding(
+                            get: { steps[index].transitions?[transitionIndex].outcome ?? .always },
+                            set: { steps[index].transitions?[transitionIndex].outcome = $0; save() }
+                        )) {
+                            ForEach(DesktopWorkflowTransitionOutcome.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                        }
+                        Picker("Target", selection: Binding(
+                            get: { steps[index].transitions?[transitionIndex].targetStepID ?? "" },
+                            set: { steps[index].transitions?[transitionIndex].targetStepID = $0; save() }
+                        )) {
+                            ForEach(steps.filter { $0.id != stepID }) { Text($0.name).tag($0.id) }
+                        }
+                        Button("Remove", systemImage: "minus.circle") {
+                            steps[index].transitions?.remove(at: transitionIndex); save()
+                        }
+                        .labelStyle(.iconOnly)
+                    }
+                    let predicateCount = steps[index].transitions?[transitionIndex].predicates.count ?? 0
+                    ForEach(0..<predicateCount, id: \.self) { predicateIndex in
+                        HStack {
+                            TextField("JSON Pointer", text: Binding(
+                                get: { steps[index].transitions?[transitionIndex].predicates[predicateIndex].pointer ?? "" },
+                                set: { steps[index].transitions?[transitionIndex].predicates[predicateIndex].pointer = $0; save() }
+                            ))
+                            Picker("Predicate", selection: Binding(
+                                get: { steps[index].transitions?[transitionIndex].predicates[predicateIndex].operation ?? .exists },
+                                set: { steps[index].transitions?[transitionIndex].predicates[predicateIndex].operation = $0; save() }
+                            )) {
+                                ForEach(DesktopWorkflowPredicateOperator.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                            }
+                            TextField("Value", text: Binding(
+                                get: { steps[index].transitions?[transitionIndex].predicates[predicateIndex].value ?? "" },
+                                set: { steps[index].transitions?[transitionIndex].predicates[predicateIndex].value = $0.isEmpty ? nil : $0; save() }
+                            ))
+                            Button("Remove predicate", systemImage: "minus.circle") {
+                                steps[index].transitions?[transitionIndex].predicates.remove(at: predicateIndex); save()
+                            }
+                            .labelStyle(.iconOnly)
+                        }
+                    }
+                    Button("Add predicate") {
+                        steps[index].transitions?[transitionIndex].predicates.append(.init(pointer: "", operation: .exists)); save()
+                    }
+                }
+                Button("Add transition") {
+                    guard let target = steps.first(where: { $0.id != stepID })?.id else { return }
+                    if steps[index].transitions == nil { steps[index].transitions = [] }
+                    steps[index].transitions?.append(.init(outcome: .always, targetStepID: target)); save()
+                }
+                .disabled(steps[index].kind == .complete || steps.count < 2)
+            }
+            .padding(.top, 8)
+        }
+        DisclosureGroup("Schemas and typed mappings · \(steps[index].inputMappings?.count ?? 0)") {
+            VStack(alignment: .leading, spacing: 10) {
+                TextField("Input schema reference", text: optionalBinding(index, \.inputSchemaReference))
+                TextField("Output schema reference", text: optionalBinding(index, \.outputSchemaReference))
+                ForEach(Array((steps[index].inputMappings ?? []).enumerated()), id: \.element.id) { mappingIndex, mapping in
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 6) {
+                            TextField("Target JSON Pointer", text: Binding(
+                                get: { steps[index].inputMappings?[mappingIndex].targetPointer ?? "" },
+                                set: { steps[index].inputMappings?[mappingIndex].targetPointer = $0; save() }
+                            ))
+                            Picker("Source", selection: Binding(
+                                get: { steps[index].inputMappings?[mappingIndex].reference.source ?? .trigger },
+                                set: { steps[index].inputMappings?[mappingIndex].reference.source = $0; save() }
+                            )) {
+                                ForEach(DesktopWorkflowDataReferenceSource.allCases, id: \.self) { Text($0.label).tag($0) }
+                            }
+                            TextField("Source ID", text: Binding(
+                                get: { steps[index].inputMappings?[mappingIndex].reference.sourceID ?? "" },
+                                set: { steps[index].inputMappings?[mappingIndex].reference.sourceID = $0.isEmpty ? nil : $0; save() }
+                            ))
+                            TextField("Source JSON Pointer", text: Binding(
+                                get: { steps[index].inputMappings?[mappingIndex].reference.pointer ?? "" },
+                                set: { steps[index].inputMappings?[mappingIndex].reference.pointer = $0; save() }
+                            ))
+                            TextEditor(text: Binding(
+                                get: { steps[index].inputMappings?[mappingIndex].reference.schema ?? "" },
+                                set: { steps[index].inputMappings?[mappingIndex].reference.schema = $0; save() }
+                            ))
+                            .font(.system(.caption2, design: .monospaced)).frame(height: 60)
+                            Button("Remove mapping", role: .destructive) {
+                                steps[index].inputMappings?.remove(at: mappingIndex); save()
+                            }
+                        }
+                    } label: { Text(mapping.id).font(.caption) }
+                }
+                Button("Add typed mapping") {
+                    if steps[index].inputMappings == nil { steps[index].inputMappings = [] }
+                    let id = "mapping-\(UUID().uuidString.lowercased().prefix(8))"
+                    steps[index].inputMappings?.append(.init(
+                        id: id, targetPointer: "/value", reference: .init(id: "ref-\(id)", source: .trigger)
+                    )); save()
+                }
+            }
+            .padding(.top, 8)
+        }
+        DisclosureGroup("Artifacts and state") {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(Array((steps[index].artifactInputs ?? []).enumerated()), id: \.offset) { itemIndex, _ in
+                    HStack {
+                        TextField("Artifact role", text: Binding(
+                            get: { steps[index].artifactInputs?[itemIndex].role ?? "" },
+                            set: {
+                                let required = steps[index].artifactInputs?[itemIndex].required ?? true
+                                steps[index].artifactInputs?[itemIndex] = .init(role: $0, required: required); save()
+                            }
+                        ))
+                        Toggle("Required", isOn: Binding(
+                            get: { steps[index].artifactInputs?[itemIndex].required ?? true },
+                            set: {
+                                let role = steps[index].artifactInputs?[itemIndex].role ?? "input"
+                                steps[index].artifactInputs?[itemIndex] = .init(role: role, required: $0); save()
+                            }
+                        ))
+                    }
+                }
+                Button("Add artifact input") {
+                    if steps[index].artifactInputs == nil { steps[index].artifactInputs = [] }
+                    steps[index].artifactInputs?.append(.init(role: "input")); save()
+                }
+                ForEach(Array((steps[index].stateInputs ?? []).enumerated()), id: \.offset) { itemIndex, _ in
+                    HStack {
+                        TextField("Namespace", text: stateBinding(index, itemIndex, namespace: true))
+                        TextField("Key", text: stateBinding(index, itemIndex, namespace: false))
+                    }
+                }
+                Button("Add state input") {
+                    if steps[index].stateInputs == nil { steps[index].stateInputs = [] }
+                    steps[index].stateInputs?.append(.init(namespace: "workflow", key: "value")); save()
+                }
+            }
+            .padding(.top, 8)
+        }
+        if let policy = steps[index].batchPolicy {
+            DisclosureGroup("Batch policy") {
+                VStack(alignment: .leading, spacing: 8) {
+                    TextField("Items JSON Pointer", text: Binding(
+                        get: { steps[index].batchPolicy?.itemsPointer ?? policy.itemsPointer },
+                        set: { steps[index].batchPolicy?.itemsPointer = $0; save() }
+                    ))
+                    Stepper("Maximum items · \(policy.maximumItems)", value: Binding(
+                        get: { steps[index].batchPolicy?.maximumItems ?? policy.maximumItems },
+                        set: { steps[index].batchPolicy?.maximumItems = $0; save() }
+                    ), in: 1...10_000)
+                    Stepper("Maximum concurrency · \(policy.maximumConcurrency)", value: Binding(
+                        get: { steps[index].batchPolicy?.maximumConcurrency ?? policy.maximumConcurrency },
+                        set: { steps[index].batchPolicy?.maximumConcurrency = $0; save() }
+                    ), in: 1...32)
+                    Picker("Aggregation", selection: Binding(
+                        get: { steps[index].batchPolicy?.aggregation ?? policy.aggregation },
+                        set: { steps[index].batchPolicy?.aggregation = $0; save() }
+                    )) {
+                        ForEach(DesktopWorkflowBatchAggregationPolicy.allCases, id: \.self) { Text($0.label).tag($0) }
+                    }
+                }
+                .padding(.top, 8)
+            }
+        }
+        if steps[index].reviewContract != nil {
+            DisclosureGroup("Review contract") {
+                VStack(alignment: .leading, spacing: 8) {
+                    TextField("Title", text: reviewBinding(index, \.title))
+                    TextField("Summary", text: reviewBinding(index, \.summary))
+                    TextEditor(text: reviewBinding(index, \.inputSchema)).frame(height: 60)
+                    TextEditor(text: reviewBinding(index, \.outputSchema)).frame(height: 60)
+                }.padding(.top, 8)
+            }
+        }
+        if steps[index].waitContract != nil {
+            DisclosureGroup("Wait contract") {
+                VStack(alignment: .leading, spacing: 8) {
+                    TextField("Connector", text: waitBinding(index, \.connectorID))
+                    TextField("Source", text: waitBinding(index, \.source))
+                    Stepper("Timeout · \(steps[index].waitContract?.timeoutSeconds ?? 60)s", value: Binding(
+                        get: { steps[index].waitContract?.timeoutSeconds ?? 60 },
+                        set: { steps[index].waitContract?.timeoutSeconds = $0; save() }
+                    ), in: 60...31_536_000)
+                }.padding(.top, 8)
+            }
+        }
+        if steps[index].executionPolicy != nil {
+            DisclosureGroup("Execution limits") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Stepper("Timeout · \(steps[index].executionPolicy?.timeoutSeconds ?? 120)s", value: Binding(
+                        get: { steps[index].executionPolicy?.timeoutSeconds ?? 120 },
+                        set: { steps[index].executionPolicy?.timeoutSeconds = $0; save() }
+                    ), in: 1...3_600)
+                    Stepper("Maximum output · \(steps[index].executionPolicy?.maximumOutputBytes ?? 0) bytes", value: Binding(
+                        get: { steps[index].executionPolicy?.maximumOutputBytes ?? 1 },
+                        set: { steps[index].executionPolicy?.maximumOutputBytes = $0; save() }
+                    ), in: 1...(64 * 1_024 * 1_024), step: 1_024)
+                }.padding(.top, 8)
+            }
+        }
+        if steps[index].agentPolicy != nil {
+            DisclosureGroup("Bounded agent") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Direct effects are always disabled.").font(.caption).foregroundStyle(.secondary)
+                    Stepper("Model tokens · \(steps[index].agentPolicy?.maximumModelTokens ?? 256)", value: Binding(
+                        get: { steps[index].agentPolicy?.maximumModelTokens ?? 256 },
+                        set: { steps[index].agentPolicy?.maximumModelTokens = $0; save() }
+                    ), in: 256...200_000, step: 256)
+                    Stepper("Tool calls · \(steps[index].agentPolicy?.maximumToolCalls ?? 1)", value: Binding(
+                        get: { steps[index].agentPolicy?.maximumToolCalls ?? 1 },
+                        set: { steps[index].agentPolicy?.maximumToolCalls = $0; save() }
+                    ), in: 1...128)
+                }.padding(.top, 8)
+            }
+        }
+    }
+
+    private func optionalBinding(_ index: Int, _ keyPath: WritableKeyPath<DesktopWorkflowStepDefinition, String?>) -> Binding<String> {
+        Binding(get: { steps[index][keyPath: keyPath] ?? "" }, set: { steps[index][keyPath: keyPath] = $0.isEmpty ? nil : $0; save() })
+    }
+
+    private func reviewBinding(_ index: Int, _ keyPath: WritableKeyPath<DesktopWorkflowReviewContract, String>) -> Binding<String> {
+        Binding(get: { steps[index].reviewContract?[keyPath: keyPath] ?? "" }, set: { steps[index].reviewContract?[keyPath: keyPath] = $0; save() })
+    }
+
+    private func waitBinding(_ index: Int, _ keyPath: WritableKeyPath<DesktopWorkflowWaitContract, String>) -> Binding<String> {
+        Binding(get: { steps[index].waitContract?[keyPath: keyPath] ?? "" }, set: { steps[index].waitContract?[keyPath: keyPath] = $0; save() })
+    }
+
+    private func stateBinding(_ index: Int, _ itemIndex: Int, namespace: Bool) -> Binding<String> {
+        Binding(
+            get: { namespace ? steps[index].stateInputs?[itemIndex].namespace ?? "" : steps[index].stateInputs?[itemIndex].key ?? "" },
+            set: { value in
+                guard let current = steps[index].stateInputs?[itemIndex] else { return }
+                steps[index].stateInputs?[itemIndex] = .init(
+                    namespace: namespace ? value : current.namespace,
+                    key: namespace ? current.key : value,
+                    required: current.required, scope: current.scope ?? .installation
+                )
+                save()
+            }
+        )
+    }
+
     private var editableKinds: [DesktopWorkflowStepKind] {
-        [.classifyEvent, .correlateWork, .compileContext, .structuredModel, .invokeTool,
-         .registerArtifact, .validate, .effect, .createEmailDraft, .sendEmail]
+        DesktopWorkflowStepKind.allCases.filter { $0 != .complete }
     }
 
     private func load() {
@@ -779,9 +1094,12 @@ struct WorkflowStudioSheet: View {
         selectedPermissions = Set(draft.permissions.permissions)
         selectedSubflowIDs = Set(draft.subflows.map { "\($0.subflowID)@\($0.version)" })
         steps = draft.steps
+        canvasPositions = draft.canvasPositions ?? defaultCanvasPositions()
+        sourceText = model.workflowStudioCanonicalSource(draftID: draftID) ?? ""
         if steps.isEmpty {
             steps = [
-                .init(id: "prepare", name: "Prepare input", kind: .classifyEvent),
+                .init(id: "prepare", name: "Prepare input", kind: .classifyEvent,
+                      transitions: [.init(outcome: .always, targetStepID: "complete")]),
                 .init(id: "complete", name: "Complete", kind: .complete),
             ]
             save()
@@ -792,17 +1110,29 @@ struct WorkflowStudioSheet: View {
     private func addStep(_ kind: DesktopWorkflowStepKind) {
         let id = "step-\(UUID().uuidString.lowercased().prefix(8))"
         let step = DesktopWorkflowStepDefinition(
-            id: id, name: kind.label, kind: kind, capabilityID: defaultCapability(for: kind)
+            id: id, name: kind.label, kind: kind, capabilityID: defaultCapability(for: kind),
+            transitions: [.init(outcome: .always, targetStepID: steps.first(where: { $0.kind == .complete })?.id ?? "complete")],
+            reviewContract: kind == .humanReview ? defaultReviewContract() : nil,
+            waitContract: kind == .waitForEmail ? defaultWaitContract() : nil,
+            executionPolicy: defaultExecutionPolicy(for: kind),
+            agentPolicy: kind == .agent ? defaultAgentPolicy() : nil,
+            batchPolicy: kind == .forEach ? .init() : nil
         )
         if let terminal = steps.firstIndex(where: { $0.kind == .complete }) { steps.insert(step, at: terminal) }
         else { steps.append(step); steps.append(.init(id: "complete", name: "Complete", kind: .complete)) }
         selectedStepID = id
+        canvasPositions.append(.init(stepID: id, x: 40, y: Double(canvasPositions.count) * 110 + 40))
         save()
     }
 
     private func replaceKind(at index: Int, with kind: DesktopWorkflowStepKind) {
         steps[index].kind = kind
         steps[index].capabilityID = defaultCapability(for: kind)
+        steps[index].reviewContract = kind == .humanReview ? (steps[index].reviewContract ?? defaultReviewContract()) : nil
+        steps[index].waitContract = kind == .waitForEmail ? (steps[index].waitContract ?? defaultWaitContract()) : nil
+        steps[index].agentPolicy = kind == .agent ? (steps[index].agentPolicy ?? defaultAgentPolicy()) : nil
+        steps[index].batchPolicy = kind == .forEach ? (steps[index].batchPolicy ?? .init()) : nil
+        steps[index].executionPolicy = defaultExecutionPolicy(for: kind)
         if kind == .complete {
             steps.removeAll { $0.id != steps[index].id && $0.kind == .complete }
             if let moved = steps.firstIndex(where: { $0.id == selectedStepID }) {
@@ -813,14 +1143,8 @@ struct WorkflowStudioSheet: View {
         save()
     }
 
-    private func save() {
+    private func save(recordUndo: Bool = true) {
         guard draft != nil else { return }
-        var chained = steps
-        for index in chained.indices {
-            chained[index].transitions = chained[index].kind == .complete || !chained.indices.contains(index + 1)
-                ? nil : [.init(outcome: .always, targetStepID: chained[index + 1].id)]
-        }
-        steps = chained
         let subflowRecords = model.snapshot.operations.workflows.subflows.filter { selectedSubflowIDs.contains($0.id) }
         let references = subflowRecords.map {
             DesktopWorkflowSubflowReference.pinned(
@@ -830,13 +1154,15 @@ struct WorkflowStudioSheet: View {
         }
         var permissionSet = selectedPermissions
         subflowRecords.forEach { permissionSet.formUnion($0.permissions.permissions) }
-        let capabilities = Set(chained.compactMap(\.capabilityID))
+        let capabilities = Set(steps.compactMap(\.capabilityID))
             .union(subflowRecords.flatMap { $0.permissions.capabilityIDs })
         _ = model.updateWorkflowStudioDraft(
-            id: draftID, triggerKinds: Array(selectedTriggers), steps: chained,
+            id: draftID, triggerKinds: Array(selectedTriggers), steps: steps,
             permissions: .init(permissions: Array(permissionSet), capabilityIDs: Array(capabilities)),
-            subflows: references
+            subflows: references, canvasPositions: canvasPositions,
+            manifestMetadata: draft?.manifestMetadata, recordUndo: recordUndo
         )
+        sourceText = model.workflowStudioCanonicalSource(draftID: draftID) ?? sourceText
     }
 
     private func defaultCapability(for kind: DesktopWorkflowStepKind) -> String? {
@@ -849,6 +1175,34 @@ struct WorkflowStudioSheet: View {
         case .createEmailDraft: "kaname.email.draft"
         case .sendEmail: "kaname.email.send"
         default: nil
+        }
+    }
+
+    private func defaultExecutionPolicy(for kind: DesktopWorkflowStepKind) -> DesktopWorkflowExecutionPolicy? {
+        [.invokeTool, .structuredModel, .effect, .agent, .forEach, .createEmailDraft, .sendEmail].contains(kind)
+            ? .init() : nil
+    }
+
+    private func defaultAgentPolicy() -> DesktopWorkflowAgentPolicy {
+        .init(allowedCapabilityIDs: ["kaname.context.compile"], maximumModelTokens: 8_000, maximumToolCalls: 8, timeoutSeconds: 120, allowDirectEffects: false)
+    }
+
+    private func defaultReviewContract() -> DesktopWorkflowReviewContract {
+        .init(
+            title: "Review result", summary: "Inspect the structured result before continuing.",
+            inputSchema: #"{"type":"object"}"#, outputSchema: #"{"type":"object"}"#,
+            actions: [.init(id: "approve", label: "Approve", kind: .approve, isPrimary: true),
+                      .init(id: "reject", label: "Reject", kind: .reject)]
+        )
+    }
+
+    private func defaultWaitContract() -> DesktopWorkflowWaitContract {
+        .init(connectorID: "kaname.mail", source: "mail", timeoutSeconds: 604_800)
+    }
+
+    private func defaultCanvasPositions() -> [DesktopWorkflowCanvasNodePosition] {
+        steps.enumerated().map { index, step in
+            .init(stepID: step.id, x: Double(index % 3) * 230 + 30, y: Double(index / 3) * 130 + 30)
         }
     }
 
@@ -871,6 +1225,106 @@ struct WorkflowStudioSheet: View {
         switch kind {
         case .complete: "checkmark.circle"
         case .effect, .sendEmail, .createEmailDraft: "bolt.horizontal.circle"
+        case .validate: "checkmark.shield"
+        case .structuredModel, .agent: "brain"
+        default: "square.stack.3d.forward.dottedline"
+        }
+    }
+}
+
+private struct WorkflowStudioCanvas: View {
+    @Binding var steps: [DesktopWorkflowStepDefinition]
+    @Binding var positions: [DesktopWorkflowCanvasNodePosition]
+    @Binding var selection: String?
+    let onChange: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        GroupBox("Semantic graph canvas") {
+            ScrollView([.horizontal, .vertical]) {
+                ZStack(alignment: .topLeading) {
+                    ForEach(edges, id: \.id) { edge in
+                        Path { path in
+                            path.move(to: point(edge.from))
+                            path.addLine(to: point(edge.to))
+                        }
+                        .stroke(Nord.frost0.opacity(0.7), style: StrokeStyle(lineWidth: 2, dash: edge.outcome == .always ? [] : [6, 4]))
+                        .accessibilityHidden(true)
+                    }
+                    ForEach(steps) { step in
+                        let position = point(step.id)
+                        Button {
+                            selection = step.id
+                        } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Image(systemName: studioCanvasSymbol(step.kind))
+                                    Text(step.name).font(.caption.weight(.semibold)).lineLimit(1)
+                                }
+                                Text(step.kind.label).font(.caption2).foregroundStyle(.secondary)
+                                Text("\(step.transitions?.count ?? 0) route(s)")
+                                    .font(.caption2).foregroundStyle(.secondary)
+                            }
+                            .padding(10)
+                            .frame(width: 190, alignment: .leading)
+                            .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 10))
+                            .overlay(RoundedRectangle(cornerRadius: 10).stroke(selection == step.id ? Nord.frost1 : Nord.polarNight3, lineWidth: selection == step.id ? 3 : 1))
+                        }
+                        .buttonStyle(.plain)
+                        .position(x: position.x + 95, y: position.y + 40)
+                        .gesture(DragGesture().onChanged { value in
+                            setPosition(stepID: step.id, point: value.location)
+                        }.onEnded { _ in onChange() })
+                        .accessibilityLabel("\(step.name), \(step.kind.label)")
+                        .accessibilityValue("\(step.transitions?.count ?? 0) outgoing routes")
+                        .accessibilityHint("Selects this workflow step for editing")
+                    }
+                }
+                .frame(width: 1_100, height: 720)
+            }
+            .accessibilityLabel("Workflow graph canvas. The synchronized outline provides the complete keyboard representation.")
+        }
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: positions)
+    }
+
+    private struct Edge: Identifiable {
+        var id: String { "\(from):\(outcome.rawValue):\(to)" }
+        var from: String
+        var to: String
+        var outcome: DesktopWorkflowTransitionOutcome
+    }
+
+    private var edges: [Edge] {
+        steps.flatMap { step in
+            (step.transitions ?? []).map { .init(from: step.id, to: $0.targetStepID, outcome: $0.outcome) }
+        }
+    }
+
+    private func point(_ stepID: String) -> CGPoint {
+        if let value = positions.first(where: { $0.stepID == stepID }) { return CGPoint(x: value.x, y: value.y) }
+        let index = steps.firstIndex(where: { $0.id == stepID }) ?? 0
+        return CGPoint(x: Double(index % 4) * 230 + 30, y: Double(index / 4) * 130 + 30)
+    }
+
+    private func setPosition(stepID: String, point: CGPoint) {
+        let x = max(0, min(900, point.x - 95))
+        let y = max(0, min(620, point.y - 40))
+        if let index = positions.firstIndex(where: { $0.stepID == stepID }) {
+            positions[index].x = x
+            positions[index].y = y
+        } else {
+            positions.append(.init(stepID: stepID, x: x, y: y))
+        }
+    }
+
+    private func studioCanvasSymbol(_ kind: DesktopWorkflowStepKind) -> String {
+        switch kind {
+        case .complete: "checkmark.circle"
+        case .branch: "arrow.triangle.branch"
+        case .forEach: "square.stack.3d.down.right"
+        case .effect, .sendEmail, .createEmailDraft: "bolt.horizontal.circle"
+        case .humanReview, .requestApproval: "person.crop.circle.badge.checkmark"
+        case .waitForEmail: "clock.badge"
         case .validate: "checkmark.shield"
         case .structuredModel, .agent: "brain"
         default: "square.stack.3d.forward.dottedline"
