@@ -6367,6 +6367,7 @@ private struct DesktopEmailView: View {
     @State private var workflowImportMessage: String?
     @State private var capabilityImportMessage: String?
     @State private var manualRunDefinition: DesktopWorkflowDefinitionRecord?
+    @State private var installationToConfigure: DesktopWorkflowInstallationRecord?
     @State private var workflowStudioDraftID: String?
     @State private var connectorToConfigure: DesktopWorkflowConnectorInstallationRecord?
 
@@ -6458,12 +6459,22 @@ private struct DesktopEmailView: View {
             )
         }
         .sheet(item: $manualRunDefinition) { definition in
-            WorkflowManualRunSheet(definition: definition) { title, request, input in
+            WorkflowManualRunSheet(
+                definition: definition,
+                revision: model.snapshot.operations.workflows.revisions.first { $0.id == definition.currentRevisionID }
+            ) { title, request, input in
                 mail.runWorkflowManually(
                     model: model, workflowID: definition.id,
                     title: title, request: request, input: input
                 )
             }
+        }
+        .sheet(item: $installationToConfigure) { installation in
+            WorkflowInstallationSetupSheet(
+                model: model,
+                installation: installation,
+                accounts: integrations.googleAccounts
+            )
         }
         .sheet(isPresented: Binding(
             get: { workflowStudioDraftID != nil },
@@ -6897,6 +6908,7 @@ private struct DesktopEmailView: View {
                     definition: definition,
                     googleAccounts: integrations.googleAccounts,
                     runManually: { manualRunDefinition = definition },
+                    configureInstallation: { installationToConfigure = $0 },
                     processExistingMatches: { mail.processExistingWorkflowMatches(model: model, binding: $0) }
                 )
             }
@@ -7742,6 +7754,7 @@ private struct WorkflowDefinitionCard: View {
     let definition: DesktopWorkflowDefinitionRecord
     let googleAccounts: [NativeGoogleAccountSnapshot]
     let runManually: () -> Void
+    let configureInstallation: (DesktopWorkflowInstallationRecord) -> Void
     let processExistingMatches: (DesktopWorkflowTriggerBindingRecord) -> Void
     @State private var selectedAccountID = ""
     @State private var emailFilter = ""
@@ -7818,6 +7831,45 @@ private struct WorkflowDefinitionCard: View {
                     WorkflowMetricValue(label: "Steps", value: "\(revision.steps.count)", tint: Nord.frost1),
                     WorkflowMetricValue(label: "Permissions", value: "\(revision.permissions.permissions.count)", tint: Nord.auroraYellow)
                 ])
+                if revision.schemaVersion == 3 {
+                    DisclosureGroup("Installations · \(model.workflowInstallations(workflowID: definition.id).count)") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            ForEach(model.workflowInstallations(workflowID: definition.id)) { installation in
+                                HStack(alignment: .top, spacing: 10) {
+                                    Image(systemName: installation.readinessIssues.isEmpty ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                                        .foregroundStyle(installation.readinessIssues.isEmpty ? Nord.auroraGreen : Nord.auroraYellow)
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(installation.name).font(.caption.weight(.semibold))
+                                        Text(installation.readinessIssues.isEmpty
+                                            ? "Configuration and bindings are ready; authority remains separate."
+                                            : installation.readinessIssues.joined(separator: " · "))
+                                            .font(.caption2).foregroundStyle(.secondary).lineLimit(3)
+                                    }
+                                    Spacer()
+                                    Button("Configure…") { configureInstallation(installation) }
+                                    Toggle("Enabled", isOn: Binding(
+                                        get: { installation.enabled },
+                                        set: { _ = model.setWorkflowInstallationEnabled(id: installation.id, enabled: $0) }
+                                    ))
+                                    .labelsHidden()
+                                    .disabled(!installation.readinessIssues.isEmpty && !installation.enabled)
+                                }
+                            }
+                            Button("Add another installation") {
+                                do {
+                                    let id = try model.createWorkflowInstallation(
+                                        workflowID: definition.id,
+                                        name: "\(definition.name) \(model.workflowInstallations(workflowID: definition.id).count + 1)"
+                                    )
+                                    if let created = model.snapshot.operations.workflows.installations.first(where: { $0.id == id }) {
+                                        configureInstallation(created)
+                                    }
+                                } catch { transferMessage = error.localizedDescription }
+                            }
+                        }
+                        .padding(.top, 8)
+                    }
+                }
                 DisclosureGroup {
                     VStack(alignment: .leading, spacing: 8) {
                         ForEach(readiness.checks) { check in
@@ -8129,11 +8181,13 @@ private struct WorkflowOwnershipPolicySummary: View {
 
 private struct WorkflowManualRunSheet: View {
     let definition: DesktopWorkflowDefinitionRecord
+    let revision: DesktopWorkflowRevisionRecord?
     let start: (String, String, Data) -> Bool
     @Environment(\.dismiss) private var dismiss
     @State private var title = ""
     @State private var request = ""
     @State private var input = "{}"
+    @State private var values: [String: String] = [:]
     @State private var validationMessage: String?
 
     var body: some View {
@@ -8144,14 +8198,23 @@ private struct WorkflowManualRunSheet: View {
             TextField("Work title", text: $title)
             TextField("What should this run accomplish?", text: $request, axis: .vertical)
                 .lineLimit(2...5)
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Structured input").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                TextEditor(text: $input)
-                    .font(.system(.body, design: .monospaced))
-                    .frame(minHeight: 150)
-                    .padding(6)
-                    .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
-                    .accessibilityLabel("Manual workflow JSON input")
+            if formFields.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Structured input").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    TextEditor(text: $input)
+                        .font(.system(.body, design: .monospaced))
+                        .frame(minHeight: 150)
+                        .padding(6)
+                        .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+                        .accessibilityLabel("Manual workflow JSON input")
+                }
+            } else {
+                Form {
+                    Section("Run input") {
+                        WorkflowSchemaFormView(fields: formFields, values: $values)
+                    }
+                }
+                .formStyle(.grouped)
             }
             if let validationMessage {
                 Label(validationMessage, systemImage: "exclamationmark.triangle.fill")
@@ -8167,17 +8230,52 @@ private struct WorkflowManualRunSheet: View {
         }
         .padding(24)
         .frame(width: 560)
-        .onAppear { title = definition.name }
+        .onAppear {
+            title = definition.name
+            for field in formFields where values[field.pointer] == nil {
+                guard let value = field.defaultJSON else { continue }
+                if field.control == .picker { values[field.pointer] = value }
+                else if let data = value.data(using: .utf8),
+                        let decoded = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
+                    values[field.pointer] = decoded as? String ?? String(describing: decoded)
+                }
+            }
+        }
+    }
+
+    private var formFields: [DesktopWorkflowFormField] {
+        guard let schema = revision?.manualRunInputSchema else { return [] }
+        return DesktopWorkflowSchemaForm.fields(schemaText: schema, hints: revision?.uiHints ?? [])
     }
 
     private func submit() {
-        guard let data = input.data(using: .utf8),
+        guard let data = formFields.isEmpty ? input.data(using: .utf8) : encodedForm(),
               (try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])) != nil else {
             validationMessage = "Enter valid JSON input."
             return
         }
         if start(title, request, data) { dismiss() }
         else { validationMessage = "Kaname could not queue this run. Review the workflow readiness details." }
+    }
+
+    private func encodedForm() -> Data? {
+        var object: [String: Any] = [:]
+        for field in formFields {
+            let raw = values[field.pointer] ?? ""
+            if raw.isEmpty && !field.required { continue }
+            let key = String(field.pointer.dropFirst()).replacingOccurrences(of: "~1", with: "/").replacingOccurrences(of: "~0", with: "~")
+            switch field.type {
+            case "boolean": object[key] = raw == "true"
+            case "integer": guard let value = Int(raw) else { return nil }; object[key] = value
+            case "number": guard let value = Double(raw) else { return nil }; object[key] = value
+            default:
+                if field.control == .picker, let data = raw.data(using: .utf8),
+                   let decoded = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
+                    object[key] = decoded
+                } else { object[key] = raw }
+            }
+        }
+        return try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
     }
 }
 

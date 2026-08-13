@@ -3,16 +3,20 @@
 Kaname workflow packages describe reusable orchestration without embedding a private business process in the application. A package is a bounded JSON manifest; Kaname owns durable state, context provenance, validation, approvals, effects, recovery, and presentation.
 
 The synthetic [document revision example](../Examples/Workflows/document-revision.workflow.json) contains no private names, paths, layouts, prompts, or customer data. It is intentionally draft-only. The [generic case review example](../Examples/Workflows/generic-case-review.workflow.json) demonstrates the v2 host contracts without encoding a legacy workflow.
+The [synthetic mailbox review example](../Examples/Workflows/mailbox-review-v3.workflow.json) demonstrates manifest v3 configuration, binding slots, provider features, compatibility, provenance, UI hints, and schema-generated setup/manual-run forms.
 
 ## Install and activate
 
 1. Open **Email → Workflows → Definitions**.
 2. Choose **Install package…** and select a manifest.
-3. Inspect the immutable revision, ordered stages, permissions, and manifest digest.
-4. Enable the definition only after review.
-5. For email triggers, add an exact Gmail account and filter scope. The binding starts disabled and must be enabled separately.
+3. Inspect the immutable revision, ordered stages, publisher/provenance, permissions, compatibility, dependencies, and manifest digest.
+4. For v3, configure one installation. Kaname generates the form from its declared Draft 2020-12 schema and exposes typed pickers for accounts, provider resources, folders, secret references, capabilities, connectors, renderers, and subflows.
+5. Resolve every required slot and dependency. The installation stays disabled while readiness has unresolved items.
+6. Enable the ready installation, then enable its definition after review.
+7. For email triggers, add an exact provider account and filter scope. The trigger binding starts disabled and must be enabled separately.
 
 Installing a newer revision never changes prior runs. A permission-broadening revision cannot remain enabled silently. Disabling a definition also disables each of its trigger bindings.
+An upgrade creates a new immutable configuration revision through declared one-version migrations, shows configuration/slot/dependency/permission differences, disables the installation and trigger bindings, and revokes standing authority. Authority is never migrated automatically.
 
 ## Export and move
 
@@ -28,6 +32,7 @@ Kaname never stores an installation-export passphrase. Import decrypts and revie
 Kaname separates the durable identities that make correction-heavy work understandable:
 
 - A definition is reusable behavior and a revision is its immutable contract.
+- An installation is one private use of that behavior. It points to immutable configuration, binding, dependency-lock, capture-policy, and retention-policy revisions, so the same package can be installed for different accounts and rules without editing its manifest.
 - A work item is one durable unit of work, independent of an email thread.
 - A conversation binding connects one or more external threads to that work item.
 - An episode captures one meaningful request, correction, clarification, or acceptance event.
@@ -36,7 +41,9 @@ Kaname separates the durable identities that make correction-heavy work understa
 
 ## Generic host model
 
-Package schema v1 remains a compatible ordered pipeline. Package schema v2 is a typed execution graph. Every non-terminal node declares bounded transitions to another known node, and Kaname records the selected edge with the structured decision digest. Conditions use a deliberately small JSON Pointer predicate language; workflow packages cannot inject executable branching code into the host.
+Package schema v1 remains a compatible ordered pipeline. Package schema v2 is a typed execution graph. Package schema v3 retains that graph and adds a reusable installation contract: `configurationSchema`, `configurationSchemaVersion`, `manualRunInputSchema`, binding slots, provider-feature requirements, host compatibility, dependency constraints, publisher/provenance, safe UI hints, and deterministic configuration migrations. Every non-terminal node declares bounded transitions to another known node, and Kaname records the selected edge with the structured decision digest. Conditions use a deliberately small JSON Pointer predicate language; workflow packages cannot inject executable branching code into the host.
+
+Configuration and manual-run schemas declare `https://json-schema.org/draft/2020-12/schema`. Kaname implements a documented fail-closed subset covering local `$defs`/`$ref`, composition and conditionals, objects, arrays, string formats and bounds, numeric bounds, annotations/defaults, and exact path diagnostics. An unsupported keyword rejects the package at its schema path rather than being silently ignored. Secret-shaped configuration properties are rejected; packages declare a `secretReference` slot and the private installation stores only a Keychain or environment reference name.
 
 The host recognizes structural, capability, model, validation, human-decision, connector-effect, wait, bounded-agent, and terminal nodes. A bounded agent receives frozen context and an allowlist of capabilities, tokens, tool calls, time, and attempts. It cannot hold connector credentials or perform a direct effect. Novel work must still become a structured proposal, clarification, or reviewable effect.
 

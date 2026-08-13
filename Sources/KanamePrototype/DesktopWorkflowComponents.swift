@@ -1,3 +1,4 @@
+import AppKit
 import KanameConnectivity
 import KanameDesktop
 import KanamePrototypeUI
@@ -5,6 +6,357 @@ import SwiftUI
 #if canImport(Security)
 import Security
 #endif
+
+struct WorkflowSchemaFormView: View {
+    let fields: [DesktopWorkflowFormField]
+    @Binding var values: [String: String]
+
+    var body: some View {
+        ForEach(fields) { field in
+            VStack(alignment: .leading, spacing: 4) {
+                switch field.control {
+                case .toggle:
+                    Toggle(field.title, isOn: Binding(
+                        get: { values[field.pointer] == "true" },
+                        set: { values[field.pointer] = $0 ? "true" : "false" }
+                    ))
+                case .picker:
+                    Picker(field.title, selection: valueBinding(field)) {
+                        if !field.required { Text("Not set").tag("") }
+                        ForEach(field.enumChoices, id: \.self) { choice in
+                            Text(displayChoice(choice)).tag(choice)
+                        }
+                    }
+                case .multilineText:
+                    TextField(field.title, text: valueBinding(field), prompt: prompt(field), axis: .vertical)
+                        .lineLimit(3...8)
+                case .number:
+                    TextField(field.title, text: valueBinding(field), prompt: prompt(field))
+                        .textContentType(.none)
+                case .date, .dateTime, .text, .automatic:
+                    TextField(field.title, text: valueBinding(field), prompt: prompt(field))
+                }
+                if let description = field.description {
+                    Text(description).font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private func valueBinding(_ field: DesktopWorkflowFormField) -> Binding<String> {
+        Binding(
+            get: { values[field.pointer] ?? initialValue(field) },
+            set: { values[field.pointer] = $0 }
+        )
+    }
+
+    private func initialValue(_ field: DesktopWorkflowFormField) -> String {
+        guard let value = field.defaultJSON else { return "" }
+        return field.control == .picker ? value : displayChoice(value)
+    }
+
+    private func prompt(_ field: DesktopWorkflowFormField) -> Text? {
+        field.placeholder.map(Text.init)
+    }
+
+    private func displayChoice(_ value: String) -> String {
+        guard let data = value.data(using: .utf8),
+              let decoded = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) else { return value }
+        return decoded as? String ?? String(describing: decoded)
+    }
+}
+
+struct WorkflowInstallationSetupSheet: View {
+    @ObservedObject var model: DesktopAppModel
+    let installation: DesktopWorkflowInstallationRecord
+    let accounts: [NativeGoogleAccountSnapshot]
+    @Environment(\.dismiss) private var dismiss
+    @State private var values: [String: String] = [:]
+    @State private var bindingValues: [String: String] = [:]
+    @State private var captureLevel = DesktopWorkflowMailCaptureLevel.metadataOnly
+    @State private var includeAttachments = false
+    @State private var settledContent = DesktopWorkflowSettledContentPolicy.purgeOrdinaryContent
+    @State private var message: String?
+    @State private var loaded = false
+
+    private var revision: DesktopWorkflowRevisionRecord? {
+        model.snapshot.operations.workflows.revisions.first { $0.id == installation.workflowRevisionID }
+    }
+
+    private var fields: [DesktopWorkflowFormField] {
+        guard let schema = revision?.configurationSchema else { return [] }
+        return DesktopWorkflowSchemaForm.fields(schemaText: schema, hints: revision?.uiHints ?? [])
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Configure \(installation.name)").font(.title2.weight(.bold))
+                    Text("Saving creates immutable local revisions and leaves this installation disabled until every required slot is ready.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Label(
+                    installation.readinessIssues.isEmpty ? "Ready for explicit enablement" : "\(installation.readinessIssues.count) unresolved",
+                    systemImage: installation.readinessIssues.isEmpty ? "checkmark.seal.fill" : "exclamationmark.triangle.fill"
+                )
+                .font(.caption).foregroundStyle(installation.readinessIssues.isEmpty ? Nord.auroraGreen : Nord.auroraYellow)
+            }
+            .padding(20)
+            Divider()
+            ScrollView {
+                Form {
+                    if !fields.isEmpty {
+                        Section("Configuration") {
+                            WorkflowSchemaFormView(fields: fields, values: $values)
+                        }
+                    }
+                    if let slots = revision?.bindingSlots, !slots.isEmpty {
+                        Section("Private bindings") {
+                            ForEach(slots) { slot in bindingPicker(slot) }
+                            Text("Secret slots store only a Keychain reference name here. Secret bytes never enter the workflow manifest, configuration, logs, or model context.")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
+                    if let dependencies = revision?.dependencies, !dependencies.isEmpty {
+                        Section("Dependency lock") {
+                            ForEach(dependencies) { dependency in
+                                LabeledContent("\(dependency.kind.rawValue.capitalized) · \(dependency.id)") {
+                                    Text(resolve(dependency).map { "\($0.version) · locked" } ?? "Unavailable")
+                                        .foregroundStyle(resolve(dependency) == nil && dependency.required ? Nord.auroraYellow : .secondary)
+                                }
+                                Text(dependency.versionRequirement).font(.caption2.monospaced()).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    Section("Local content lifecycle") {
+                        Picker("Mail capture", selection: $captureLevel) {
+                            ForEach(DesktopWorkflowMailCaptureLevel.allCases, id: \.self) { Text(captureLabel($0)).tag($0) }
+                        }
+                        Toggle("Include declared attachments", isOn: $includeAttachments)
+                        Picker("After work settles", selection: $settledContent) {
+                            Text("Purge ordinary copied content").tag(DesktopWorkflowSettledContentPolicy.purgeOrdinaryContent)
+                            Text("Retain until explicit removal").tag(DesktopWorkflowSettledContentPolicy.retainUntilExplicitRemoval)
+                        }
+                    }
+                    if !installation.readinessIssues.isEmpty {
+                        Section("Readiness") {
+                            ForEach(installation.readinessIssues, id: \.self) { issue in
+                                Label(issue, systemImage: "exclamationmark.circle.fill").foregroundStyle(Nord.auroraYellow)
+                            }
+                        }
+                    }
+                }
+                .formStyle(.grouped)
+                .padding(16)
+            }
+            Divider()
+            HStack {
+                if let message { Label(message, systemImage: "info.circle").font(.caption).foregroundStyle(.secondary) }
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                Button("Save disabled", action: save).buttonStyle(.borderedProminent)
+            }
+            .padding(16)
+        }
+        .frame(width: 720, height: 720)
+        .onAppear(perform: load)
+    }
+
+    @ViewBuilder
+    private func bindingPicker(_ slot: DesktopWorkflowBindingSlotDefinition) -> some View {
+        switch slot.kind {
+        case .account:
+            Picker(slot.label, selection: binding(slot.id)) {
+                Text("Choose account").tag("")
+                ForEach(accounts) { account in Text(account.identity).tag(account.id) }
+            }
+        case .providerResource:
+            Picker(slot.label, selection: binding(slot.id)) {
+                Text("Choose provider resource").tag("")
+                ForEach(model.snapshot.domains.calendarSources.filter(\.isEnabled)) { resource in
+                    Text("\(resource.displayName) · \(resource.ownerIdentity)").tag(resource.id)
+                }
+            }
+        case .folder:
+            HStack {
+                TextField(slot.label, text: binding(slot.id))
+                Button("Choose…") { chooseFolder(slotID: slot.id) }
+            }
+        case .secretReference:
+            TextField(slot.label + " reference", text: binding(slot.id), prompt: Text("Keychain item or environment reference name"))
+        case .capability:
+            Picker(slot.label, selection: binding(slot.id)) {
+                Text("Choose capability").tag("")
+                ForEach(model.workflowCapabilityInstallations.filter(\.enabled)) { item in Text(item.name).tag(item.capabilityID) }
+            }
+        case .connector:
+            Picker(slot.label, selection: binding(slot.id)) {
+                Text("Choose connector").tag("")
+                ForEach(model.snapshot.operations.workflows.connectorInstallations.filter { $0.enabled && $0.qualified }) { item in
+                    Text(item.name).tag(item.connectorID)
+                }
+            }
+        case .renderer:
+            Picker(slot.label, selection: binding(slot.id)) {
+                Text("Choose renderer").tag("")
+                ForEach(model.snapshot.operations.workflows.rendererInstallations.filter { $0.enabled && $0.qualified }) { item in
+                    Text(item.name).tag(item.rendererID)
+                }
+            }
+        case .subflow:
+            Picker(slot.label, selection: binding(slot.id)) {
+                Text("Choose subflow").tag("")
+                ForEach(model.snapshot.operations.workflows.subflows.filter(\.enabled)) { item in Text(item.name).tag(item.subflowID) }
+            }
+        }
+        if !slot.summary.isEmpty { Text(slot.summary).font(.caption2).foregroundStyle(.secondary) }
+    }
+
+    private func binding(_ slotID: String) -> Binding<String> {
+        Binding(get: { bindingValues[slotID] ?? "" }, set: { bindingValues[slotID] = $0 })
+    }
+
+    private func load() {
+        guard !loaded else { return }
+        loaded = true
+        if let configuration = model.currentWorkflowConfiguration(installationID: installation.id),
+           let object = try? JSONSerialization.jsonObject(with: Data(configuration.canonicalJSON.utf8)) as? [String: Any] {
+            for field in fields {
+                let key = String(field.pointer.dropFirst()).replacingOccurrences(of: "~1", with: "/").replacingOccurrences(of: "~0", with: "~")
+                guard let value = object[key] else { continue }
+                values[field.pointer] = display(value)
+            }
+        }
+        if let bindings = model.currentWorkflowBindings(installationID: installation.id) {
+            bindingValues = Dictionary(uniqueKeysWithValues: bindings.resolutions.compactMap { resolution in
+                resolution.resourceIDs.first.map { (resolution.slotID, $0) }
+            })
+        }
+        if let policy = model.snapshot.operations.workflows.capturePolicyRevisions.first(where: {
+            $0.id == installation.currentCapturePolicyRevisionID
+        })?.policy {
+            captureLevel = policy.mailLevel
+            includeAttachments = policy.includeAttachments
+        }
+        if let policy = model.snapshot.operations.workflows.retentionPolicyRevisions.first(where: {
+            $0.id == installation.currentRetentionPolicyRevisionID
+        })?.policy {
+            settledContent = policy.settledContent
+        }
+    }
+
+    private func save() {
+        guard let revision, let configuration = encodedConfiguration() else {
+            message = "Configuration values could not be encoded."
+            return
+        }
+        let slots = revision.bindingSlots ?? []
+        let resolutions = slots.compactMap { slot -> DesktopWorkflowBindingResolution? in
+            guard let value = bindingValues[slot.id]?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
+            return DesktopWorkflowBindingResolution(
+                slotID: slot.id, kind: slot.kind, resourceIDs: [value], displayLabels: [displayLabel(value, kind: slot.kind)]
+            )
+        }
+        let locks = (revision.dependencies ?? []).compactMap(resolve)
+        do {
+            try model.reviseWorkflowInstallation(
+                id: installation.id,
+                configuration: configuration,
+                bindings: resolutions,
+                dependencyLock: locks,
+                capturePolicy: DesktopWorkflowCapturePolicy(
+                    mailLevel: captureLevel,
+                    includeAttachments: includeAttachments,
+                    maximumAttachmentBytes: includeAttachments ? 32 * 1_024 * 1_024 : 0,
+                    maximumTotalBytes: includeAttachments ? 128 * 1_024 * 1_024 : 0,
+                    maximumAttachmentCount: includeAttachments ? 32 : 0
+                ),
+                retentionPolicy: DesktopWorkflowRetentionPolicy(settledContent: settledContent)
+            )
+            dismiss()
+        } catch {
+            message = error.localizedDescription
+        }
+    }
+
+    private func encodedConfiguration() -> Data? {
+        var object: [String: Any] = [:]
+        for field in fields {
+            let raw = values[field.pointer] ?? ""
+            if raw.isEmpty && !field.required { continue }
+            let key = String(field.pointer.dropFirst()).replacingOccurrences(of: "~1", with: "/").replacingOccurrences(of: "~0", with: "~")
+            switch field.type {
+            case "boolean": object[key] = raw == "true"
+            case "integer": guard let value = Int(raw) else { return nil }; object[key] = value
+            case "number": guard let value = Double(raw) else { return nil }; object[key] = value
+            default:
+                if field.control == .picker, let data = raw.data(using: .utf8),
+                   let decoded = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
+                    object[key] = decoded
+                } else { object[key] = raw }
+            }
+        }
+        return try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    }
+
+    private func resolve(_ dependency: DesktopWorkflowDependencyConstraint) -> DesktopWorkflowDependencyLockEntry? {
+        switch dependency.kind {
+        case .capability:
+            return model.workflowCapabilityInstallations.first { $0.capabilityID == dependency.id && $0.enabled }.map {
+                DesktopWorkflowDependencyLockEntry(componentID: $0.capabilityID, kind: .capability, version: $0.version, digest: $0.packageDigest)
+            }
+        case .connector:
+            return model.snapshot.operations.workflows.connectorInstallations.first { $0.connectorID == dependency.id && $0.enabled && $0.qualified }.map {
+                DesktopWorkflowDependencyLockEntry(componentID: $0.connectorID, kind: .connector, version: $0.version, digest: $0.packageDigest)
+            }
+        case .renderer:
+            return model.snapshot.operations.workflows.rendererInstallations.first { $0.rendererID == dependency.id && $0.enabled && $0.qualified }.map {
+                DesktopWorkflowDependencyLockEntry(componentID: $0.rendererID, kind: .renderer, version: $0.version, digest: $0.packageDigest)
+            }
+        case .subflow:
+            return model.snapshot.operations.workflows.subflows.first { $0.subflowID == dependency.id && $0.enabled }.map {
+                DesktopWorkflowDependencyLockEntry(componentID: $0.subflowID, kind: .subflow, version: $0.version, digest: $0.manifestDigest)
+            }
+        case .workflow:
+            return model.workflowDefinitions.first { $0.id == dependency.id && $0.enabled }.flatMap { definition in
+                model.snapshot.operations.workflows.revisions.first { $0.id == definition.currentRevisionID }.map {
+                    DesktopWorkflowDependencyLockEntry(componentID: definition.id, kind: .workflow, version: $0.version, digest: $0.manifestDigest)
+                }
+            }
+        }
+    }
+
+    private func chooseFolder(slotID: String) {
+        let panel = NSOpenPanel()
+        panel.title = "Choose workflow folder"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK { bindingValues[slotID] = panel.url?.standardizedFileURL.path }
+    }
+
+    private func display(_ value: Any) -> String {
+        if let string = value as? String { return string }
+        if let number = value as? NSNumber { return number.stringValue }
+        return String(describing: value)
+    }
+
+    private func displayLabel(_ value: String, kind: DesktopWorkflowBindingSlotKind) -> String {
+        if kind == .account { return accounts.first(where: { $0.id == value })?.identity ?? "Selected account" }
+        return kind == .secretReference ? "Private reference" : URL(fileURLWithPath: value).lastPathComponent
+    }
+
+    private func captureLabel(_ level: DesktopWorkflowMailCaptureLevel) -> String {
+        switch level {
+        case .metadataOnly: "Metadata only"
+        case .allowlistedHeaders: "Allowlisted headers"
+        case .selectedBodyParts: "Selected body parts"
+        case .fullBody: "Full body when required"
+        }
+    }
+}
 
 struct WorkflowCapabilityInstallationRow: View {
     @ObservedObject var model: DesktopAppModel

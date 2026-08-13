@@ -149,6 +149,13 @@ public final class DesktopMailViewModel: ObservableObject {
             message = "Enter valid JSON input before starting this workflow."
             return false
         }
+        if let definition = model.snapshot.operations.workflows.definitions.first(where: { $0.id == workflowID }),
+           let revision = model.snapshot.operations.workflows.revisions.first(where: { $0.id == definition.currentRevisionID }),
+           let schema = revision.manualRunInputSchema,
+           let issue = DesktopWorkflowJSONSchemaValidator.validationDiagnostics(instance: input, against: schema).first {
+            message = "Manual input \(issue.path.isEmpty ? "/" : issue.path): \(issue.message)"
+            return false
+        }
         let timestamp = Int64(Date().timeIntervalSince1970 * 1_000)
         let digest = DesktopWorkflowPackageCodec.digest(input)
         guard let eventID = model.observeWorkflowExternalEvent(

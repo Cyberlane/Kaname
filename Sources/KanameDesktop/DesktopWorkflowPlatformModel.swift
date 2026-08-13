@@ -202,6 +202,17 @@ public extension DesktopAppModel {
             permissions: manifest.permissions, correlationSummary: manifest.correlationSummary,
             contextSummary: manifest.contextSummary, completionSummary: manifest.completionSummary,
             datasetDefinitions: manifest.datasets,
+            configurationSchema: manifest.configurationSchema,
+            configurationSchemaVersion: manifest.configurationSchemaVersion,
+            manualRunInputSchema: manifest.manualRunInputSchema,
+            bindingSlots: manifest.bindingSlots,
+            providerFeatures: manifest.providerFeatures,
+            hostCompatibility: manifest.hostCompatibility,
+            dependencies: manifest.dependencies,
+            publisher: manifest.publisher,
+            provenance: manifest.provenance,
+            uiHints: manifest.uiHints,
+            configurationMigrations: manifest.configurationMigrations,
             installedAtUnixMillis: timestamp
         )
         let definition = DesktopWorkflowDefinitionRecord(
@@ -211,6 +222,13 @@ public extension DesktopAppModel {
             createdAtUnixMillis: snapshot.operations.workflows.definitions.first(where: { $0.id == manifest.id })?.createdAtUnixMillis ?? timestamp,
             updatedAtUnixMillis: timestamp
         )
+        let installationSeed = try DesktopWorkflowInstallationSeed.make(
+            manifest: manifest,
+            revisionID: revision.id,
+            installationID: UUID().uuidString.lowercased(),
+            name: manifest.name,
+            timestamp: timestamp
+        )
         guard mutate({ state in
             state.operations.workflows.revisions.append(revision)
             if let index = state.operations.workflows.definitions.firstIndex(where: { $0.id == definition.id }) {
@@ -218,6 +236,12 @@ public extension DesktopAppModel {
             } else {
                 state.operations.workflows.definitions.append(definition)
             }
+            state.operations.workflows.installations.append(installationSeed.installation)
+            state.operations.workflows.configurationRevisions.append(installationSeed.configuration)
+            state.operations.workflows.bindingRevisions.append(installationSeed.binding)
+            state.operations.workflows.dependencyLockRevisions.append(installationSeed.dependencyLock)
+            state.operations.workflows.capturePolicyRevisions.append(installationSeed.capturePolicy)
+            state.operations.workflows.retentionPolicyRevisions.append(installationSeed.retentionPolicy)
             state.operations.audit.append(DesktopAuditRecord(
                 id: UUID().uuidString.lowercased(), domain: "workflow-package", action: "installed",
                 target: "\(definition.id)@\(revision.version)", state: enable ? .approved : .proposed,
@@ -232,7 +256,11 @@ public extension DesktopAppModel {
 
     func setWorkflowEnabled(id: String, enabled: Bool) -> Bool {
         guard let definition = snapshot.operations.workflows.definitions.first(where: { $0.id == id }),
-              snapshot.operations.workflows.revisions.contains(where: { $0.id == definition.currentRevisionID }) else {
+              let revision = snapshot.operations.workflows.revisions.first(where: { $0.id == definition.currentRevisionID }),
+              !enabled || revision.schemaVersion < 3
+                || snapshot.operations.workflows.installations.contains(where: {
+                    $0.workflowID == id && $0.workflowRevisionID == revision.id && $0.enabled && $0.readinessIssues.isEmpty
+                }) else {
             return false
         }
         let timestamp = now()
@@ -258,18 +286,34 @@ public extension DesktopAppModel {
     }
 
     @discardableResult
-    func createWorkflowWorkItem(workflowID: String, title: String, goal: String) -> String? {
+    func createWorkflowWorkItem(
+        workflowID: String,
+        title: String,
+        goal: String,
+        installationID: String? = nil
+    ) -> String? {
         let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanGoal = goal.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let definition = snapshot.operations.workflows.definitions.first(where: { $0.id == workflowID && $0.enabled }),
-              snapshot.operations.workflows.revisions.contains(where: { $0.id == definition.currentRevisionID }),
+              let revision = snapshot.operations.workflows.revisions.first(where: { $0.id == definition.currentRevisionID }),
               !cleanTitle.isEmpty, cleanTitle.utf8.count <= 240,
               !cleanGoal.isEmpty, cleanGoal.utf8.count <= 8_192 else { return nil }
+        let selectedInstallation: String?
+        if revision.schemaVersion >= 3 {
+            selectedInstallation = snapshot.operations.workflows.installations.first(where: {
+                $0.workflowID == workflowID && $0.workflowRevisionID == revision.id && $0.enabled
+                    && $0.readinessIssues.isEmpty && (installationID == nil || $0.id == installationID)
+            })?.id
+            guard selectedInstallation != nil else { return nil }
+        } else {
+            selectedInstallation = installationID
+        }
         let timestamp = now()
         let item = DesktopWorkflowWorkItemRecord(
             id: UUID().uuidString.lowercased(), workflowID: workflowID, title: cleanTitle, goal: cleanGoal,
             state: .open, currentEpisodeID: nil, nextAction: "Wait for or attach a triggering event.",
-            explicitAcceptance: false, createdAtUnixMillis: timestamp, updatedAtUnixMillis: timestamp, closedAtUnixMillis: nil
+            explicitAcceptance: false, createdAtUnixMillis: timestamp, updatedAtUnixMillis: timestamp,
+            closedAtUnixMillis: nil, installationID: selectedInstallation
         )
         guard mutate({ state in
             state.operations.workflows.workItems.append(item)

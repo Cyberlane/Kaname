@@ -187,6 +187,17 @@ public struct DesktopWorkflowRevisionRecord: Codable, Equatable, Identifiable, S
     public var contextSummary: String
     public var completionSummary: String
     public var datasetDefinitions: [DesktopWorkflowDatasetDefinition]? = nil
+    public var configurationSchema: String? = nil
+    public var configurationSchemaVersion: Int? = nil
+    public var manualRunInputSchema: String? = nil
+    public var bindingSlots: [DesktopWorkflowBindingSlotDefinition]? = nil
+    public var providerFeatures: [DesktopWorkflowProviderFeatureRequirement]? = nil
+    public var hostCompatibility: DesktopWorkflowHostCompatibility? = nil
+    public var dependencies: [DesktopWorkflowDependencyConstraint]? = nil
+    public var publisher: DesktopWorkflowPublisher? = nil
+    public var provenance: DesktopWorkflowPackageProvenance? = nil
+    public var uiHints: [DesktopWorkflowUIHint]? = nil
+    public var configurationMigrations: [DesktopWorkflowConfigurationMigration]? = nil
     public var installedAtUnixMillis: Int64
 }
 
@@ -255,6 +266,7 @@ public struct DesktopWorkflowWorkItemRecord: Codable, Equatable, Identifiable, S
     public var createdAtUnixMillis: Int64
     public var updatedAtUnixMillis: Int64
     public var closedAtUnixMillis: Int64?
+    public var installationID: String? = nil
 }
 
 public enum DesktopWorkflowConversationRelationship: String, Codable, CaseIterable, Equatable, Sendable {
@@ -635,6 +647,12 @@ public struct DesktopWorkflowPlatformState: Codable, Equatable, Sendable {
     public var studioDrafts: [DesktopWorkflowStudioDraftRecord]
     public var scheduleBindings: [DesktopWorkflowScheduleBindingRecord]
     public var migrationAssessments: [DesktopWorkflowMigrationAssessmentRecord]
+    public var installations: [DesktopWorkflowInstallationRecord]
+    public var configurationRevisions: [DesktopWorkflowConfigurationRevisionRecord]
+    public var bindingRevisions: [DesktopWorkflowBindingRevisionRecord]
+    public var dependencyLockRevisions: [DesktopWorkflowDependencyLockRevisionRecord]
+    public var capturePolicyRevisions: [DesktopWorkflowCapturePolicyRevisionRecord]
+    public var retentionPolicyRevisions: [DesktopWorkflowRetentionPolicyRevisionRecord]
 
     public static let empty = Self(
         definitions: [], revisions: [], triggerBindings: [], workItems: [], conversationBindings: [], episodes: [], runs: [],
@@ -645,7 +663,8 @@ public struct DesktopWorkflowPlatformState: Codable, Equatable, Sendable {
         executionReceipts: [], authorityGrants: [], effectPreviews: [], triggerHealth: [], ownershipPolicies: [],
         ownershipClaims: [], connectorInstallations: [], connectorBindings: [], qualificationRuns: [],
         rendererInstallations: [], renderReceipts: [], subflows: [], studioDrafts: [], scheduleBindings: [],
-        migrationAssessments: []
+        migrationAssessments: [], installations: [], configurationRevisions: [], bindingRevisions: [],
+        dependencyLockRevisions: [], capturePolicyRevisions: [], retentionPolicyRevisions: []
     )
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
@@ -655,6 +674,8 @@ public struct DesktopWorkflowPlatformState: Codable, Equatable, Sendable {
         case validatorReports, executionReceipts, authorityGrants, effectPreviews, triggerHealth, ownershipPolicies
         case ownershipClaims, connectorInstallations, connectorBindings, qualificationRuns, rendererInstallations
         case renderReceipts, subflows, studioDrafts, scheduleBindings, migrationAssessments
+        case installations, configurationRevisions, bindingRevisions, dependencyLockRevisions
+        case capturePolicyRevisions, retentionPolicyRevisions
     }
 
 }
@@ -702,6 +723,12 @@ extension DesktopWorkflowPlatformState {
         studioDrafts = try Self.decodeArray([DesktopWorkflowStudioDraftRecord].self, key: .studioDrafts, from: container)
         scheduleBindings = try Self.decodeArray([DesktopWorkflowScheduleBindingRecord].self, key: .scheduleBindings, from: container)
         migrationAssessments = try Self.decodeArray([DesktopWorkflowMigrationAssessmentRecord].self, key: .migrationAssessments, from: container)
+        installations = try Self.decodeArray([DesktopWorkflowInstallationRecord].self, key: .installations, from: container)
+        configurationRevisions = try Self.decodeArray([DesktopWorkflowConfigurationRevisionRecord].self, key: .configurationRevisions, from: container)
+        bindingRevisions = try Self.decodeArray([DesktopWorkflowBindingRevisionRecord].self, key: .bindingRevisions, from: container)
+        dependencyLockRevisions = try Self.decodeArray([DesktopWorkflowDependencyLockRevisionRecord].self, key: .dependencyLockRevisions, from: container)
+        capturePolicyRevisions = try Self.decodeArray([DesktopWorkflowCapturePolicyRevisionRecord].self, key: .capturePolicyRevisions, from: container)
+        retentionPolicyRevisions = try Self.decodeArray([DesktopWorkflowRetentionPolicyRevisionRecord].self, key: .retentionPolicyRevisions, from: container)
     }
 
     private static func decodeArray<Element: Decodable>(
@@ -729,6 +756,17 @@ public struct DesktopWorkflowPackageManifest: Codable, Equatable, Sendable {
     public let contextSummary: String
     public let completionSummary: String
     public var datasets: [DesktopWorkflowDatasetDefinition]? = nil
+    public var configurationSchema: String? = nil
+    public var configurationSchemaVersion: Int? = nil
+    public var manualRunInputSchema: String? = nil
+    public var bindingSlots: [DesktopWorkflowBindingSlotDefinition]? = nil
+    public var providerFeatures: [DesktopWorkflowProviderFeatureRequirement]? = nil
+    public var hostCompatibility: DesktopWorkflowHostCompatibility? = nil
+    public var dependencies: [DesktopWorkflowDependencyConstraint]? = nil
+    public var publisher: DesktopWorkflowPublisher? = nil
+    public var provenance: DesktopWorkflowPackageProvenance? = nil
+    public var uiHints: [DesktopWorkflowUIHint]? = nil
+    public var configurationMigrations: [DesktopWorkflowConfigurationMigration]? = nil
 
 }
 
@@ -742,6 +780,7 @@ public enum DesktopWorkflowPackageError: Error, Equatable, LocalizedError {
     case unsafeCapability
     case invalidPermission
     case permissionBroadening
+    case invalidContract(path: String, message: String)
 
     public var errorDescription: String? {
         switch self {
@@ -754,6 +793,7 @@ public enum DesktopWorkflowPackageError: Error, Equatable, LocalizedError {
         case .unsafeCapability: "The workflow refers to an unregistered or unsafe capability identifier."
         case .invalidPermission: "The workflow requests a permission that its steps do not justify."
         case .permissionBroadening: "This revision broadens authority and must be reviewed before enablement."
+        case let .invalidContract(path, message): "The workflow contract is invalid at \(path.isEmpty ? "/" : path): \(message)"
         }
     }
 }
@@ -782,7 +822,7 @@ public enum DesktopWorkflowPackageCodec {
         _ manifest: DesktopWorkflowPackageManifest,
         registeredCapabilityIDs: Set<String>
     ) throws {
-        guard manifest.schemaVersion == 1 || manifest.schemaVersion == 2 else {
+        guard (1...3).contains(manifest.schemaVersion) else {
             throw DesktopWorkflowPackageError.invalidSchema
         }
         guard validIdentifier(manifest.id), validVersion(manifest.version) else { throw DesktopWorkflowPackageError.invalidIdentifier }
@@ -846,6 +886,116 @@ public enum DesktopWorkflowPackageCodec {
             do { try DesktopWorkflowHostContractValidation.validateGraph(manifest.steps) }
             catch { throw DesktopWorkflowPackageError.invalidSteps }
         }
+        if manifest.schemaVersion == 3 {
+            do { try DesktopWorkflowHostContractValidation.validateGraph(manifest.steps) }
+            catch { throw DesktopWorkflowPackageError.invalidSteps }
+            try validateV3(manifest)
+        }
+    }
+
+    private static func validateV3(_ manifest: DesktopWorkflowPackageManifest) throws {
+        guard let compatibility = manifest.hostCompatibility,
+              compatibility.minimumWorkspaceSchema > 0,
+              compatibility.maximumWorkspaceSchema.map({ $0 >= compatibility.minimumWorkspaceSchema }) ?? true,
+              let publisher = manifest.publisher,
+              validIdentifier(publisher.identifier),
+              !publisher.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              manifest.provenance != nil else {
+            throw DesktopWorkflowPackageError.invalidContract(
+                path: "/hostCompatibility", message: "Manifest v3 requires compatible host bounds, publisher identity, and provenance."
+            )
+        }
+        if let schema = manifest.configurationSchema {
+            guard let version = manifest.configurationSchemaVersion, version > 0 else {
+                throw DesktopWorkflowPackageError.invalidContract(
+                    path: "/configurationSchemaVersion", message: "A positive configuration schema version is required."
+                )
+            }
+            try validateDeclaredSchema(schema, path: "/configurationSchema")
+            if let secretPath = firstSecretConfigurationPath(schema) {
+                throw DesktopWorkflowPackageError.invalidContract(
+                    path: "/configurationSchema" + secretPath,
+                    message: "Secret values must use a secret-reference binding slot, not configuration."
+                )
+            }
+        } else if manifest.configurationSchemaVersion != nil {
+            throw DesktopWorkflowPackageError.invalidContract(
+                path: "/configurationSchema", message: "Configuration schema text is missing."
+            )
+        }
+        if let manual = manifest.manualRunInputSchema {
+            try validateDeclaredSchema(manual, path: "/manualRunInputSchema")
+        }
+        let slots = manifest.bindingSlots ?? []
+        guard Set(slots.map(\.id)).count == slots.count,
+              slots.allSatisfy({
+                  validIdentifier($0.id) && !$0.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                      && !$0.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+              }) else {
+            throw DesktopWorkflowPackageError.invalidContract(path: "/bindingSlots", message: "Binding slots must have unique valid identifiers and user-facing text.")
+        }
+        let features = manifest.providerFeatures ?? []
+        guard Set(features.map(\.id)).count == features.count,
+              features.allSatisfy({ validIdentifier($0.id) && validIdentifier($0.providerKind) && validIdentifier($0.feature) }),
+              slots.compactMap(\.providerFeatureID).allSatisfy(Set(features.map(\.id)).contains) else {
+            throw DesktopWorkflowPackageError.invalidContract(path: "/providerFeatures", message: "Provider feature declarations or slot references are invalid.")
+        }
+        let dependencies = manifest.dependencies ?? []
+        guard Set(dependencies.map { "\($0.kind.rawValue):\($0.id)" }).count == dependencies.count,
+              dependencies.allSatisfy({ validIdentifier($0.id) && validVersionRequirement($0.versionRequirement) }) else {
+            throw DesktopWorkflowPackageError.invalidContract(path: "/dependencies", message: "Dependency identifiers and version constraints must be unique and bounded.")
+        }
+        guard (manifest.uiHints ?? []).allSatisfy({ $0.pointer.hasPrefix("/") && $0.pointer.utf8.count <= 512 }),
+              Set((manifest.uiHints ?? []).map(\.pointer)).count == (manifest.uiHints ?? []).count else {
+            throw DesktopWorkflowPackageError.invalidContract(path: "/uiHints", message: "UI hints must use unique JSON Pointer paths.")
+        }
+        let migrations = manifest.configurationMigrations ?? []
+        guard migrations.allSatisfy({ migration in
+            migration.fromVersion > 0 && migration.toVersion == migration.fromVersion + 1
+                && !migration.operations.isEmpty
+                && migration.operations.allSatisfy { operation in
+                    operation.pointer.hasPrefix("/")
+                        && (operation.kind != .rename || operation.destinationPointer?.hasPrefix("/") == true)
+                        && (operation.kind != .setDefault || operation.value != nil)
+                }
+        }), Set(migrations.map(\.id)).count == migrations.count else {
+            throw DesktopWorkflowPackageError.invalidContract(path: "/configurationMigrations", message: "Configuration migrations must advance one version using bounded pointer operations.")
+        }
+    }
+
+    private static func validateDeclaredSchema(_ schema: String, path: String) throws {
+        guard let data = schema.data(using: .utf8) else {
+            throw DesktopWorkflowPackageError.invalidContract(path: path, message: "Schema is not UTF-8.")
+        }
+        if let issue = DesktopWorkflowJSONSchemaValidator.schemaDiagnostics(data, requireDeclaredDialect: true).first {
+            throw DesktopWorkflowPackageError.invalidContract(path: path + issue.path, message: issue.message)
+        }
+    }
+
+    private static func firstSecretConfigurationPath(_ schema: String) -> String? {
+        guard let data = schema.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) else { return nil }
+        let forbidden = Set([
+            "secret", "password", "token", "apikey", "api_key", "apitoken", "api_token",
+            "accesstoken", "access_token", "credential", "clientsecret", "client_secret",
+        ])
+        func inspect(_ node: Any, path: String) -> String? {
+            guard let object = node as? [String: Any] else { return nil }
+            if let properties = object["properties"] as? [String: Any] {
+                for (key, child) in properties.sorted(by: { $0.key < $1.key }) {
+                    let normalized = key.lowercased().replacingOccurrences(of: "-", with: "_")
+                    if forbidden.contains(normalized) { return path + "/properties/" + key }
+                    if let nested = inspect(child, path: path + "/properties/" + key) { return nested }
+                }
+            }
+            if let definitions = object["$defs"] as? [String: Any] {
+                for (key, child) in definitions.sorted(by: { $0.key < $1.key }) {
+                    if let nested = inspect(child, path: path + "/$defs/" + key) { return nested }
+                }
+            }
+            return nil
+        }
+        return inspect(root, path: "")
     }
 
     private static func validIdentifier(_ value: String) -> Bool {
@@ -854,6 +1004,11 @@ public enum DesktopWorkflowPackageCodec {
 
     private static func validVersion(_ value: String) -> Bool {
         value.range(of: #"^[0-9]+(?:\.[0-9]+){0,3}$"#, options: .regularExpression) != nil
+    }
+
+    private static func validVersionRequirement(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.count <= 128
+            && value.range(of: #"^[0-9A-Za-z.*+<>=~^|, -]+$"#, options: .regularExpression) != nil
     }
 }
 

@@ -674,6 +674,12 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
                 // They intentionally start empty so older workspaces do not
                 // silently gain observation or effect authority.
                 break
+            case 22:
+                // Manifest-v3 installation, configuration, binding, dependency,
+                // capture, and retention revisions decode additively. Existing
+                // definitions retain their legacy behavior and gain no new
+                // observation, secret, or effect authority during migration.
+                break
             default:
                 throw DesktopModelError.unsupportedVersion
             }

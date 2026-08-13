@@ -244,6 +244,12 @@ public extension DesktopAppModel {
             state.operations.workflows.ownershipClaims.append(contentsOf: imported.ownershipClaims)
             state.operations.workflows.renderReceipts.append(contentsOf: imported.renderReceipts)
             state.operations.workflows.scheduleBindings.append(contentsOf: imported.scheduleBindings)
+            state.operations.workflows.installations.append(contentsOf: imported.installations)
+            state.operations.workflows.configurationRevisions.append(contentsOf: imported.configurationRevisions)
+            state.operations.workflows.bindingRevisions.append(contentsOf: imported.bindingRevisions)
+            state.operations.workflows.dependencyLockRevisions.append(contentsOf: imported.dependencyLockRevisions)
+            state.operations.workflows.capturePolicyRevisions.append(contentsOf: imported.capturePolicyRevisions)
+            state.operations.workflows.retentionPolicyRevisions.append(contentsOf: imported.retentionPolicyRevisions)
             state.operations.artifacts.append(contentsOf: restoredArtifacts)
             state.appendAudit(
                 domain: "workflow-package",
@@ -285,7 +291,18 @@ public extension DesktopAppModel {
                 correlationSummary: revision.correlationSummary,
                 contextSummary: revision.contextSummary,
                 completionSummary: revision.completionSummary,
-                datasets: revision.datasetDefinitions
+                datasets: revision.datasetDefinitions,
+                configurationSchema: revision.configurationSchema,
+                configurationSchemaVersion: revision.configurationSchemaVersion,
+                manualRunInputSchema: revision.manualRunInputSchema,
+                bindingSlots: revision.bindingSlots,
+                providerFeatures: revision.providerFeatures,
+                hostCompatibility: revision.hostCompatibility,
+                dependencies: revision.dependencies,
+                publisher: revision.publisher,
+                provenance: revision.provenance,
+                uiHints: revision.uiHints,
+                configurationMigrations: revision.configurationMigrations
             )
             let canonical = try DesktopWorkflowPackageCodec.canonicalData(manifest)
             if DesktopWorkflowPackageCodec.digest(canonical) == revision.manifestDigest {
@@ -349,6 +366,13 @@ public extension DesktopAppModel {
         }
         for index in state.authorityGrants.indices {
             state.authorityGrants[index].state = .revoked
+        }
+        for index in state.installations.indices {
+            state.installations[index].enabled = false
+            state.installations[index].updatedAtUnixMillis = timestamp
+            if !state.installations[index].readinessIssues.contains("Review imported bindings before enabling.") {
+                state.installations[index].readinessIssues.append("Review imported bindings before enabling.")
+            }
         }
     }
 
@@ -418,7 +442,23 @@ public extension DesktopAppModel {
             subflows: [],
             studioDrafts: [],
             scheduleBindings: snapshot.operations.workflows.scheduleBindings.filter { $0.workflowID == workflowID },
-            migrationAssessments: []
+            migrationAssessments: [],
+            installations: snapshot.operations.workflows.installations.filter { $0.workflowID == workflowID },
+            configurationRevisions: snapshot.operations.workflows.configurationRevisions.filter { record in
+                snapshot.operations.workflows.installations.contains { $0.workflowID == workflowID && $0.id == record.installationID }
+            },
+            bindingRevisions: snapshot.operations.workflows.bindingRevisions.filter { record in
+                snapshot.operations.workflows.installations.contains { $0.workflowID == workflowID && $0.id == record.installationID }
+            },
+            dependencyLockRevisions: snapshot.operations.workflows.dependencyLockRevisions.filter { record in
+                snapshot.operations.workflows.installations.contains { $0.workflowID == workflowID && $0.id == record.installationID }
+            },
+            capturePolicyRevisions: snapshot.operations.workflows.capturePolicyRevisions.filter { record in
+                snapshot.operations.workflows.installations.contains { $0.workflowID == workflowID && $0.id == record.installationID }
+            },
+            retentionPolicyRevisions: snapshot.operations.workflows.retentionPolicyRevisions.filter { record in
+                snapshot.operations.workflows.installations.contains { $0.workflowID == workflowID && $0.id == record.installationID }
+            }
         )
     }
 
@@ -494,6 +534,7 @@ public extension DesktopAppModel {
         let contextIDs = Set(state.contextSnapshots.map(\.id))
         let externalEventIDs = Set(state.externalEvents.map(\.id))
         let artifactIDs = Set(payload.artifacts.map(\.record.id))
+        let installationIDs = Set(state.installations.map(\.id))
         let activeArtifactRoles = state.artifactRoles.filter(\.active).map { "\($0.workItemID):\($0.role)" }
         guard payload.schemaVersion == DesktopWorkflowInstallationPayload.currentSchemaVersion,
               state.definitions.count == 1,
@@ -516,6 +557,9 @@ public extension DesktopAppModel {
               uniqueIDs(state.qualificationRuns), uniqueIDs(state.rendererInstallations),
               uniqueIDs(state.renderReceipts), uniqueIDs(state.subflows), uniqueIDs(state.studioDrafts),
               uniqueIDs(state.scheduleBindings), uniqueIDs(state.migrationAssessments),
+              uniqueIDs(state.installations), uniqueIDs(state.configurationRevisions),
+              uniqueIDs(state.bindingRevisions), uniqueIDs(state.dependencyLockRevisions),
+              uniqueIDs(state.capturePolicyRevisions), uniqueIDs(state.retentionPolicyRevisions),
               artifactIDs.count == payload.artifacts.count,
               state.capabilityInstallations.isEmpty, state.runtimeClaims.isEmpty,
               state.triggerHealth.isEmpty, state.connectorInstallations.isEmpty,
@@ -584,6 +628,19 @@ public extension DesktopAppModel {
                   $0.workflowID == payload.manifest.id && workItemIDs.contains($0.workItemID)
               }),
               state.scheduleBindings.allSatisfy({ $0.workflowID == payload.manifest.id }),
+              state.installations.allSatisfy({ installation in
+                  installation.workflowID == payload.manifest.id && revisionIDs.contains(installation.workflowRevisionID)
+                      && state.configurationRevisions.contains(where: { $0.id == installation.currentConfigurationRevisionID })
+                      && state.bindingRevisions.contains(where: { $0.id == installation.currentBindingRevisionID })
+                      && state.dependencyLockRevisions.contains(where: { $0.id == installation.currentDependencyLockRevisionID })
+                      && state.capturePolicyRevisions.contains(where: { $0.id == installation.currentCapturePolicyRevisionID })
+                      && state.retentionPolicyRevisions.contains(where: { $0.id == installation.currentRetentionPolicyRevisionID })
+              }),
+              state.configurationRevisions.allSatisfy({ installationIDs.contains($0.installationID) }),
+              state.bindingRevisions.allSatisfy({ installationIDs.contains($0.installationID) }),
+              state.dependencyLockRevisions.allSatisfy({ installationIDs.contains($0.installationID) }),
+              state.capturePolicyRevisions.allSatisfy({ installationIDs.contains($0.installationID) }),
+              state.retentionPolicyRevisions.allSatisfy({ installationIDs.contains($0.installationID) }),
               state.effectPreviews.allSatisfy({
                   effectIDs.contains($0.effectID) && $0.request.workflowID == payload.manifest.id
                       && $0.structuredTarget.count <= 1 * 1_024 * 1_024
@@ -672,6 +729,12 @@ public extension DesktopAppModel {
             || intersects(payload.state.ownershipClaims, current.ownershipClaims)
             || intersects(payload.state.renderReceipts, current.renderReceipts)
             || intersects(payload.state.scheduleBindings, current.scheduleBindings)
+            || intersects(payload.state.installations, current.installations)
+            || intersects(payload.state.configurationRevisions, current.configurationRevisions)
+            || intersects(payload.state.bindingRevisions, current.bindingRevisions)
+            || intersects(payload.state.dependencyLockRevisions, current.dependencyLockRevisions)
+            || intersects(payload.state.capturePolicyRevisions, current.capturePolicyRevisions)
+            || intersects(payload.state.retentionPolicyRevisions, current.retentionPolicyRevisions)
             || !Set(payload.artifacts.map(\.record.id)).isDisjoint(with: snapshot.operations.artifacts.map(\.id))
     }
 

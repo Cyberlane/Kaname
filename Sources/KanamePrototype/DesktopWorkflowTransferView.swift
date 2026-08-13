@@ -53,7 +53,15 @@ enum DesktopWorkflowTransferUI {
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = "Install \(manifest.name) disabled?"
-        alert.informativeText = "Version \(manifest.version) · \(manifest.steps.count) stages\nSource: \(manifest.source)\nDigest: \(digest.prefix(20))…\n\nPermissions:\n• \(permissionText)\n\nTriggers and the definition remain disabled until separately reviewed."
+        let requiredSlots = (manifest.bindingSlots ?? []).filter(\.required)
+        let slotText = requiredSlots.isEmpty
+            ? "No required private binding slots."
+            : "Unresolved required slots:\n• " + requiredSlots.map { "\($0.label) (\($0.kind.label))" }.joined(separator: "\n• ")
+        let dependencies = (manifest.dependencies ?? []).filter(\.required)
+        let dependencyText = dependencies.isEmpty
+            ? "No required package dependencies."
+            : "Required dependencies:\n• " + dependencies.map { "\($0.kind.rawValue):\($0.id) \($0.versionRequirement)" }.joined(separator: "\n• ")
+        alert.informativeText = "Version \(manifest.version) · manifest v\(manifest.schemaVersion) · \(manifest.steps.count) stages\nSource: \(manifest.source)\nPublisher: \(manifest.publisher?.name ?? "Legacy package")\nDigest: \(digest.prefix(20))…\n\nPermissions:\n• \(permissionText)\n\n\(slotText)\n\n\(dependencyText)\n\nThe package, installation, and triggers remain disabled until configuration and readiness review pass. No authority is inherited."
         alert.addButton(withTitle: "Install Disabled")
         alert.addButton(withTitle: "Cancel")
         return alert.runModal() == .alertFirstButtonReturn

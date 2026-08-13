@@ -1,0 +1,123 @@
+{
+  "schemaVersion": 3,
+  "id": "org.example.mailbox-review-v3",
+  "name": "Synthetic mailbox review",
+  "summary": "A provider-neutral synthetic fixture for independently configured mailbox-review installations.",
+  "icon": "tray.full",
+  "version": "1.0.0",
+  "source": "Kaname synthetic example",
+  "license": "MIT",
+  "triggers": [
+    "manual"
+  ],
+  "steps": [
+    {
+      "id": "read-mail",
+      "name": "Read bounded mailbox scope",
+      "kind": "invokeTool",
+      "capabilityID": "kaname.email.read",
+      "retryLimit": 1,
+      "isIdempotent": true,
+      "blocking": true,
+      "transitions": [
+        {
+          "outcome": "succeeded",
+          "predicates": [],
+          "targetStepID": "complete"
+        }
+      ]
+    },
+    {
+      "id": "complete",
+      "name": "Complete review",
+      "kind": "complete",
+      "retryLimit": 0,
+      "isIdempotent": true,
+      "blocking": true
+    }
+  ],
+  "permissions": {
+    "permissions": [
+      "emailRead"
+    ],
+    "accountIDs": [],
+    "filesystemScopes": [],
+    "capabilityIDs": [
+      "kaname.email.read"
+    ],
+    "networkDestinations": [],
+    "dataClassesLeavingDevice": []
+  },
+  "correlationSummary": "Each manual review is independent and account scoped.",
+  "contextSummary": "Use only the configured synthetic query and selected logical label.",
+  "completionSummary": "Complete after a bounded read produces a frozen review artifact.",
+  "configurationSchema": "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"required\":[\"query\",\"reviewLabel\"],\"properties\":{\"query\":{\"type\":\"string\",\"title\":\"Mailbox query\",\"description\":\"Provider-neutral bounded review query.\",\"minLength\":1,\"maxLength\":2048,\"default\":\"in:inbox\"},\"reviewLabel\":{\"type\":\"string\",\"title\":\"Logical review label\",\"minLength\":1,\"maxLength\":120,\"default\":\"Needs review\"},\"includeRead\":{\"type\":\"boolean\",\"title\":\"Include read mail\",\"default\":false}},\"additionalProperties\":false}",
+  "configurationSchemaVersion": 1,
+  "manualRunInputSchema": "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"required\":[\"reason\",\"limit\"],\"properties\":{\"reason\":{\"type\":\"string\",\"title\":\"Reason for review\",\"minLength\":1,\"maxLength\":500},\"limit\":{\"type\":\"integer\",\"title\":\"Maximum threads\",\"minimum\":1,\"maximum\":500,\"default\":100}},\"additionalProperties\":false}",
+  "bindingSlots": [
+    {
+      "id": "mail-account",
+      "label": "Mailbox account",
+      "summary": "Choose exactly one synthetic or locally connected mail account.",
+      "kind": "account",
+      "required": true,
+      "allowsMultiple": false,
+      "providerFeatureID": "mail-search"
+    },
+    {
+      "id": "review-label",
+      "label": "Provider label",
+      "summary": "Bind the logical review label without hard-coding a provider resource ID.",
+      "kind": "providerResource",
+      "required": true,
+      "allowsMultiple": false,
+      "providerFeatureID": "logical-labels"
+    },
+    {
+      "id": "optional-private-reference",
+      "label": "Optional private reference",
+      "summary": "A reference name only; no secret value is stored in the package or configuration.",
+      "kind": "secretReference",
+      "required": false,
+      "allowsMultiple": false
+    }
+  ],
+  "providerFeatures": [
+    {
+      "id": "mail-search",
+      "providerKind": "mail",
+      "feature": "bounded-search",
+      "required": true,
+      "explanation": "The adapter must provide complete bounded search."
+    },
+    {
+      "id": "logical-labels",
+      "providerKind": "mail",
+      "feature": "logical-label-binding",
+      "required": true,
+      "explanation": "The adapter must resolve a logical label to a provider resource."
+    }
+  ],
+  "hostCompatibility": {
+    "minimumWorkspaceSchema": 23,
+    "minimumHostVersion": "0.26.0"
+  },
+  "dependencies": [],
+  "publisher": {
+    "name": "Kaname synthetic examples",
+    "identifier": "org.example.kaname"
+  },
+  "provenance": {
+    "sourceURL": "https://github.com/Cyberlane/Kaname",
+    "sourceRevision": "synthetic-fixture",
+    "buildSystem": "Kaname canonical JSON"
+  },
+  "uiHints": [
+    {
+      "pointer": "/query",
+      "control": "multilineText",
+      "placeholder": "in:inbox newer_than:30d"
+    }
+  ],
+  "configurationMigrations": []
+}
