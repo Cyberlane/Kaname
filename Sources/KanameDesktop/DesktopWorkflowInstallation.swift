@@ -385,6 +385,36 @@ public struct DesktopWorkflowCapturePolicy: Codable, Equatable, Sendable {
     }
 }
 
+public extension DesktopWorkflowCapturePolicy {
+    var capturesMailBody: Bool {
+        [.selectedBodyParts, .fullBody].contains(mailLevel)
+    }
+
+    func capturedHeaders(from requested: [String]) -> [String] {
+        guard mailLevel == .allowlistedHeaders else { return [] }
+        let allowed = Set(headerAllowlist.map { $0.lowercased() })
+        return requested.filter { allowed.contains($0.lowercased()) }
+    }
+
+    func maximumBytesForNextAttachment(
+        mediaType: String,
+        declaredSize: Int,
+        capturedCount: Int,
+        capturedBytes: Int
+    ) -> Int? {
+        guard includeAttachments,
+              maximumAttachmentBytes > 0, maximumTotalBytes > 0, maximumAttachmentCount > 0,
+              capturedCount < maximumAttachmentCount,
+              declaredSize >= 0, declaredSize <= maximumAttachmentBytes,
+              attachmentMIMETypes.isEmpty || attachmentMIMETypes.contains(where: {
+                  $0.caseInsensitiveCompare(mediaType) == .orderedSame
+              }) else { return nil }
+        let remaining = maximumTotalBytes - capturedBytes
+        guard remaining > 0, declaredSize <= remaining else { return nil }
+        return min(maximumAttachmentBytes, remaining)
+    }
+}
+
 public struct DesktopWorkflowCapturePolicyRevisionRecord: Codable, Equatable, Identifiable, Sendable {
     public let id: String
     public var installationID: String
@@ -951,6 +981,59 @@ public extension DesktopAppModel {
     func currentWorkflowBindings(installationID: String) -> DesktopWorkflowBindingRevisionRecord? {
         guard let installation = snapshot.operations.workflows.installations.first(where: { $0.id == installationID }) else { return nil }
         return snapshot.operations.workflows.bindingRevisions.first { $0.id == installation.currentBindingRevisionID }
+    }
+
+    func currentWorkflowCapturePolicy(installationID: String) -> DesktopWorkflowCapturePolicy? {
+        guard let installation = snapshot.operations.workflows.installations.first(where: { $0.id == installationID }) else {
+            return nil
+        }
+        return snapshot.operations.workflows.capturePolicyRevisions.first {
+            $0.id == installation.currentCapturePolicyRevisionID
+        }?.policy
+    }
+
+    func workflowMailCapturePolicy(workflowID: String, accountID: String) -> DesktopWorkflowCapturePolicy {
+        let installation = workflowInstallations(workflowID: workflowID).first { installation in
+            guard installation.enabled,
+                  let binding = currentWorkflowBindings(installationID: installation.id) else { return false }
+            let accountBindings = binding.resolutions.filter { $0.kind == .account }
+            return accountBindings.isEmpty || accountBindings.contains { $0.resourceIDs.contains(accountID) }
+        }
+        return installation.flatMap { currentWorkflowCapturePolicy(installationID: $0.id) }
+            ?? DesktopWorkflowCapturePolicy()
+    }
+
+    @discardableResult
+    func recordWorkflowProviderReadiness(installationID: String, issues: [String]) -> Bool {
+        guard snapshot.operations.workflows.installations.contains(where: { $0.id == installationID }) else {
+            return false
+        }
+        let providerPrefix = "Provider: "
+        let normalized = Array(Set(issues.map { providerPrefix + String($0.prefix(2_000)) })).sorted()
+        let timestamp = now()
+        return mutate { state in
+            guard let index = state.operations.workflows.installations.firstIndex(where: { $0.id == installationID }) else {
+                return
+            }
+            let retained = state.operations.workflows.installations[index].readinessIssues.filter {
+                !$0.hasPrefix(providerPrefix)
+            }
+            let combined = retained + normalized
+            guard combined != state.operations.workflows.installations[index].readinessIssues else { return }
+            state.operations.workflows.installations[index].readinessIssues = combined
+            if !normalized.isEmpty { state.operations.workflows.installations[index].enabled = false }
+            state.operations.workflows.installations[index].updatedAtUnixMillis = timestamp
+            state.operations.audit.append(DesktopAuditRecord(
+                id: UUID().uuidString.lowercased(), domain: "workflow-installation",
+                action: normalized.isEmpty ? "provider-ready" : "provider-blocked",
+                target: installationID,
+                state: normalized.isEmpty ? .completed : .failed,
+                detail: normalized.isEmpty
+                    ? "Verified current provider features and logical resource bindings."
+                    : "Disabled dispatch because current provider readiness has \(normalized.count) issue(s).",
+                recordedAtUnixMillis: timestamp
+            ))
+        }
     }
 
     private func workflowManifest(

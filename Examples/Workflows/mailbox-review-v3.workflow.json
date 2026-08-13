@@ -93,7 +93,7 @@
     {
       "id": "logical-labels",
       "providerKind": "mail",
-      "feature": "logical-label-binding",
+      "feature": "logical-resource-binding",
       "required": true,
       "explanation": "The adapter must resolve a logical label to a provider resource."
     }

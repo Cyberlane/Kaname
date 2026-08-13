@@ -1279,7 +1279,7 @@ public extension DesktopAppModel {
             checks.append(.init(
                 id: "email-threading",
                 title: "Threaded email with attachments",
-                detail: "Kaname binds thread ID, reply headers, recipients, body, and attachment digests, then re-reads Gmail and verifies recipients, subject, thread, headers, names, and attachment bytes.",
+                detail: "Kaname binds conversation ID, reply headers, recipients, body, and attachment digests, then re-reads the provider and verifies recipients, subject, conversation, headers, names, and attachment bytes.",
                 state: .ready
             ))
         }
@@ -1308,11 +1308,11 @@ public extension DesktopAppModel {
                 id: "email-trigger",
                 title: "Durable email trigger",
                 detail: bindings.isEmpty
-                    ? "Configure an account-scoped Gmail history binding and test its filter before enabling it."
+                    ? "Configure an account-scoped mail delta binding and test its filter before enabling it."
                     : enabledBindings.isEmpty
                         ? "\(bindings.count) account-scoped binding\(bindings.count == 1 ? " is" : "s are") configured but disabled."
                         : enabledBindings.allSatisfy { $0.lastCursor != nil }
-                            ? "\(enabledBindings.count) enabled Gmail history binding\(enabledBindings.count == 1 ? " has" : "s have") a durable cursor."
+                            ? "\(enabledBindings.count) enabled mail delta binding\(enabledBindings.count == 1 ? " has" : "s have") a durable cursor."
                             : "The enabled binding will establish its start cursor without importing old mail on the next check.",
                 state: triggerState
             ))

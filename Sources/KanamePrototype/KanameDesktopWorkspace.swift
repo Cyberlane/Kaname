@@ -8154,10 +8154,10 @@ private struct WorkflowDefinitionCard: View {
                             if !googleAccounts.isEmpty {
                                 HStack {
                                     googleAccountPicker
-                                    TextField("Gmail filter, for example from:sender@example.com", text: $emailFilter)
+                                    TextField("Provider filter, for example from:sender@example.com", text: $emailFilter)
                                     Button("Add scope") {
                                         _ = model.bindWorkflowTrigger(
-                                            workflowID: definition.id, trigger: .email, source: "gmail",
+                                            workflowID: definition.id, trigger: .email, source: "mail",
                                             accountIDs: [selectedAccountID], sourceFilter: emailFilter, enabled: false
                                         )
                                         emailFilter = ""
@@ -8165,7 +8165,7 @@ private struct WorkflowDefinitionCard: View {
                                     .disabled(selectedAccountID.isEmpty || emailFilter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                                 }
                             } else {
-                                Text("Connect a Gmail account to configure an email trigger.")
+                                Text("Connect a mail account to configure an email trigger.")
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                         }
@@ -8528,7 +8528,7 @@ private struct WorkflowTriggerBindingRow: View {
             HStack {
                 if let processExistingMatches {
                     Button("Process existing…", action: processExistingMatches)
-                        .help("Preview and create workflow episodes for existing Gmail matches without changing mail")
+                        .help("Preview and create workflow episodes for existing provider matches without changing mail")
                 }
                 if let rebaseline {
                     Button("Rebaseline", action: rebaseline)

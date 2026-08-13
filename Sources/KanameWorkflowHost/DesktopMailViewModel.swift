@@ -32,6 +32,7 @@ public final class DesktopMailViewModel: ObservableObject {
     @Published public var query = "in:inbox"
 
     private let service: NativeGoogleIntegrationService
+    private let mailAdapter: any MailProviderAdapter
     private let environment: KanameDesktopEnvironment
     private var workflowMonitoringTask: _Concurrency.Task<Void, Never>?
     private var workflowRuntime: DesktopWorkflowRuntime?
@@ -42,11 +43,13 @@ public final class DesktopMailViewModel: ObservableObject {
         googleClientConfiguration: GoogleOAuthClientConfiguration? = nil
     ) {
         self.environment = environment
-        service = NativeGoogleIntegrationService(
+        let service = NativeGoogleIntegrationService(
             rootDirectory: environment.googleDirectory,
             keychainService: environment.googleKeychainService,
             clientConfiguration: googleClientConfiguration
         )
+        self.service = service
+        mailAdapter = GmailMailProviderAdapter(service: service)
     }
 
     public func startWorkflowMonitoring(model: DesktopAppModel) {
@@ -66,9 +69,73 @@ public final class DesktopMailViewModel: ObservableObject {
     public func runWorkflowMaintenanceCycle(model: DesktopAppModel) async {
         _ = model.recoverExpiredWorkflowClaims()
         _ = model.expireWorkflowWaits()
+        await refreshMailProviderReadiness(model: model)
         dispatchDueSchedules(model: model)
         await pollWorkflowBindings(model: model, announce: false)
         await executeQueuedWorkflowRuns(model: model)
+    }
+
+    private func refreshMailProviderReadiness(model: DesktopAppModel) async {
+        for installation in model.workflowInstallations {
+            guard let revision = model.snapshot.operations.workflows.revisions.first(where: {
+                $0.id == installation.workflowRevisionID
+            }), let bindings = model.currentWorkflowBindings(installationID: installation.id) else { continue }
+            let requirements = (revision.providerFeatures ?? []).filter { $0.providerKind == "mail" }
+            guard !requirements.isEmpty else { continue }
+            let featureIDs = Set(requirements.map(\.id))
+            let mailSlots = Set((revision.bindingSlots ?? []).filter {
+                $0.providerFeatureID.map(featureIDs.contains) == true
+            }.map(\.id))
+            let resourceBindings = bindings.resolutions.filter {
+                mailSlots.contains($0.slotID) && [.providerResource, .folder].contains($0.kind)
+            }
+            let accountIDs = bindings.resolutions.filter {
+                $0.kind == .account && (mailSlots.isEmpty || mailSlots.contains($0.slotID))
+            }.flatMap(\.resourceIDs)
+            var issues: [String] = []
+            if accountIDs.isEmpty { issues.append("Select a logical mail account.") }
+            for accountID in accountIDs {
+                do {
+                    let readiness = try await mailAdapter.readiness(accountID: accountID)
+                    for requirement in requirements where requirement.required {
+                        guard let feature = mailFeature(requirement.feature) else {
+                            issues.append("Unknown required mail feature \(requirement.feature).")
+                            continue
+                        }
+                        guard let status = readiness.feature(feature), status.ready else {
+                            let missing = readiness.feature(feature)?.missingScopes.joined(separator: ", ") ?? "unsupported"
+                            issues.append("\(accountID) cannot provide \(requirement.feature): \(missing).")
+                            continue
+                        }
+                    }
+                    if !resourceBindings.isEmpty {
+                        let available = Set(try await mailAdapter.resources(accountID: accountID).map(\.id))
+                        for binding in resourceBindings {
+                            let missing = binding.resourceIDs.filter { !available.contains($0) }
+                            if !missing.isEmpty {
+                                issues.append("\(accountID) is missing bound resource IDs: \(missing.sorted().joined(separator: ", ")).")
+                            }
+                        }
+                    }
+                } catch {
+                    issues.append("\(accountID) readiness could not be verified: \(error.localizedDescription)")
+                }
+            }
+            _ = model.recordWorkflowProviderReadiness(installationID: installation.id, issues: issues)
+        }
+    }
+
+    private func mailFeature(_ identifier: String) -> MailProviderFeature? {
+        if let exact = MailProviderFeature(rawValue: identifier) { return exact }
+        return switch identifier {
+        case "search": .boundedSearch
+        case "read", "thread-read": .conversationRead
+        case "history", "delta": .deltaSync
+        case "resources", "labels", "folders", "logical-label-binding": .logicalResourceBinding
+        case "attachments": .attachmentFetch
+        case "mutate", "effects": .conversationMutation
+        default: nil
+        }
     }
 
     public func checkWorkflowTriggers(model: DesktopAppModel) {
@@ -79,16 +146,16 @@ public final class DesktopMailViewModel: ObservableObject {
         model: DesktopAppModel,
         binding: DesktopWorkflowTriggerBindingRecord
     ) {
-        guard !isBusy, binding.trigger == .email, binding.source == "gmail",
+        guard !isBusy, binding.trigger == .email, ["mail", "gmail"].contains(binding.source),
               let accountID = binding.accountIDs.first else { return }
         isBusy = true
         _Concurrency.Task {
             do {
-                let matches = try await service.matchingGmailThreadIDs(
+                let matches = try await matchingMailConversationIDs(
                     accountID: accountID, query: binding.sourceFilter
                 ).sorted()
                 let alert = NSAlert()
-                alert.messageText = "Process \(matches.count) existing Gmail match\(matches.count == 1 ? "" : "es")?"
+                alert.messageText = "Process \(matches.count) existing mail match\(matches.count == 1 ? "" : "es")?"
                 alert.informativeText = "Account: \(accountID)\nFilter: \(binding.sourceFilter)\n\nThis creates durable workflow episodes for the exact current matches. It does not archive, label, trash, mark read, draft, or send email."
                 alert.alertStyle = .informational
                 alert.addButton(withTitle: "Process existing matches")
@@ -98,35 +165,37 @@ public final class DesktopMailViewModel: ObservableObject {
                     isBusy = false
                     return
                 }
-                let cursor = try await service.gmailHistoryCursor(accountID: accountID)
+                let cursor = try await mailAdapter.currentCursor(accountID: accountID)
                 var ownership: [String: DesktopWorkflowOwnershipPolicyRecord] = [:]
                 let policies = model.snapshot.operations.workflows.ownershipPolicies
                     .filter { $0.enabled && $0.accountID == accountID }
                     .sorted { ($0.priority, $0.id) > ($1.priority, $1.id) }
                 for policy in policies {
-                    let threadIDs = try await service.matchingGmailThreadIDs(
+                    let threadIDs = try await matchingMailConversationIDs(
                         accountID: accountID, query: policy.sourceFilter
                     )
                     for threadID in threadIDs where ownership[threadID] == nil { ownership[threadID] = policy }
                 }
                 var ingested = 0
-                for threadID in matches {
-                    let thread = try await service.readMailThread(accountID: accountID, threadID: threadID)
+                for conversationID in matches {
+                    let conversation = try await mailAdapter.conversation(
+                        accountID: accountID, conversationID: conversationID
+                    )
                     guard mayObserveWorkflowThread(
-                        thread, binding: binding, matchingPolicy: ownership[thread.id], model: model
+                        conversation, binding: binding, matchingPolicy: ownership[conversation.id], model: model
                     ) else { continue }
-                    guard let latest = thread.messages.last else { continue }
-                    let event = GmailHistoryEvent.record(
-                        id: "backfill:\(accountID):\(latest.id)", historyID: thread.historyID ?? cursor,
-                        kind: .messageAdded, messageID: latest.id, threadID: thread.id,
-                        labelIDs: latest.labels
+                    guard let latest = conversation.messages.last else { continue }
+                    let event = MailDeltaEvent(
+                        id: "backfill:\(accountID):\(latest.id)", cursor: conversation.cursor ?? cursor,
+                        kind: .messageAdded, messageID: latest.id, conversationID: conversation.id,
+                        resourceIDs: latest.resourceIDs
                     )
                     if try await ingestWorkflowThread(
-                        thread, event: event, binding: binding, cursor: cursor, model: model
+                        conversation, event: event, binding: binding, cursor: cursor, model: model
                     ) { ingested += 1 }
                 }
                 _ = model.advanceWorkflowTriggerCursor(id: binding.id, cursor: cursor)
-                message = "Created \(ingested) workflow episode\(ingested == 1 ? "" : "s") from \(matches.count) exact existing match\(matches.count == 1 ? "" : "es"). Gmail was not changed."
+                message = "Created \(ingested) workflow episode\(ingested == 1 ? "" : "s") from \(matches.count) exact existing match\(matches.count == 1 ? "" : "es"). The mail provider was not changed."
                 await executeQueuedWorkflowRuns(model: model)
             } catch {
                 message = "Existing-mail processing stopped safely: \(error.localizedDescription)"
@@ -205,7 +274,7 @@ public final class DesktopMailViewModel: ObservableObject {
             $0.enabled && definitions[$0.workflowID]?.enabled == true
                 && (health[$0.id]?.nextAttemptAtUnixMillis ?? Int64.min) <= timestamp
         }
-        let emailBindings = eligibleBindings.filter { $0.trigger == .email && $0.source == "gmail" }
+        let emailBindings = eligibleBindings.filter { $0.trigger == .email && ["mail", "gmail"].contains($0.source) }
         let calendarBindings = eligibleBindings.filter {
             $0.trigger == .calendar && $0.source == "google-calendar"
         }
@@ -225,7 +294,7 @@ public final class DesktopMailViewModel: ObservableObject {
                             .filter { $0.enabled && $0.accountID == accountID }
                             .sorted { ($0.priority, $0.id) > ($1.priority, $1.id) }
                         for policy in policies {
-                            let threadIDs = try await service.matchingGmailThreadIDs(
+                            let threadIDs = try await matchingMailConversationIDs(
                                 accountID: accountID, query: policy.sourceFilter
                             )
                             for threadID in threadIDs where resolved[threadID] == nil {
@@ -238,29 +307,31 @@ public final class DesktopMailViewModel: ObservableObject {
                     guard let cursor = binding.lastCursor else {
                         _ = model.advanceWorkflowTriggerCursor(
                             id: binding.id,
-                            cursor: try await service.gmailHistoryCursor(accountID: accountID)
+                            cursor: try await mailAdapter.currentCursor(accountID: accountID)
                         )
                         _ = model.recordWorkflowTriggerSuccess(bindingID: binding.id, accountID: accountID)
                         continue
                     }
-                    let matching = try await service.matchingGmailThreadIDs(
+                    let matching = try await matchingMailConversationIDs(
                         accountID: accountID,
                         query: binding.sourceFilter
                     )
-                    let observation = try await GmailHistoryObserver(service: service).observe(
+                    let observation = try await MailDeltaObserver(adapter: mailAdapter).observe(
                         accountID: accountID,
-                        startHistoryID: cursor,
-                        historyTypes: [.messageAdded]
+                        startCursor: cursor,
+                        kinds: [.messageAdded]
                     )
                     switch observation {
                     case let .events(events, nextCursor):
-                        for event in events where matching.contains(event.threadID) {
-                            let thread = try await service.readMailThread(accountID: accountID, threadID: event.threadID)
+                        for event in events where matching.contains(event.conversationID) {
+                            let conversation = try await mailAdapter.conversation(
+                                accountID: accountID, conversationID: event.conversationID
+                            )
                             guard mayObserveWorkflowThread(
-                                thread, binding: binding, matchingPolicy: ownership[thread.id], model: model
+                                conversation, binding: binding, matchingPolicy: ownership[conversation.id], model: model
                             ) else { continue }
                             if try await ingestWorkflowThread(
-                                thread,
+                                conversation,
                                 event: event,
                                 binding: binding,
                                 cursor: nextCursor,
@@ -274,30 +345,32 @@ public final class DesktopMailViewModel: ObservableObject {
                         )
                     case .fullSyncRequired:
                         for threadID in matching.sorted() {
-                            let thread = try await service.readMailThread(accountID: accountID, threadID: threadID)
+                            let conversation = try await mailAdapter.conversation(
+                                accountID: accountID, conversationID: threadID
+                            )
                             guard mayObserveWorkflowThread(
-                                thread, binding: binding, matchingPolicy: ownership[thread.id], model: model
+                                conversation, binding: binding, matchingPolicy: ownership[conversation.id], model: model
                             ) else { continue }
-                            guard let latest = thread.messages.last else { continue }
-                            let event = GmailHistoryEvent.record(
+                            guard let latest = conversation.messages.last else { continue }
+                            let event = MailDeltaEvent(
                                 id: "full-sync:\(accountID):\(latest.id)",
-                                historyID: thread.historyID ?? cursor,
+                                cursor: conversation.cursor ?? cursor,
                                 kind: .messageAdded,
                                 messageID: latest.id,
-                                threadID: thread.id,
-                                labelIDs: latest.labels
+                                conversationID: conversation.id,
+                                resourceIDs: latest.resourceIDs
                             )
                             if try await ingestWorkflowThread(
-                                thread,
+                                conversation,
                                 event: event,
                                 binding: binding,
-                                cursor: thread.historyID ?? cursor,
+                                cursor: conversation.cursor ?? cursor,
                                 model: model
                             ) { observedEpisodes += 1 }
                         }
                         _ = model.advanceWorkflowTriggerCursor(
                             id: binding.id,
-                            cursor: try await service.gmailHistoryCursor(accountID: accountID)
+                            cursor: try await mailAdapter.currentCursor(accountID: accountID)
                         )
                         _ = model.recordWorkflowTriggerSuccess(
                             bindingID: binding.id, accountID: accountID,
@@ -447,7 +520,7 @@ public final class DesktopMailViewModel: ObservableObject {
     }
 
     private func mayObserveWorkflowThread(
-        _ thread: GmailThreadDetailSnapshot,
+        _ conversation: MailConversationSnapshot,
         binding: DesktopWorkflowTriggerBindingRecord,
         matchingPolicy: DesktopWorkflowOwnershipPolicyRecord?,
         model: DesktopAppModel
@@ -461,12 +534,46 @@ public final class DesktopMailViewModel: ObservableObject {
             ? matchingPolicy?.mode ?? .sharedObservation
             : .sharedObservation
         return switch model.claimWorkflowConversation(
-            workflowID: binding.workflowID, accountID: thread.accountID,
-            conversationID: thread.id, mode: mode
+            workflowID: binding.workflowID, accountID: conversation.account.localID,
+            conversationID: conversation.id, mode: mode
         ) {
         case .acquired, .shared: true
         case .blocked: false
         }
+    }
+
+    private func matchingMailConversationIDs(
+        accountID: String,
+        query: String,
+        maximumPages: Int = 20,
+        maximumConversations: Int = 2_000
+    ) async throws -> Set<String> {
+        let cleanQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanQuery.isEmpty, cleanQuery.utf8.count <= 2_048 else {
+            throw MailProviderAdapterError.invalidIdentifier
+        }
+        var pageToken: String?
+        var seenTokens = Set<String>()
+        var identifiers = Set<String>()
+        for _ in 0..<min(max(maximumPages, 1), 100) {
+            let page = try await mailAdapter.search(
+                accountID: accountID,
+                query: MailQuery(text: cleanQuery, pageToken: pageToken, limit: 100)
+            )
+            guard page.failedConversationCount == 0 else {
+                throw DesktopWorkflowCapabilityError.executionFailed("The mail provider returned an incomplete search page.")
+            }
+            identifiers.formUnion(page.conversations.map(\.id))
+            guard identifiers.count <= min(max(maximumConversations, 1), 10_000) else {
+                throw DesktopWorkflowCapabilityError.executionFailed("The mail filter exceeded its bounded conversation limit.")
+            }
+            guard let next = page.nextPageToken else { return identifiers }
+            guard seenTokens.insert(next).inserted else {
+                throw DesktopWorkflowCapabilityError.executionFailed("The mail provider repeated a search page token.")
+            }
+            pageToken = next
+        }
+        throw DesktopWorkflowCapabilityError.executionFailed("The mail filter exceeded its bounded page limit.")
     }
 
     private func dispatchDueSchedules(model: DesktopAppModel) {
@@ -512,48 +619,62 @@ public final class DesktopMailViewModel: ObservableObject {
     }
 
     private func ingestWorkflowThread(
-        _ thread: GmailThreadDetailSnapshot,
-        event: GmailHistoryEvent,
+        _ conversation: MailConversationSnapshot,
+        event: MailDeltaEvent,
         binding: DesktopWorkflowTriggerBindingRecord,
         cursor: String,
         model: DesktopAppModel
     ) async throws -> Bool {
-        guard let message = thread.messages.first(where: { $0.id == event.messageID }) ?? thread.messages.last else { return false }
+        guard let message = conversation.messages.first(where: { $0.id == event.messageID })
+                ?? conversation.messages.last else { return false }
+        let policy = model.workflowMailCapturePolicy(
+            workflowID: binding.workflowID, accountID: conversation.account.localID
+        )
         var attachmentPayloads: [String: Data] = [:]
         var totalAttachmentBytes = 0
-        for threadMessage in thread.messages {
-            for attachment in threadMessage.attachments {
-                let data = try await service.downloadGmailAttachment(
-                    accountID: thread.accountID,
-                    messageID: attachment.messageID,
-                    attachmentID: attachment.attachmentID
-                )
-                totalAttachmentBytes += data.count
-                guard totalAttachmentBytes <= GmailOutboundAttachment.maximumTotalBytes else {
-                    throw DesktopWorkflowStorageError.quotaExceeded
+        var attachmentCount = 0
+        if policy.includeAttachments {
+            for threadMessage in conversation.messages {
+                for attachment in threadMessage.attachments {
+                    guard let maximumBytes = policy.maximumBytesForNextAttachment(
+                        mediaType: attachment.mediaType, declaredSize: attachment.size,
+                        capturedCount: attachmentCount, capturedBytes: totalAttachmentBytes
+                    ) else { continue }
+                    let data = try await mailAdapter.attachment(
+                        accountID: conversation.account.localID,
+                        messageID: attachment.messageID,
+                        attachmentID: attachment.attachmentID,
+                        maximumBytes: maximumBytes
+                    )
+                    totalAttachmentBytes += data.count
+                    guard totalAttachmentBytes <= policy.maximumTotalBytes else {
+                        throw DesktopWorkflowStorageError.quotaExceeded
+                    }
+                    attachmentPayloads[WorkflowEmailReadResponse.attachmentKey(attachment)] = data
+                    attachmentCount += 1
                 }
-                attachmentPayloads[WorkflowEmailReadResponse.attachmentKey(attachment)] = data
             }
         }
         let payload = try workflowEventPayload(
-            thread: thread,
+            conversation: conversation,
             message: message,
-            attachmentPayloads: attachmentPayloads
+            attachmentPayloads: attachmentPayloads,
+            policy: policy
         )
         let digest = SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined()
         let eventID = model.observeWorkflowExternalEvent(
-            source: "gmail",
-            accountID: thread.accountID,
-            conversationID: thread.id,
+            source: "mail",
+            accountID: conversation.account.localID,
+            conversationID: conversation.id,
             messageID: message.id,
             cursor: cursor,
             payloadDigest: digest,
-            deduplicationKey: "gmail:\(thread.accountID):\(message.id)"
+            deduplicationKey: "mail:\(conversation.account.providerID):\(conversation.account.localID):\(message.id)"
         )
         guard let eventID else { return false }
         if model.snapshot.operations.workflows.episodes.contains(where: { $0.sourceEventID == eventID }) { return false }
 
-        var item = model.workflowWorkItems(accountID: thread.accountID, conversationID: thread.id)
+        var item = model.workflowWorkItems(accountID: conversation.account.localID, conversationID: conversation.id)
             .first(where: { $0.workflowID == binding.workflowID })
         if item == nil,
            let workItemID = model.createWorkflowWorkItem(
@@ -563,11 +684,11 @@ public final class DesktopMailViewModel: ObservableObject {
            ) {
             _ = model.bindWorkflowConversation(
                 workItemID: workItemID,
-                source: "gmail",
-                accountID: thread.accountID,
-                conversationID: thread.id,
+                source: "mail",
+                accountID: conversation.account.localID,
+                conversationID: conversation.id,
                 relationship: .primary,
-                reason: "Matched the reviewed Gmail trigger filter.",
+                reason: "Matched the reviewed mail-provider trigger filter.",
                 confidence: 1,
                 requiresReview: false,
                 firstMessageID: message.id,
@@ -590,45 +711,45 @@ public final class DesktopMailViewModel: ObservableObject {
         if let storage = model.workflowStorage(workflowID: binding.workflowID),
            let artifact = try? storage.importArtifact(
                data: payload,
-               filename: "gmail-event-\(message.id).json",
+               filename: "mail-event-\(message.id).json",
                mediaType: "application/json",
                createdAtUnixMillis: Int64(Date().timeIntervalSince1970 * 1_000)
            ) {
             artifactDigest = artifact.sha256
             _ = model.bindWorkflowArtifactRole(
                 workflowID: binding.workflowID, workItemID: item.id, episodeID: episodeID,
-                role: "trigger-payload", artifact: artifact, createdByRunID: "gmail:\(message.id)"
+                role: "trigger-payload", artifact: artifact, createdByRunID: "mail:\(message.id)"
             )
-            for threadMessage in thread.messages {
+            for threadMessage in conversation.messages {
                 for attachment in threadMessage.attachments {
                     guard let data = attachmentPayloads[WorkflowEmailReadResponse.attachmentKey(attachment)],
                           let stored = try? storage.importArtifact(
                               data: data,
                               filename: attachment.filename,
-                              mediaType: attachment.mimeType,
+                              mediaType: attachment.mediaType,
                               createdAtUnixMillis: Int64(Date().timeIntervalSince1970 * 1_000)
                           ) else { continue }
                     _ = model.bindWorkflowArtifactRole(
                         workflowID: binding.workflowID, workItemID: item.id, episodeID: episodeID,
                         role: "source-attachment-\(stored.sha256.prefix(16))", artifact: stored,
-                        createdByRunID: "gmail:\(threadMessage.id)"
+                        createdByRunID: "mail:\(conversation.account.providerID):\(threadMessage.id)"
                     )
                 }
             }
         }
-        let threadText = workflowThreadText(thread)
+        let threadText = workflowThreadText(conversation, policy: policy)
         var contextReferences = priorWorkflowContextReferences(
             model: model, workItemID: item.id, excludingEpisodeID: episodeID
         )
         contextReferences.append(
             .reference(
                 id: eventID,
-                kind: "gmail-thread",
-                label: message.subject.isEmpty ? "Gmail conversation" : message.subject,
-                sourceID: "gmail:\(thread.accountID):\(thread.id):\(message.id)",
+                kind: "mail-conversation",
+                label: message.subject.isEmpty ? "Mail conversation" : message.subject,
+                sourceID: "mail:\(conversation.account.providerID):\(conversation.account.localID):\(conversation.id):\(message.id)",
                 digest: artifactDigest,
                 included: true,
-                reason: "Complete conversation snapshot for the active workflow episode.",
+                reason: "Capture-policy-bounded conversation snapshot for the active workflow episode.",
                 estimatedTokens: max(1, min(threadText.utf8.count / 4, 24_000)),
                 content: threadText
             )
@@ -636,7 +757,8 @@ public final class DesktopMailViewModel: ObservableObject {
         let contextID = model.compileWorkflowContext(
             workItemID: item.id,
             episodeID: episodeID,
-            request: message.body.isEmpty ? message.subject : message.body,
+            request: policy.capturesMailBody && !message.body.isEmpty
+                ? message.body : message.subject,
             references: contextReferences
         )
         if let contextID {
@@ -646,26 +768,37 @@ public final class DesktopMailViewModel: ObservableObject {
     }
 
     private func workflowEventPayload(
-        thread: GmailThreadDetailSnapshot,
-        message: GmailMessageSnapshot,
-        attachmentPayloads: [String: Data]
+        conversation: MailConversationSnapshot,
+        message: MailMessageSnapshot,
+        attachmentPayloads: [String: Data],
+        policy: DesktopWorkflowCapturePolicy
     ) throws -> Data {
-        let messages = thread.messages.map {
-            WorkflowGmailPayloadEncoder.messageObject($0, attachmentPayloads: attachmentPayloads)
+        let headers = policy.capturedHeaders(from: policy.headerAllowlist)
+        let includeBody = policy.capturesMailBody
+        let messages = conversation.messages.map {
+            WorkflowMailPayloadEncoder.messageObject(
+                $0, attachmentPayloads: attachmentPayloads,
+                headerProjection: headers, includeBody: includeBody
+            )
         }
         let object: [String: Any] = [
-            "accountID": thread.accountID,
-            "accountIdentity": thread.accountIdentity,
-            "threadID": thread.id,
-            "historyID": thread.historyID ?? "",
+            "providerID": conversation.account.providerID,
+            "accountID": conversation.account.localID,
+            "accountIdentity": conversation.accountAddress,
+            "conversationID": conversation.id,
+            "cursor": conversation.cursor ?? "",
             "triggerMessageID": message.id,
             "messages": messages,
         ]
         return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
     }
 
-    private func workflowThreadText(_ thread: GmailThreadDetailSnapshot) -> String {
-        thread.messages.enumerated().map { index, message in
+    private func workflowThreadText(
+        _ conversation: MailConversationSnapshot,
+        policy: DesktopWorkflowCapturePolicy
+    ) -> String {
+        let includeBody = policy.capturesMailBody
+        return conversation.messages.enumerated().map { index, message in
             """
             Message \(index + 1) [\(message.id)]
             From: \(message.sender)
@@ -674,7 +807,7 @@ public final class DesktopMailViewModel: ObservableObject {
             Subject: \(message.subject)
             Attachments: \(message.attachments.map(\.filename).joined(separator: ", "))
 
-            \(message.body)
+            \(includeBody ? message.body : "[Body omitted by capture policy]")
             """
         }.joined(separator: "\n\n---\n\n")
     }
@@ -734,7 +867,7 @@ public final class DesktopMailViewModel: ObservableObject {
         )
         let router = DesktopWorkflowCapabilityRouter(fallback: fallback)
         let effectCoordinator = DesktopWorkflowEffectCoordinator(model: model)
-        effectCoordinator.register(DesktopGmailWorkflowConnector(service: service))
+        effectCoordinator.register(DesktopMailWorkflowConnector(adapter: mailAdapter))
         var componentIssues: [String] = []
         for connector in model.snapshot.operations.workflows.connectorInstallations
             .filter({ $0.enabled && $0.qualified }) {
@@ -950,14 +1083,19 @@ public final class DesktopMailViewModel: ObservableObject {
             throw DesktopWorkflowCapabilityError.executionFailed("The bounded agent did not finish within its reviewed tool-call budget.")
         }
         for capabilityID in ["kaname.email.draft", "kaname.email.send"] {
-            await router.register(capabilityID: capabilityID) { [weak model] invocation, _ in
-                guard let model else { throw DesktopWorkflowCapabilityError.executionUnavailable }
+            await router.register(capabilityID: capabilityID) { [weak model, weak self] invocation, _ in
+                guard let model, let self else { throw DesktopWorkflowCapabilityError.executionUnavailable }
                 let outbound = try WorkflowEmailEffectRequest.decode(invocation.input)
                 let message = try outbound.message()
                 let send = invocation.step.kind == .sendEmail
-                let exactTarget = try send
-                    ? NativeGoogleIntegrationService.gmailSendTarget(accountID: outbound.accountID, message: message)
-                    : NativeGoogleIntegrationService.gmailDraftTarget(accountID: outbound.accountID, message: message)
+                let operation: MailOutboundOperation = send ? .send : .draft
+                let readiness = try await self.mailAdapter.readiness(accountID: outbound.accountID)
+                guard readiness.feature(send ? .send : .draft)?.ready == true else {
+                    throw DesktopWorkflowCapabilityError.executionFailed("The requested outbound mail feature is not ready.")
+                }
+                let exactTarget = try await self.mailAdapter.exactOutboundTarget(
+                    accountID: outbound.accountID, operation: operation, message: message
+                )
                 guard let storage = await MainActor.run(body: { model.workflowStorage(workflowID: invocation.workflowID) }) else {
                     throw DesktopWorkflowCapabilityError.executionFailed("Kaname could not open private workflow storage.")
                 }
@@ -973,7 +1111,7 @@ public final class DesktopMailViewModel: ObservableObject {
                         episodeID: invocation.episodeID,
                         runID: invocation.runID,
                         stepID: invocation.step.id,
-                        kind: send ? "gmail-send" : "gmail-draft",
+                        kind: send ? "mail-send" : "mail-draft",
                         accountID: outbound.accountID,
                         exactTarget: exactTarget,
                         contentDigest: storedInput.sha256,
@@ -990,9 +1128,35 @@ public final class DesktopMailViewModel: ObservableObject {
             let request = try WorkflowEmailReadRequest.decode(invocation.input)
             guard await MainActor.run(body: {
                 model.workflowRevision(runID: invocation.runID)?.permissions.accountIDs.contains(request.accountID) == true
-            }) else { throw DesktopWorkflowCapabilityError.executionFailed("The Gmail account is outside this workflow revision's reviewed scope.") }
-            var threads: [GmailThreadDetailSnapshot] = []
-            var labels: [GmailLabelSnapshot] = []
+            }) else { throw DesktopWorkflowCapabilityError.executionFailed("The mail account is outside this workflow revision's reviewed scope.") }
+            let capturePolicy = await MainActor.run {
+                model.workflowMailCapturePolicy(
+                    workflowID: invocation.workflowID, accountID: request.accountID
+                )
+            }
+            let readiness = try await self.mailAdapter.readiness(accountID: request.accountID)
+            let requiredFeature: MailProviderFeature = switch request.operation {
+            case .search: .boundedSearch
+            case .thread: .conversationRead
+            case .resources, .labels: .logicalResourceBinding
+            }
+            guard readiness.feature(requiredFeature)?.ready == true else {
+                let missing = readiness.feature(requiredFeature)?.missingScopes.joined(separator: ", ") ?? "unsupported feature"
+                throw DesktopWorkflowCapabilityError.executionFailed("The mail provider feature is not ready: \(missing).")
+            }
+            if let extensionID = request.queryExtensionID {
+                guard readiness.feature(.boundedSearch)?.extensionIDs.contains(extensionID) == true else {
+                    throw DesktopWorkflowCapabilityError.executionFailed("The mail adapter does not declare query extension \(extensionID).")
+                }
+            }
+            if !request.headerProjection.isEmpty {
+                guard let extensionID = request.headerProjectionExtensionID,
+                      readiness.feature(.conversationRead)?.extensionIDs.contains(extensionID) == true else {
+                    throw DesktopWorkflowCapabilityError.executionFailed("The mail adapter does not declare projected-header support.")
+                }
+            }
+            var conversations: [MailConversationSnapshot] = []
+            var resources: [MailResourceSnapshot] = []
             var pages = 0
             switch request.operation {
             case .search:
@@ -1000,56 +1164,68 @@ public final class DesktopMailViewModel: ObservableObject {
                 var seenTokens = Set<String>()
                 repeat {
                     guard pages < request.maximumPages else {
-                        throw DesktopWorkflowCapabilityError.executionFailed("The Gmail search exceeded its reviewed page limit.")
+                        throw DesktopWorkflowCapabilityError.executionFailed("The mail search exceeded its reviewed page limit.")
                     }
-                    let page = try await self.service.searchMail(
-                        accountID: request.accountID, query: request.query ?? "", pageToken: pageToken, limit: 100
+                    let extensions = request.queryExtensionID.map { [$0: request.query ?? ""] } ?? [:]
+                    let page = try await self.mailAdapter.search(
+                        accountID: request.accountID,
+                        query: MailQuery(
+                            text: request.query ?? "", pageToken: pageToken, limit: 100, extensions: extensions
+                        )
                     )
-                    guard page.failedThreadCount == 0 else {
-                        throw DesktopWorkflowCapabilityError.executionFailed("Gmail returned an incomplete thread page.")
+                    guard page.failedConversationCount == 0 else {
+                        throw DesktopWorkflowCapabilityError.executionFailed("The mail provider returned an incomplete conversation page.")
                     }
-                    threads.append(contentsOf: page.threads)
-                    guard threads.count <= request.maximumThreads else {
-                        throw DesktopWorkflowCapabilityError.executionFailed("The Gmail search exceeded its reviewed thread limit.")
+                    conversations.append(contentsOf: page.conversations)
+                    guard conversations.count <= request.maximumThreads else {
+                        throw DesktopWorkflowCapabilityError.executionFailed("The mail search exceeded its reviewed conversation limit.")
                     }
                     pages += 1
                     pageToken = page.nextPageToken
                     if let pageToken, !seenTokens.insert(pageToken).inserted {
-                        throw DesktopWorkflowCapabilityError.executionFailed("Gmail repeated a search page token.")
+                        throw DesktopWorkflowCapabilityError.executionFailed("The mail provider repeated a search page token.")
                     }
                 } while pageToken != nil
             case .thread:
-                threads = [try await self.service.readMailThread(
-                    accountID: request.accountID, threadID: request.threadID ?? ""
+                conversations = [try await self.mailAdapter.conversation(
+                    accountID: request.accountID, conversationID: request.threadID ?? ""
                 )]
                 pages = 1
-            case .labels:
-                labels = try await self.service.listGmailLabels(accountID: request.accountID)
+            case .resources, .labels:
+                resources = try await self.mailAdapter.resources(accountID: request.accountID)
                 pages = 1
             }
             var attachments: [String: Data] = [:]
-            if request.includeAttachmentBytes {
+            if request.includeAttachmentBytes, capturePolicy.includeAttachments {
                 var total = 0
-                for thread in threads {
-                    for message in thread.messages {
+                var count = 0
+                for conversation in conversations {
+                    for message in conversation.messages {
                         for attachment in message.attachments {
-                            let data = try await self.service.downloadGmailAttachment(
+                            guard let policyMaximum = capturePolicy.maximumBytesForNextAttachment(
+                                mediaType: attachment.mediaType, declaredSize: attachment.size,
+                                capturedCount: count, capturedBytes: total
+                            ) else { continue }
+                            let maximumBytes = min(request.maximumAttachmentBytes, policyMaximum)
+                            guard attachment.size <= maximumBytes else { continue }
+                            let data = try await self.mailAdapter.attachment(
                                 accountID: request.accountID, messageID: attachment.messageID,
                                 attachmentID: attachment.attachmentID,
-                                maximumBytes: request.maximumAttachmentBytes
+                                maximumBytes: maximumBytes
                             )
                             total += data.count
-                            guard total <= request.maximumAttachmentBytes else {
+                            guard total <= capturePolicy.maximumTotalBytes else {
                                 throw DesktopWorkflowCapabilityError.inputTooLarge
                             }
                             attachments[WorkflowEmailReadResponse.attachmentKey(attachment)] = data
+                            count += 1
                         }
                     }
                 }
             }
             let output = try WorkflowEmailReadResponse.encode(
-                request: request, threads: threads, labels: labels, pages: pages,
-                attachmentPayloads: attachments
+                request: request, conversations: conversations, resources: resources, pages: pages,
+                attachmentPayloads: attachments, capturePolicy: capturePolicy
             )
             return .completed(output: output, artifactIDs: [])
         }
@@ -1077,15 +1253,15 @@ public final class DesktopMailViewModel: ObservableObject {
         guard effect.approvalID == nil,
               let approvalID = model.createApproval(
                   threadID: nil,
-                  title: preview?.title ?? (effect.kind == "gmail-send" ? "Send workflow email" : "Create workflow Gmail draft"),
+                  title: preview?.title ?? (effect.kind == "mail-send" ? "Send workflow email" : "Create workflow email draft"),
                   exactTarget: effect.exactTarget,
-                  consequence: preview?.consequences.joined(separator: " ") ?? (effect.kind == "gmail-send"
+                  consequence: preview?.consequences.joined(separator: " ") ?? (effect.kind == "mail-send"
                       ? "Send the exact reviewed workflow reply."
-                      : "Create the exact reviewed workflow draft in Gmail."),
-                  dataLeavingDevice: effect.kind.hasPrefix("gmail-")
+                      : "Create the exact reviewed workflow draft at the selected provider."),
+                  dataLeavingDevice: effect.kind.hasPrefix("mail-")
                       ? "Recipients, thread headers, subject, body, and attachment bytes"
                       : "Exact connector target and declared effect payload",
-                  reversible: preview?.reversible ?? (effect.kind != "gmail-send"),
+                  reversible: preview?.reversible ?? (effect.kind != "mail-send"),
                   expiresAtUnixMillis: Int64(Date().addingTimeInterval(15 * 60).timeIntervalSince1970 * 1_000)
               ) else { return }
         _ = model.attachWorkflowEffectApproval(effectID: effect.id, approvalID: approvalID)
@@ -1094,7 +1270,7 @@ public final class DesktopMailViewModel: ObservableObject {
 
     public func executeWorkflowEffect(model: DesktopAppModel, effect: DesktopWorkflowEffectRecord) {
         if model.snapshot.operations.workflows.effectPreviews.contains(where: {
-            $0.effectID == effect.id && $0.connectorID == "kaname.gmail"
+            $0.effectID == effect.id && $0.connectorID == "kaname.mail"
         }) {
             executeTrustedConnectorEffect(model: model, effect: effect)
             return
@@ -1114,28 +1290,28 @@ public final class DesktopMailViewModel: ObservableObject {
         isBusy = true
         _Concurrency.Task {
             do {
-                let grant = GmailMutationGrant(approvalID: approvalID, exactTarget: effect.exactTarget)
-                let receipt: String
-                if effect.kind == "gmail-send" {
-                    let sent = try await service.sendGmailMessage(accountID: request.accountID, message: outbound, grant: grant)
-                    receipt = "Sent message \(sent.messageID). \(sent.reconciliation.summary)"
-                } else {
-                    let drafted = try await service.createGmailDraft(accountID: request.accountID, message: outbound, grant: grant)
-                    receipt = "Draft \(drafted.id). \(drafted.reconciliation.summary)"
-                }
-                _ = model.reconcileWorkflowEffect(effectID: effect.id, receipt: receipt, outcomeKnown: true, succeeded: true)
+                let operation: MailOutboundOperation = effect.kind == "mail-send" ? .send : .draft
+                let outboundReceipt = try await mailAdapter.performOutbound(
+                    accountID: request.accountID, operation: operation, message: outbound,
+                    grant: MailEffectGrant(approvalID: approvalID, exactTarget: effect.exactTarget)
+                )
+                let reconciliation = outboundReceipt.reconciliation
+                let receipt = "\(operation == .send ? "Sent message" : "Draft") \(outboundReceipt.remoteID). Verified recipients, subject, conversation, and \(reconciliation.attachmentNames.count) attachment(s) at \(mailAdapter.identity.displayName)."
+                _ = model.reconcileWorkflowEffect(
+                    effectID: effect.id, receipt: receipt, outcomeKnown: true, succeeded: true
+                )
                 let digest = SHA256.hash(data: input).map { String(format: "%02x", $0) }.joined()
                 _ = model.resumeWorkflowStepAfterEffect(runID: effect.runID, stepID: effect.stepID, outputDigest: digest)
                 message = receipt
                 await executeQueuedWorkflowRuns(model: model)
-            } catch GmailWorkError.reconciliationFailed {
+            } catch MailProviderAdapterError.reconciliationFailed {
                 _ = model.reconcileWorkflowEffect(
                     effectID: effect.id,
-                    receipt: GmailWorkError.reconciliationFailed.localizedDescription,
+                    receipt: MailProviderAdapterError.reconciliationFailed.localizedDescription,
                     outcomeKnown: true,
                     succeeded: false
                 )
-                message = "Gmail returned a result that did not match the approved message. Kaname will not retry it."
+                message = "The mail provider returned a result that did not match the approved message. Kaname will not retry it."
             } catch {
                 _ = model.reconcileWorkflowEffect(
                     effectID: effect.id,
@@ -1143,7 +1319,7 @@ public final class DesktopMailViewModel: ObservableObject {
                     outcomeKnown: false,
                     succeeded: false
                 )
-                message = "The Gmail outcome is unknown. Kaname will not retry until it is reconciled."
+                message = "The mail-provider outcome is unknown. Kaname will not retry until it is reconciled."
             }
             isBusy = false
         }

@@ -75,6 +75,11 @@ struct WorkflowInstallationSetupSheet: View {
     @State private var bindingValues: [String: String] = [:]
     @State private var captureLevel = DesktopWorkflowMailCaptureLevel.metadataOnly
     @State private var includeAttachments = false
+    @State private var headerAllowlist = ""
+    @State private var attachmentMIMETypes = ""
+    @State private var maximumAttachmentMegabytes = 25
+    @State private var maximumTotalMegabytes = 100
+    @State private var maximumAttachmentCount = 20
     @State private var settledContent = DesktopWorkflowSettledContentPolicy.purgeOrdinaryContent
     @State private var message: String?
     @State private var loaded = false
@@ -135,6 +140,15 @@ struct WorkflowInstallationSetupSheet: View {
                             ForEach(DesktopWorkflowMailCaptureLevel.allCases, id: \.self) { Text(captureLabel($0)).tag($0) }
                         }
                         Toggle("Include declared attachments", isOn: $includeAttachments)
+                        if captureLevel == .allowlistedHeaders {
+                            TextField("Allowed headers, comma separated", text: $headerAllowlist)
+                        }
+                        if includeAttachments {
+                            TextField("Allowed MIME types, comma separated; blank allows any", text: $attachmentMIMETypes)
+                            Stepper("Per attachment: \(maximumAttachmentMegabytes) MB", value: $maximumAttachmentMegabytes, in: 1...100)
+                            Stepper("Total capture: \(maximumTotalMegabytes) MB", value: $maximumTotalMegabytes, in: 1...500)
+                            Stepper("Attachment count: \(maximumAttachmentCount)", value: $maximumAttachmentCount, in: 1...100)
+                        }
                         Picker("After work settles", selection: $settledContent) {
                             Text("Purge ordinary copied content").tag(DesktopWorkflowSettledContentPolicy.purgeOrdinaryContent)
                             Text("Retain until explicit removal").tag(DesktopWorkflowSettledContentPolicy.retainUntilExplicitRemoval)
@@ -173,12 +187,9 @@ struct WorkflowInstallationSetupSheet: View {
                 ForEach(accounts) { account in Text(account.identity).tag(account.id) }
             }
         case .providerResource:
-            Picker(slot.label, selection: binding(slot.id)) {
-                Text("Choose provider resource").tag("")
-                ForEach(model.snapshot.domains.calendarSources.filter(\.isEnabled)) { resource in
-                    Text("\(resource.displayName) · \(resource.ownerIdentity)").tag(resource.id)
-                }
-            }
+            TextField(slot.label, text: binding(slot.id), prompt: Text("Stable provider resource ID"))
+            Text("Kaname verifies this logical binding against the selected account before dispatch.")
+                .font(.caption2).foregroundStyle(.secondary)
         case .folder:
             HStack {
                 TextField(slot.label, text: binding(slot.id))
@@ -239,6 +250,11 @@ struct WorkflowInstallationSetupSheet: View {
         })?.policy {
             captureLevel = policy.mailLevel
             includeAttachments = policy.includeAttachments
+            headerAllowlist = policy.headerAllowlist.joined(separator: ", ")
+            attachmentMIMETypes = policy.attachmentMIMETypes.joined(separator: ", ")
+            maximumAttachmentMegabytes = max(1, policy.maximumAttachmentBytes / (1_024 * 1_024))
+            maximumTotalMegabytes = max(1, policy.maximumTotalBytes / (1_024 * 1_024))
+            maximumAttachmentCount = max(1, policy.maximumAttachmentCount)
         }
         if let policy = model.snapshot.operations.workflows.retentionPolicyRevisions.first(where: {
             $0.id == installation.currentRetentionPolicyRevisionID
@@ -268,10 +284,12 @@ struct WorkflowInstallationSetupSheet: View {
                 dependencyLock: locks,
                 capturePolicy: DesktopWorkflowCapturePolicy(
                     mailLevel: captureLevel,
+                    headerAllowlist: commaSeparated(headerAllowlist),
                     includeAttachments: includeAttachments,
-                    maximumAttachmentBytes: includeAttachments ? 32 * 1_024 * 1_024 : 0,
-                    maximumTotalBytes: includeAttachments ? 128 * 1_024 * 1_024 : 0,
-                    maximumAttachmentCount: includeAttachments ? 32 : 0
+                    attachmentMIMETypes: commaSeparated(attachmentMIMETypes),
+                    maximumAttachmentBytes: includeAttachments ? maximumAttachmentMegabytes * 1_024 * 1_024 : 0,
+                    maximumTotalBytes: includeAttachments ? maximumTotalMegabytes * 1_024 * 1_024 : 0,
+                    maximumAttachmentCount: includeAttachments ? maximumAttachmentCount : 0
                 ),
                 retentionPolicy: DesktopWorkflowRetentionPolicy(settledContent: settledContent)
             )
@@ -279,6 +297,12 @@ struct WorkflowInstallationSetupSheet: View {
         } catch {
             message = error.localizedDescription
         }
+    }
+
+    private func commaSeparated(_ value: String) -> [String] {
+        Array(Set(value.split(separator: ",").map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }.filter { !$0.isEmpty })).sorted()
     }
 
     private func encodedConfiguration() -> Data? {

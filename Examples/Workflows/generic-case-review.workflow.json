@@ -154,10 +154,10 @@
       ],
       "waitContract": {
         "accountPointer": "/accountID",
-        "connectorID": "kaname.gmail",
+        "connectorID": "kaname.mail",
         "conversationPointer": "/conversationID",
         "correlationPointer": "/correlation",
-        "source": "gmail",
+        "source": "mail",
         "supersedePrior": true,
         "timeoutSeconds": 604800
       }

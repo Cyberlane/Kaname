@@ -218,7 +218,7 @@ public struct DesktopMailActionRecord: Codable, Equatable, Identifiable, Sendabl
             case .archive: "Archive"
             case .trash: "Move to Trash"
             case .labels: "Change labels"
-            case .createDraft: "Create Gmail draft"
+            case .createDraft: "Create mail draft"
             case .send: "Send email"
             }
         }

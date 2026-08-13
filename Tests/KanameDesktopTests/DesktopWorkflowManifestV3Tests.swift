@@ -163,6 +163,69 @@ struct DesktopWorkflowManifestV3Tests {
         #expect(model.snapshot.operations.workflows.configurationRevisions.contains { $0.id == priorConfigurationID })
     }
 
+    @Test
+    func capturePolicyIsAccountScopedAndProviderReadinessDisablesMissingResources() throws {
+        let model = DesktopAppModel(store: ManifestV3MemoryStore(), now: { 300_000 })
+        _ = try model.installWorkflowPackage(manifestData: fixtureData(), registeredCapabilityIDs: capabilities)
+        let installation = try #require(model.workflowInstallations(workflowID: "org.example.mailbox-review-v3").first)
+        let policy = DesktopWorkflowCapturePolicy(
+            mailLevel: .allowlistedHeaders,
+            headerAllowlist: ["List-Unsubscribe"],
+            includeAttachments: true,
+            attachmentMIMETypes: ["application/pdf"],
+            maximumAttachmentBytes: 2_000_000,
+            maximumTotalBytes: 4_000_000,
+            maximumAttachmentCount: 2
+        )
+        #expect(!policy.capturesMailBody)
+        #expect(policy.capturedHeaders(from: ["list-unsubscribe", "Precedence"]) == ["list-unsubscribe"])
+        #expect(policy.maximumBytesForNextAttachment(
+            mediaType: "application/pdf", declaredSize: 1_000_000,
+            capturedCount: 1, capturedBytes: 2_000_000
+        ) == 2_000_000)
+        #expect(policy.maximumBytesForNextAttachment(
+            mediaType: "image/png", declaredSize: 100,
+            capturedCount: 0, capturedBytes: 0
+        ) == nil)
+        try model.reviseWorkflowInstallation(
+            id: installation.id,
+            configuration: Data(#"{"includeRead":false,"query":"in:inbox","reviewLabel":"Review"}"#.utf8),
+            bindings: bindings(account: "account-1", label: "resource-1"),
+            dependencyLock: [], capturePolicy: policy, retentionPolicy: .init()
+        )
+        #expect(model.workflowMailCapturePolicy(
+            workflowID: "org.example.mailbox-review-v3", accountID: "account-1"
+        ) == .init())
+        #expect(model.setWorkflowInstallationEnabled(id: installation.id, enabled: true))
+        #expect(model.workflowMailCapturePolicy(
+            workflowID: "org.example.mailbox-review-v3", accountID: "account-1"
+        ) == policy)
+        #expect(model.workflowMailCapturePolicy(
+            workflowID: "org.example.mailbox-review-v3", accountID: "different-account"
+        ) == .init())
+
+        #expect(model.recordWorkflowProviderReadiness(
+            installationID: installation.id, issues: ["account-1 is missing bound resource ID resource-1."]
+        ))
+        let blocked = try #require(model.workflowInstallations.first { $0.id == installation.id })
+        #expect(!blocked.enabled)
+        #expect(blocked.readinessIssues.contains { $0.hasPrefix("Provider: ") })
+        #expect(model.recordWorkflowProviderReadiness(installationID: installation.id, issues: []))
+        let recovered = try #require(model.workflowInstallations.first { $0.id == installation.id })
+        #expect(recovered.readinessIssues.isEmpty)
+        #expect(!recovered.enabled)
+    }
+
+    @Test
+    func reusableMailGraphsContainNoProviderIdentifier() throws {
+        for filename in ["mailbox-review-v3.workflow.json", "generic-case-review.workflow.json"] {
+            let data = try Data(contentsOf: packageRoot().appendingPathComponent("Examples/Workflows/\(filename)"))
+            let text = try #require(String(data: data, encoding: .utf8)).lowercased()
+            #expect(!text.contains("gmail"), "\(filename) contains a provider-specific identifier")
+            #expect(!text.contains("kaname.gmail"), "\(filename) contains a provider-specific connector")
+        }
+    }
+
     private func fixtureData() throws -> Data {
         try Data(contentsOf: packageRoot().appendingPathComponent("Examples/Workflows/mailbox-review-v3.workflow.json"))
     }
