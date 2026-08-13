@@ -1108,6 +1108,96 @@ struct DesktopAppModelTests {
     }
 
     @Test
+    func resumableMailActionRestoresExactApprovedTargetWithoutReusingRejectedOrMismatchedAuthority() throws {
+        let store = MemoryDesktopStateStore()
+        var timestamp: Int64 = 14_000
+        let model = DesktopAppModel(store: store, now: {
+            defer { timestamp += 1 }
+            return timestamp
+        })
+        let target = "gmail:account-1:thread:thread-1:trash"
+        let approvedActionID = try #require(model.recordMailAction(
+            accountID: "account-1",
+            accountIdentity: "one@example.test",
+            threadID: "thread-1",
+            kind: .trash,
+            preview: "Move one exact thread to Trash.",
+            exactTarget: target
+        ))
+        let approvalID = try #require(model.createApproval(
+            threadID: nil,
+            title: "Move to Trash",
+            exactTarget: target,
+            consequence: "Move one exact thread to Trash.",
+            dataLeavingDevice: "Account and thread identifiers",
+            reversible: true,
+            expiresAtUnixMillis: nil
+        ))
+        model.attachMailApproval(actionID: approvedActionID, approvalID: approvalID)
+        model.resolveApproval(id: approvalID, approved: true)
+
+        let duplicateProposalID = try #require(model.recordMailAction(
+            accountID: "account-1",
+            accountIdentity: "one@example.test",
+            threadID: "thread-1",
+            kind: .trash,
+            preview: "Move one exact thread to Trash.",
+            exactTarget: target
+        ))
+        let mismatchedActionID = try #require(model.recordMailAction(
+            accountID: "account-1",
+            accountIdentity: "one@example.test",
+            threadID: "thread-1",
+            kind: .trash,
+            preview: "Move one exact thread to Trash.",
+            exactTarget: "gmail:account-1:thread:thread-1:archive"
+        ))
+        let mismatchedApprovalID = try #require(model.createApproval(
+            threadID: nil,
+            title: "Move to Trash",
+            exactTarget: target,
+            consequence: "Move one exact thread to Trash.",
+            dataLeavingDevice: "Account and thread identifiers",
+            reversible: true,
+            expiresAtUnixMillis: nil
+        ))
+        model.attachMailApproval(actionID: mismatchedActionID, approvalID: mismatchedApprovalID)
+        model.resolveApproval(id: mismatchedApprovalID, approved: true)
+        let rejectedActionID = try #require(model.recordMailAction(
+            accountID: "account-1",
+            accountIdentity: "one@example.test",
+            threadID: "thread-1",
+            kind: .archive,
+            preview: "Remove Inbox from one exact thread.",
+            exactTarget: "gmail:account-1:thread:thread-1:archive"
+        ))
+        let rejectedApprovalID = try #require(model.createApproval(
+            threadID: nil,
+            title: "Archive",
+            exactTarget: "gmail:account-1:thread:thread-1:archive",
+            consequence: "Remove Inbox from one exact thread.",
+            dataLeavingDevice: "Account and thread identifiers",
+            reversible: true,
+            expiresAtUnixMillis: nil
+        ))
+        model.attachMailApproval(actionID: rejectedActionID, approvalID: rejectedApprovalID)
+        model.resolveApproval(id: rejectedApprovalID, approved: false)
+
+        let restored = DesktopAppModel(store: store, now: { 15_000 })
+        #expect(restored.resumableMailAction(
+            accountID: "account-1",
+            threadID: "thread-1",
+            exactTarget: target
+        )?.id == approvedActionID)
+        #expect(restored.snapshot.operations.mailActions.first { $0.id == duplicateProposalID }?.state == .proposed)
+        #expect(restored.resumableMailAction(
+            accountID: "account-1",
+            threadID: "thread-1",
+            exactTarget: "gmail:account-1:thread:thread-1:archive"
+        ) == nil)
+    }
+
+    @Test
     func fileStoreUsesPrivateDirectoryAndFileModes() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("kaname-desktop-state-\(UUID().uuidString)")

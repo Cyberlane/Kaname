@@ -2756,6 +2756,42 @@ public final class DesktopAppModel: ObservableObject {
         }
     }
 
+    public func resumableMailAction(
+        accountID: String,
+        threadID: String,
+        exactTarget: String
+    ) -> DesktopMailActionRecord? {
+        snapshot.operations.mailActions
+            .filter {
+                $0.accountID == accountID
+                    && $0.threadID == threadID
+                    && $0.exactTarget == exactTarget
+                    && $0.standingRuleID == nil
+                    && ($0.state == .proposed || $0.state == .awaitingApproval)
+            }
+            .compactMap { action -> (record: DesktopMailActionRecord, priority: Int)? in
+                guard let approvalID = action.approvalID else {
+                    return action.state == .proposed ? (action, 0) : nil
+                }
+                guard action.state == .awaitingApproval,
+                      let approval = snapshot.operations.approvals.first(where: { $0.id == approvalID }),
+                      approval.exactTarget == action.exactTarget else { return nil }
+                switch approval.state {
+                case .approved:
+                    return (action, 2)
+                case .awaitingApproval:
+                    return (action, 1)
+                default:
+                    return nil
+                }
+            }
+            .max {
+                if $0.priority != $1.priority { return $0.priority < $1.priority }
+                return $0.record.createdAtUnixMillis < $1.record.createdAtUnixMillis
+            }?
+            .record
+    }
+
     @discardableResult
     public func createMailStandingRule(
         accountID: String,

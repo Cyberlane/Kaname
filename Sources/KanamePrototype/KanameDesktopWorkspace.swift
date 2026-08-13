@@ -6534,7 +6534,7 @@ private struct DesktopEmailView: View {
                         MailThreadRow(thread: thread)
                             .tag(thread.stableID)
                             .onTapGesture {
-                                mail.select(thread)
+                                pendingMutation = mail.select(thread, model: model)
                                 mail.loadLabels(accountID: thread.accountID)
                             }
                     }
@@ -6552,7 +6552,7 @@ private struct DesktopEmailView: View {
             get: { mail.selectedThread?.stableID },
             set: { stableID in
                 guard let stableID, let thread = mail.threads.first(where: { $0.stableID == stableID }) else { return }
-                mail.select(thread)
+                pendingMutation = mail.select(thread, model: model)
             }
         )
     }

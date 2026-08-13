@@ -148,7 +148,7 @@ let package = Package(
         ),
         .testTarget(
             name: "KanameDesktopTests",
-            dependencies: ["KanameDesktop"]
+            dependencies: ["KanameConnectivity", "KanameDesktop", "KanameWorkflowHost"]
         ),
     ]
 )

@@ -1423,10 +1423,12 @@ public final class DesktopMailViewModel: ObservableObject {
         }
     }
 
-    public func select(_ thread: GmailThreadDetailSnapshot) {
+    @discardableResult
+    public func select(_ thread: GmailThreadDetailSnapshot, model: DesktopAppModel) -> GmailThreadMutation? {
         selectedThread = thread
         activeActionID = nil
         localSummary = nil
+        return restoreThreadAction(model: model, thread: thread)
     }
 
     public func summarize(_ thread: GmailThreadDetailSnapshot) {
@@ -1474,6 +1476,15 @@ public final class DesktopMailViewModel: ObservableObject {
             threadID: thread.id,
             mutation: mutation
         )
+        if let existing = model.resumableMailAction(
+            accountID: thread.accountID,
+            threadID: thread.id,
+            exactTarget: target
+        ), existing.kind == kind {
+            activeActionID = existing.id
+            message = actionResumeMessage(existing, model: model)
+            return
+        }
         activeActionID = model.recordMailAction(
             accountID: thread.accountID,
             accountIdentity: thread.accountIdentity,
@@ -1711,11 +1722,55 @@ public final class DesktopMailViewModel: ObservableObject {
         activeActionID.flatMap { id in model.snapshot.operations.mailActions.first { $0.id == id } }
     }
 
+    private func restoreThreadAction(
+        model: DesktopAppModel,
+        thread: GmailThreadDetailSnapshot
+    ) -> GmailThreadMutation? {
+        let candidates: [(mutation: GmailThreadMutation, action: DesktopMailActionRecord)] = [
+            (GmailThreadMutation.archive, DesktopMailActionRecord.Kind.archive),
+            (GmailThreadMutation.trash, DesktopMailActionRecord.Kind.trash),
+        ].compactMap { mutation, kind in
+            let target = NativeGoogleIntegrationService.gmailMutationTarget(
+                accountID: thread.accountID,
+                threadID: thread.id,
+                mutation: mutation
+            )
+            guard let action = model.resumableMailAction(
+                accountID: thread.accountID,
+                threadID: thread.id,
+                exactTarget: target
+            ), action.kind == kind else { return nil }
+            return (mutation, action)
+        }
+        guard let restored = candidates.max(by: {
+            $0.action.createdAtUnixMillis < $1.action.createdAtUnixMillis
+        }) else { return nil }
+        activeActionID = restored.action.id
+        message = actionResumeMessage(restored.action, model: model)
+        return restored.mutation
+    }
+
+    private func actionResumeMessage(
+        _ action: DesktopMailActionRecord,
+        model: DesktopAppModel
+    ) -> String {
+        guard let approvalID = action.approvalID,
+              let approval = model.snapshot.operations.approvals.first(where: { $0.id == approvalID }) else {
+            return "Restored the exact proposed Gmail action for review."
+        }
+        return approval.state == .approved
+            ? "Restored the exact approved Gmail action. Apply it here when ready."
+            : "Restored the exact Gmail action waiting in Inbox."
+    }
+
     private func authorizedAction(model: DesktopAppModel) -> DesktopMailActionRecord? {
         guard let action = activeAction(model: model) else { return nil }
         if action.standingRuleID != nil { return action }
-        guard let approvalID = action.approvalID,
-              model.snapshot.operations.approvals.first(where: { $0.id == approvalID })?.state == .approved else { return nil }
+        guard action.state == .awaitingApproval,
+              let approvalID = action.approvalID,
+              let approval = model.snapshot.operations.approvals.first(where: { $0.id == approvalID }),
+              approval.state == .approved,
+              approval.exactTarget == action.exactTarget else { return nil }
         return action
     }
 
