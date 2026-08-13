@@ -433,18 +433,23 @@ public struct DesktopWorkflowRetentionPolicy: Codable, Equatable, Sendable {
     public var retainAuditReceipts: Bool
     public var retainPromotedArtifacts: Bool
     public var unresolvedContentMaximumDays: Int?
+    public var maximumLocalBytes: Int? = nil
 
     public init(
         settledContent: DesktopWorkflowSettledContentPolicy = .purgeOrdinaryContent,
         retainAuditReceipts: Bool = true,
         retainPromotedArtifacts: Bool = true,
-        unresolvedContentMaximumDays: Int? = nil
+        unresolvedContentMaximumDays: Int? = nil,
+        maximumLocalBytes: Int? = 256 * 1_024 * 1_024
     ) {
         self.settledContent = settledContent
         self.retainAuditReceipts = retainAuditReceipts
         self.retainPromotedArtifacts = retainPromotedArtifacts
         self.unresolvedContentMaximumDays = unresolvedContentMaximumDays
+        self.maximumLocalBytes = maximumLocalBytes
     }
+
+    public var localByteQuota: Int { maximumLocalBytes ?? 256 * 1_024 * 1_024 }
 }
 
 public struct DesktopWorkflowRetentionPolicyRevisionRecord: Codable, Equatable, Identifiable, Sendable {
@@ -720,6 +725,9 @@ struct DesktopWorkflowInstallationSeed {
             if !DesktopWorkflowVersionConstraint.satisfies(version: entry.version, requirement: dependency.versionRequirement) {
                 issues.append("Dependency \(dependency.id) \(entry.version) does not satisfy \(dependency.versionRequirement).")
             }
+            if entry.digest?.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) == nil {
+                issues.append("Dependency \(dependency.id) needs an exact package digest.")
+            }
         }
         return issues.sorted()
     }
@@ -832,11 +840,11 @@ public extension DesktopAppModel {
             timestamp: timestamp
         )
         return mutate { state in
-            state.operations.workflows.configurationRevisions.append(seed.configuration)
-            state.operations.workflows.bindingRevisions.append(seed.binding)
-            state.operations.workflows.dependencyLockRevisions.append(seed.dependencyLock)
-            state.operations.workflows.capturePolicyRevisions.append(seed.capturePolicy)
-            state.operations.workflows.retentionPolicyRevisions.append(seed.retentionPolicy)
+            Self.appendInstallationRevision(seed.configuration, to: &state.operations.workflows.configurationRevisions)
+            Self.appendInstallationRevision(seed.binding, to: &state.operations.workflows.bindingRevisions)
+            Self.appendInstallationRevision(seed.dependencyLock, to: &state.operations.workflows.dependencyLockRevisions)
+            Self.appendInstallationRevision(seed.capturePolicy, to: &state.operations.workflows.capturePolicyRevisions)
+            Self.appendInstallationRevision(seed.retentionPolicy, to: &state.operations.workflows.retentionPolicyRevisions)
             guard let index = state.operations.workflows.installations.firstIndex(where: { $0.id == id }) else { return }
             state.operations.workflows.installations[index].currentConfigurationRevisionID = seed.configuration.id
             state.operations.workflows.installations[index].currentBindingRevisionID = seed.binding.id
@@ -947,29 +955,67 @@ public extension DesktopAppModel {
         seed.configuration.migratedFromRevisionID = currentConfiguration.id
         seed.installation.createdAtUnixMillis = installation.createdAtUnixMillis
         return mutate { state in
-            state.operations.workflows.configurationRevisions.append(seed.configuration)
-            state.operations.workflows.bindingRevisions.append(seed.binding)
-            state.operations.workflows.dependencyLockRevisions.append(seed.dependencyLock)
-            state.operations.workflows.capturePolicyRevisions.append(seed.capturePolicy)
-            state.operations.workflows.retentionPolicyRevisions.append(seed.retentionPolicy)
-            guard let index = state.operations.workflows.installations.firstIndex(where: { $0.id == installationID }) else { return }
-            state.operations.workflows.installations[index] = seed.installation
-            for grantIndex in state.operations.workflows.authorityGrants.indices
-                where state.operations.workflows.authorityGrants[grantIndex].workflowID == installation.workflowID {
-                state.operations.workflows.authorityGrants[grantIndex].state = .revoked
-            }
-            for bindingIndex in state.operations.workflows.triggerBindings.indices
-                where state.operations.workflows.triggerBindings[bindingIndex].workflowID == installation.workflowID {
-                state.operations.workflows.triggerBindings[bindingIndex].enabled = false
-                state.operations.workflows.triggerBindings[bindingIndex].lastCursor = nil
-                state.operations.workflows.triggerBindings[bindingIndex].updatedAtUnixMillis = timestamp
-            }
-            state.operations.audit.append(DesktopAuditRecord(
-                id: UUID().uuidString.lowercased(), domain: "workflow-installation", action: "upgraded",
-                target: installationID, state: .proposed,
-                detail: "Migrated configuration from \(fromRevision.version) to \(toRevision.version); installation, triggers, and standing authority remain disabled pending review.",
-                recordedAtUnixMillis: timestamp
-            ))
+            Self.replaceInstallationRevisionSet(
+                seed, workflowID: installation.workflowID, timestamp: timestamp,
+                auditAction: "upgraded",
+                auditDetail: "Migrated configuration from \(fromRevision.version) to \(toRevision.version); installation, triggers, and standing authority remain disabled pending review.",
+                in: &state
+            )
+        }
+    }
+
+    @discardableResult
+    func rollbackWorkflowInstallation(installationID: String, toRevisionID: String) throws -> Bool {
+        guard let installation = snapshot.operations.workflows.installations.first(where: { $0.id == installationID }),
+              installation.workflowRevisionID != toRevisionID,
+              let definition = snapshot.operations.workflows.definitions.first(where: { $0.id == installation.workflowID }),
+              let currentRevision = snapshot.operations.workflows.revisions.first(where: { $0.id == installation.workflowRevisionID }),
+              let targetRevision = snapshot.operations.workflows.revisions.first(where: {
+                  $0.id == toRevisionID && $0.workflowID == installation.workflowID
+              }),
+              let targetManifest = try? workflowManifest(definition: definition, revision: targetRevision),
+              let configuration = currentWorkflowConfiguration(installationID: installationID),
+              let bindings = currentWorkflowBindings(installationID: installationID),
+              let dependencyLock = snapshot.operations.workflows.dependencyLockRevisions.first(where: {
+                  $0.id == installation.currentDependencyLockRevisionID
+              }),
+              let capturePolicy = snapshot.operations.workflows.capturePolicyRevisions.first(where: {
+                  $0.id == installation.currentCapturePolicyRevisionID
+              })?.policy,
+              let retentionPolicy = snapshot.operations.workflows.retentionPolicyRevisions.first(where: {
+                  $0.id == installation.currentRetentionPolicyRevisionID
+              })?.policy else {
+            throw DesktopWorkflowOperationalError.workflowUnavailable
+        }
+        guard (targetManifest.configurationSchemaVersion ?? configuration.schemaVersion) == configuration.schemaVersion else {
+            throw DesktopWorkflowOperationalError.invalidConfiguration(
+                "Rollback requires a configuration revision compatible with schema \(targetManifest.configurationSchemaVersion ?? 1)."
+            )
+        }
+        let targetSlots = Set((targetManifest.bindingSlots ?? []).map(\.id))
+        let retainedBindings = bindings.resolutions.filter { targetSlots.contains($0.slotID) }
+        let targetDependencies = Set((targetManifest.dependencies ?? []).map { "\($0.kind.rawValue):\($0.id)" })
+        let retainedDependencies = dependencyLock.entries.filter {
+            targetDependencies.contains("\($0.kind.rawValue):\($0.componentID)")
+        }
+        let timestamp = now()
+        var seed = try DesktopWorkflowInstallationSeed.make(
+            manifest: targetManifest, revisionID: targetRevision.id,
+            installationID: installationID, name: installation.name,
+            configurationData: Data(configuration.canonicalJSON.utf8),
+            resolutions: retainedBindings, dependencyEntries: retainedDependencies,
+            capturePolicy: capturePolicy, retentionPolicy: retentionPolicy,
+            timestamp: timestamp
+        )
+        seed.configuration.migratedFromRevisionID = configuration.id
+        seed.installation.createdAtUnixMillis = installation.createdAtUnixMillis
+        return mutate { state in
+            Self.replaceInstallationRevisionSet(
+                seed, workflowID: installation.workflowID, timestamp: timestamp,
+                auditAction: "rolled-back",
+                auditDetail: "Rolled installation from \(currentRevision.version) to exact revision \(targetRevision.version); installation, triggers, and standing authority remain disabled pending review.",
+                in: &state
+            )
         }
     }
 
@@ -1005,13 +1051,13 @@ public extension DesktopAppModel {
 
     @discardableResult
     func recordWorkflowProviderReadiness(installationID: String, issues: [String]) -> Bool {
-        guard snapshot.operations.workflows.installations.contains(where: { $0.id == installationID }) else {
+        guard let installation = snapshot.operations.workflows.installations.first(where: { $0.id == installationID }) else {
             return false
         }
         let providerPrefix = "Provider: "
         let normalized = Array(Set(issues.map { providerPrefix + String($0.prefix(2_000)) })).sorted()
         let timestamp = now()
-        return mutate { state in
+        let persisted = mutate { state in
             guard let index = state.operations.workflows.installations.firstIndex(where: { $0.id == installationID }) else {
                 return
             }
@@ -1034,6 +1080,17 @@ public extension DesktopAppModel {
                 recordedAtUnixMillis: timestamp
             ))
         }
+        if persisted {
+            _ = recordWorkflowOperationalStatus(
+                workflowID: installation.workflowID, relatedID: installationID, kind: .resourceDrift,
+                level: .actionRequired,
+                summary: normalized.isEmpty
+                    ? "Provider features and logical resources are ready."
+                    : "Provider readiness drift disabled dispatch until explicit review.",
+                active: !normalized.isEmpty
+            )
+        }
+        return persisted
     }
 
     private func workflowManifest(
@@ -1105,6 +1162,49 @@ public extension DesktopAppModel {
                 recordedAtUnixMillis: seed.installation.createdAtUnixMillis
             ))
         }
+    }
+
+    private static func appendInstallationRevision<Record: Identifiable>(
+        _ record: Record,
+        to records: inout [Record]
+    ) where Record.ID: Equatable {
+        if !records.contains(where: { $0.id == record.id }) {
+            records.append(record)
+        }
+    }
+
+    private static func replaceInstallationRevisionSet(
+        _ seed: DesktopWorkflowInstallationSeed,
+        workflowID: String,
+        timestamp: Int64,
+        auditAction: String,
+        auditDetail: String,
+        in state: inout DesktopAppSnapshot
+    ) {
+        appendInstallationRevision(seed.configuration, to: &state.operations.workflows.configurationRevisions)
+        appendInstallationRevision(seed.binding, to: &state.operations.workflows.bindingRevisions)
+        appendInstallationRevision(seed.dependencyLock, to: &state.operations.workflows.dependencyLockRevisions)
+        appendInstallationRevision(seed.capturePolicy, to: &state.operations.workflows.capturePolicyRevisions)
+        appendInstallationRevision(seed.retentionPolicy, to: &state.operations.workflows.retentionPolicyRevisions)
+        guard let index = state.operations.workflows.installations.firstIndex(where: { $0.id == seed.installation.id }) else {
+            return
+        }
+        state.operations.workflows.installations[index] = seed.installation
+        for grantIndex in state.operations.workflows.authorityGrants.indices
+            where state.operations.workflows.authorityGrants[grantIndex].workflowID == workflowID {
+            state.operations.workflows.authorityGrants[grantIndex].state = .revoked
+        }
+        for bindingIndex in state.operations.workflows.triggerBindings.indices
+            where state.operations.workflows.triggerBindings[bindingIndex].workflowID == workflowID {
+            state.operations.workflows.triggerBindings[bindingIndex].enabled = false
+            state.operations.workflows.triggerBindings[bindingIndex].lastCursor = nil
+            state.operations.workflows.triggerBindings[bindingIndex].updatedAtUnixMillis = timestamp
+        }
+        state.operations.audit.append(DesktopAuditRecord(
+            id: UUID().uuidString.lowercased(), domain: "workflow-installation", action: auditAction,
+            target: seed.installation.id, state: .proposed, detail: auditDetail,
+            recordedAtUnixMillis: timestamp
+        ))
     }
 }
 

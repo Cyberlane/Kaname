@@ -168,8 +168,10 @@ struct DesktopWorkflowOperationsTests {
         #expect(model.updateWorkflowMigrationEvidence(
             id: assessmentID, passedScenarioIDs: ["fixture", "restart"], blockingFindings: []
         ))
-        try model.advanceWorkflowMigration(id: assessmentID, to: .shadow)
-        #expect(model.snapshot.operations.workflows.migrationAssessments.first?.stage == .shadow)
+        #expect(throws: DesktopWorkflowOperationalError.self) {
+            try model.advanceWorkflowMigration(id: assessmentID, to: .shadow)
+        }
+        #expect(model.snapshot.operations.workflows.migrationAssessments.first?.stage == .observeOnly)
     }
 
     @Test

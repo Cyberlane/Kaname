@@ -261,6 +261,14 @@ public struct DesktopWorkflowMigrationAssessmentRecord: Codable, Equatable, Iden
     public var blockingFindings: [String]
     public var legacyOutputDigest: String?
     public var kanameOutputDigest: String?
+    public var workflowRevisionID: String? = nil
+    public var manifestDigest: String? = nil
+    public var installationID: String? = nil
+    public var dependencyLockRevisionID: String? = nil
+    public var dependencyLockDigest: String? = nil
+    public var fixtureSuiteID: String? = nil
+    public var fixtureSuiteDigest: String? = nil
+    public var comparisonEvidenceIDs: [String]? = nil
     public var createdAtUnixMillis: Int64
     public var updatedAtUnixMillis: Int64
 }
@@ -306,12 +314,24 @@ public extension DesktopAppModel {
     ) -> Bool {
         guard snapshot.operations.workflows.triggerBindings.contains(where: { $0.id == bindingID }) else { return false }
         let timestamp = now()
-        return persistWorkflowTriggerHealth(DesktopWorkflowTriggerHealthRecord(
+        let persisted = persistWorkflowTriggerHealth(DesktopWorkflowTriggerHealthRecord(
             bindingID: bindingID, state: .healthy, lastAttemptAtUnixMillis: timestamp,
             lastSuccessAtUnixMillis: timestamp, nextAttemptAtUnixMillis: nil, consecutiveFailures: 0,
             errorCode: nil, errorSummary: nil, accountID: accountID,
             cursorLagEstimate: cursorLagEstimate.map { max(0, $0) }, authenticationRequired: false
         ))
+        if persisted {
+            let workflowID = snapshot.operations.workflows.triggerBindings.first { $0.id == bindingID }?.workflowID
+            _ = recordWorkflowOperationalStatus(
+                workflowID: workflowID, relatedID: bindingID, kind: .triggerLag,
+                level: .degraded, summary: "Trigger observation is current.", active: false
+            )
+            _ = recordWorkflowOperationalStatus(
+                workflowID: workflowID, relatedID: bindingID, kind: .authenticationExpired,
+                level: .actionRequired, summary: "Provider authentication is current.", active: false
+            )
+        }
+        return persisted
     }
 
     @discardableResult
@@ -338,11 +358,21 @@ public extension DesktopAppModel {
             accountID: accountID ?? prior?.accountID, cursorLagEstimate: prior?.cursorLagEstimate,
             authenticationRequired: authenticationRequired
         )
-        return persistWorkflowTriggerHealth(
+        let persisted = persistWorkflowTriggerHealth(
             health,
             actionRequiredDetail: state == .actionRequired
                 ? health.errorSummary ?? "Trigger check failed." : nil
         )
+        if persisted {
+            let workflowID = snapshot.operations.workflows.triggerBindings.first { $0.id == bindingID }?.workflowID
+            _ = recordWorkflowOperationalStatus(
+                workflowID: workflowID, relatedID: bindingID,
+                kind: authenticationRequired ? .authenticationExpired : .triggerLag,
+                level: state == .actionRequired ? .actionRequired : .degraded,
+                summary: health.errorSummary ?? "Trigger observation is delayed."
+            )
+        }
+        return persisted
     }
 
     @discardableResult
@@ -895,7 +925,9 @@ public extension DesktopAppModel {
         for (index, reference) in draft.subflows.enumerated() {
             guard let subflow = snapshot.operations.workflows.subflows.first(where: {
                 $0.subflowID == reference.subflowID && $0.version == reference.version && $0.enabled
-            }) else { return nil }
+            }), DesktopWorkflowPermissionMonotonicity.permits(
+                callee: subflow.permissions, within: draft.permissions
+            ) else { return nil }
             groups.append(("subflow\(index)-", subflow.steps))
         }
         if !draft.steps.isEmpty { groups.append(("", draft.steps)) }
@@ -983,15 +1015,32 @@ public extension DesktopAppModel {
     @discardableResult
     func createWorkflowMigrationAssessment(
         workflowID: String,
-        requiredScenarioIDs: [String]
+        requiredScenarioIDs: [String],
+        installationID: String? = nil
     ) -> String? {
-        guard snapshot.operations.workflows.definitions.contains(where: { $0.id == workflowID }),
+        guard let definition = snapshot.operations.workflows.definitions.first(where: { $0.id == workflowID }),
+              let revision = snapshot.operations.workflows.revisions.first(where: { $0.id == definition.currentRevisionID }),
               !requiredScenarioIDs.isEmpty else { return nil }
+        let candidates = snapshot.operations.workflows.installations.filter {
+            $0.workflowID == workflowID && $0.workflowRevisionID == revision.id
+        }
+        let installation = installationID.flatMap { selectedID in
+            candidates.first(where: { $0.id == selectedID })
+        } ?? (candidates.count == 1 ? candidates[0] : nil)
+        if installationID != nil, installation == nil { return nil }
+        let lock = installation.flatMap { selected in
+            snapshot.operations.workflows.dependencyLockRevisions.first {
+                $0.id == selected.currentDependencyLockRevisionID && $0.installationID == selected.id
+            }
+        }
         let timestamp = now()
         let assessment = DesktopWorkflowMigrationAssessmentRecord(
             id: UUID().uuidString.lowercased(), workflowID: workflowID, stage: .observeOnly,
             requiredScenarioIDs: Array(Set(requiredScenarioIDs)).sorted(), passedScenarioIDs: [],
             blockingFindings: [], legacyOutputDigest: nil, kanameOutputDigest: nil,
+            workflowRevisionID: revision.id, manifestDigest: revision.manifestDigest,
+            installationID: installation?.id, dependencyLockRevisionID: lock?.id,
+            dependencyLockDigest: lock?.digest,
             createdAtUnixMillis: timestamp, updatedAtUnixMillis: timestamp
         )
         guard mutate({ $0.operations.workflows.migrationAssessments.append(assessment) }) else { return nil }
@@ -1030,6 +1079,7 @@ public extension DesktopAppModel {
         let missing = Set(assessment.requiredScenarioIDs).subtracting(assessment.passedScenarioIDs).sorted()
         var blockers = assessment.blockingFindings
         if !missing.isEmpty { blockers.append("Missing scenarios: \(missing.joined(separator: ", "))") }
+        blockers.append(contentsOf: workflowMigrationEvidenceBlockers(assessment))
         if stage == .legacyRetired, assessment.legacyOutputDigest != assessment.kanameOutputDigest {
             blockers.append("Legacy and Kaname fixture outputs do not match.")
         }
@@ -1044,6 +1094,77 @@ public extension DesktopAppModel {
                 state: .completed, detail: "Advanced to \(stage.label).", recordedAtUnixMillis: timestamp
             )
         }) else { throw DesktopWorkflowOperationalError.componentUnavailable }
+    }
+
+    private func workflowMigrationEvidenceBlockers(
+        _ assessment: DesktopWorkflowMigrationAssessmentRecord
+    ) -> [String] {
+        guard let revisionID = assessment.workflowRevisionID,
+              let manifestDigest = assessment.manifestDigest,
+              let fixtureSuiteID = assessment.fixtureSuiteID,
+              let fixtureSuiteDigest = assessment.fixtureSuiteDigest else {
+            return ["Automated revision-bound comparison evidence is missing."]
+        }
+        guard let definition = snapshot.operations.workflows.definitions.first(where: { $0.id == assessment.workflowID }),
+              definition.currentRevisionID == revisionID,
+              let revision = snapshot.operations.workflows.revisions.first(where: {
+                  $0.id == revisionID && $0.manifestDigest == manifestDigest
+              }) else {
+            return ["The workflow package revision changed after evidence was recorded."]
+        }
+        if revision.schemaVersion >= 3 {
+            guard let installationID = assessment.installationID,
+                  let lockID = assessment.dependencyLockRevisionID,
+                  let lockDigest = assessment.dependencyLockDigest,
+                  let installation = snapshot.operations.workflows.installations.first(where: {
+                      $0.id == installationID && $0.workflowRevisionID == revisionID
+                  }),
+                  installation.readinessIssues.isEmpty,
+                  installation.currentDependencyLockRevisionID == lockID,
+                  snapshot.operations.workflows.dependencyLockRevisions.contains(where: {
+                      $0.id == lockID && $0.installationID == installationID && $0.digest == lockDigest
+                  }) else {
+                return ["The installation or dependency lock changed after evidence was recorded."]
+            }
+        }
+        let evidenceIDs = Set(assessment.comparisonEvidenceIDs ?? [])
+        var findings: [String] = []
+        for scenarioID in assessment.requiredScenarioIDs {
+            let candidates = snapshot.operations.workflows.migrationComparisons.filter {
+                evidenceIDs.contains($0.id) && $0.assessmentID == assessment.id && $0.scenarioID == scenarioID
+            }.sorted { ($0.createdAtUnixMillis, $0.id) > ($1.createdAtUnixMillis, $1.id) }
+            guard let comparison = candidates.first else {
+                findings.append("Scenario \(scenarioID) has no automated comparison evidence.")
+                continue
+            }
+            guard comparison.workflowRevisionID == revisionID,
+                  comparison.manifestDigest == manifestDigest,
+                  comparison.installationID == assessment.installationID,
+                  comparison.dependencyLockRevisionID == assessment.dependencyLockRevisionID,
+                  comparison.dependencyLockDigest == assessment.dependencyLockDigest,
+                  comparison.fixtureSuiteID == fixtureSuiteID,
+                  comparison.fixtureSuiteDigest == fixtureSuiteDigest else {
+                findings.append("Scenario \(scenarioID) evidence is stale or version-mismatched.")
+                continue
+            }
+            guard comparison.evidenceDigest == DesktopWorkflowSimulationEngine.comparisonEvidenceDigest(comparison) else {
+                findings.append("Scenario \(scenarioID) evidence was edited after generation.")
+                continue
+            }
+            guard let run = snapshot.operations.workflows.simulationRuns.first(where: {
+                $0.id == comparison.simulationRunID && $0.workflowRevisionID == revisionID
+                    && $0.manifestDigest == manifestDigest && $0.fixtureSuiteID == fixtureSuiteID
+                    && $0.fixtureSuiteDigest == fixtureSuiteDigest && $0.scenarioID == scenarioID
+                    && $0.outputDigest == comparison.kanameOutputDigest && $0.outcome == .passed
+            }), DesktopWorkflowSimulationEngine.replay(run) else {
+                findings.append("Scenario \(scenarioID) simulation evidence is incomplete or edited.")
+                continue
+            }
+            if !comparison.matched {
+                findings.append("Scenario \(scenarioID) legacy and Kaname outputs differ.")
+            }
+        }
+        return findings
     }
 
     private static func upsert<Record: Identifiable>(_ record: Record, in records: inout [Record]) where Record.ID: Equatable {

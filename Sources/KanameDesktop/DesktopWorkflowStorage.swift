@@ -37,15 +37,21 @@ public struct DesktopWorkflowStorage: Sendable {
     public static let maximumValueBytes = 1 * 1_024 * 1_024
     public static let maximumValuesBytes = 16 * 1_024 * 1_024
     public static let maximumArtifactBytes = 128 * 1_024 * 1_024
+    public static let defaultMaximumArtifactsBytes = 256 * 1_024 * 1_024
 
     private struct ValuesFile: Codable {
         var values: [String: Data]
     }
 
     public let installationRoot: URL
+    public let maximumArtifactsBytes: Int
 
-    public init(installationRoot: URL) {
+    public init(
+        installationRoot: URL,
+        maximumArtifactsBytes: Int = DesktopWorkflowStorage.defaultMaximumArtifactsBytes
+    ) {
         self.installationRoot = installationRoot.standardizedFileURL
+        self.maximumArtifactsBytes = max(1, maximumArtifactsBytes)
     }
 
     public func value(forKey key: String) throws -> Data? {
@@ -98,6 +104,11 @@ public struct DesktopWorkflowStorage: Sendable {
             byteCount: data.count,
             createdAtUnixMillis: createdAtUnixMillis
         )
+        let existingRecords = try artifactRecords()
+        if !existingRecords.contains(where: { $0.sha256 == digest }),
+           existingRecords.reduce(0, { $0 + $1.byteCount }) + data.count > maximumArtifactsBytes {
+            throw DesktopWorkflowStorageError.quotaExceeded
+        }
         let artifacts = try privateDirectory(artifactsDirectory())
         let destination = artifacts.appendingPathComponent(digest).standardizedFileURL
         guard destination.deletingLastPathComponent() == artifacts else { throw DesktopWorkflowStorageError.unsafeStorage }
@@ -108,7 +119,7 @@ public struct DesktopWorkflowStorage: Sendable {
         } else {
             try writePrivate(data, to: destination)
         }
-        var records = try artifactRecords()
+        var records = existingRecords
         if !records.contains(where: { $0.sha256 == digest }) {
             records.append(record)
             try writePrivate(try canonicalEncoder().encode(records.sorted { $0.sha256 < $1.sha256 }), to: artifactManifestURL())
@@ -127,6 +138,66 @@ public struct DesktopWorkflowStorage: Sendable {
                       && $0.byteCount > 0 && $0.byteCount <= Self.maximumArtifactBytes
               }) else { throw DesktopWorkflowStorageError.artifactUnavailable }
         return records.sorted { ($0.createdAtUnixMillis, $0.sha256) < ($1.createdAtUnixMillis, $1.sha256) }
+    }
+
+    public func artifactUsageBytes() throws -> Int {
+        try artifactRecords().reduce(0) { $0 + $1.byteCount }
+    }
+
+    /// Removes an exact digest set through a private staging directory. The
+    /// manifest changes only after every source file has been verified and
+    /// moved, and a failed manifest write restores the canonical files.
+    @discardableResult
+    public func removeArtifacts(sha256s: Set<String>) throws -> [DesktopWorkflowStoredArtifact] {
+        guard !sha256s.isEmpty,
+              sha256s.allSatisfy({ $0.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil }) else {
+            return []
+        }
+        let records = try artifactRecords()
+        let removing = records.filter { sha256s.contains($0.sha256) }
+        guard Set(removing.map(\.sha256)) == sha256s else { throw DesktopWorkflowStorageError.artifactUnavailable }
+        for record in removing { _ = try artifactData(sha256: record.sha256) }
+        let artifacts = try privateDirectory(artifactsDirectory())
+        let staging = try privateDirectory(
+            installationRoot.appendingPathComponent("PurgeStaging", isDirectory: true)
+                .appendingPathComponent(UUID().uuidString.lowercased(), isDirectory: true)
+        )
+        var moved: [(source: URL, staged: URL)] = []
+        do {
+            for record in removing {
+                let source = artifacts.appendingPathComponent(record.sha256).standardizedFileURL
+                let staged = staging.appendingPathComponent(record.sha256).standardizedFileURL
+                guard source.deletingLastPathComponent() == artifacts,
+                      staged.deletingLastPathComponent() == staging else {
+                    throw DesktopWorkflowStorageError.unsafeStorage
+                }
+                try FileManager.default.moveItem(at: source, to: staged)
+                moved.append((source, staged))
+            }
+            let retained = records.filter { !sha256s.contains($0.sha256) }
+            try writePrivate(
+                try canonicalEncoder().encode(retained.sorted { $0.sha256 < $1.sha256 }),
+                to: artifactManifestURL()
+            )
+        } catch {
+            for pair in moved.reversed() where FileManager.default.fileExists(atPath: pair.staged.path) {
+                try? FileManager.default.moveItem(at: pair.staged, to: pair.source)
+            }
+            try? FileManager.default.removeItem(at: staging)
+            throw error
+        }
+        let presentation = installationRoot.appendingPathComponent("Presentation", isDirectory: true).standardizedFileURL
+        for record in removing {
+            let copyDirectory = presentation.appendingPathComponent(record.sha256, isDirectory: true).standardizedFileURL
+            if copyDirectory.deletingLastPathComponent() == presentation {
+                try? FileManager.default.removeItem(at: copyDirectory)
+            }
+        }
+        // The manifest is already committed and the canonical files are gone.
+        // A leftover private staging directory is harmless and can be cleaned by
+        // maintenance; it must not turn a completed purge into an unknown result.
+        try? FileManager.default.removeItem(at: staging)
+        return removing.sorted { $0.sha256 < $1.sha256 }
     }
 
     public func artifactData(sha256: String) throws -> Data {
@@ -251,6 +322,17 @@ public struct DesktopWorkflowStorage: Sendable {
 
 public extension DesktopAppModel {
     func workflowStorage(workflowID: String) -> DesktopWorkflowStorage? {
-        workflowInstallationStorageURL(workflowID: workflowID).map { DesktopWorkflowStorage(installationRoot: $0) }
+        let quotas = workflowInstallations(workflowID: workflowID).compactMap { installation in
+            snapshot.operations.workflows.retentionPolicyRevisions.first {
+                $0.id == installation.currentRetentionPolicyRevisionID
+            }?.policy.localByteQuota
+        }
+        // Storage is namespaced by reusable workflow identity, so multiple local
+        // installations share the same artifact pool. Honor the narrowest
+        // reviewed quota rather than allowing one installation to widen another.
+        let quota = quotas.min() ?? DesktopWorkflowStorage.defaultMaximumArtifactsBytes
+        return workflowInstallationStorageURL(workflowID: workflowID).map {
+            DesktopWorkflowStorage(installationRoot: $0, maximumArtifactsBytes: quota)
+        }
     }
 }

@@ -67,6 +67,7 @@ public final class DesktopMailViewModel: ObservableObject {
     }
 
     public func runWorkflowMaintenanceCycle(model: DesktopAppModel) async {
+        _ = model.expireWorkflowAuthorityGrants()
         _ = model.recoverExpiredWorkflowClaims()
         _ = model.expireWorkflowWaits()
         await refreshMailProviderReadiness(model: model)
@@ -248,7 +249,7 @@ public final class DesktopMailViewModel: ObservableObject {
         )
         guard let contextID = model.compileWorkflowContext(
             workItemID: workItemID, episodeID: episodeID, request: request,
-            references: [.reference(
+            references: [DesktopWorkflowContextReference.reference(
                 id: eventID, kind: "manual-input", label: title, sourceID: "manual:\(eventID)",
                 digest: artifact.sha256, included: true,
                 reason: "Exact user-supplied input for this manual run.",
@@ -511,7 +512,13 @@ public final class DesktopMailViewModel: ObservableObject {
                 digest: artifact.sha256, included: true,
                 reason: "Exact incremental Calendar event revision.",
                 estimatedTokens: max(1, min(payload.count / 4, 2_000)),
-                content: String(data: payload, encoding: .utf8)
+                content: String(data: payload, encoding: .utf8),
+                provenance: DesktopWorkflowExternalContentProvenance(
+                    sourceID: "google-calendar:\(event.accountID):\(event.calendarID):\(event.eventID)",
+                    providerID: "google-calendar", accountID: event.accountID,
+                    mediaType: "application/json", digest: artifact.sha256,
+                    trust: .untrustedExternalContent
+                )
             )]
         ) else { return false }
         return model.queueWorkflowRun(
@@ -742,7 +749,7 @@ public final class DesktopMailViewModel: ObservableObject {
             model: model, workItemID: item.id, excludingEpisodeID: episodeID
         )
         contextReferences.append(
-            .reference(
+            DesktopWorkflowContextReference.reference(
                 id: eventID,
                 kind: "mail-conversation",
                 label: message.subject.isEmpty ? "Mail conversation" : message.subject,
@@ -751,7 +758,13 @@ public final class DesktopMailViewModel: ObservableObject {
                 included: true,
                 reason: "Capture-policy-bounded conversation snapshot for the active workflow episode.",
                 estimatedTokens: max(1, min(threadText.utf8.count / 4, 24_000)),
-                content: threadText
+                content: threadText,
+                provenance: DesktopWorkflowExternalContentProvenance(
+                    sourceID: "mail:\(conversation.account.providerID):\(conversation.account.localID):\(conversation.id):\(message.id)",
+                    providerID: conversation.account.providerID, accountID: conversation.account.stableID,
+                    mediaType: "message/rfc822", digest: artifactDigest,
+                    trust: .untrustedExternalContent
+                )
             )
         )
         let contextID = model.compileWorkflowContext(
@@ -948,6 +961,11 @@ public final class DesktopMailViewModel: ObservableObject {
             guard let model, let policy = invocation.step.agentPolicy else {
                 throw DesktopWorkflowCapabilityError.executionUnavailable
             }
+            guard let callerRevision = await MainActor.run(body: {
+                model.snapshot.operations.workflows.runs.first(where: { $0.id == invocation.runID }).flatMap { run in
+                    model.snapshot.operations.workflows.revisions.first { $0.id == run.workflowRevisionID }
+                }
+            }) else { throw DesktopWorkflowCapabilityError.executionUnavailable }
             let request = try WorkflowBoundedAgentRequest.decode(invocation.input)
             let basePrompt = DesktopWorkflowModelContextCompiler.augment(
                 prompt: request.prompt, context: invocation.contextSnapshot
@@ -1043,6 +1061,7 @@ public final class DesktopMailViewModel: ObservableObject {
                           let installation = await MainActor.run(body: {
                               model.workflowCapabilityInstallation(capabilityID: capabilityID)
                           }), installation.enabled, installation.lastTestPassed,
+                          !installation.permissions.broadens(callerRevision.permissions),
                           !installation.permissions.permissions.contains(where: {
                               [.externalEffects, .emailDraft, .emailSend, .emailLabels].contains($0)
                           }) else {

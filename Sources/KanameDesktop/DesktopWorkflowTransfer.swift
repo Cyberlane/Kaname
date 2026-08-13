@@ -251,6 +251,10 @@ public extension DesktopAppModel {
             state.operations.workflows.capturePolicyRevisions.append(contentsOf: imported.capturePolicyRevisions)
             state.operations.workflows.retentionPolicyRevisions.append(contentsOf: imported.retentionPolicyRevisions)
             state.operations.workflows.batchItems.append(contentsOf: imported.batchItems)
+            state.operations.workflows.authorityEvents.append(contentsOf: imported.authorityEvents)
+            state.operations.workflows.contentRecords.append(contentsOf: imported.contentRecords)
+            state.operations.workflows.purgeReceipts.append(contentsOf: imported.purgeReceipts)
+            state.operations.workflows.operationalStatuses.append(contentsOf: imported.operationalStatuses)
             state.operations.artifacts.append(contentsOf: restoredArtifacts)
             state.appendAudit(
                 domain: "workflow-package",
@@ -367,6 +371,16 @@ public extension DesktopAppModel {
         }
         for index in state.authorityGrants.indices {
             state.authorityGrants[index].state = .revoked
+            let grant = state.authorityGrants[index]
+            state.authorityEvents.append(.init(
+                id: UUID().uuidString.lowercased(), grantID: grant.id, workflowID: grant.workflowID,
+                kind: .revoked, detail: "Revoked during private installation transfer.",
+                recordedAtUnixMillis: timestamp
+            ))
+        }
+        for index in state.operationalStatuses.indices {
+            state.operationalStatuses[index].active = false
+            state.operationalStatuses[index].updatedAtUnixMillis = timestamp
         }
         for index in state.installations.indices {
             state.installations[index].enabled = false
@@ -460,7 +474,11 @@ public extension DesktopAppModel {
             retentionPolicyRevisions: snapshot.operations.workflows.retentionPolicyRevisions.filter { record in
                 snapshot.operations.workflows.installations.contains { $0.workflowID == workflowID && $0.id == record.installationID }
             },
-            batchItems: snapshot.operations.workflows.batchItems.filter { runIDs.contains($0.runID) }
+            batchItems: snapshot.operations.workflows.batchItems.filter { runIDs.contains($0.runID) },
+            authorityEvents: snapshot.operations.workflows.authorityEvents.filter { $0.workflowID == workflowID },
+            contentRecords: snapshot.operations.workflows.contentRecords.filter { $0.workflowID == workflowID },
+            purgeReceipts: snapshot.operations.workflows.purgeReceipts.filter { $0.workflowID == workflowID },
+            operationalStatuses: snapshot.operations.workflows.operationalStatuses.filter { $0.workflowID == workflowID }
         )
     }
 
@@ -562,13 +580,16 @@ public extension DesktopAppModel {
               uniqueIDs(state.installations), uniqueIDs(state.configurationRevisions),
               uniqueIDs(state.bindingRevisions), uniqueIDs(state.dependencyLockRevisions),
               uniqueIDs(state.capturePolicyRevisions), uniqueIDs(state.retentionPolicyRevisions),
-              uniqueIDs(state.batchItems),
+              uniqueIDs(state.batchItems), uniqueIDs(state.authorityEvents), uniqueIDs(state.contentRecords),
+              uniqueIDs(state.purgeReceipts), uniqueIDs(state.operationalStatuses),
               artifactIDs.count == payload.artifacts.count,
               state.capabilityInstallations.isEmpty, state.runtimeClaims.isEmpty,
               state.triggerHealth.isEmpty, state.connectorInstallations.isEmpty,
               state.connectorBindings.isEmpty, state.qualificationRuns.isEmpty,
               state.rendererInstallations.isEmpty, state.subflows.isEmpty,
               state.studioDrafts.isEmpty, state.migrationAssessments.isEmpty,
+              state.templateVerifications.isEmpty, state.simulationRuns.isEmpty,
+              state.migrationComparisons.isEmpty,
               state.revisions.allSatisfy({ $0.workflowID == payload.manifest.id }),
               state.triggerBindings.allSatisfy({ $0.workflowID == payload.manifest.id }),
               state.workItems.allSatisfy({ $0.workflowID == payload.manifest.id }),
@@ -591,10 +612,18 @@ public extension DesktopAppModel {
                   workItemIDs.contains($0.workItemID) && revisionIDs.contains($0.workflowRevisionID)
                       && externalEventIDs.contains($0.sourceEventID)
               }),
-              state.runs.allSatisfy({
-                  workItemIDs.contains($0.workItemID) && episodeIDs.contains($0.episodeID)
-                      && revisionIDs.contains($0.workflowRevisionID)
-                      && ($0.contextSnapshotID == nil || contextIDs.contains($0.contextSnapshotID!))
+              state.runs.allSatisfy({ run in
+                  workItemIDs.contains(run.workItemID) && episodeIDs.contains(run.episodeID)
+                      && revisionIDs.contains(run.workflowRevisionID)
+                      && (run.contextSnapshotID == nil || contextIDs.contains(run.contextSnapshotID!))
+                      && ((run.installationID == nil && run.dependencyLockRevisionID == nil)
+                          || state.installations.contains(where: { installation in
+                              installation.id == run.installationID
+                                  && state.dependencyLockRevisions.contains(where: { lock in
+                                      lock.id == run.dependencyLockRevisionID
+                                          && lock.installationID == installation.id
+                                  })
+                          }))
               }),
               state.stepAttempts.allSatisfy({ runIDs.contains($0.runID) }),
               state.batchItems.allSatisfy({ runIDs.contains($0.runID) }),
@@ -623,6 +652,16 @@ public extension DesktopAppModel {
                   runIDs.contains($0.runID) && stepAttemptIDs.contains($0.stepAttemptID)
               }),
               state.authorityGrants.allSatisfy({ $0.workflowID == payload.manifest.id }),
+              state.authorityEvents.allSatisfy({ event in
+                  event.workflowID == payload.manifest.id
+                      && state.authorityGrants.contains(where: { $0.id == event.grantID })
+              }),
+              state.contentRecords.allSatisfy({ record in
+                  record.workflowID == payload.manifest.id && workItemIDs.contains(record.workItemID)
+                      && artifactIDs.contains(record.artifactDigest)
+              }),
+              state.purgeReceipts.allSatisfy({ $0.workflowID == payload.manifest.id }),
+              state.operationalStatuses.allSatisfy({ $0.workflowID == payload.manifest.id }),
               state.ownershipPolicies.allSatisfy({ $0.workflowID == payload.manifest.id }),
               state.ownershipClaims.allSatisfy({
                   $0.workflowID == payload.manifest.id
@@ -740,6 +779,10 @@ public extension DesktopAppModel {
             || intersects(payload.state.dependencyLockRevisions, current.dependencyLockRevisions)
             || intersects(payload.state.capturePolicyRevisions, current.capturePolicyRevisions)
             || intersects(payload.state.retentionPolicyRevisions, current.retentionPolicyRevisions)
+            || intersects(payload.state.authorityEvents, current.authorityEvents)
+            || intersects(payload.state.contentRecords, current.contentRecords)
+            || intersects(payload.state.purgeReceipts, current.purgeReceipts)
+            || intersects(payload.state.operationalStatuses, current.operationalStatuses)
             || !Set(payload.artifacts.map(\.record.id)).isDisjoint(with: snapshot.operations.artifacts.map(\.id))
     }
 

@@ -535,6 +535,7 @@ public extension DesktopAppModel {
         workItemID: String,
         episodeID: String,
         contextSnapshotID: String,
+        installationID: String? = nil,
         retryMode: DesktopWorkflowRetryMode = .initial,
         priorRunID: String? = nil,
         startStepID: String? = nil
@@ -551,9 +552,30 @@ public extension DesktopAppModel {
         guard startStepID == nil || snapshot.operations.workflows.revisions.contains(where: {
             $0.id == revisionID && $0.steps.contains(where: { $0.id == startStepID })
         }) else { return nil }
+        guard let revision = snapshot.operations.workflows.revisions.first(where: { $0.id == revisionID }),
+              let workflowID = snapshot.operations.workflows.workItems.first(where: { $0.id == workItemID })?.workflowID else {
+            return nil
+        }
+        let candidates = snapshot.operations.workflows.installations.filter {
+            $0.workflowID == workflowID && $0.workflowRevisionID == revisionID
+        }
+        let installation: DesktopWorkflowInstallationRecord?
+        if let installationID {
+            installation = candidates.first(where: { $0.id == installationID && $0.enabled && $0.readinessIssues.isEmpty })
+        } else {
+            let enabled = candidates.filter { $0.enabled && $0.readinessIssues.isEmpty }
+            installation = enabled.count == 1 ? enabled[0] : nil
+        }
+        let dependencyLock = installation.flatMap { selected in
+            snapshot.operations.workflows.dependencyLockRevisions.first {
+                $0.id == selected.currentDependencyLockRevisionID && $0.installationID == selected.id
+            }
+        }
+        guard revision.schemaVersion < 3 || (installation != nil && dependencyLock != nil) else { return nil }
         let run = DesktopWorkflowRunRecord(
             id: UUID().uuidString.lowercased(), workItemID: workItemID, episodeID: episodeID,
             workflowRevisionID: revisionID,
+            installationID: installation?.id, dependencyLockRevisionID: dependencyLock?.id,
             retryMode: retryMode, priorRunID: priorRunID, startStepID: startStepID,
             contextSnapshotID: contextSnapshotID,
             state: .queued, currentStepID: nil, traceID: UUID().uuidString.lowercased(),
@@ -579,6 +601,24 @@ public extension DesktopAppModel {
               run.currentStepID == nil,
               let revision = snapshot.operations.workflows.revisions.first(where: { $0.id == run.workflowRevisionID }) else {
             return nil
+        }
+        if revision.schemaVersion >= 3 {
+            guard let installationID = run.installationID,
+                  let lockID = run.dependencyLockRevisionID,
+                  let lock = snapshot.operations.workflows.dependencyLockRevisions.first(where: {
+                      $0.id == lockID && $0.installationID == installationID
+                  }),
+                  let canonical = try? DesktopWorkflowRevisionDigest.canonical(lock.entries),
+                  canonical.digest == lock.digest else { return nil }
+            let entries = Dictionary(uniqueKeysWithValues: lock.entries.map {
+                ("\($0.kind.rawValue):\($0.componentID)", $0)
+            })
+            guard (revision.dependencies ?? []).filter(\.required).allSatisfy({ dependency in
+                guard let entry = entries["\(dependency.kind.rawValue):\(dependency.id)"] else { return false }
+                return DesktopWorkflowVersionConstraint.satisfies(
+                    version: entry.version, requirement: dependency.versionRequirement
+                ) && entry.digest?.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil
+            }) else { return nil }
         }
         let attempts = snapshot.operations.workflows.stepAttempts.filter { $0.runID == runID }
         if revision.schemaVersion >= 2 {

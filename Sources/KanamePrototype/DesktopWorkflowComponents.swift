@@ -81,6 +81,10 @@ struct WorkflowInstallationSetupSheet: View {
     @State private var maximumTotalMegabytes = 100
     @State private var maximumAttachmentCount = 20
     @State private var settledContent = DesktopWorkflowSettledContentPolicy.purgeOrdinaryContent
+    @State private var retainAuditReceipts = true
+    @State private var retainPromotedArtifacts = true
+    @State private var unresolvedContentMaximumDays = 0
+    @State private var maximumLocalMegabytes = 256
     @State private var message: String?
     @State private var loaded = false
 
@@ -153,6 +157,17 @@ struct WorkflowInstallationSetupSheet: View {
                             Text("Purge ordinary copied content").tag(DesktopWorkflowSettledContentPolicy.purgeOrdinaryContent)
                             Text("Retain until explicit removal").tag(DesktopWorkflowSettledContentPolicy.retainUntilExplicitRemoval)
                         }
+                        Stepper("Local content quota: \(maximumLocalMegabytes) MB", value: $maximumLocalMegabytes, in: 16...2_048, step: 16)
+                        Stepper(
+                            unresolvedContentMaximumDays == 0
+                                ? "Unresolved evidence: keep until resolved"
+                                : "Unresolved evidence: up to \(unresolvedContentMaximumDays) days",
+                            value: $unresolvedContentMaximumDays, in: 0...365
+                        )
+                        Toggle("Retain sanitized audit receipts", isOn: $retainAuditReceipts)
+                        Toggle("Retain explicitly promoted artifacts", isOn: $retainPromotedArtifacts)
+                        Text("Purge previews show eligible bytes and retained reasons before removal. Promotion is explicit and never implied by a workflow result.")
+                            .font(.caption2).foregroundStyle(.secondary)
                     }
                     if !installation.readinessIssues.isEmpty {
                         Section("Readiness") {
@@ -260,6 +275,10 @@ struct WorkflowInstallationSetupSheet: View {
             $0.id == installation.currentRetentionPolicyRevisionID
         })?.policy {
             settledContent = policy.settledContent
+            retainAuditReceipts = policy.retainAuditReceipts
+            retainPromotedArtifacts = policy.retainPromotedArtifacts
+            unresolvedContentMaximumDays = policy.unresolvedContentMaximumDays ?? 0
+            maximumLocalMegabytes = max(16, policy.localByteQuota / (1_024 * 1_024))
         }
     }
 
@@ -291,7 +310,13 @@ struct WorkflowInstallationSetupSheet: View {
                     maximumTotalBytes: includeAttachments ? maximumTotalMegabytes * 1_024 * 1_024 : 0,
                     maximumAttachmentCount: includeAttachments ? maximumAttachmentCount : 0
                 ),
-                retentionPolicy: DesktopWorkflowRetentionPolicy(settledContent: settledContent)
+                retentionPolicy: DesktopWorkflowRetentionPolicy(
+                    settledContent: settledContent,
+                    retainAuditReceipts: retainAuditReceipts,
+                    retainPromotedArtifacts: retainPromotedArtifacts,
+                    unresolvedContentMaximumDays: unresolvedContentMaximumDays == 0 ? nil : unresolvedContentMaximumDays,
+                    maximumLocalBytes: maximumLocalMegabytes * 1_024 * 1_024
+                )
             )
             dismiss()
         } catch {
@@ -1461,6 +1486,7 @@ struct WorkflowWaitRow: View {
 
 struct WorkflowAuthorityGrantRow: View {
     let grant: DesktopWorkflowAuthorityGrantRecord
+    let events: [DesktopWorkflowAuthorityEventRecord]
     let setState: (DesktopWorkflowAuthorityGrantState) -> Void
 
     var body: some View {
@@ -1471,7 +1497,15 @@ struct WorkflowAuthorityGrantRow: View {
                 Text("\(grant.effectKind) · \(grant.connectorID)").font(.caption.weight(.semibold))
                 Text("Up to \(grant.maximumItemsPerExecution) items · \(grant.requiresManualRun ? "manual runs only" : "triggered runs allowed")")
                     .font(.caption2).foregroundStyle(.secondary)
+                if let maximumUses = grant.maximumUses {
+                    Text("\(grant.useCount) of \(maximumUses) uses · preview \(grant.sourcePreviewID?.prefix(8) ?? "legacy")")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
                 Text(grant.postcondition).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+                if let latest = events.last {
+                    Text("Latest: \(latest.kind.rawValue) · \(latest.detail)")
+                        .font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+                }
             }
             Spacer()
             if grant.state == .active {
@@ -1485,6 +1519,81 @@ struct WorkflowAuthorityGrantRow: View {
         }
         .padding(10)
         .background(Nord.polarNight1.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+struct WorkflowStandingGrantBuilderSheet: View {
+    @ObservedObject var model: DesktopAppModel
+    let preview: DesktopWorkflowEffectPreviewRecord
+    @Environment(\.dismiss) private var dismiss
+    @State private var pointer = "/conversationIDs"
+    @State private var operation = DesktopWorkflowPredicateOperator.contains
+    @State private var value = ""
+    @State private var manualOnly = true
+    @State private var maximumItems = 1
+    @State private var maximumUses = 1
+    @State private var expiryDays = 30
+    @State private var postcondition = "Provider state must match the exact declared postcondition after re-read."
+    @State private var message: String?
+
+    private var simulation: DesktopWorkflowAuthorityScopeSimulation? {
+        model.simulateWorkflowAuthorityGrant(
+            previewID: preview.id,
+            targetPredicates: [.init(pointer: pointer, operation: operation, value: value.isEmpty ? nil : value)],
+            requiresManualRun: manualOnly,
+            maximumItemsPerExecution: maximumItems,
+            maximumUses: maximumUses,
+            expiresAtUnixMillis: Int64(Date().addingTimeInterval(Double(expiryDays) * 86_400).timeIntervalSince1970 * 1_000),
+            postcondition: postcondition
+        )
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Create bounded standing authority").font(.title2.weight(.bold))
+            Text("Every field is derived from effect preview \(preview.id.prefix(8)). The simulator must match this exact target before Kaname can create a revocable grant.")
+                .font(.callout).foregroundStyle(.secondary)
+            Form {
+                TextField("Target JSON Pointer", text: $pointer)
+                Picker("Predicate", selection: $operation) {
+                    ForEach(DesktopWorkflowPredicateOperator.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }
+                TextField("Predicate value", text: $value)
+                Toggle("Manual runs only", isOn: $manualOnly)
+                Stepper("Maximum items per execution: \(maximumItems)", value: $maximumItems, in: max(1, preview.itemCount)...10_000)
+                Stepper("Maximum uses: \(maximumUses)", value: $maximumUses, in: 1...100_000)
+                Stepper("Expires in \(expiryDays) day\(expiryDays == 1 ? "" : "s")", value: $expiryDays, in: 1...365)
+                TextField("Required postcondition", text: $postcondition, axis: .vertical)
+                if let simulation {
+                    if simulation.findings.isEmpty {
+                        Label("This scope matches the frozen preview and stays within its connector, effect, account, item, use, and expiry bounds.", systemImage: "checkmark.shield.fill")
+                            .foregroundStyle(Nord.auroraGreen)
+                    } else {
+                        ForEach(simulation.findings, id: \.self) { finding in
+                            Label(finding, systemImage: "exclamationmark.triangle.fill").foregroundStyle(Nord.auroraYellow)
+                        }
+                    }
+                }
+            }
+            if let message { Text(message).font(.caption).foregroundStyle(Nord.auroraYellow) }
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                Button("Create grant") {
+                    guard let simulation, let id = model.createWorkflowAuthorityGrant(from: simulation) else {
+                        message = "The grant scope no longer matches the frozen preview."
+                        return
+                    }
+                    message = "Created grant \(id.prefix(8))."
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(simulation?.canCreateGrant != true)
+            }
+        }
+        .padding(20)
+        .frame(width: 620, height: 620)
+        .onAppear { maximumItems = max(1, preview.itemCount) }
     }
 }
 
@@ -1551,6 +1660,7 @@ struct WorkflowArtifactRoleRow: View {
     let exportCopy: () -> Void
     let compareWithCurrent: (() -> Void)?
     let makeCurrent: (() -> Void)?
+    let promote: (() -> Void)?
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -1580,6 +1690,9 @@ struct WorkflowArtifactRoleRow: View {
                 }
                 if let makeCurrent {
                     Button("Make current", systemImage: "checkmark.circle", action: makeCurrent)
+                }
+                if let promote {
+                    Button("Promote as durable", systemImage: "pin.fill", action: promote)
                 }
             } label: {
                 Image(systemName: "ellipsis.circle").accessibilityLabel("Artifact actions")

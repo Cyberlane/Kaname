@@ -487,9 +487,14 @@ public final class DesktopWorkflowRuntime {
               let values = value as? [Any] else {
             throw DesktopWorkflowHostFrameworkError.invalidContract("The batch item pointer does not resolve to an array.")
         }
-        let records = try model.prepareWorkflowBatch(runID: run.id, stepID: step.id, input: input)
+        var records = try model.prepareWorkflowBatch(runID: run.id, stepID: step.id, input: input)
+        _ = model.recoverInterruptedWorkflowBatch(runID: run.id, stepID: step.id)
+        records = model.snapshot.operations.workflows.batchItems
+            .filter { $0.runID == run.id && $0.stepID == step.id }.sorted { $0.ordinal < $1.ordinal }
         var outputs: [Any] = []
         var failures = 0
+        var unknown = 0
+        var cancelled = 0
         let installation: DesktopWorkflowCapabilityInstallationRecord?
         if let capabilityID = step.capabilityID {
             guard revision.permissions.capabilityIDs.contains(capabilityID),
@@ -507,8 +512,24 @@ public final class DesktopWorkflowRuntime {
                 outputs.append(["ordinal": record.ordinal, "outputDigest": record.outputDigest ?? "", "state": "succeeded"])
                 continue
             }
+            if record.state == .unknown || record.state == .running {
+                unknown += 1
+                outputs.append(["ordinal": record.ordinal, "state": "unknown", "error": record.errorSummary ?? "Reconciliation required."])
+                continue
+            }
+            if record.state == .failed {
+                failures += 1
+                outputs.append(["ordinal": record.ordinal, "state": "failed", "error": record.errorSummary ?? "Explicit retry required."])
+                continue
+            }
+            if record.state == .cancelled {
+                cancelled += 1
+                outputs.append(["ordinal": record.ordinal, "state": "cancelled"])
+                continue
+            }
             if policy.aggregation == .stopOnFirstFailure, failures > 0 {
                 _ = model.updateWorkflowBatchItem(id: record.id, state: .cancelled, error: "A prior item failed.")
+                cancelled += 1
                 outputs.append(["ordinal": record.ordinal, "state": "cancelled"])
                 continue
             }
@@ -557,10 +578,16 @@ public final class DesktopWorkflowRuntime {
         if failures > 0 && policy.aggregation == .requireAll {
             throw DesktopWorkflowHostFrameworkError.invalidContract("\(failures) batch item(s) failed under the require-all policy.")
         }
+        if unknown > 0 {
+            throw DesktopWorkflowHostFrameworkError.invalidContract("\(unknown) batch item outcome(s) are unknown and require reconciliation before retry.")
+        }
         return try JSONSerialization.data(
             withJSONObject: [
                 "items": outputs,
-                "summary": ["total": records.count, "failed": failures, "succeeded": records.count - failures],
+                "summary": [
+                    "total": records.count, "failed": failures, "unknown": unknown,
+                    "succeeded": records.count - failures - unknown - cancelled,
+                ],
             ],
             options: [.sortedKeys, .withoutEscapingSlashes]
         )

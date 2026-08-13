@@ -473,7 +473,10 @@ public extension DesktopAppModel {
         requiresManualRun: Bool,
         maximumItemsPerExecution: Int,
         postcondition: String,
-        expiresAtUnixMillis: Int64?
+        expiresAtUnixMillis: Int64?,
+        maximumUses: Int? = nil,
+        sourcePreviewID: String? = nil,
+        sourceTargetDigest: String? = nil
     ) -> String? {
         let timestamp = now()
         guard let definition = snapshot.operations.workflows.definitions.first(where: { $0.id == workflowID }),
@@ -485,16 +488,30 @@ public extension DesktopAppModel {
               !targetPredicates.isEmpty, targetPredicates.count <= 32,
               targetPredicates.allSatisfy({ $0.pointer.isEmpty || $0.pointer.hasPrefix("/") }),
               (1...10_000).contains(maximumItemsPerExecution), !postcondition.isEmpty,
-              expiresAtUnixMillis.map({ $0 > timestamp }) ?? true else { return nil }
+              expiresAtUnixMillis.map({ $0 > timestamp }) ?? true,
+              maximumUses.map({ (1...100_000).contains($0) }) ?? true,
+              sourcePreviewID.map({ id in snapshot.operations.workflows.effectPreviews.contains(where: {
+                  $0.id == id && $0.request.workflowID == workflowID && $0.connectorID == connectorID
+                      && $0.request.effectKind == effectKind && $0.structuredTargetDigest == sourceTargetDigest
+              }) }) ?? (sourceTargetDigest == nil) else { return nil }
         let grant = DesktopWorkflowAuthorityGrantRecord(
             id: UUID().uuidString.lowercased(), workflowID: workflowID, connectorID: connectorID,
             effectKind: effectKind, accountIDs: Array(Set(accountIDs)).sorted(), targetPredicates: targetPredicates,
             requiresManualRun: requiresManualRun, maximumItemsPerExecution: maximumItemsPerExecution,
             postcondition: postcondition, state: .active, createdAtUnixMillis: timestamp,
-            expiresAtUnixMillis: expiresAtUnixMillis, lastUsedAtUnixMillis: nil, useCount: 0
+            expiresAtUnixMillis: expiresAtUnixMillis, lastUsedAtUnixMillis: nil, useCount: 0,
+            maximumUses: maximumUses, sourcePreviewID: sourcePreviewID, sourceTargetDigest: sourceTargetDigest
         )
         guard mutate({ state in
             state.appendWorkflowHostRecord(grant, to: \.authorityGrants)
+            state.operations.workflows.authorityEvents.append(.init(
+                id: UUID().uuidString.lowercased(), grantID: grant.id, workflowID: workflowID,
+                kind: .created,
+                detail: sourcePreviewID == nil
+                    ? "Created through the legacy bounded-authority API."
+                    : "Created from exact effect preview \(sourcePreviewID!).",
+                recordedAtUnixMillis: timestamp
+            ))
             state.appendAudit(
                 domain: "workflow-authority", action: "grant", target: grant.id, state: .approved,
                 detail: "Granted bounded \(effectKind) authority for \(accountIDs.count) account scope(s).",
@@ -507,9 +524,29 @@ public extension DesktopAppModel {
     func setWorkflowAuthorityGrantState(id: String, state requested: DesktopWorkflowAuthorityGrantState) -> Bool {
         guard let current = snapshot.operations.workflows.authorityGrants.first(where: { $0.id == id }),
               current.state != .revoked, requested != .expired,
-              current.state != requested else { return false }
-        return mutateRecord(at: \.operations.workflows.authorityGrants, id: id) { grant in
-            grant.state = requested
+              current.state != requested,
+              requested != .active || (current.expiresAtUnixMillis.map({ $0 > now() }) ?? true),
+              requested != .active || (current.maximumUses.map({ current.useCount < $0 }) ?? true) else { return false }
+        let timestamp = now()
+        return mutate { state in
+            guard let index = state.operations.workflows.authorityGrants.firstIndex(where: { $0.id == id }) else { return }
+            state.operations.workflows.authorityGrants[index].state = requested
+            let kind: DesktopWorkflowAuthorityEventKind = switch requested {
+            case .active: .resumed
+            case .paused: .paused
+            case .revoked: .revoked
+            case .expired: .expired
+            }
+            state.operations.workflows.authorityEvents.append(.init(
+                id: UUID().uuidString.lowercased(), grantID: id, workflowID: current.workflowID,
+                kind: kind, detail: "Grant state changed from \(current.state.rawValue) to \(requested.rawValue).",
+                recordedAtUnixMillis: timestamp
+            ))
+            state.appendAudit(
+                domain: "workflow-authority", action: requested.rawValue, target: id,
+                state: requested == .revoked ? .cancelled : .completed,
+                detail: "Standing authority is now \(requested.rawValue).", recordedAtUnixMillis: timestamp
+            )
         }
     }
 
@@ -522,6 +559,7 @@ public extension DesktopAppModel {
             grant.workflowID == request.workflowID && grant.connectorID == request.connectorID
                 && grant.effectKind == request.effectKind && grant.state == .active
                 && (grant.expiresAtUnixMillis == nil || grant.expiresAtUnixMillis! > timestamp)
+                && (grant.maximumUses == nil || grant.useCount < grant.maximumUses!)
                 && request.accountID.map(grant.accountIDs.contains) == true
                 && (!grant.requiresManualRun || request.manuallyInitiated)
                 && request.itemCount <= grant.maximumItemsPerExecution
@@ -566,6 +604,16 @@ public extension DesktopAppModel {
             state.operations.workflows.effects[effectIndex].state = .executing
             state.operations.workflows.authorityGrants[grantIndex].lastUsedAtUnixMillis = timestamp
             state.operations.workflows.authorityGrants[grantIndex].useCount += 1
+            let exhausted = state.operations.workflows.authorityGrants[grantIndex].maximumUses.map {
+                state.operations.workflows.authorityGrants[grantIndex].useCount >= $0
+            } ?? false
+            if exhausted { state.operations.workflows.authorityGrants[grantIndex].state = .expired }
+            state.operations.workflows.authorityEvents.append(.init(
+                id: UUID().uuidString.lowercased(), grantID: grantID, workflowID: grant.workflowID,
+                kind: exhausted ? .exhausted : .used,
+                detail: exhausted ? "The final permitted use was consumed." : "Authorized exact effect \(effect.id).",
+                recordedAtUnixMillis: timestamp
+            ))
             state.appendAudit(
                 domain: "workflow-authority", action: "use", target: grantID, state: .approved,
                 detail: "Authorized effect \(effect.id) under its exact bounded grant.", recordedAtUnixMillis: timestamp
@@ -646,7 +694,8 @@ public final class DesktopWorkflowEffectCoordinator {
     public func execute(effectID: String) async throws -> DesktopWorkflowConnectorExecutionReceipt {
         guard let effect = model.snapshot.operations.workflows.effects.first(where: { $0.id == effectID }),
               let previewRecord = model.snapshot.operations.workflows.effectPreviews.first(where: { $0.effectID == effectID }),
-              let connector = connectors[previewRecord.connectorID] else {
+              let connector = connectors[previewRecord.connectorID],
+              let frozenIntent = model.workflowActionIntent(effectID: effectID) else {
             throw DesktopWorkflowHostFrameworkError.effectUnavailable
         }
         let began: Bool
@@ -655,7 +704,9 @@ public final class DesktopWorkflowEffectCoordinator {
         } else {
             began = model.beginWorkflowEffect(effectID: effectID)
         }
-        guard began else { throw DesktopWorkflowHostFrameworkError.authorityUnavailable }
+        guard began, model.validatesWorkflowActionIntent(effectID: effectID, candidate: frozenIntent) else {
+            throw DesktopWorkflowHostFrameworkError.authorityUnavailable
+        }
         let preview = Self.connectorPreview(effect: effect, record: previewRecord)
         do {
             let receipt = try await connector.execute(
@@ -665,9 +716,19 @@ public final class DesktopWorkflowEffectCoordinator {
                 effectID: effectID, receipt: receipt.remoteReceipt ?? receipt.detail,
                 outcomeKnown: receipt.outcomeKnown, succeeded: receipt.succeeded
             )
+            _ = model.recordWorkflowOperationalStatus(
+                workflowID: previewRecord.request.workflowID, relatedID: effectID, kind: .unknownEffect,
+                level: .actionRequired,
+                summary: receipt.outcomeKnown ? "The connector produced a known effect outcome." : "The effect outcome is unknown; reconcile before retry.",
+                active: !receipt.outcomeKnown
+            )
             return receipt
         } catch {
             _ = model.reconcileWorkflowEffect(effectID: effectID, receipt: nil, outcomeKnown: false, succeeded: false)
+            _ = model.recordWorkflowOperationalStatus(
+                workflowID: previewRecord.request.workflowID, relatedID: effectID, kind: .unknownEffect,
+                level: .actionRequired, summary: "The connector stopped without a provable outcome; reconcile before retry."
+            )
             throw error
         }
     }
@@ -688,6 +749,12 @@ public final class DesktopWorkflowEffectCoordinator {
             effectID: effectID, receipt: receipt.remoteReceipt ?? receipt.detail,
             outcomeKnown: receipt.outcomeKnown, succeeded: receipt.succeeded
         ) else { throw DesktopWorkflowHostFrameworkError.effectUnavailable }
+        _ = model.recordWorkflowOperationalStatus(
+            workflowID: previewRecord.request.workflowID, relatedID: effectID, kind: .unknownEffect,
+            level: .actionRequired,
+            summary: receipt.outcomeKnown ? "Reconciliation established the external effect outcome." : "Reconciliation remains inconclusive.",
+            active: !receipt.outcomeKnown
+        )
         return receipt
     }
 

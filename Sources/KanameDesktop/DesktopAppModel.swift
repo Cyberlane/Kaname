@@ -685,6 +685,18 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
                 // and durable batch items decode additively. No graph is
                 // rewritten and no execution or effect authority is granted.
                 break
+            case 24:
+                // Authority history, content lifecycle receipts, and quiet
+                // operational status decode additively. Existing grants retain
+                // their exact scope and no captured content is purged during
+                // migration.
+                break
+            case 25:
+                // Signed-template verification, deterministic workflow
+                // simulation, exact dependency locks on runs, and
+                // revision-bound migration comparisons decode additively.
+                // Existing workflows gain no authority or migration evidence.
+                break
             default:
                 throw DesktopModelError.unsupportedVersion
             }

@@ -373,6 +373,9 @@ public struct DesktopWorkflowAuthorityGrantRecord: Codable, Equatable, Identifia
     public var expiresAtUnixMillis: Int64?
     public var lastUsedAtUnixMillis: Int64?
     public var useCount: Int
+    public var maximumUses: Int? = nil
+    public var sourcePreviewID: String? = nil
+    public var sourceTargetDigest: String? = nil
 }
 
 public struct DesktopWorkflowEffectRequest: Codable, Equatable, Sendable {

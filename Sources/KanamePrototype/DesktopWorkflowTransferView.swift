@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 @MainActor
 enum DesktopWorkflowTransferUI {
     static let packageType = UTType(exportedAs: "com.cyberlane.kaname.workflow")
+    static let signedTemplateType = UTType(exportedAs: "com.cyberlane.kaname.workflow-template")
     static let installationType = UTType(exportedAs: "com.cyberlane.kaname.workflow-installation")
 
     static func exportPackage(model: DesktopAppModel, definition: DesktopWorkflowDefinitionRecord) throws -> String? {
@@ -63,6 +64,16 @@ enum DesktopWorkflowTransferUI {
             : "Required dependencies:\n• " + dependencies.map { "\($0.kind.rawValue):\($0.id) \($0.versionRequirement)" }.joined(separator: "\n• ")
         alert.informativeText = "Version \(manifest.version) · manifest v\(manifest.schemaVersion) · \(manifest.steps.count) stages\nSource: \(manifest.source)\nPublisher: \(manifest.publisher?.name ?? "Legacy package")\nDigest: \(digest.prefix(20))…\n\nPermissions:\n• \(permissionText)\n\n\(slotText)\n\n\(dependencyText)\n\nThe package, installation, and triggers remain disabled until configuration and readiness review pass. No authority is inherited."
         alert.addButton(withTitle: "Install Disabled")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    static func confirmSignedTemplateImport(_ envelope: DesktopWorkflowSignedTemplateEnvelope) -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "Install verified template \(envelope.manifest.name) disabled?"
+        alert.informativeText = "Version \(envelope.manifest.version) · signer \(envelope.signature.signerID)\nSigning key: \(envelope.signature.publicKeyFingerprint.prefix(20))…\nManifest: \(envelope.signature.manifestDigest.prefix(20))…\n\nKaname will cryptographically verify the exact manifest and publisher declaration before installation. Configuration, bindings, triggers, and authority remain disabled."
+        alert.addButton(withTitle: "Verify and Install Disabled")
         alert.addButton(withTitle: "Cancel")
         return alert.runModal() == .alertFirstButtonReturn
     }

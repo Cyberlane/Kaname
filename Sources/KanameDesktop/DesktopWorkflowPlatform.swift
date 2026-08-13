@@ -379,6 +379,8 @@ public struct DesktopWorkflowRunRecord: Codable, Equatable, Identifiable, Sendab
     public var workItemID: String
     public var episodeID: String
     public var workflowRevisionID: String
+    public var installationID: String? = nil
+    public var dependencyLockRevisionID: String? = nil
     public var retryMode: DesktopWorkflowRetryMode
     public var priorRunID: String?
     public var startStepID: String? = nil
@@ -447,6 +449,7 @@ public struct DesktopWorkflowContextReference: Codable, Equatable, Identifiable,
     /// Bounded, immutable source text selected by the context compiler. Binary
     /// artifacts remain digest references and are never coerced into prompt text.
     public var content: String? = nil
+    public var provenance: DesktopWorkflowExternalContentProvenance? = nil
 
     public static func reference(
         id: String,
@@ -457,14 +460,15 @@ public struct DesktopWorkflowContextReference: Codable, Equatable, Identifiable,
         included: Bool,
         reason: String,
         estimatedTokens: Int,
-        content: String? = nil
+        content: String? = nil,
+        provenance: DesktopWorkflowExternalContentProvenance? = nil
     ) -> Self {
         let boundedTokenEstimate = max(0, estimatedTokens)
         let explanation = reason.isEmpty ? "No selection explanation supplied." : reason
         return Self(
             id: id, kind: kind, label: label, sourceID: sourceID, digest: digest,
             included: included, reason: explanation, estimatedTokens: boundedTokenEstimate,
-            content: content
+            content: content, provenance: provenance
         )
     }
 }
@@ -663,6 +667,13 @@ public struct DesktopWorkflowPlatformState: Codable, Equatable, Sendable {
     public var capturePolicyRevisions: [DesktopWorkflowCapturePolicyRevisionRecord]
     public var retentionPolicyRevisions: [DesktopWorkflowRetentionPolicyRevisionRecord]
     public var batchItems: [DesktopWorkflowBatchItemRecord]
+    public var authorityEvents: [DesktopWorkflowAuthorityEventRecord]
+    public var contentRecords: [DesktopWorkflowContentRecord]
+    public var purgeReceipts: [DesktopWorkflowPurgeReceiptRecord]
+    public var operationalStatuses: [DesktopWorkflowOperationalStatusRecord]
+    public var templateVerifications: [DesktopWorkflowTemplateVerificationRecord] = []
+    public var simulationRuns: [DesktopWorkflowSimulationRunRecord] = []
+    public var migrationComparisons: [DesktopWorkflowMigrationComparisonRecord] = []
 
     public static let empty = Self(
         definitions: [], revisions: [], triggerBindings: [], workItems: [], conversationBindings: [], episodes: [], runs: [],
@@ -674,7 +685,9 @@ public struct DesktopWorkflowPlatformState: Codable, Equatable, Sendable {
         ownershipClaims: [], connectorInstallations: [], connectorBindings: [], qualificationRuns: [],
         rendererInstallations: [], renderReceipts: [], subflows: [], studioDrafts: [], scheduleBindings: [],
         migrationAssessments: [], installations: [], configurationRevisions: [], bindingRevisions: [],
-        dependencyLockRevisions: [], capturePolicyRevisions: [], retentionPolicyRevisions: [], batchItems: []
+        dependencyLockRevisions: [], capturePolicyRevisions: [], retentionPolicyRevisions: [], batchItems: [],
+        authorityEvents: [], contentRecords: [], purgeReceipts: [], operationalStatuses: [],
+        templateVerifications: [], simulationRuns: [], migrationComparisons: []
     )
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
@@ -686,7 +699,8 @@ public struct DesktopWorkflowPlatformState: Codable, Equatable, Sendable {
         case renderReceipts, subflows, studioDrafts, scheduleBindings, migrationAssessments
         case installations, configurationRevisions, bindingRevisions, dependencyLockRevisions
         case capturePolicyRevisions, retentionPolicyRevisions
-        case batchItems
+        case batchItems, authorityEvents, contentRecords, purgeReceipts, operationalStatuses
+        case templateVerifications, simulationRuns, migrationComparisons
     }
 
 }
@@ -741,6 +755,13 @@ extension DesktopWorkflowPlatformState {
         capturePolicyRevisions = try Self.decodeArray([DesktopWorkflowCapturePolicyRevisionRecord].self, key: .capturePolicyRevisions, from: container)
         retentionPolicyRevisions = try Self.decodeArray([DesktopWorkflowRetentionPolicyRevisionRecord].self, key: .retentionPolicyRevisions, from: container)
         batchItems = try Self.decodeArray([DesktopWorkflowBatchItemRecord].self, key: .batchItems, from: container)
+        authorityEvents = try Self.decodeArray([DesktopWorkflowAuthorityEventRecord].self, key: .authorityEvents, from: container)
+        contentRecords = try Self.decodeArray([DesktopWorkflowContentRecord].self, key: .contentRecords, from: container)
+        purgeReceipts = try Self.decodeArray([DesktopWorkflowPurgeReceiptRecord].self, key: .purgeReceipts, from: container)
+        operationalStatuses = try Self.decodeArray([DesktopWorkflowOperationalStatusRecord].self, key: .operationalStatuses, from: container)
+        templateVerifications = try Self.decodeArray([DesktopWorkflowTemplateVerificationRecord].self, key: .templateVerifications, from: container)
+        simulationRuns = try Self.decodeArray([DesktopWorkflowSimulationRunRecord].self, key: .simulationRuns, from: container)
+        migrationComparisons = try Self.decodeArray([DesktopWorkflowMigrationComparisonRecord].self, key: .migrationComparisons, from: container)
     }
 
     private static func decodeArray<Element: Decodable>(

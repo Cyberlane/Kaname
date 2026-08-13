@@ -6744,6 +6744,8 @@ private struct DesktopEmailView: View {
         let actionRequired = health.filter { $0.state == .actionRequired }.count
         let degraded = health.filter { $0.state == .degraded }.count
         let waiting = model.snapshot.operations.workflows.waitSubscriptions.filter { $0.state == .active }.count
+        let operational = model.activeWorkflowOperationalStatuses
+        let operationalAction = operational.filter { $0.level == .actionRequired }.count
         return DisclosureGroup {
             VStack(alignment: .leading, spacing: 7) {
                 ForEach(health.filter { $0.state != .healthy && $0.state != .paused }) { record in
@@ -6755,7 +6757,12 @@ private struct DesktopEmailView: View {
                     Label(issue, systemImage: "puzzlepiece.extension.fill")
                         .font(.caption).foregroundStyle(Nord.auroraYellow)
                 }
-                if health.isEmpty && mail.workflowComponentIssues.isEmpty {
+                ForEach(operational) { record in
+                    Label(record.summary, systemImage: record.level == .actionRequired ? "exclamationmark.shield.fill" : "clock.badge.exclamationmark")
+                        .font(.caption)
+                        .foregroundStyle(record.level == .actionRequired ? Nord.auroraYellow : .secondary)
+                }
+                if health.isEmpty && mail.workflowComponentIssues.isEmpty && operational.isEmpty {
                     Text("Health appears after the first enabled trigger check. Manual-only workflows stay quiet here.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
@@ -6768,6 +6775,7 @@ private struct DesktopEmailView: View {
                     .foregroundStyle(actionRequired == 0 ? Nord.auroraGreen : Nord.auroraYellow)
                 if degraded > 0 { Text("\(degraded) retrying").foregroundStyle(.secondary) }
                 if waiting > 0 { Text("\(waiting) waiting").foregroundStyle(Nord.frost0) }
+                if operationalAction > 0 { Text("\(operationalAction) operation alert\(operationalAction == 1 ? "" : "s")").foregroundStyle(Nord.auroraYellow) }
                 Spacer()
                 Text("Details").font(.caption).foregroundStyle(.secondary)
             }
@@ -6988,7 +6996,10 @@ private struct DesktopEmailView: View {
         let panel = NSOpenPanel()
         panel.title = "Install Kaname workflow package"
         panel.message = "Choose a reusable workflow package or an encrypted private installation archive. Kaname reviews either locally and imports it disabled."
-        panel.allowedContentTypes = [.json, DesktopWorkflowTransferUI.packageType, DesktopWorkflowTransferUI.installationType]
+        panel.allowedContentTypes = [
+            .json, DesktopWorkflowTransferUI.packageType,
+            DesktopWorkflowTransferUI.signedTemplateType, DesktopWorkflowTransferUI.installationType,
+        ]
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
@@ -7002,6 +7013,14 @@ private struct DesktopEmailView: View {
                 guard DesktopWorkflowTransferUI.confirmInstallationImport(payload) else { return }
                 let workflowID = try model.importWorkflowInstallation(payload, registeredCapabilityIDs: registered)
                 workflowImportMessage = "Imported \(workflowID) disabled. Rebind accounts and review capabilities, context, triggers, and effects before resuming."
+            } else if url.pathExtension.lowercased() == "kanametemplate" {
+                let envelope = try JSONDecoder().decode(DesktopWorkflowSignedTemplateEnvelope.self, from: data)
+                try DesktopWorkflowTemplateCodec.verify(envelope)
+                guard DesktopWorkflowTransferUI.confirmSignedTemplateImport(envelope) else { return }
+                let revisionID = try model.installSignedWorkflowTemplate(
+                    envelopeData: data, registeredCapabilityIDs: registered
+                )
+                workflowImportMessage = "Verified and installed signed revision \(revisionID) disabled. Review configuration, exact dependency locks, and permissions before enabling."
             } else {
                 let manifest = try DesktopWorkflowPackageCodec.decode(data, registeredCapabilityIDs: registered)
                 let canonical = try DesktopWorkflowPackageCodec.canonicalData(manifest)
@@ -7250,6 +7269,7 @@ private struct WorkflowWorkItemCard: View {
     let executeEffect: (DesktopWorkflowEffectRecord) -> Void
     let completeHumanReview: (String, String) -> Void
     let toggleExpanded: () -> Void
+    @State private var standingGrantPreview: DesktopWorkflowEffectPreviewRecord? = nil
 
     private var definition: DesktopWorkflowDefinitionRecord? {
         model.snapshot.operations.workflows.definitions.first { $0.id == item.workflowID }
@@ -7472,12 +7492,31 @@ private struct WorkflowWorkItemCard: View {
                                             },
                                             makeCurrent: artifact.active ? nil : {
                                                 _ = model.setWorkflowArtifactRoleCurrent(id: artifact.id)
+                                            },
+                                            promote: {
+                                                _ = model.promoteWorkflowContent(
+                                                    workflowID: item.workflowID,
+                                                    artifactDigest: artifact.artifactDigest,
+                                                    reason: "Explicitly promoted from workflow artifact role \(artifact.role)."
+                                                )
                                             }
                                         )
                                     }
                                 }
                             }
                             .padding(.top, 8)
+                        }
+                    }
+                    if !artifactRoles.isEmpty {
+                        let usage = (try? model.workflowStorage(workflowID: item.workflowID)?.artifactUsageBytes()) ?? 0
+                        let receipts = model.snapshot.operations.workflows.purgeReceipts.filter { $0.workflowID == item.workflowID }
+                        HStack {
+                            Text("Private content: \(ByteCountFormatter.string(fromByteCount: Int64(usage), countStyle: .file)) · \(receipts.count) purge receipt\(receipts.count == 1 ? "" : "s")")
+                                .font(.caption2).foregroundStyle(.secondary)
+                            Spacer()
+                            Button("Preview purge…", action: reviewPurge)
+                                .disabled(!item.state.isHistorical)
+                                .help(item.state.isHistorical ? "Review eligible bytes and retained reasons" : "Content remains protected until work settles")
                         }
                     }
                     if !stateRecords.isEmpty {
@@ -7551,7 +7590,11 @@ private struct WorkflowWorkItemCard: View {
                         DisclosureGroup("Standing authority · \(authorityGrants.count)") {
                             VStack(alignment: .leading, spacing: 7) {
                                 ForEach(authorityGrants) { grant in
-                                    WorkflowAuthorityGrantRow(grant: grant) { requestedState in
+                                    WorkflowAuthorityGrantRow(
+                                        grant: grant,
+                                        events: model.snapshot.operations.workflows.authorityEvents.filter { $0.grantID == grant.id }
+                                            .sorted { $0.recordedAtUnixMillis < $1.recordedAtUnixMillis }
+                                    ) { requestedState in
                                         _ = model.setWorkflowAuthorityGrantState(id: grant.id, state: requestedState)
                                     }
                                 }
@@ -7597,7 +7640,13 @@ private struct WorkflowWorkItemCard: View {
                                     }
                                     Spacer()
                                     if effect.approvalID == nil && preview?.authorityGrantID == nil {
-                                        Button("Request approval") { requestEffectApproval(effect) }
+                                        VStack(alignment: .trailing, spacing: 5) {
+                                            Button("Request approval") { requestEffectApproval(effect) }
+                                            if let preview {
+                                                Button("Standing grant…") { standingGrantPreview = preview }
+                                                    .font(.caption)
+                                            }
+                                        }
                                     } else if effect.state == .outcomeUnknown {
                                         if preview != nil {
                                             Button("Reconcile result") { executeEffect(effect) }
@@ -7640,6 +7689,9 @@ private struct WorkflowWorkItemCard: View {
             }
         }
         .panelStyle()
+        .sheet(item: $standingGrantPreview) { preview in
+            WorkflowStandingGrantBuilderSheet(model: model, preview: preview)
+        }
     }
 
     private func artifactURL(_ artifact: DesktopWorkflowArtifactRoleRecord) -> URL? {
@@ -7680,6 +7732,41 @@ private struct WorkflowWorkItemCard: View {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         try? data.write(to: url, options: .atomic)
     }
+
+    private func reviewPurge() {
+        guard let storage = model.workflowStorage(workflowID: item.workflowID),
+              let plan = model.previewWorkflowPurge(workflowID: item.workflowID, mode: .manual) else { return }
+        let alert = NSAlert()
+        alert.messageText = "Purge eligible private workflow content?"
+        alert.informativeText = "Eligible: \(plan.eligibleDigests.count) artifact(s), \(ByteCountFormatter.string(fromByteCount: Int64(plan.eligibleBytes), countStyle: .file))\nRetained: \(plan.retained.count) artifact(s)\n\nPromoted artifacts and unresolved-effect evidence remain. A sanitized receipt records counts and reasons, never deleted content."
+        alert.alertStyle = .warning
+        if plan.eligibleDigests.isEmpty {
+            alert.addButton(withTitle: "Done")
+            _ = alert.runModal()
+            return
+        }
+        alert.addButton(withTitle: "Purge eligible content")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        do {
+            if try model.executeWorkflowPurge(plan, storage: storage) == nil {
+                _ = model.recordWorkflowOperationalStatus(
+                    workflowID: item.workflowID, relatedID: item.workflowID, kind: .retentionFailure,
+                    level: .actionRequired, summary: "The purge plan changed before execution; review it again."
+                )
+            } else {
+                _ = model.recordWorkflowOperationalStatus(
+                    workflowID: item.workflowID, relatedID: item.workflowID, kind: .retentionFailure,
+                    level: .actionRequired, summary: "The latest retention operation completed.", active: false
+                )
+            }
+        } catch {
+            _ = model.recordWorkflowOperationalStatus(
+                workflowID: item.workflowID, relatedID: item.workflowID, kind: .retentionFailure,
+                level: .actionRequired, summary: "Retention cleanup failed safely: \(error.localizedDescription)"
+            )
+        }
+    }
 }
 
 private struct WorkflowRunGraphProjectionView: View {
@@ -7714,6 +7801,9 @@ private struct WorkflowRunGraphProjectionView: View {
                         let effects = model.snapshot.operations.workflows.effects.filter {
                             $0.runID == run.id && $0.stepID == node.stepID
                         }
+                        let batchItems = model.snapshot.operations.workflows.batchItems.filter {
+                            $0.runID == run.id && $0.stepID == node.stepID
+                        }.sorted { $0.ordinal < $1.ordinal }
                         let eligibility = step.map {
                             DesktopWorkflowRunProjection.debugEligibility(
                                 step: $0, projection: node,
@@ -7746,6 +7836,23 @@ private struct WorkflowRunGraphProjectionView: View {
                                     }
                                     if !effects.isEmpty {
                                         Text("Effects: \(effects.map { $0.state.rawValue }.joined(separator: ", "))")
+                                    }
+                                    if !batchItems.isEmpty {
+                                        ForEach(batchItems) { item in
+                                            Text("Item \(item.ordinal + 1) · \(item.state.rawValue) · attempt \(item.attempt)")
+                                        }
+                                        let failedIDs = Set(batchItems.filter { $0.state == .failed }.map(\.id))
+                                        let unknownItems = batchItems.filter { $0.state == .unknown }
+                                        HStack {
+                                            Button("Retry failed items") {
+                                                _ = model.retryFailedWorkflowBatchItems(ids: failedIDs)
+                                            }
+                                            .disabled(failedIDs.isEmpty)
+                                            Button("Reconcile unknown…") {
+                                                reconcileUnknownBatchAsFailed(unknownItems)
+                                            }
+                                            .disabled(unknownItems.isEmpty)
+                                        }
                                     }
                                     HStack {
                                         Button("Retry step") {
@@ -7786,6 +7893,23 @@ private struct WorkflowRunGraphProjectionView: View {
 
     private var revision: DesktopWorkflowRevisionRecord? {
         model.snapshot.operations.workflows.revisions.first { $0.id == run.workflowRevisionID }
+    }
+
+    private func reconcileUnknownBatchAsFailed(_ items: [DesktopWorkflowBatchItemRecord]) {
+        guard !items.isEmpty else { return }
+        let alert = NSAlert()
+        alert.messageText = "Record verified failure for unknown batch items?"
+        alert.informativeText = "Use this only after checking the external system and confirming these \(items.count) item(s) did not succeed. They can then be retried explicitly."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Record verified failure")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        for item in items {
+            _ = model.reconcileUnknownWorkflowBatchItem(
+                id: item.id, outcomeKnown: true, succeeded: false,
+                detail: "Operator verified that the interrupted item did not succeed externally."
+            )
+        }
     }
 
     private func symbol(_ state: DesktopWorkflowRunNodeState) -> String {
@@ -7977,6 +8101,10 @@ private struct WorkflowDefinitionCard: View {
 
     private var revision: DesktopWorkflowRevisionRecord? {
         model.snapshot.operations.workflows.revisions.first { $0.id == definition.currentRevisionID }
+    }
+
+    private var catalogFixtureSuite: DesktopWorkflowFixtureSuite? {
+        DesktopWorkflowStarterCatalog.fixtureSuites.first { $0.workflowID == definition.id }
     }
 
     var body: some View {
@@ -8292,13 +8420,23 @@ private struct WorkflowDefinitionCard: View {
 
     @ViewBuilder
     private var workflowMigrationAcceptance: some View {
-        let assessment = model.snapshot.operations.workflows.migrationAssessments.first { $0.workflowID == definition.id }
+        let assessment = model.snapshot.operations.workflows.migrationAssessments
+            .filter { $0.workflowID == definition.id }
+            .sorted { ($0.updatedAtUnixMillis, $0.id) > ($1.updatedAtUnixMillis, $1.id) }
+            .first
         DisclosureGroup("Migration acceptance") {
             VStack(alignment: .leading, spacing: 9) {
                 if let assessment {
                     LabeledContent("Stage", value: assessment.stage.label)
                     Text("\(assessment.passedScenarioIDs.count) of \(assessment.requiredScenarioIDs.count) required scenarios passed")
                         .font(.caption).foregroundStyle(.secondary)
+                    Text("\(assessment.comparisonEvidenceIDs?.count ?? 0) integrity-bound comparison receipt(s)")
+                        .font(.caption2).foregroundStyle(.secondary)
+                    if let fixtureSuiteID = assessment.fixtureSuiteID,
+                       let fixtureSuiteDigest = assessment.fixtureSuiteDigest {
+                        Text("\(fixtureSuiteID) · \(fixtureSuiteDigest.prefix(16))…")
+                            .font(.caption2.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
+                    }
                     ForEach(assessment.blockingFindings, id: \.self) { finding in
                         Label(finding, systemImage: "xmark.octagon.fill").font(.caption).foregroundStyle(Nord.auroraYellow)
                     }
@@ -8327,8 +8465,53 @@ private struct WorkflowDefinitionCard: View {
                         )
                     }
                 }
+                if let suite = catalogFixtureSuite {
+                    Button("Run signed-package synthetic qualification", systemImage: "checkmark.seal") {
+                        qualifySyntheticPackage(suite)
+                    }
+                    Text("Runs deterministic mail, model, connector, failure, and replay fixtures. The comparison baseline is synthetic package evidence, not private legacy acceptance.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
             }
             .padding(.top, 8)
+        }
+    }
+
+    private func qualifySyntheticPackage(_ suite: DesktopWorkflowFixtureSuite) {
+        do {
+            let installation = model.workflowInstallations(workflowID: definition.id).first {
+                $0.workflowRevisionID == definition.currentRevisionID
+            }
+            let requiredScenarios = Set(suite.cases.map(\.id))
+            let assessmentID = model.snapshot.operations.workflows.migrationAssessments.first {
+                $0.workflowID == definition.id
+                    && Set($0.requiredScenarioIDs) == requiredScenarios
+                    && ($0.fixtureSuiteDigest == nil || $0.fixtureSuiteDigest == suite.digest)
+            }?.id ?? model.createWorkflowMigrationAssessment(
+                workflowID: definition.id,
+                requiredScenarioIDs: requiredScenarios.sorted(),
+                installationID: installation?.id
+            )
+            guard let assessmentID else {
+                throw DesktopWorkflowSimulationError.staleEvidence
+            }
+            for scenario in suite.cases {
+                let runID = try model.simulateWorkflowFixture(
+                    workflowID: definition.id, installationID: installation?.id,
+                    suite: suite, scenarioID: scenario.id
+                )
+                guard let run = model.snapshot.operations.workflows.simulationRuns.first(where: { $0.id == runID }) else {
+                    throw DesktopWorkflowSimulationError.expectationFailed
+                }
+                _ = try model.recordWorkflowMigrationComparison(
+                    assessmentID: assessmentID, simulationRunID: runID,
+                    legacySourceRevision: "synthetic-package-baseline@\(suite.digest)",
+                    legacyOutputJSON: run.outputJSON
+                )
+            }
+            transferMessage = "Synthetic qualification passed with exact package, dependency, fixture, timeline, and comparison receipts."
+        } catch {
+            transferMessage = "Synthetic qualification failed safely: \(error.localizedDescription)"
         }
     }
 
