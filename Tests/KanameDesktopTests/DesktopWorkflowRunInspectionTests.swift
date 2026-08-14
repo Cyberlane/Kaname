@@ -37,6 +37,7 @@ struct DesktopWorkflowRunInspectionTests {
         #expect(run.outputs(for: "trigger").first?.value.storage?.logicalKey == "draft")
         #expect(run.outputs(for: "trigger").first?.value.storage?.revision == 2)
         #expect(run.outputs(for: "trigger").first?.value.storage?.previousVersionID == "storage-version-1")
+        #expect(run.outputs(for: "trigger").first?.value.storage?.sourceVersionID == "job-version-source")
         #expect(run.outputs(for: "trigger").first?.value.storage?.result == "read")
         #expect(run.events.map(\.storePosition) == [11, 12, 13, 14, 15])
     }
@@ -121,6 +122,7 @@ private actor HistoricalRunTransport:
         value.storage.versionID = "storage-version-2"
         value.storage.revision = 2
         value.storage.previousVersionID = "storage-version-1"
+        value.storage.sourceVersionID = "job-version-source"
         value.storage.byteCount = value.byteCount
         value.storage.result = "read"
         var attempt = Kaname_V1_WorkflowProjectedAttempt()

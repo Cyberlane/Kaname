@@ -419,6 +419,9 @@ struct DesktopDurableWorkflowRunsView: View {
                 storageRow("Key", metadata.logicalKey)
                 storageRow("Version", version)
                 storageRow("Lineage", lineage)
+                if let sourceVersionID = metadata.sourceVersionID {
+                    storageRow("Promoted from", sourceVersionID)
+                }
                 storageRow("Bytes", String(metadata.byteCount))
                 storageRow("Handle", metadata.handleID ?? "Summary only")
             }

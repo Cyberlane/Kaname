@@ -110,7 +110,8 @@ fn version_one_projection_migrates_storage_lineage_columns_in_place() {
     let connection = rusqlite::Connection::open(&path).unwrap();
     connection
         .execute_batch(
-            "ALTER TABLE workflow_values DROP COLUMN storage_result;
+            "ALTER TABLE workflow_values DROP COLUMN storage_source_version_id;
+             ALTER TABLE workflow_values DROP COLUMN storage_result;
              ALTER TABLE workflow_values DROP COLUMN storage_previous_version_id;
              ALTER TABLE workflow_values DROP COLUMN storage_revision;
              ALTER TABLE workflow_values DROP COLUMN storage_version_id;

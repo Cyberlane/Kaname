@@ -30,7 +30,8 @@ message WorkflowStorageValueMetadata {
   string previous_version_id = 6;
   uint64 byte_count = 7;
   string result = 8;
-  reserved 9 to 20;
+  string source_version_id = 9;
+  reserved 10 to 20;
   reserved "host_path", "raw_path", "cas_path", "mount_path";
 }
 

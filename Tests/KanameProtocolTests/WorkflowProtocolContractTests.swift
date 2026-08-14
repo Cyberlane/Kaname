@@ -154,6 +154,7 @@ struct WorkflowProtocolContractTests {
         storageValue.storage.versionID = "storage-version-two"
         storageValue.storage.revision = 2
         storageValue.storage.previousVersionID = "storage-version-one"
+        storageValue.storage.sourceVersionID = "job-version-source"
         storageValue.storage.byteCount = storageValue.byteCount
         storageValue.storage.result = "read"
         var cancel = Kaname_V1_CancelWorkflowRun()

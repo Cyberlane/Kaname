@@ -403,6 +403,7 @@ fn execution_availability(node: &Node) -> &'static str {
         }
         "data.validate" => "executable",
         "storage.read" => "executable",
+        "storage.promote" => "executable",
         "storage.write"
             if node.config.get("operation").and_then(Value::as_str) == Some("delete-reference")
                 || node
@@ -874,6 +875,20 @@ fn validate_storage(workflow: &Workflow, diagnostics: &mut Vec<CompilerDiagnosti
                     || source.is_some_and(|value| Some(value.scope.as_str()) != from)
                     || destination.is_some_and(|value| Some(value.scope.as_str()) != to)
                     || scope_rank(from) >= scope_rank(to)
+                    || source
+                        .zip(destination)
+                        .is_some_and(|(source, destination)| {
+                            source.kind != destination.kind
+                                || source.schema_ref != destination.schema_ref
+                                || classification_rank(&destination.classification)
+                                    < classification_rank(&source.classification)
+                                || destination
+                                    .conflict_policy
+                                    .as_deref()
+                                    .is_some_and(|policy| {
+                                        Some(policy) != string_field(&node.config, "conflictPolicy")
+                                    })
+                        })
                 {
                     diagnostics.push(CompilerDiagnostic::new(
                         "storage.promotion.invalid",
@@ -1483,6 +1498,16 @@ fn scope_rank(scope: Option<&str>) -> u8 {
         Some("case") => 2,
         Some("workflow") => 3,
         _ => u8::MAX,
+    }
+}
+
+fn classification_rank(classification: &str) -> u8 {
+    match classification {
+        "public" => 1,
+        "internal" => 2,
+        "private" => 3,
+        "restricted" => 4,
+        _ => 0,
     }
 }
 

@@ -48,7 +48,8 @@
     "to": "workflow",
     "sourceKey": "draft",
     "destinationKey": "latest-result",
-    "conflictPolicy": "compare-and-swap"
+    "conflictPolicy": "compare-and-swap",
+    "expectedRevision": 0
   },
   "compute.capability": {
     "capabilityId": "dev.kaname.document.check",

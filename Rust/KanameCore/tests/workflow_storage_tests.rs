@@ -2,10 +2,11 @@ use kaname_core::{
     open_workflow_object_store, open_workflow_scoped_storage,
     workflow_object_store::{WorkflowObjectStoreQuota, WorkflowObjectStoreUsage},
     workflow_storage::{
-        WorkflowStorageAccessContext, WorkflowStorageDeleteRequest, WorkflowStorageError,
+        WorkflowStorageAccessContext, WorkflowStorageDeleteJobRequest,
+        WorkflowStorageDeleteRequest, WorkflowStorageError, WorkflowStorageLifecycleFault,
         WorkflowStorageListRequest, WorkflowStorageNamespace, WorkflowStorageNamespaceQuota,
-        WorkflowStorageReadRequest, WorkflowStorageScopeKind, WorkflowStorageValueInput,
-        WorkflowStorageWriteRequest,
+        WorkflowStoragePromoteRequest, WorkflowStorageReadRequest, WorkflowStorageScopeKind,
+        WorkflowStorageValueInput, WorkflowStorageWriteRequest,
     },
 };
 use sha2::{Digest, Sha256};
@@ -462,6 +463,206 @@ fn one_physical_object_can_have_isolated_logical_references_without_path_leakage
 }
 
 #[test]
+fn promotion_and_job_deletion_are_atomic_idempotent_and_collect_only_orphans() {
+    let temporary = tempdir().unwrap();
+    let retained_bytes = vec![7_u8; 1_024];
+    let orphaned_bytes = vec![9_u8; 768];
+    let object_store = open_workflow_object_store(temporary.path(), object_quota()).unwrap();
+    let mut retained_write = object_store
+        .begin_write("promotion-retained-object", None)
+        .unwrap();
+    retained_write.write_chunk(&retained_bytes).unwrap();
+    let retained_object = object_store.finalize(retained_write).unwrap();
+    let mut orphaned_write = object_store
+        .begin_write("promotion-orphaned-object", None)
+        .unwrap();
+    orphaned_write.write_chunk(&orphaned_bytes).unwrap();
+    let orphaned_object = object_store.finalize(orphaned_write).unwrap();
+
+    let mut storage = open_workflow_scoped_storage(temporary.path(), object_quota()).unwrap();
+    let job = namespace(
+        WorkflowStorageScopeKind::Job,
+        "run-promotion",
+        Some("install-promotion"),
+    );
+    let case = namespace(
+        WorkflowStorageScopeKind::Case,
+        "case-promotion",
+        Some("install-promotion"),
+    );
+    let workflow = namespace(
+        WorkflowStorageScopeKind::Installation,
+        "install-promotion",
+        Some("install-promotion"),
+    );
+    for (index, scope) in [&job, &case, &workflow].into_iter().enumerate() {
+        storage
+            .register_namespace(scope.clone(), namespace_quota(), 100 + index as i64)
+            .unwrap();
+    }
+    let context = access(
+        Some("run-promotion"),
+        Some("case-promotion"),
+        "install-promotion",
+        &[],
+    );
+    let source = storage
+        .write_value(object_request(
+            write_fixture(
+                "command-promotion-source",
+                "entry-promotion-source",
+                "version-promotion-source",
+                "files/result.bin",
+            ),
+            context.clone(),
+            job.clone(),
+            "reference-promotion-source",
+            &retained_object.manifest.digest,
+            retained_object.manifest.byte_count,
+        ))
+        .unwrap();
+    storage
+        .write_value(object_request(
+            write_fixture(
+                "command-orphan-source",
+                "entry-orphan-source",
+                "version-orphan-source",
+                "files/scratch.bin",
+            ),
+            context.clone(),
+            job.clone(),
+            "reference-orphan-source",
+            &orphaned_object.manifest.digest,
+            orphaned_object.manifest.byte_count,
+        ))
+        .unwrap();
+
+    let promote_to_case = WorkflowStoragePromoteRequest {
+        command_id: "command-promote-case".into(),
+        access: context.clone(),
+        source_namespace: job.clone(),
+        destination_namespace: case.clone(),
+        source_handle_id: source.handle.handle_id.clone(),
+        destination_entry_id: "entry-promoted-case".into(),
+        destination_version_id: "version-promoted-case".into(),
+        destination_reference_id: Some("reference-promoted-case".into()),
+        destination_logical_key: "files/case-result.bin".into(),
+        expected_revision: 0,
+        schema_ref: None,
+        media_type: "application/octet-stream".into(),
+        classification: "sensitive".into(),
+        purpose: "file".into(),
+        promoted_by_attempt_id: "attempt-promote-case".into(),
+        promoted_at_unix_millis: 3_000,
+    };
+    assert!(matches!(
+        storage.promote_value_with_fault_for_test(
+            promote_to_case.clone(),
+            WorkflowStorageLifecycleFault::PromotionBeforeCommit,
+        ),
+        Err(WorkflowStorageError::Integrity(
+            "injected_promotion_interruption"
+        ))
+    ));
+    assert_eq!(storage.usage(&context, &case).unwrap().version_count, 0);
+    let promoted_case = storage.promote_value(promote_to_case.clone()).unwrap();
+    assert_eq!(
+        promoted_case.handle.source_version_id.as_deref(),
+        Some("version-promotion-source")
+    );
+    assert!(storage.promote_value(promote_to_case).unwrap().duplicate);
+
+    let promote_to_workflow = WorkflowStoragePromoteRequest {
+        command_id: "command-promote-workflow".into(),
+        access: context.clone(),
+        source_namespace: case.clone(),
+        destination_namespace: workflow.clone(),
+        source_handle_id: promoted_case.handle.handle_id.clone(),
+        destination_entry_id: "entry-promoted-workflow".into(),
+        destination_version_id: "version-promoted-workflow".into(),
+        destination_reference_id: Some("reference-promoted-workflow".into()),
+        destination_logical_key: "files/latest-result.bin".into(),
+        expected_revision: 0,
+        schema_ref: None,
+        media_type: "application/octet-stream".into(),
+        classification: "restricted".into(),
+        purpose: "file".into(),
+        promoted_by_attempt_id: "attempt-promote-workflow".into(),
+        promoted_at_unix_millis: 3_001,
+    };
+    let promoted_workflow = storage.promote_value(promote_to_workflow).unwrap();
+    assert_eq!(
+        promoted_workflow.handle.source_version_id.as_deref(),
+        Some("version-promoted-case")
+    );
+
+    let delete_job = WorkflowStorageDeleteJobRequest {
+        command_id: "command-delete-promotion-job".into(),
+        access: context.clone(),
+        namespace: job.clone(),
+        deleted_at_unix_millis: 4_000,
+    };
+    assert!(matches!(
+        storage.delete_job_with_fault_for_test(
+            delete_job.clone(),
+            WorkflowStorageLifecycleFault::JobDeletionBeforeCommit,
+        ),
+        Err(WorkflowStorageError::Integrity(
+            "injected_job_delete_interruption"
+        ))
+    ));
+    assert_eq!(storage.usage(&context, &job).unwrap().version_count, 2);
+    assert!(matches!(
+        storage.delete_job_with_fault_for_test(
+            delete_job.clone(),
+            WorkflowStorageLifecycleFault::JobDeletionAfterCommit,
+        ),
+        Err(WorkflowStorageError::Integrity(
+            "injected_job_delete_after_commit"
+        ))
+    ));
+    let repeated = storage.delete_job(delete_job).unwrap();
+    assert!(repeated.duplicate);
+    assert_eq!(repeated.entry_count, 2);
+    assert_eq!(repeated.version_count, 2);
+    assert_eq!(repeated.blob_reference_count, 2);
+    assert!(matches!(
+        storage.inspect_handle(&context, &source.handle.handle_id),
+        Err(WorkflowStorageError::NotFound("handle"))
+    ));
+    assert_eq!(
+        storage
+            .inspect_handle(&context, &promoted_workflow.handle.handle_id)
+            .unwrap()
+            .sha256,
+        retained_object.manifest.digest
+    );
+    assert!(matches!(
+        storage.ensure_namespace_capacity(job, namespace_quota(), 100),
+        Err(WorkflowStorageError::Integrity("namespace_deleted"))
+    ));
+
+    let collection = storage.collect_orphaned_objects().unwrap();
+    assert_eq!(collection.retained_object_count, 1);
+    assert_eq!(collection.quarantined_object_count, 1);
+    assert_eq!(
+        collection.quarantined_byte_count,
+        orphaned_bytes.len() as u64
+    );
+    assert_eq!(
+        object_store.usage().unwrap(),
+        WorkflowObjectStoreUsage {
+            object_count: 1,
+            byte_count: retained_bytes.len() as u64,
+        }
+    );
+    storage.verify_integrity().unwrap();
+    let serialized = serde_json::to_string(&(promoted_case, promoted_workflow, repeated)).unwrap();
+    assert!(!serialized.contains(temporary.path().to_string_lossy().as_ref()));
+    assert!(!serialized.contains("Objects/"));
+}
+
+#[test]
 fn item_value_and_total_quotas_reject_without_partial_versions() {
     let temporary = tempdir().unwrap();
     let mut storage = open_workflow_scoped_storage(temporary.path(), object_quota()).unwrap();
@@ -746,14 +947,14 @@ fn newer_schema_and_corrupt_current_pointer_fail_closed_on_reopen() {
     let newer_database = newer.path().join("Objects").join("workflow-storage.sqlite");
     let newer_connection = rusqlite::Connection::open(&newer_database).unwrap();
     newer_connection
-        .pragma_update(None, "user_version", 3)
+        .pragma_update(None, "user_version", 4)
         .unwrap();
     drop(newer_connection);
     assert!(matches!(
         open_workflow_scoped_storage(newer.path(), object_quota()),
         Err(WorkflowStorageError::UnsupportedNewerSchema {
-            found: 3,
-            supported: 2
+            found: 4,
+            supported: 3
         })
     ));
 
@@ -963,9 +1164,14 @@ fn version_one_catalog_migrates_forward_before_storage_nodes_write() {
     let connection = rusqlite::Connection::open(&database).unwrap();
     connection
         .execute_batch(
-            "ALTER TABLE storage_entries DROP COLUMN current_state;
+            "DROP TABLE storage_namespace_tombstones;
+             DROP INDEX storage_command_receipts_scope;
+             ALTER TABLE storage_command_receipts DROP COLUMN scope_id;
+             ALTER TABLE storage_command_receipts DROP COLUMN scope_kind;
+             ALTER TABLE storage_versions DROP COLUMN source_version_id;
+             ALTER TABLE storage_entries DROP COLUMN current_state;
              ALTER TABLE storage_entries DROP COLUMN declared_classification;
-             DELETE FROM workflow_storage_migrations WHERE version = 2;
+             DELETE FROM workflow_storage_migrations WHERE version IN (2, 3);
              PRAGMA user_version = 1;",
         )
         .unwrap();

@@ -44,6 +44,7 @@ public struct DesktopWorkflowStorageValueMetadata: Equatable, Sendable {
     public let versionID: String?
     public let revision: UInt64?
     public let previousVersionID: String?
+    public let sourceVersionID: String?
     public let byteCount: UInt64
     public let result: String
 }
@@ -441,6 +442,7 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
             versionID: storage.versionID.nilIfEmpty,
             revision: storage.revision > 0 ? storage.revision : nil,
             previousVersionID: storage.previousVersionID.nilIfEmpty,
+            sourceVersionID: storage.sourceVersionID.nilIfEmpty,
             byteCount: storage.byteCount,
             result: storage.result
         )

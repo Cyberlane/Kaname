@@ -460,7 +460,7 @@ fn validate_value(value: Option<&v1::WorkflowValueReference>) -> Result<()> {
             || storage.byte_count != value.byte_count
             || !matches!(
                 storage.result.as_str(),
-                "read" | "written" | "deleted" | "listed" | "missing"
+                "read" | "written" | "deleted" | "promoted" | "listed" | "missing"
             )
         {
             return invalid("storage_metadata");
@@ -471,6 +471,9 @@ fn validate_value(value: Option<&v1::WorkflowValueReference>) -> Result<()> {
                 128,
                 "storage_previous_version_id",
             )?;
+        }
+        if !storage.source_version_id.is_empty() {
+            validate_identifier(&storage.source_version_id, 128, "storage_source_version_id")?;
         }
         if stored && value.storage_reference_id != storage.handle_id {
             return invalid("storage_reference_identity");

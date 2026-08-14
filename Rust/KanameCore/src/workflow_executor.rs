@@ -3,8 +3,8 @@
 //! The executor consumes only a verified immutable compiled revision and the
 //! typed journal contracts. It advances one deterministic event boundary at a
 //! time, so resubmitting the same request after a process crash can only append
-//! the next missing fact. This first slice supports no connector, model,
-//! capability, storage dereference, arbitrary mapping, or external effect.
+//! the next missing fact. This bounded slice supports typed scoped storage but
+//! no connector, model, capability, arbitrary mapping, or external effect.
 
 use crate::{
     journal::{Journal, JournalError, ReplayBasis},
@@ -16,8 +16,9 @@ use crate::{
     workflow_storage::{
         WorkflowScopedStorage, WorkflowStorageAccessContext, WorkflowStorageDeleteRequest,
         WorkflowStorageError, WorkflowStorageHandle, WorkflowStorageListRequest,
-        WorkflowStorageNamespace, WorkflowStorageNamespaceQuota, WorkflowStorageReadRequest,
-        WorkflowStorageScopeKind, WorkflowStorageValueInput, WorkflowStorageWriteRequest,
+        WorkflowStorageNamespace, WorkflowStorageNamespaceQuota, WorkflowStoragePromoteRequest,
+        WorkflowStorageReadRequest, WorkflowStorageScopeKind, WorkflowStorageValueInput,
+        WorkflowStorageWriteRequest,
     },
     workflow_versions::WorkflowExecutionSupport,
 };
@@ -630,6 +631,7 @@ fn validate_compiled_subset(compiled: &CompiledWorkflow) -> Result<()> {
                     | "control.match"
                     | "storage.read"
                     | "storage.write"
+                    | "storage.promote"
                     | "terminal.complete"
                     | "terminal.fail"
             )
@@ -1030,7 +1032,7 @@ fn execute_node(
                 error,
             })
         }
-        "storage.read" | "storage.write" => execute_storage_node(
+        "storage.read" | "storage.write" | "storage.promote" => execute_storage_node(
             package,
             storage.ok_or_else(|| {
                 WorkflowExecutionError::Unsupported("storage_service_required".into())
@@ -1092,6 +1094,17 @@ struct StorageWriteConfig {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StoragePromoteConfig {
+    from: String,
+    to: String,
+    source_key: String,
+    destination_key: String,
+    conflict_policy: String,
+    expected_revision: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StorageValueSelector {
     root: String,
     pointer: String,
@@ -1122,10 +1135,11 @@ fn execute_storage_node(
     occurred_at_unix_millis: i64,
     input: &v1::WorkflowValueReference,
 ) -> Result<NodeExecution> {
-    let operation = if node.node_type == "storage.read" {
-        execute_storage_read(package, storage, request, node, occurred_at_unix_millis)
-    } else {
-        execute_storage_write(
+    let operation = match node.node_type.as_str() {
+        "storage.read" => {
+            execute_storage_read(package, storage, request, node, occurred_at_unix_millis)
+        }
+        "storage.write" => execute_storage_write(
             package,
             storage,
             request,
@@ -1133,7 +1147,19 @@ fn execute_storage_node(
             attempt_id,
             occurred_at_unix_millis,
             input,
-        )
+        ),
+        "storage.promote" => execute_storage_promote(
+            package,
+            storage,
+            request,
+            node,
+            attempt_id,
+            occurred_at_unix_millis,
+            input,
+        ),
+        _ => Err(WorkflowExecutionError::Integrity(
+            "storage_node_type".into(),
+        )),
     };
     match operation {
         Ok(value) => Ok(success_output("success", value)),
@@ -1348,6 +1374,116 @@ fn execute_storage_write(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn execute_storage_promote(
+    package: &ExecutionPackage,
+    storage: &mut WorkflowScopedStorage,
+    request: &v1::RequestWorkflowRun,
+    node: &CompiledNode,
+    attempt_id: &str,
+    occurred_at_unix_millis: i64,
+    input: &v1::WorkflowValueReference,
+) -> Result<v1::WorkflowValueReference> {
+    let config: StoragePromoteConfig = serde_json::from_value(node.config.clone())
+        .map_err(|_| WorkflowExecutionError::Integrity("storage_promote_config".into()))?;
+    let source_declaration = storage_declaration(package, &config.from, &config.source_key)?;
+    let destination_declaration =
+        storage_declaration(package, &config.to, &config.destination_key)?;
+    if source_declaration.kind != destination_declaration.kind
+        || source_declaration.schema_ref != destination_declaration.schema_ref
+        || destination_declaration
+            .conflict_policy
+            .as_deref()
+            .is_some_and(|policy| policy != config.conflict_policy)
+    {
+        return Err(WorkflowExecutionError::Integrity(
+            "storage_promotion_contract".into(),
+        ));
+    }
+    if input.storage_reference_id.is_empty() {
+        return Err(WorkflowExecutionError::Integrity(
+            "storage_promotion_input".into(),
+        ));
+    }
+    let (access, source_namespace) = storage_access(request, &config.from)?;
+    let (_, destination_namespace) = storage_access(request, &config.to)?;
+    storage.ensure_namespace_capacity(
+        source_namespace.clone(),
+        storage_quota(package, &config.from)?,
+        occurred_at_unix_millis,
+    )?;
+    storage.ensure_namespace_capacity(
+        destination_namespace.clone(),
+        storage_quota(package, &config.to)?,
+        occurred_at_unix_millis,
+    )?;
+    let source_handle = storage.inspect_handle(&access, &input.storage_reference_id)?;
+    if storage_scope_name(source_handle.scope_kind) != config.from
+        || source_handle.logical_key != source_declaration.key
+    {
+        return Err(WorkflowExecutionError::Integrity(
+            "storage_promotion_source".into(),
+        ));
+    }
+    let expected_revision = match config.conflict_policy.as_str() {
+        "fail" => 0,
+        "compare-and-swap" => config
+            .expected_revision
+            .ok_or_else(|| WorkflowExecutionError::Integrity("storage_expected_revision".into()))?,
+        "replace" => storage
+            .list_current(
+                &access,
+                &destination_namespace,
+                Some(&destination_declaration.key),
+                1,
+            )?
+            .into_iter()
+            .find(|handle| handle.logical_key == destination_declaration.key)
+            .map_or(0, |handle| handle.revision),
+        _ => {
+            return Err(WorkflowExecutionError::Integrity(
+                "storage_conflict_policy".into(),
+            ));
+        }
+    };
+    let version_id = stable_id("storage-version", &[&request.run_id, &node.id, "promoted"]);
+    let receipt = storage.promote_value(WorkflowStoragePromoteRequest {
+        command_id: stable_id("storage-command", &[&request.run_id, &node.id, "promote"]),
+        access,
+        source_namespace,
+        destination_namespace: destination_namespace.clone(),
+        source_handle_id: source_handle.handle_id,
+        destination_entry_id: stable_id(
+            "storage-entry",
+            &[
+                &destination_namespace.owner_id,
+                &config.to,
+                &destination_declaration.key,
+            ],
+        ),
+        destination_version_id: version_id.clone(),
+        destination_reference_id: (source_handle.value_kind == "object")
+            .then(|| stable_id("storage-reference", &[&version_id, "promotion"])),
+        destination_logical_key: destination_declaration.key.clone(),
+        expected_revision,
+        schema_ref: Some(destination_declaration.schema_ref.clone()),
+        media_type: source_handle.media_type,
+        classification: destination_declaration.classification.clone(),
+        purpose: if destination_declaration.kind == "value" {
+            "value".into()
+        } else {
+            "file".into()
+        },
+        promoted_by_attempt_id: attempt_id.into(),
+        promoted_at_unix_millis: occurred_at_unix_millis,
+    })?;
+    Ok(storage_handle_value(
+        &stable_id("value", &[&request.run_id, &node.id, "promoted"]),
+        &receipt.handle,
+        "promoted",
+    ))
+}
+
 fn storage_declaration<'a>(
     package: &'a ExecutionPackage,
     scope: &str,
@@ -1495,6 +1631,7 @@ fn storage_metadata(
         previous_version_id: handle.previous_version_id.clone().unwrap_or_default(),
         byte_count: handle.byte_count,
         result: result.into(),
+        source_version_id: handle.source_version_id.clone().unwrap_or_default(),
     }
 }
 
@@ -1515,6 +1652,7 @@ fn storage_summary_value(
         previous_version_id: String::new(),
         byte_count: reference.byte_count,
         result: result.into(),
+        source_version_id: String::new(),
     });
     Ok(reference)
 }

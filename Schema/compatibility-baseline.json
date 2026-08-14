@@ -732,7 +732,8 @@
       "5": "uint64 revision",
       "6": "string previous_version_id",
       "7": "uint64 byte_count",
-      "8": "string result"
+      "8": "string result",
+      "9": "string source_version_id"
     },
     "workflow_runtime.WorkflowValueReference": {
       "1": "string value_id",

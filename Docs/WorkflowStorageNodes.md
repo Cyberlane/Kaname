@@ -8,6 +8,7 @@ Kaname's v1 storage nodes expose logical, scoped names and opaque handles. They 
 - `storage.read` with `operation: "list"` returns a bounded, key-ordered snapshot for the declared key or prefix. The read receipt pins that snapshot across process restart.
 - `storage.write` with `operation: "write"` stores the selected input value. `fail`, `compare-and-swap`, and `replace` all commit through an optimistic revision check.
 - `storage.write` with `operation: "delete-reference"` removes the current logical reference at an exact expected revision. It retains immutable version lineage for history; lifecycle deletion and object collection belong to the separate promotion/deletion stage.
+- `storage.promote` copies one selected immutable job or case handle into a declared longer-lived case or workflow key. The destination uses `fail`, `compare-and-swap`, or `replace` conflict policy and records both its own prior version and the source version.
 
 Every storage operation uses a deterministic command identity. Repeating an operation after a crash returns the persisted receipt and cannot create another version, observe a newer read, or repeat deletion.
 
@@ -23,12 +24,12 @@ The run request pins the stable `installation_id` and optional `case_id`. Those 
 
 ## Inspector evidence
 
-An emitted value may include `WorkflowStorageValueMetadata`: opaque handle, product scope, logical key, immutable version ID, optimistic revision, previous-version lineage, byte count, and operation result. The disposable run projection persists only those fields. The desktop inspector presents them in a dedicated Storage group and labels content as mediated by a scoped handle.
+An emitted value may include `WorkflowStorageValueMetadata`: opaque handle, product scope, logical key, immutable version ID, optimistic revision, previous-version lineage, promotion source version, byte count, and operation result. The disposable run projection persists only those fields. The desktop inspector presents them in a dedicated Storage group and labels content as mediated by a scoped handle.
 
-List and optional-missing results are bounded inline JSON summaries. Individual read, write, and delete results are opaque storage references. Their bytes remain accessible only through the scoped storage service, which reauthorizes the caller and enforces a maximum copy size.
+List and optional-missing results are bounded inline JSON summaries. Individual read, write, delete, and promotion results are opaque storage references. Their bytes remain accessible only through the scoped storage service, which reauthorizes the caller and enforces a maximum copy size.
 
 ## Deliberate boundaries
 
-- Cross-scope copying is rejected here; explicit promotion is WFP-005D.
-- Job lifecycle deletion and orphan collection are WFP-005D.
+- Promotion never crosses installation ownership, shortens lifetime, changes the declared schema/kind, or lowers classification.
+- Job deletion is a separate lifecycle action; it is not available to a workflow node or self-authorized by run input.
 - No account binding, credential, Keychain item, connector, provider, LLM, email, network call, or external effect is accessed by these nodes.

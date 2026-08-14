@@ -293,6 +293,17 @@ fn storage_nodes_write_compare_read_list_and_delete_with_inspectable_lineage() {
         storage.list_current(&access, &namespace, None, 10),
         Ok(handles) if handles.is_empty()
     ));
+    let workflow_namespace = WorkflowStorageNamespace {
+        kind: WorkflowStorageScopeKind::Installation,
+        owner_id: "installation-storage-001".into(),
+        installation_id: Some("installation-storage-001".into()),
+    };
+    let promoted = storage
+        .list_current(&access, &workflow_namespace, None, 10)
+        .unwrap();
+    assert_eq!(promoted.len(), 1);
+    assert_eq!(promoted[0].logical_key, "latest-draft");
+    assert!(promoted[0].source_version_id.is_some());
 
     let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
     projection.catch_up(&journal).unwrap();
@@ -311,7 +322,9 @@ fn storage_nodes_write_compare_read_list_and_delete_with_inspectable_lineage() {
             .iter()
             .map(|metadata| metadata.result.as_str())
             .collect::<Vec<_>>(),
-        ["written", "written", "read", "listed", "deleted"]
+        [
+            "written", "written", "read", "listed", "deleted", "promoted"
+        ]
     );
     assert_eq!(storage_values[0].revision, 1);
     assert_eq!(storage_values[1].revision, 2);
@@ -321,7 +334,12 @@ fn storage_nodes_write_compare_read_list_and_delete_with_inspectable_lineage() {
     );
     assert_eq!(storage_values[2].version_id, storage_values[1].version_id);
     assert_eq!(storage_values[4].revision, 2);
-    for metadata in storage_values {
+    assert_eq!(storage_values[5].scope, "workflow");
+    assert_eq!(
+        storage_values[5].source_version_id,
+        storage_values[4].version_id
+    );
+    for metadata in &storage_values[..5] {
         assert_eq!(metadata.scope, "job");
         assert_eq!(metadata.logical_key, "draft");
         assert!(!metadata.handle_id.contains('/'));
@@ -409,6 +427,25 @@ fn storage_node_receipts_resume_at_every_event_boundary_without_repeating_mutati
                 .unwrap()
                 .version_count,
             2
+        );
+        assert_eq!(
+            storage
+                .usage(
+                    &WorkflowStorageAccessContext {
+                        run_id: Some("run-storage-crash-001".into()),
+                        case_id: None,
+                        installation_id: "installation-storage-001".into(),
+                        account_binding_ids: Default::default(),
+                    },
+                    &WorkflowStorageNamespace {
+                        kind: WorkflowStorageScopeKind::Installation,
+                        owner_id: "installation-storage-001".into(),
+                        installation_id: Some("installation-storage-001".into()),
+                    },
+                )
+                .unwrap()
+                .version_count,
+            1
         );
     }
 }
@@ -531,6 +568,7 @@ fn storage_workflow_source() -> Value {
         "018f5300-0007-7000-8000-000000000007",
         "018f5300-0008-7000-8000-000000000008",
         "018f5300-0009-7000-8000-000000000009",
+        "018f5300-0011-7000-8000-000000000011",
     ];
     let node = |index: usize, key: &str, node_type: &str, config: Value| {
         json!({
@@ -555,7 +593,7 @@ fn storage_workflow_source() -> Value {
         "summary": "Synthetic and effect free",
         "graph": {
             "entrypoints": [{
-                "id": "018f5300-0010-7000-8000-000000000010",
+                "id": "018f5300-0012-7000-8000-000000000012",
                 "nodeId": ids[0]
             }],
             "nodes": [
@@ -580,8 +618,13 @@ fn storage_workflow_source() -> Value {
                     "operation": "delete-reference", "scope": "job", "key": "draft",
                     "conflictPolicy": "compare-and-swap", "expectedRevision": 2
                 })),
-                node(6, "complete", "terminal.complete", json!({})),
-                node(7, "fail", "terminal.fail", json!({}))
+                node(6, "promote", "storage.promote", json!({
+                    "from": "job", "to": "workflow",
+                    "sourceKey": "draft", "destinationKey": "latest-draft",
+                    "conflictPolicy": "fail"
+                })),
+                node(7, "complete", "terminal.complete", json!({})),
+                node(8, "fail", "terminal.fail", json!({}))
             ],
             "edges": [
                 edge(1, (0, "success"), (1, "input")),
@@ -590,11 +633,13 @@ fn storage_workflow_source() -> Value {
                 edge(4, (3, "success"), (4, "input")),
                 edge(5, (4, "success"), (5, "input")),
                 edge(6, (5, "success"), (6, "input")),
-                edge(7, (1, "error"), (7, "input")),
-                edge(8, (2, "error"), (7, "input")),
-                edge(9, (3, "error"), (7, "input")),
-                edge(10, (4, "error"), (7, "input")),
-                edge(11, (5, "error"), (7, "input"))
+                edge(7, (6, "success"), (7, "input")),
+                edge(8, (1, "error"), (8, "input")),
+                edge(9, (2, "error"), (8, "input")),
+                edge(10, (3, "error"), (8, "input")),
+                edge(11, (4, "error"), (8, "input")),
+                edge(12, (5, "error"), (8, "input")),
+                edge(13, (6, "error"), (8, "input"))
             ]
         },
         "interfaces": {}, "resources": {}, "policies": {},
@@ -603,6 +648,12 @@ fn storage_workflow_source() -> Value {
                 "key": "draft", "scope": "job", "kind": "value",
                 "schemaRef": "dev.kaname.storage/draft-v1",
                 "maximumBytes": 65536, "classification": "private"
+            },
+            "latest-draft": {
+                "key": "latest-draft", "scope": "workflow", "kind": "value",
+                "schemaRef": "dev.kaname.storage/draft-v1",
+                "maximumBytes": 65536, "classification": "private",
+                "conflictPolicy": "fail"
             }
         },
         "metadata": {}

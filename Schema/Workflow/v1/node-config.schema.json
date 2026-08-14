@@ -263,8 +263,31 @@
             "compare-and-swap",
             "replace"
           ]
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 0
         }
       },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "conflictPolicy": {
+                "const": "compare-and-swap"
+              }
+            },
+            "required": [
+              "conflictPolicy"
+            ]
+          },
+          "then": {
+            "required": [
+              "expectedRevision"
+            ]
+          }
+        }
+      ],
       "additionalProperties": false
     },
     "capability": {

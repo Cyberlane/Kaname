@@ -9,8 +9,8 @@ use crate::{
     workflow_canonical,
     workflow_library::is_workflow_identifier,
     workflow_object_store::{
-        WorkflowObjectManifest, WorkflowObjectStore, WorkflowObjectStoreError,
-        WorkflowObjectStoreQuota,
+        WorkflowObjectGarbageCollectionReceipt, WorkflowObjectManifest, WorkflowObjectStore,
+        WorkflowObjectStoreError, WorkflowObjectStoreQuota,
     },
 };
 use rusqlite::{
@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, error::Error, fmt, io::Write, path::Path};
 
-const STORAGE_SCHEMA_VERSION: i64 = 2;
+const STORAGE_SCHEMA_VERSION: i64 = 3;
 const MAXIMUM_INLINE_JSON_BYTES: usize = 64 * 1024;
 const MAXIMUM_LIST_LIMIT: u32 = 500;
 const MAXIMUM_ACCOUNT_BINDINGS: usize = 32;
@@ -108,6 +108,28 @@ ALTER TABLE storage_entries ADD COLUMN declared_classification TEXT NOT NULL DEF
 UPDATE storage_entries SET declared_classification = classification;
 ALTER TABLE storage_entries ADD COLUMN current_state TEXT NOT NULL DEFAULT 'active'
     CHECK (current_state IN ('active', 'deleted'));
+"#;
+
+const STORAGE_MIGRATION_3: &str = r#"
+ALTER TABLE storage_versions ADD COLUMN source_version_id TEXT
+    CHECK (source_version_id IS NULL OR length(source_version_id) BETWEEN 1 AND 128);
+ALTER TABLE storage_command_receipts ADD COLUMN scope_kind TEXT
+    CHECK (scope_kind IS NULL OR scope_kind IN ('run', 'case', 'installation', 'account_binding'));
+ALTER TABLE storage_command_receipts ADD COLUMN scope_id TEXT
+    CHECK (scope_id IS NULL OR length(scope_id) BETWEEN 1 AND 128);
+CREATE INDEX storage_command_receipts_scope
+ON storage_command_receipts(scope_kind, scope_id);
+
+CREATE TABLE storage_namespace_tombstones (
+    scope_kind TEXT NOT NULL CHECK (scope_kind = 'run'),
+    scope_id TEXT NOT NULL CHECK (length(scope_id) BETWEEN 1 AND 128),
+    installation_id TEXT NOT NULL CHECK (length(installation_id) BETWEEN 1 AND 128),
+    command_id TEXT NOT NULL UNIQUE CHECK (length(command_id) BETWEEN 1 AND 128),
+    request_digest TEXT NOT NULL CHECK (length(request_digest) = 64),
+    response_json BLOB NOT NULL,
+    deleted_at_unix_millis INTEGER NOT NULL CHECK (deleted_at_unix_millis >= 0),
+    PRIMARY KEY (scope_kind, scope_id)
+) STRICT;
 "#;
 
 pub type Result<T> = std::result::Result<T, WorkflowStorageError>;
@@ -303,6 +325,36 @@ pub struct WorkflowStorageDeleteRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkflowStoragePromoteRequest {
+    pub command_id: String,
+    pub access: WorkflowStorageAccessContext,
+    pub source_namespace: WorkflowStorageNamespace,
+    pub destination_namespace: WorkflowStorageNamespace,
+    pub source_handle_id: String,
+    pub destination_entry_id: String,
+    pub destination_version_id: String,
+    pub destination_reference_id: Option<String>,
+    pub destination_logical_key: String,
+    pub expected_revision: u64,
+    pub schema_ref: Option<String>,
+    pub media_type: String,
+    pub classification: String,
+    pub purpose: String,
+    pub promoted_by_attempt_id: String,
+    pub promoted_at_unix_millis: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkflowStorageDeleteJobRequest {
+    pub command_id: String,
+    pub access: WorkflowStorageAccessContext,
+    pub namespace: WorkflowStorageNamespace,
+    pub deleted_at_unix_millis: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkflowStorageHandle {
     pub handle_id: String,
     pub entry_id: String,
@@ -312,6 +364,8 @@ pub struct WorkflowStorageHandle {
     pub revision: u64,
     #[serde(default)]
     pub previous_version_id: Option<String>,
+    #[serde(default)]
+    pub source_version_id: Option<String>,
     pub schema_ref: Option<String>,
     pub media_type: String,
     pub classification: String,
@@ -348,11 +402,37 @@ pub struct WorkflowStorageDeleteReceipt {
     pub duplicate: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkflowStoragePromoteReceipt {
+    pub handle: WorkflowStorageHandle,
+    pub source_handle_id: String,
+    pub duplicate: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkflowStorageDeleteJobReceipt {
+    pub job_id: String,
+    pub entry_count: u64,
+    pub version_count: u64,
+    pub blob_reference_count: u64,
+    pub duplicate: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkflowStorageNamespaceUsage {
     pub item_count: u64,
     pub version_count: u64,
     pub byte_count: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum WorkflowStorageLifecycleFault {
+    PromotionBeforeCommit,
+    JobDeletionBeforeCommit,
+    JobDeletionAfterCommit,
 }
 
 pub struct WorkflowScopedStorage {
@@ -435,6 +515,17 @@ impl WorkflowScopedStorage {
             transaction.pragma_update(None, "user_version", 2)?;
             transaction.commit()?;
         }
+        if schema_version(&connection)? == 2 {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(STORAGE_MIGRATION_3)?;
+            transaction.execute(
+                "INSERT INTO workflow_storage_migrations (version, checksum) VALUES (?1, ?2)",
+                params![3, migration_checksum(STORAGE_MIGRATION_3)],
+            )?;
+            transaction.pragma_update(None, "user_version", 3)?;
+            transaction.commit()?;
+        }
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "FULL")?;
         verify_database(&connection)?;
@@ -458,6 +549,7 @@ impl WorkflowScopedStorage {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        reject_deleted_namespace(&transaction, &namespace)?;
         type NamespaceRow = (Option<String>, i64, i64, i64, i64);
         let existing: Option<NamespaceRow> = transaction
             .query_row(
@@ -524,6 +616,7 @@ impl WorkflowScopedStorage {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        reject_deleted_namespace(&transaction, &namespace)?;
         type NamespaceRow = (Option<String>, i64, i64, i64);
         let existing: Option<NamespaceRow> = transaction
             .query_row(
@@ -725,6 +818,7 @@ impl WorkflowScopedStorage {
             logical_key: request.logical_key,
             revision,
             previous_version_id: existing.map(|entry| entry.current_version_id),
+            source_version_id: None,
             schema_ref: request.schema_ref,
             media_type: request.media_type,
             classification: request.classification,
@@ -740,13 +834,16 @@ impl WorkflowScopedStorage {
             .map_err(|_| WorkflowStorageError::Integrity("command_receipt_encoding"))?;
         transaction.execute(
             "INSERT INTO storage_command_receipts
-               (command_id, request_digest, response_json, committed_at_unix_millis)
-             VALUES (?1, ?2, ?3, ?4)",
+               (command_id, request_digest, response_json, committed_at_unix_millis,
+                scope_kind, scope_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 request.command_id,
                 request_digest,
                 response_json,
                 request.created_at_unix_millis,
+                request.namespace.kind.database_value(),
+                request.namespace.owner_id,
             ],
         )?;
         transaction.commit()?;
@@ -799,6 +896,7 @@ impl WorkflowScopedStorage {
             &request_digest,
             &receipt,
             request.read_at_unix_millis,
+            &request.namespace,
         )?;
         transaction.commit()?;
         Ok(receipt)
@@ -839,6 +937,7 @@ impl WorkflowScopedStorage {
             &request_digest,
             &receipt,
             request.read_at_unix_millis,
+            &request.namespace,
         )?;
         transaction.commit()?;
         Ok(receipt)
@@ -899,9 +998,391 @@ impl WorkflowScopedStorage {
             &request_digest,
             &receipt,
             request.deleted_at_unix_millis,
+            &request.namespace,
         )?;
         transaction.commit()?;
         Ok(receipt)
+    }
+
+    pub fn promote_value(
+        &mut self,
+        request: WorkflowStoragePromoteRequest,
+    ) -> Result<WorkflowStoragePromoteReceipt> {
+        self.promote_value_inner(request, None)
+    }
+
+    #[doc(hidden)]
+    pub fn promote_value_with_fault_for_test(
+        &mut self,
+        request: WorkflowStoragePromoteRequest,
+        fault: WorkflowStorageLifecycleFault,
+    ) -> Result<WorkflowStoragePromoteReceipt> {
+        self.promote_value_inner(request, Some(fault))
+    }
+
+    fn promote_value_inner(
+        &mut self,
+        request: WorkflowStoragePromoteRequest,
+        fault: Option<WorkflowStorageLifecycleFault>,
+    ) -> Result<WorkflowStoragePromoteReceipt> {
+        validate_promote_request(&request)?;
+        let request_digest = operation_digest("promote", &request)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(mut receipt) = stored_receipt::<WorkflowStoragePromoteReceipt>(
+            &transaction,
+            &request.command_id,
+            &request_digest,
+        )? {
+            receipt.duplicate = true;
+            transaction.commit()?;
+            return Ok(receipt);
+        }
+        authorize_namespace(&transaction, &request.access, &request.source_namespace)?;
+        let destination_quota = authorize_namespace(
+            &transaction,
+            &request.access,
+            &request.destination_namespace,
+        )?;
+        if !valid_promotion_path(&request.source_namespace, &request.destination_namespace) {
+            return Err(WorkflowStorageError::AccessDenied("promotion_scope"));
+        }
+        let (source_namespace, source_handle) =
+            projected_handle(&transaction, &request.source_handle_id)?
+                .ok_or(WorkflowStorageError::NotFound("source_handle"))?;
+        if source_namespace != request.source_namespace {
+            return Err(WorkflowStorageError::AccessDenied("promotion_source"));
+        }
+        validate_promotion_contract(&source_handle, &request)?;
+        if source_handle.byte_count > destination_quota.maximum_value_bytes {
+            return Err(WorkflowStorageError::QuotaExceeded("value_bytes"));
+        }
+
+        let existing = entry_row(
+            &transaction,
+            &request.destination_namespace,
+            &request.destination_logical_key,
+        )?;
+        let actual_revision = existing.as_ref().map_or(0, |entry| entry.current_revision);
+        if request.expected_revision != actual_revision {
+            return Err(WorkflowStorageError::Conflict {
+                expected: request.expected_revision,
+                actual: actual_revision,
+            });
+        }
+        if let Some(entry) = &existing
+            && (entry.entry_id != request.destination_entry_id
+                || entry.schema_ref != request.schema_ref
+                || entry.media_type != request.media_type
+                || entry.classification != request.classification)
+        {
+            return Err(WorkflowStorageError::Integrity("entry_contract_drift"));
+        }
+        let usage = namespace_usage(&transaction, &request.destination_namespace)?;
+        if existing
+            .as_ref()
+            .is_none_or(|entry| entry.current_state == "deleted")
+            && usage.item_count >= destination_quota.maximum_item_count
+        {
+            return Err(WorkflowStorageError::QuotaExceeded("item_count"));
+        }
+        if usage
+            .byte_count
+            .checked_add(source_handle.byte_count)
+            .is_none_or(|value| value > destination_quota.maximum_total_bytes)
+        {
+            return Err(WorkflowStorageError::QuotaExceeded("total_bytes"));
+        }
+
+        type SourceValue = (String, Option<Vec<u8>>, Option<String>, i64, String);
+        let source_value: SourceValue = transaction.query_row(
+            "SELECT value_kind, inline_canonical_json, blob_digest, byte_count, sha256
+             FROM storage_versions WHERE version_id = ?1",
+            [&request.source_handle_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )?;
+        if projected_u64(source_value.3)? != source_handle.byte_count
+            || source_value.4 != source_handle.sha256
+        {
+            return Err(WorkflowStorageError::Integrity("promotion_source_value"));
+        }
+        match (source_value.0.as_str(), &source_value.1, &source_value.2) {
+            ("inline_json", Some(_), None) if request.destination_reference_id.is_none() => {}
+            ("object", None, Some(_)) if request.destination_reference_id.is_some() => {}
+            _ => {
+                return Err(WorkflowStorageError::Invalid(
+                    "promotion_reference_contract",
+                ));
+            }
+        }
+
+        let revision = actual_revision
+            .checked_add(1)
+            .ok_or(WorkflowStorageError::Integrity("revision_overflow"))?;
+        if existing.is_none() {
+            transaction.execute(
+                "INSERT INTO storage_entries
+                   (entry_id, scope_kind, scope_id, logical_key, schema_ref, media_type,
+                    classification, current_version_id, current_revision,
+                    declared_classification, current_state,
+                    created_at_unix_millis, updated_at_unix_millis)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, 0, ?8, 'active', ?9, ?9)",
+                params![
+                    request.destination_entry_id,
+                    request.destination_namespace.kind.database_value(),
+                    request.destination_namespace.owner_id,
+                    request.destination_logical_key,
+                    request.schema_ref,
+                    request.media_type,
+                    storage_classification(&request.classification),
+                    request.classification,
+                    request.promoted_at_unix_millis,
+                ],
+            )?;
+        }
+        transaction.execute(
+            "INSERT INTO storage_versions
+               (version_id, entry_id, revision, value_kind, inline_canonical_json,
+                blob_digest, byte_count, sha256, created_by_attempt_id,
+                created_at_unix_millis, source_version_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                request.destination_version_id,
+                request.destination_entry_id,
+                sql_u64(revision)?,
+                source_value.0,
+                source_value.1,
+                source_value.2,
+                sql_u64(source_handle.byte_count)?,
+                source_handle.sha256,
+                request.promoted_by_attempt_id,
+                request.promoted_at_unix_millis,
+                source_handle.version_id,
+            ],
+        )?;
+        if let Some(digest) = &source_value.2 {
+            transaction.execute(
+                "INSERT INTO blob_references
+                   (reference_id, blob_digest, scope_kind, scope_id, entry_id, version_id,
+                    purpose, created_at_unix_millis)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    request.destination_reference_id,
+                    digest,
+                    request.destination_namespace.kind.database_value(),
+                    request.destination_namespace.owner_id,
+                    request.destination_entry_id,
+                    request.destination_version_id,
+                    request.purpose,
+                    request.promoted_at_unix_millis,
+                ],
+            )?;
+        }
+        let updated = transaction.execute(
+            "UPDATE storage_entries SET current_version_id = ?1, current_revision = ?2,
+                    current_state = 'active', updated_at_unix_millis = ?3
+             WHERE entry_id = ?4 AND current_revision = ?5",
+            params![
+                request.destination_version_id,
+                sql_u64(revision)?,
+                request.promoted_at_unix_millis,
+                request.destination_entry_id,
+                sql_u64(actual_revision)?,
+            ],
+        )?;
+        if updated != 1 {
+            return Err(WorkflowStorageError::Integrity("promotion_entry_update"));
+        }
+        let handle = WorkflowStorageHandle {
+            handle_id: request.destination_version_id.clone(),
+            entry_id: request.destination_entry_id,
+            version_id: request.destination_version_id,
+            scope_kind: request.destination_namespace.kind,
+            logical_key: request.destination_logical_key,
+            revision,
+            previous_version_id: existing.map(|entry| entry.current_version_id),
+            source_version_id: Some(source_handle.version_id.clone()),
+            schema_ref: request.schema_ref,
+            media_type: request.media_type,
+            classification: request.classification,
+            value_kind: source_handle.value_kind,
+            byte_count: source_handle.byte_count,
+            sha256: source_handle.sha256,
+        };
+        let receipt = WorkflowStoragePromoteReceipt {
+            handle,
+            source_handle_id: source_handle.handle_id,
+            duplicate: false,
+        };
+        insert_receipt(
+            &transaction,
+            &request.command_id,
+            &request_digest,
+            &receipt,
+            request.promoted_at_unix_millis,
+            &request.destination_namespace,
+        )?;
+        if fault == Some(WorkflowStorageLifecycleFault::PromotionBeforeCommit) {
+            return Err(WorkflowStorageError::Integrity(
+                "injected_promotion_interruption",
+            ));
+        }
+        transaction.commit()?;
+        Ok(receipt)
+    }
+
+    pub fn delete_job(
+        &mut self,
+        request: WorkflowStorageDeleteJobRequest,
+    ) -> Result<WorkflowStorageDeleteJobReceipt> {
+        self.delete_job_inner(request, None)
+    }
+
+    #[doc(hidden)]
+    pub fn delete_job_with_fault_for_test(
+        &mut self,
+        request: WorkflowStorageDeleteJobRequest,
+        fault: WorkflowStorageLifecycleFault,
+    ) -> Result<WorkflowStorageDeleteJobReceipt> {
+        self.delete_job_inner(request, Some(fault))
+    }
+
+    fn delete_job_inner(
+        &mut self,
+        request: WorkflowStorageDeleteJobRequest,
+        fault: Option<WorkflowStorageLifecycleFault>,
+    ) -> Result<WorkflowStorageDeleteJobReceipt> {
+        validate_delete_job_request(&request)?;
+        let request_digest = operation_digest("delete_job", &request)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(mut receipt) = stored_job_deletion_receipt(
+            &transaction,
+            &request.namespace,
+            &request.command_id,
+            &request_digest,
+        )? {
+            receipt.duplicate = true;
+            transaction.commit()?;
+            return Ok(receipt);
+        }
+        authorize_namespace(&transaction, &request.access, &request.namespace)?;
+        let usage = namespace_usage(&transaction, &request.namespace)?;
+        let entry_count: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM storage_entries WHERE scope_kind = ?1 AND scope_id = ?2",
+            params![
+                request.namespace.kind.database_value(),
+                request.namespace.owner_id
+            ],
+            |row| row.get(0),
+        )?;
+        let blob_reference_count: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM blob_references WHERE scope_kind = ?1 AND scope_id = ?2",
+            params![
+                request.namespace.kind.database_value(),
+                request.namespace.owner_id
+            ],
+            |row| row.get(0),
+        )?;
+        transaction.execute(
+            "DELETE FROM storage_command_receipts WHERE scope_kind = ?1 AND scope_id = ?2",
+            params![
+                request.namespace.kind.database_value(),
+                request.namespace.owner_id
+            ],
+        )?;
+        transaction.execute(
+            "DELETE FROM blob_references WHERE scope_kind = ?1 AND scope_id = ?2",
+            params![
+                request.namespace.kind.database_value(),
+                request.namespace.owner_id
+            ],
+        )?;
+        transaction.execute(
+            "DELETE FROM storage_versions WHERE entry_id IN (
+                 SELECT entry_id FROM storage_entries WHERE scope_kind = ?1 AND scope_id = ?2
+             )",
+            params![
+                request.namespace.kind.database_value(),
+                request.namespace.owner_id
+            ],
+        )?;
+        transaction.execute(
+            "DELETE FROM storage_entries WHERE scope_kind = ?1 AND scope_id = ?2",
+            params![
+                request.namespace.kind.database_value(),
+                request.namespace.owner_id
+            ],
+        )?;
+        let deleted = transaction.execute(
+            "DELETE FROM storage_namespaces WHERE scope_kind = ?1 AND scope_id = ?2",
+            params![
+                request.namespace.kind.database_value(),
+                request.namespace.owner_id
+            ],
+        )?;
+        if deleted != 1 {
+            return Err(WorkflowStorageError::Integrity("job_namespace_delete"));
+        }
+        let receipt = WorkflowStorageDeleteJobReceipt {
+            job_id: request.namespace.owner_id.clone(),
+            entry_count: projected_u64(entry_count)?,
+            version_count: usage.version_count,
+            blob_reference_count: projected_u64(blob_reference_count)?,
+            duplicate: false,
+        };
+        let response_json = serde_json_canonicalizer::to_vec(&receipt)
+            .map_err(|_| WorkflowStorageError::Integrity("job_delete_receipt_encoding"))?;
+        transaction.execute(
+            "INSERT INTO storage_namespace_tombstones
+               (scope_kind, scope_id, installation_id, command_id, request_digest,
+                response_json, deleted_at_unix_millis)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                request.namespace.kind.database_value(),
+                request.namespace.owner_id,
+                request.access.installation_id,
+                request.command_id,
+                request_digest,
+                response_json,
+                request.deleted_at_unix_millis,
+            ],
+        )?;
+        if fault == Some(WorkflowStorageLifecycleFault::JobDeletionBeforeCommit) {
+            return Err(WorkflowStorageError::Integrity(
+                "injected_job_delete_interruption",
+            ));
+        }
+        transaction.commit()?;
+        if fault == Some(WorkflowStorageLifecycleFault::JobDeletionAfterCommit) {
+            return Err(WorkflowStorageError::Integrity(
+                "injected_job_delete_after_commit",
+            ));
+        }
+        Ok(receipt)
+    }
+
+    pub fn collect_orphaned_objects(&self) -> Result<WorkflowObjectGarbageCollectionReceipt> {
+        verify_database(&self.connection)?;
+        let mut statement = self
+            .connection
+            .prepare("SELECT DISTINCT blob_digest FROM blob_references ORDER BY blob_digest")?;
+        let live = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<BTreeSet<_>, _>>()?;
+        self.object_store
+            .quarantine_unreferenced(&live)
+            .map_err(Into::into)
     }
 
     pub fn inspect_handle(
@@ -1077,7 +1558,11 @@ fn verify_database(connection: &Connection) -> Result<()> {
     if schema_version(connection)? != STORAGE_SCHEMA_VERSION {
         return Err(WorkflowStorageError::Integrity("schema_version"));
     }
-    for (version, sql) in [(1, STORAGE_SCHEMA), (2, STORAGE_MIGRATION_2)] {
+    for (version, sql) in [
+        (1, STORAGE_SCHEMA),
+        (2, STORAGE_MIGRATION_2),
+        (3, STORAGE_MIGRATION_3),
+    ] {
         let checksum: String = connection.query_row(
             "SELECT checksum FROM workflow_storage_migrations WHERE version = ?1",
             [version],
@@ -1119,6 +1604,15 @@ fn verify_database(connection: &Connection) -> Result<()> {
     )?;
     if invalid_references != 0 {
         return Err(WorkflowStorageError::Integrity("blob_references"));
+    }
+    let invalid_receipt_scope: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM storage_command_receipts
+         WHERE (scope_kind IS NULL) <> (scope_id IS NULL)",
+        [],
+        |row| row.get(0),
+    )?;
+    if invalid_receipt_scope != 0 {
+        return Err(WorkflowStorageError::Integrity("command_receipt_scope"));
     }
     Ok(())
 }
@@ -1267,6 +1761,108 @@ fn validate_delete_request(request: &WorkflowStorageDeleteRequest) -> Result<()>
     Ok(())
 }
 
+fn validate_promote_request(request: &WorkflowStoragePromoteRequest) -> Result<()> {
+    validate_access(&request.access)?;
+    validate_namespace(&request.source_namespace)?;
+    validate_namespace(&request.destination_namespace)?;
+    for (value, code) in [
+        (&request.command_id, "command_id"),
+        (&request.source_handle_id, "source_handle_id"),
+        (&request.destination_entry_id, "destination_entry_id"),
+        (&request.destination_version_id, "destination_version_id"),
+        (&request.promoted_by_attempt_id, "attempt_id"),
+    ] {
+        validate_identifier(value, code)?;
+    }
+    if let Some(reference_id) = &request.destination_reference_id {
+        validate_identifier(reference_id, "destination_reference_id")?;
+    }
+    validate_logical_key(&request.destination_logical_key)?;
+    if request.media_type.is_empty()
+        || request.media_type.len() > 255
+        || !request
+            .media_type
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic())
+        || request.promoted_at_unix_millis < 0
+        || request.schema_ref.as_ref().is_some_and(|value| {
+            value.is_empty() || value.len() > 512 || value.chars().any(char::is_control)
+        })
+    {
+        return Err(WorkflowStorageError::Invalid("promotion_metadata"));
+    }
+    if !matches!(
+        request.classification.as_str(),
+        "public" | "internal" | "private" | "sensitive" | "restricted"
+    ) {
+        return Err(WorkflowStorageError::Invalid("classification"));
+    }
+    if !matches!(request.purpose.as_str(), "value" | "file" | "artifact") {
+        return Err(WorkflowStorageError::Invalid("purpose"));
+    }
+    Ok(())
+}
+
+fn validate_delete_job_request(request: &WorkflowStorageDeleteJobRequest) -> Result<()> {
+    validate_access(&request.access)?;
+    validate_namespace(&request.namespace)?;
+    validate_identifier(&request.command_id, "command_id")?;
+    if request.namespace.kind != WorkflowStorageScopeKind::Job
+        || request.access.run_id.as_deref() != Some(&request.namespace.owner_id)
+        || request.namespace.installation_id.as_deref() != Some(&request.access.installation_id)
+        || request.deleted_at_unix_millis < 0
+    {
+        return Err(WorkflowStorageError::Invalid("job_delete_contract"));
+    }
+    Ok(())
+}
+
+fn valid_promotion_path(
+    source: &WorkflowStorageNamespace,
+    destination: &WorkflowStorageNamespace,
+) -> bool {
+    source.installation_id == destination.installation_id
+        && matches!(
+            (source.kind, destination.kind),
+            (
+                WorkflowStorageScopeKind::Job,
+                WorkflowStorageScopeKind::Case
+            ) | (
+                WorkflowStorageScopeKind::Job,
+                WorkflowStorageScopeKind::Installation
+            ) | (
+                WorkflowStorageScopeKind::Case,
+                WorkflowStorageScopeKind::Installation
+            )
+        )
+}
+
+fn validate_promotion_contract(
+    source: &WorkflowStorageHandle,
+    request: &WorkflowStoragePromoteRequest,
+) -> Result<()> {
+    if source.schema_ref != request.schema_ref || source.media_type != request.media_type {
+        return Err(WorkflowStorageError::Integrity("promotion_type_contract"));
+    }
+    if classification_rank(&request.classification) < classification_rank(&source.classification) {
+        return Err(WorkflowStorageError::AccessDenied(
+            "promotion_classification_downgrade",
+        ));
+    }
+    Ok(())
+}
+
+fn classification_rank(value: &str) -> u8 {
+    match value {
+        "public" => 1,
+        "internal" => 2,
+        "private" => 3,
+        "sensitive" => 4,
+        "restricted" => 5,
+        _ => 0,
+    }
+}
+
 fn validate_identifier(value: &str, code: &'static str) -> Result<()> {
     if !is_workflow_identifier(value, 128) {
         return Err(WorkflowStorageError::Invalid(code));
@@ -1349,6 +1945,24 @@ fn authorize_namespace(
         maximum_total_bytes: projected_u64(row.2)?,
         maximum_value_bytes: projected_u64(row.3)?,
     })
+}
+
+fn reject_deleted_namespace(
+    connection: &Connection,
+    namespace: &WorkflowStorageNamespace,
+) -> Result<()> {
+    let deleted: bool = connection.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM storage_namespace_tombstones
+             WHERE scope_kind = ?1 AND scope_id = ?2
+         )",
+        params![namespace.kind.database_value(), namespace.owner_id],
+        |row| row.get(0),
+    )?;
+    if deleted {
+        return Err(WorkflowStorageError::Integrity("namespace_deleted"));
+    }
+    Ok(())
 }
 
 fn entry_row(
@@ -1476,6 +2090,7 @@ fn projected_handle(
         String,
         i64,
         Option<String>,
+        Option<String>,
         String,
         i64,
         String,
@@ -1487,7 +2102,7 @@ fn projected_handle(
                     v.revision,
                     (SELECT previous.version_id FROM storage_versions previous
                      WHERE previous.entry_id = v.entry_id AND previous.revision = v.revision - 1),
-                    v.value_kind, v.byte_count, v.sha256
+                    v.source_version_id, v.value_kind, v.byte_count, v.sha256
              FROM storage_versions v
              JOIN storage_entries e ON e.entry_id = v.entry_id
              JOIN storage_namespaces n ON n.scope_kind = e.scope_kind AND n.scope_id = e.scope_id
@@ -1509,6 +2124,7 @@ fn projected_handle(
                     row.get(11)?,
                     row.get(12)?,
                     row.get(13)?,
+                    row.get(14)?,
                 ))
             },
         )
@@ -1529,12 +2145,13 @@ fn projected_handle(
                 logical_key: row.5,
                 revision: projected_u64(row.9)?,
                 previous_version_id: row.10,
+                source_version_id: row.11,
                 schema_ref: row.6,
                 media_type: row.7,
                 classification: row.8,
-                value_kind: row.11,
-                byte_count: projected_u64(row.12)?,
-                sha256: row.13,
+                value_kind: row.12,
+                byte_count: projected_u64(row.13)?,
+                sha256: row.14,
             },
         ))
     })
@@ -1582,24 +2199,53 @@ fn stored_receipt<T: DeserializeOwned>(
         .map_err(|_| WorkflowStorageError::Integrity("command_receipt"))
 }
 
+fn stored_job_deletion_receipt(
+    connection: &Connection,
+    namespace: &WorkflowStorageNamespace,
+    command_id: &str,
+    request_digest: &str,
+) -> Result<Option<WorkflowStorageDeleteJobReceipt>> {
+    let row: Option<(String, String, Vec<u8>)> = connection
+        .query_row(
+            "SELECT command_id, request_digest, response_json
+             FROM storage_namespace_tombstones WHERE scope_kind = ?1 AND scope_id = ?2",
+            params![namespace.kind.database_value(), namespace.owner_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((stored_command_id, stored_digest, response_json)) = row else {
+        return Ok(None);
+    };
+    if stored_command_id != command_id || stored_digest != request_digest {
+        return Err(WorkflowStorageError::Integrity("namespace_tombstone"));
+    }
+    serde_json::from_slice(&response_json)
+        .map(Some)
+        .map_err(|_| WorkflowStorageError::Integrity("job_delete_receipt"))
+}
+
 fn insert_receipt(
     connection: &Connection,
     command_id: &str,
     request_digest: &str,
     receipt: &impl Serialize,
     committed_at_unix_millis: i64,
+    namespace: &WorkflowStorageNamespace,
 ) -> Result<()> {
     let response_json = serde_json_canonicalizer::to_vec(receipt)
         .map_err(|_| WorkflowStorageError::Integrity("command_receipt_encoding"))?;
     connection.execute(
         "INSERT INTO storage_command_receipts
-           (command_id, request_digest, response_json, committed_at_unix_millis)
-         VALUES (?1, ?2, ?3, ?4)",
+           (command_id, request_digest, response_json, committed_at_unix_millis,
+            scope_kind, scope_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
             command_id,
             request_digest,
             response_json,
             committed_at_unix_millis,
+            namespace.kind.database_value(),
+            namespace.owner_id,
         ],
     )?;
     Ok(())
