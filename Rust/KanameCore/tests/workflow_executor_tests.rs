@@ -1,17 +1,24 @@
 use kaname_core::{
     journal::{Journal, ReplayBasis},
-    open_workflow_library,
+    open_workflow_library, open_workflow_scoped_storage,
     v1::{
         CancelWorkflowRun, CommandEnvelope, OpaqueTypedPayload, RequestWorkflowRun, SchemaVersion,
         Scope, WorkflowInputBinding, WorkflowRunTokenCreated, WorkflowValueReference,
     },
     workflow_drafts::CreateWorkflowDraft,
-    workflow_executor::{self, DurableRunOutcome, WorkflowExecutionError, WorkflowExecutionFault},
+    workflow_executor::{
+        self, DurableRunOutcome, WorkflowExecutionError, WorkflowExecutionFault,
+        WorkflowStorageExecutionAuthority,
+    },
+    workflow_object_store::WorkflowObjectStoreQuota,
     workflow_projection::WorkflowRunProjection,
     workflow_publication::{PublishWorkflowRevision, PublishedWorkflowRevision},
     workflow_runtime::{
         WORKFLOW_RUN_CANCEL_KIND, WORKFLOW_RUN_CANCEL_TYPE, WORKFLOW_RUN_REQUEST_KIND,
         WORKFLOW_RUN_REQUEST_TYPE, WORKFLOW_RUN_TOKEN_CREATED_KIND,
+    },
+    workflow_storage::{
+        WorkflowStorageAccessContext, WorkflowStorageNamespace, WorkflowStorageScopeKind,
     },
 };
 use prost::Message;
@@ -31,6 +38,8 @@ const FAIL_MATCH_ID: &str = "018f5000-0008-7000-8000-000000000008";
 const CASE_FIVE_ID: &str = "018f5000-0009-7000-8000-000000000009";
 const OTHERWISE_ID: &str = "018f5000-0010-7000-8000-000000000010";
 const REVISION_ID: &str = "revision-minimal-001";
+const STORAGE_WORKFLOW_ID: &str = "018f5300-0001-7000-8000-000000000001";
+const STORAGE_REVISION_ID: &str = "revision-storage-001";
 
 #[test]
 fn immutable_minimal_graph_takes_success_and_validation_failure_paths() {
@@ -181,6 +190,7 @@ fn unsupported_storage_input_and_revision_pin_drift_create_no_runtime_event() {
         sha256: "a".repeat(64),
         inline_canonical_json: Vec::new(),
         storage_reference_id: "object-storage-001".into(),
+        storage: None,
     });
     storage_command.payload.as_mut().unwrap().value = storage_request.encode_to_vec();
     let mut storage_journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
@@ -214,6 +224,193 @@ fn unsupported_storage_input_and_revision_pin_drift_create_no_runtime_event() {
             .high_water_mark,
         0
     );
+}
+
+#[test]
+fn storage_nodes_write_compare_read_list_and_delete_with_inspectable_lineage() {
+    let directory = tempdir().unwrap();
+    let (library, published) = published_storage_library(directory.path());
+    let mut storage = open_workflow_scoped_storage(
+        directory.path(),
+        WorkflowObjectStoreQuota {
+            maximum_object_bytes: 1024 * 1024,
+            maximum_total_bytes: 4 * 1024 * 1024,
+            maximum_object_count: 100,
+        },
+    )
+    .unwrap();
+    let command = storage_run_command(
+        "run-storage-nodes-001",
+        &published,
+        json!({"draft": {"text": "hello"}}),
+    );
+    let mut denied_journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    assert!(matches!(
+        workflow_executor::execute_with_storage(
+            &mut denied_journal,
+            &library,
+            &mut storage,
+            &WorkflowStorageExecutionAuthority {
+                installation_id: "installation-other".into(),
+                case_id: None,
+            },
+            &command,
+        ),
+        Err(WorkflowExecutionError::InvalidCommand(
+            "storage_authority_mismatch"
+        ))
+    ));
+    assert_eq!(
+        denied_journal
+            .event_page_after(0, 10)
+            .unwrap()
+            .high_water_mark,
+        0
+    );
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    let result = workflow_executor::execute_with_storage(
+        &mut journal,
+        &library,
+        &mut storage,
+        &storage_authority(),
+        &command,
+    )
+    .unwrap();
+    assert_eq!(result.outcome, DurableRunOutcome::Succeeded);
+
+    let access = WorkflowStorageAccessContext {
+        run_id: Some("run-storage-nodes-001".into()),
+        case_id: None,
+        installation_id: "installation-storage-001".into(),
+        account_binding_ids: Default::default(),
+    };
+    let namespace = WorkflowStorageNamespace {
+        kind: WorkflowStorageScopeKind::Job,
+        owner_id: "run-storage-nodes-001".into(),
+        installation_id: Some("installation-storage-001".into()),
+    };
+    assert!(matches!(
+        storage.list_current(&access, &namespace, None, 10),
+        Ok(handles) if handles.is_empty()
+    ));
+
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    projection.catch_up(&journal).unwrap();
+    let run = projection
+        .inspect_runs(None, Some("run-storage-nodes-001"), 1)
+        .unwrap()
+        .pop()
+        .unwrap();
+    let storage_values = run
+        .emissions
+        .iter()
+        .filter_map(|emission| emission.value.as_ref()?.storage.as_ref())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        storage_values
+            .iter()
+            .map(|metadata| metadata.result.as_str())
+            .collect::<Vec<_>>(),
+        ["written", "written", "read", "listed", "deleted"]
+    );
+    assert_eq!(storage_values[0].revision, 1);
+    assert_eq!(storage_values[1].revision, 2);
+    assert_eq!(
+        storage_values[1].previous_version_id,
+        storage_values[0].version_id
+    );
+    assert_eq!(storage_values[2].version_id, storage_values[1].version_id);
+    assert_eq!(storage_values[4].revision, 2);
+    for metadata in storage_values {
+        assert_eq!(metadata.scope, "job");
+        assert_eq!(metadata.logical_key, "draft");
+        assert!(!metadata.handle_id.contains('/'));
+    }
+
+    let duplicate = workflow_executor::execute_with_storage(
+        &mut journal,
+        &library,
+        &mut storage,
+        &storage_authority(),
+        &command,
+    )
+    .unwrap();
+    assert_eq!(duplicate.event_count, result.event_count);
+}
+
+#[test]
+fn storage_node_receipts_resume_at_every_event_boundary_without_repeating_mutations() {
+    let expected = {
+        let directory = tempdir().unwrap();
+        let (library, published) = published_storage_library(directory.path());
+        let mut storage = test_scoped_storage(directory.path());
+        let command = storage_run_command(
+            "run-storage-crash-001",
+            &published,
+            json!({"draft": {"text": "hello"}}),
+        );
+        let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+        workflow_executor::execute_with_storage(
+            &mut journal,
+            &library,
+            &mut storage,
+            &storage_authority(),
+            &command,
+        )
+        .unwrap();
+        run_wires(&journal, "run-storage-crash-001")
+    };
+
+    for boundary in 1..=expected.len() {
+        let directory = tempdir().unwrap();
+        let (library, published) = published_storage_library(directory.path());
+        let mut storage = test_scoped_storage(directory.path());
+        let command = storage_run_command(
+            "run-storage-crash-001",
+            &published,
+            json!({"draft": {"text": "hello"}}),
+        );
+        let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+        assert!(matches!(
+            workflow_executor::execute_with_storage_fault_for_test(
+                &mut journal,
+                &library,
+                &mut storage,
+                &storage_authority(),
+                &command,
+                WorkflowExecutionFault::AfterNewEvent(boundary),
+            ),
+            Err(WorkflowExecutionError::InjectedInterruption)
+        ));
+        workflow_executor::execute_with_storage(
+            &mut journal,
+            &library,
+            &mut storage,
+            &storage_authority(),
+            &command,
+        )
+        .unwrap();
+        assert_eq!(run_wires(&journal, "run-storage-crash-001"), expected);
+        assert_eq!(
+            storage
+                .usage(
+                    &WorkflowStorageAccessContext {
+                        run_id: Some("run-storage-crash-001".into()),
+                        case_id: None,
+                        installation_id: "installation-storage-001".into(),
+                        account_binding_ids: Default::default(),
+                    },
+                    &WorkflowStorageNamespace {
+                        kind: WorkflowStorageScopeKind::Job,
+                        owner_id: "run-storage-crash-001".into(),
+                        installation_id: Some("installation-storage-001".into()),
+                    },
+                )
+                .unwrap()
+                .version_count,
+            2
+        );
+    }
 }
 
 fn published_library(
@@ -265,6 +462,166 @@ fn published_library(
         })
         .unwrap();
     (library, published)
+}
+
+fn published_storage_library(
+    application_support: &std::path::Path,
+) -> (
+    kaname_core::workflow_library::WorkflowLibraryStore,
+    PublishedWorkflowRevision,
+) {
+    let mut library = open_workflow_library(application_support).unwrap();
+    library
+        .create_draft(CreateWorkflowDraft {
+            workflow_id: STORAGE_WORKFLOW_ID.into(),
+            package_id: "dev.kaname.storage-runtime".into(),
+            name: "Scoped storage runtime".into(),
+            summary: "Synthetic path-free storage node fixture".into(),
+            edit_id: "edit-storage-001".into(),
+            session_id: "executor-tests".into(),
+            workflow_source: serde_json::to_vec(&storage_workflow_source()).unwrap(),
+            layout_source: br#"{"nodes":[]}"#.to_vec(),
+            recorded_at_unix_millis: 30,
+        })
+        .unwrap();
+    let published = library
+        .publish_revision(PublishWorkflowRevision {
+            workflow_id: STORAGE_WORKFLOW_ID.into(),
+            expected_draft_sequence: 0,
+            revision_id: STORAGE_REVISION_ID.into(),
+            registration_id: "registration-storage-001".into(),
+            release_version: "1.0.0".into(),
+            schema_bundle_json: br#"{"bundleVersion":1,"schemas":[]}"#.to_vec(),
+            dependency_lock_json: br#"{"lockVersion":1,"dependencies":[]}"#.to_vec(),
+            configuration_contract_json: br#"{"type":"object"}"#.to_vec(),
+            published_at_unix_millis: 40,
+        })
+        .unwrap();
+    (library, published)
+}
+
+fn test_scoped_storage(
+    application_support: &std::path::Path,
+) -> kaname_core::workflow_storage::WorkflowScopedStorage {
+    open_workflow_scoped_storage(
+        application_support,
+        WorkflowObjectStoreQuota {
+            maximum_object_bytes: 1024 * 1024,
+            maximum_total_bytes: 4 * 1024 * 1024,
+            maximum_object_count: 100,
+        },
+    )
+    .unwrap()
+}
+
+fn storage_authority() -> WorkflowStorageExecutionAuthority {
+    WorkflowStorageExecutionAuthority {
+        installation_id: "installation-storage-001".into(),
+        case_id: None,
+    }
+}
+
+fn storage_workflow_source() -> Value {
+    let ids = [
+        "018f5300-0002-7000-8000-000000000002",
+        "018f5300-0003-7000-8000-000000000003",
+        "018f5300-0004-7000-8000-000000000004",
+        "018f5300-0005-7000-8000-000000000005",
+        "018f5300-0006-7000-8000-000000000006",
+        "018f5300-0007-7000-8000-000000000007",
+        "018f5300-0008-7000-8000-000000000008",
+        "018f5300-0009-7000-8000-000000000009",
+    ];
+    let node = |index: usize, key: &str, node_type: &str, config: Value| {
+        json!({
+            "id": ids[index], "key": key, "name": key,
+            "type": node_type, "typeVersion": 1, "config": config
+        })
+    };
+    let edge = |sequence: u16, from: (usize, &str), to: (usize, &str)| {
+        json!({
+            "id": format!("018f5400-{sequence:04}-7000-8000-{sequence:012}"),
+            "from": {"nodeId": ids[from.0], "portId": from.1},
+            "to": {"nodeId": ids[to.0], "portId": to.1},
+            "mappingId": format!("018f5500-{sequence:04}-7000-8000-{sequence:012}"),
+            "mapping": {"whole": true}
+        })
+    };
+    json!({
+        "formatVersion": 1,
+        "workflowId": STORAGE_WORKFLOW_ID,
+        "packageId": "dev.kaname.storage-runtime",
+        "name": "Scoped storage runtime",
+        "summary": "Synthetic and effect free",
+        "graph": {
+            "entrypoints": [{
+                "id": "018f5300-0010-7000-8000-000000000010",
+                "nodeId": ids[0]
+            }],
+            "nodes": [
+                node(0, "manual", "trigger.manual", json!({})),
+                node(1, "write-initial", "storage.write", json!({
+                    "scope": "job", "key": "draft",
+                    "value": {"root": "input", "pointer": "/draft"},
+                    "conflictPolicy": "fail"
+                })),
+                node(2, "write-cas", "storage.write", json!({
+                    "scope": "job", "key": "draft",
+                    "value": {"root": "input", "pointer": ""},
+                    "conflictPolicy": "compare-and-swap", "expectedRevision": 1
+                })),
+                node(3, "read", "storage.read", json!({
+                    "operation": "read", "scope": "job", "key": "draft", "required": true
+                })),
+                node(4, "list", "storage.read", json!({
+                    "operation": "list", "scope": "job", "key": "draft", "limit": 10
+                })),
+                node(5, "delete", "storage.write", json!({
+                    "operation": "delete-reference", "scope": "job", "key": "draft",
+                    "conflictPolicy": "compare-and-swap", "expectedRevision": 2
+                })),
+                node(6, "complete", "terminal.complete", json!({})),
+                node(7, "fail", "terminal.fail", json!({}))
+            ],
+            "edges": [
+                edge(1, (0, "success"), (1, "input")),
+                edge(2, (1, "success"), (2, "input")),
+                edge(3, (2, "success"), (3, "input")),
+                edge(4, (3, "success"), (4, "input")),
+                edge(5, (4, "success"), (5, "input")),
+                edge(6, (5, "success"), (6, "input")),
+                edge(7, (1, "error"), (7, "input")),
+                edge(8, (2, "error"), (7, "input")),
+                edge(9, (3, "error"), (7, "input")),
+                edge(10, (4, "error"), (7, "input")),
+                edge(11, (5, "error"), (7, "input"))
+            ]
+        },
+        "interfaces": {}, "resources": {}, "policies": {},
+        "storage": {
+            "draft": {
+                "key": "draft", "scope": "job", "kind": "value",
+                "schemaRef": "dev.kaname.storage/draft-v1",
+                "maximumBytes": 65536, "classification": "private"
+            }
+        },
+        "metadata": {}
+    })
+}
+
+fn storage_run_command(
+    run_id: &str,
+    published: &PublishedWorkflowRevision,
+    input: Value,
+) -> CommandEnvelope {
+    let mut envelope = run_command(run_id, published, input);
+    let mut request =
+        RequestWorkflowRun::decode(envelope.payload.as_ref().unwrap().value.as_slice()).unwrap();
+    request.workflow_id = STORAGE_WORKFLOW_ID.into();
+    request.revision_id = STORAGE_REVISION_ID.into();
+    request.installation_id = "installation-storage-001".into();
+    envelope.payload.as_mut().unwrap().value = request.encode_to_vec();
+    envelope
 }
 
 fn workflow_source() -> Value {
@@ -368,6 +725,8 @@ fn run_command(
                 port_id: "input".into(),
                 value: Some(value),
             }],
+            installation_id: String::new(),
+            case_id: String::new(),
         },
         1_786_220_100_000,
     )
@@ -430,6 +789,7 @@ fn inline_value(value_id: &str, value: Value) -> WorkflowValueReference {
         sha256: hex::encode(Sha256::digest(&bytes)),
         inline_canonical_json: bytes,
         storage_reference_id: String::new(),
+        storage: None,
     }
 }
 

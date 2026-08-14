@@ -402,6 +402,18 @@ fn execution_availability(node: &Node) -> &'static str {
             "executable"
         }
         "data.validate" => "executable",
+        "storage.read" => "executable",
+        "storage.write"
+            if node.config.get("operation").and_then(Value::as_str) == Some("delete-reference")
+                || node
+                    .config
+                    .get("value")
+                    .and_then(|value| value.get("root"))
+                    .and_then(Value::as_str)
+                    == Some("input") =>
+        {
+            "executable"
+        }
         "control.match"
             if matches!(
                 node.config.get("hitPolicy").and_then(Value::as_str),

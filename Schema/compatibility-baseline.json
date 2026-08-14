@@ -532,6 +532,8 @@
     "workflow_runtime.RequestWorkflowRun": {
       "1": "string run_id",
       "2": "string workflow_id",
+      "21": "string installation_id",
+      "22": "string case_id",
       "3": "string revision_id",
       "4": "string package_digest",
       "5": "string trigger_kind",
@@ -678,6 +680,7 @@
     },
     "workflow_runtime.WorkflowProjectedValue": {
       "1": "string value_id",
+      "16": "WorkflowStorageValueMetadata storage",
       "2": "string content_type",
       "3": "uint64 byte_count",
       "4": "string sha256",
@@ -721,8 +724,19 @@
       "5": "string revision_id",
       "6": "string package_digest"
     },
+    "workflow_runtime.WorkflowStorageValueMetadata": {
+      "1": "string handle_id",
+      "2": "string scope",
+      "3": "string logical_key",
+      "4": "string version_id",
+      "5": "uint64 revision",
+      "6": "string previous_version_id",
+      "7": "uint64 byte_count",
+      "8": "string result"
+    },
     "workflow_runtime.WorkflowValueReference": {
       "1": "string value_id",
+      "16": "WorkflowStorageValueMetadata storage",
       "2": "string content_type",
       "3": "uint64 byte_count",
       "4": "string sha256",

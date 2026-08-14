@@ -2,8 +2,9 @@ use kaname_core::{
     open_workflow_object_store, open_workflow_scoped_storage,
     workflow_object_store::{WorkflowObjectStoreQuota, WorkflowObjectStoreUsage},
     workflow_storage::{
-        WorkflowStorageAccessContext, WorkflowStorageError, WorkflowStorageNamespace,
-        WorkflowStorageNamespaceQuota, WorkflowStorageScopeKind, WorkflowStorageValueInput,
+        WorkflowStorageAccessContext, WorkflowStorageDeleteRequest, WorkflowStorageError,
+        WorkflowStorageListRequest, WorkflowStorageNamespace, WorkflowStorageNamespaceQuota,
+        WorkflowStorageReadRequest, WorkflowStorageScopeKind, WorkflowStorageValueInput,
         WorkflowStorageWriteRequest,
     },
 };
@@ -745,14 +746,14 @@ fn newer_schema_and_corrupt_current_pointer_fail_closed_on_reopen() {
     let newer_database = newer.path().join("Objects").join("workflow-storage.sqlite");
     let newer_connection = rusqlite::Connection::open(&newer_database).unwrap();
     newer_connection
-        .pragma_update(None, "user_version", 2)
+        .pragma_update(None, "user_version", 3)
         .unwrap();
     drop(newer_connection);
     assert!(matches!(
         open_workflow_scoped_storage(newer.path(), object_quota()),
         Err(WorkflowStorageError::UnsupportedNewerSchema {
-            found: 2,
-            supported: 1
+            found: 3,
+            supported: 2
         })
     ));
 
@@ -799,4 +800,205 @@ fn newer_schema_and_corrupt_current_pointer_fail_closed_on_reopen() {
         open_workflow_scoped_storage(corrupt.path(), object_quota()),
         Err(WorkflowStorageError::Integrity("current_versions"))
     ));
+}
+
+#[test]
+fn idempotent_read_list_and_delete_pin_opaque_lineage_and_allow_reactivation() {
+    let temporary = tempdir().unwrap();
+    let mut storage = open_workflow_scoped_storage(temporary.path(), object_quota()).unwrap();
+    let scope = namespace(
+        WorkflowStorageScopeKind::Installation,
+        "install-storage-nodes",
+        Some("install-storage-nodes"),
+    );
+    let context = access(None, None, "install-storage-nodes", &[]);
+    assert!(
+        !storage
+            .ensure_namespace_capacity(scope.clone(), namespace_quota(), 100)
+            .unwrap()
+    );
+    assert!(
+        storage
+            .ensure_namespace_capacity(
+                scope.clone(),
+                WorkflowStorageNamespaceQuota {
+                    maximum_item_count: 200,
+                    maximum_total_bytes: 20 * 1024 * 1024,
+                    maximum_value_bytes: 10 * 1024 * 1024,
+                },
+                200,
+            )
+            .unwrap()
+    );
+    let first = storage
+        .write_value(WorkflowStorageWriteRequest {
+            classification: "internal".into(),
+            ..inline_request(
+                write_fixture(
+                    "command-node-write-1",
+                    "entry-node-value",
+                    "version-node-value-1",
+                    "draft",
+                ),
+                context.clone(),
+                scope.clone(),
+                0,
+                br#"{"text":"one"}"#,
+                1_000,
+            )
+        })
+        .unwrap();
+    assert_eq!(first.handle.classification, "internal");
+    assert_eq!(first.handle.previous_version_id, None);
+
+    let read_request = WorkflowStorageReadRequest {
+        command_id: "command-node-read".into(),
+        access: context.clone(),
+        namespace: scope.clone(),
+        logical_key: "draft".into(),
+        read_at_unix_millis: 1_001,
+    };
+    assert!(
+        !storage
+            .read_current(read_request.clone())
+            .unwrap()
+            .duplicate
+    );
+    assert!(storage.read_current(read_request).unwrap().duplicate);
+
+    let list_request = WorkflowStorageListRequest {
+        command_id: "command-node-list".into(),
+        access: context.clone(),
+        namespace: scope.clone(),
+        prefix: Some("draft".into()),
+        limit: 10,
+        read_at_unix_millis: 1_002,
+    };
+    assert_eq!(
+        storage
+            .list_current_idempotent(list_request.clone())
+            .unwrap()
+            .handles
+            .len(),
+        1
+    );
+    assert!(
+        storage
+            .list_current_idempotent(list_request)
+            .unwrap()
+            .duplicate
+    );
+
+    let delete_request = WorkflowStorageDeleteRequest {
+        command_id: "command-node-delete".into(),
+        access: context.clone(),
+        namespace: scope.clone(),
+        logical_key: "draft".into(),
+        expected_revision: 1,
+        deleted_by_attempt_id: "attempt-node-delete".into(),
+        deleted_at_unix_millis: 1_003,
+    };
+    assert!(
+        !storage
+            .delete_reference(delete_request.clone())
+            .unwrap()
+            .duplicate
+    );
+    assert!(storage.delete_reference(delete_request).unwrap().duplicate);
+    assert!(
+        storage
+            .list_current(&context, &scope, None, 10)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(matches!(
+        storage.read_current(WorkflowStorageReadRequest {
+            command_id: "command-node-read-missing".into(),
+            access: context.clone(),
+            namespace: scope.clone(),
+            logical_key: "draft".into(),
+            read_at_unix_millis: 1_004,
+        }),
+        Err(WorkflowStorageError::NotFound("entry"))
+    ));
+
+    let second = storage
+        .write_value(WorkflowStorageWriteRequest {
+            classification: "internal".into(),
+            ..inline_request(
+                write_fixture(
+                    "command-node-write-2",
+                    "entry-node-value",
+                    "version-node-value-2",
+                    "draft",
+                ),
+                context,
+                scope,
+                1,
+                br#"{"text":"two"}"#,
+                1_005,
+            )
+        })
+        .unwrap();
+    assert_eq!(second.handle.revision, 2);
+    assert_eq!(
+        second.handle.previous_version_id.as_deref(),
+        Some("version-node-value-1")
+    );
+    let encoded = serde_json::to_string(&second).unwrap();
+    assert!(!encoded.contains(temporary.path().to_string_lossy().as_ref()));
+    assert!(!encoded.contains("Objects/"));
+}
+
+#[test]
+fn version_one_catalog_migrates_forward_before_storage_nodes_write() {
+    let temporary = tempdir().unwrap();
+    {
+        let _storage = open_workflow_scoped_storage(temporary.path(), object_quota()).unwrap();
+    }
+    let database = temporary
+        .path()
+        .join("Objects")
+        .join("workflow-storage.sqlite");
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    connection
+        .execute_batch(
+            "ALTER TABLE storage_entries DROP COLUMN current_state;
+             ALTER TABLE storage_entries DROP COLUMN declared_classification;
+             DELETE FROM workflow_storage_migrations WHERE version = 2;
+             PRAGMA user_version = 1;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let mut storage = open_workflow_scoped_storage(temporary.path(), object_quota()).unwrap();
+    let scope = namespace(
+        WorkflowStorageScopeKind::Installation,
+        "install-migrated",
+        Some("install-migrated"),
+    );
+    let context = access(None, None, "install-migrated", &[]);
+    storage
+        .ensure_namespace_capacity(scope.clone(), namespace_quota(), 100)
+        .unwrap();
+    let receipt = storage
+        .write_value(WorkflowStorageWriteRequest {
+            classification: "public".into(),
+            ..inline_request(
+                write_fixture(
+                    "command-migrated-write",
+                    "entry-migrated",
+                    "version-migrated-1",
+                    "draft",
+                ),
+                context,
+                scope,
+                0,
+                br#"{"migrated":true}"#,
+                200,
+            )
+        })
+        .unwrap();
+    assert_eq!(receipt.handle.classification, "public");
+    storage.verify_integrity().unwrap();
 }

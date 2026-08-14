@@ -13,6 +13,12 @@ use crate::{
     workflow_match::{self, EvaluationOutcome, MatchConfig, MatchRoots, TraceOutcome},
     workflow_runtime::{self, WorkflowRuntimeCommand, WorkflowRuntimeEvent},
     workflow_schema::{self, WorkflowSchemaCheckOutcome, WorkflowSchemaCheckRequest},
+    workflow_storage::{
+        WorkflowScopedStorage, WorkflowStorageAccessContext, WorkflowStorageDeleteRequest,
+        WorkflowStorageError, WorkflowStorageHandle, WorkflowStorageListRequest,
+        WorkflowStorageNamespace, WorkflowStorageNamespaceQuota, WorkflowStorageReadRequest,
+        WorkflowStorageScopeKind, WorkflowStorageValueInput, WorkflowStorageWriteRequest,
+    },
     workflow_versions::WorkflowExecutionSupport,
 };
 use prost::Message;
@@ -26,11 +32,13 @@ use std::{
 
 const MAXIMUM_EXECUTOR_TRANSITIONS: usize = 1_024;
 const RUN_REPLAY_PAGE: u32 = 500;
+const MAXIMUM_INLINE_STORAGE_SUMMARY_BYTES: usize = 60 * 1024;
 
 #[derive(Debug)]
 pub enum WorkflowExecutionError {
     Journal(JournalError),
     Library(WorkflowLibraryError),
+    Storage(WorkflowStorageError),
     InvalidCommand(&'static str),
     Unsupported(String),
     Integrity(String),
@@ -44,6 +52,7 @@ impl fmt::Display for WorkflowExecutionError {
         match self {
             Self::Journal(error) => write!(formatter, "workflow execution journal: {error}"),
             Self::Library(error) => write!(formatter, "workflow execution library: {error}"),
+            Self::Storage(error) => write!(formatter, "workflow execution storage: {error}"),
             Self::InvalidCommand(code) => write!(formatter, "workflow execution command: {code}"),
             Self::Unsupported(code) => write!(formatter, "workflow execution unsupported: {code}"),
             Self::Integrity(code) => write!(formatter, "workflow execution integrity: {code}"),
@@ -65,6 +74,12 @@ impl From<JournalError> for WorkflowExecutionError {
 impl From<WorkflowLibraryError> for WorkflowExecutionError {
     fn from(value: WorkflowLibraryError) -> Self {
         Self::Library(value)
+    }
+}
+
+impl From<WorkflowStorageError> for WorkflowExecutionError {
+    fn from(value: WorkflowStorageError) -> Self {
+        Self::Storage(value)
     }
 }
 
@@ -99,6 +114,14 @@ pub struct WorkflowCancellationReceipt {
     pub duplicate: bool,
 }
 
+/// Host-resolved storage ownership. Runtime request fields pin these values in
+/// the journal, but never authorize themselves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowStorageExecutionAuthority {
+    pub installation_id: String,
+    pub case_id: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CompiledWorkflow {
@@ -115,7 +138,7 @@ struct CompiledWorkflow {
     edges: Vec<CompiledEdge>,
     resources: BTreeMap<String, String>,
     policies: BTreeMap<String, Value>,
-    storage: BTreeMap<String, Value>,
+    storage: BTreeMap<String, CompiledStorageDeclaration>,
     dependencies: Vec<Value>,
 }
 
@@ -175,6 +198,19 @@ struct RuntimeSchema {
     schema: Value,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompiledStorageDeclaration {
+    key: String,
+    scope: String,
+    kind: String,
+    schema_ref: String,
+    maximum_bytes: u64,
+    classification: String,
+    #[serde(default)]
+    conflict_policy: Option<String>,
+}
+
 struct ExecutionPackage {
     compiled: CompiledWorkflow,
     schemas: BTreeMap<String, Value>,
@@ -230,7 +266,24 @@ pub fn execute(
     library: &WorkflowLibraryStore,
     command: &v1::CommandEnvelope,
 ) -> Result<WorkflowExecutionResult> {
-    execute_with_fault(journal, library, command, None)
+    execute_internal(journal, library, None, None, command, None)
+}
+
+pub fn execute_with_storage(
+    journal: &mut Journal,
+    library: &WorkflowLibraryStore,
+    storage: &mut WorkflowScopedStorage,
+    authority: &WorkflowStorageExecutionAuthority,
+    command: &v1::CommandEnvelope,
+) -> Result<WorkflowExecutionResult> {
+    execute_internal(
+        journal,
+        library,
+        Some(storage),
+        Some(authority),
+        command,
+        None,
+    )
 }
 
 #[doc(hidden)]
@@ -240,12 +293,33 @@ pub fn execute_with_fault_for_test(
     command: &v1::CommandEnvelope,
     fault: WorkflowExecutionFault,
 ) -> Result<WorkflowExecutionResult> {
-    execute_with_fault(journal, library, command, Some(fault))
+    execute_internal(journal, library, None, None, command, Some(fault))
 }
 
-fn execute_with_fault(
+#[doc(hidden)]
+pub fn execute_with_storage_fault_for_test(
     journal: &mut Journal,
     library: &WorkflowLibraryStore,
+    storage: &mut WorkflowScopedStorage,
+    authority: &WorkflowStorageExecutionAuthority,
+    command: &v1::CommandEnvelope,
+    fault: WorkflowExecutionFault,
+) -> Result<WorkflowExecutionResult> {
+    execute_internal(
+        journal,
+        library,
+        Some(storage),
+        Some(authority),
+        command,
+        Some(fault),
+    )
+}
+
+fn execute_internal(
+    journal: &mut Journal,
+    library: &WorkflowLibraryStore,
+    mut storage: Option<&mut WorkflowScopedStorage>,
+    authority: Option<&WorkflowStorageExecutionAuthority>,
     command: &v1::CommandEnvelope,
     fault: Option<WorkflowExecutionFault>,
 ) -> Result<WorkflowExecutionResult> {
@@ -260,6 +334,7 @@ fn execute_with_fault(
         }
     };
     let package = load_execution_package(library, &request)?;
+    validate_storage_authority(&package, &request, storage.is_some(), authority)?;
     journal.admit_command(command)?;
     let token_id = stable_id("token", &[&request.run_id, &command.command_id]);
     let mut appended = 0;
@@ -275,7 +350,14 @@ fn execute_with_fault(
             });
         }
 
-        let candidates = next_events(&package, command, &request, &token_id, &state)?;
+        let candidates = next_events(
+            &package,
+            storage.as_deref_mut(),
+            command,
+            &request,
+            &token_id,
+            &state,
+        )?;
         if candidates.is_empty() {
             return Err(WorkflowExecutionError::Lifecycle(
                 "no_deterministic_transition".into(),
@@ -378,7 +460,6 @@ fn load_execution_package(
         || compiled.entrypoints.len() != 1
         || !compiled.resources.is_empty()
         || !compiled.policies.is_empty()
-        || !compiled.storage.is_empty()
         || !compiled.dependencies.is_empty()
         || compiled.definition_digest.is_empty()
         || compiled.layout_digest.is_empty()
@@ -392,6 +473,19 @@ fn load_execution_package(
         ));
     }
     validate_compiled_subset(&compiled)?;
+    if !compiled.storage.is_empty() && request.installation_id.is_empty() {
+        return Err(WorkflowExecutionError::InvalidCommand(
+            "installation_id_required",
+        ));
+    }
+    if compiled
+        .storage
+        .values()
+        .any(|declaration| declaration.scope == "case")
+        && request.case_id.is_empty()
+    {
+        return Err(WorkflowExecutionError::InvalidCommand("case_id_required"));
+    }
     let bundle: RuntimeSchemaBundle = serde_json::from_slice(&revision.schema_bundle_source)
         .map_err(|_| WorkflowExecutionError::Unsupported("schema_bundle_contract".into()))?;
     if bundle.bundle_version != 1 {
@@ -437,6 +531,26 @@ fn load_execution_package(
             }
         }
     }
+    for (key, declaration) in &compiled.storage {
+        if key != &declaration.key
+            || !matches!(declaration.scope.as_str(), "job" | "case" | "workflow")
+            || !matches!(declaration.kind.as_str(), "value" | "file" | "directory")
+            || declaration.schema_ref.is_empty()
+            || declaration.maximum_bytes == 0
+            || !matches!(
+                declaration.classification.as_str(),
+                "public" | "internal" | "private" | "restricted"
+            )
+            || declaration
+                .conflict_policy
+                .as_deref()
+                .is_some_and(|policy| !matches!(policy, "fail" | "compare-and-swap" | "replace"))
+        {
+            return Err(WorkflowExecutionError::Integrity(
+                "compiled_storage_declaration".into(),
+            ));
+        }
+    }
     if request.inputs.len() != 1
         || request.inputs[0].port_id != "input"
         || request.inputs[0]
@@ -449,6 +563,33 @@ fn load_execution_package(
         ));
     }
     Ok(ExecutionPackage { compiled, schemas })
+}
+
+fn validate_storage_authority(
+    package: &ExecutionPackage,
+    request: &v1::RequestWorkflowRun,
+    storage_available: bool,
+    authority: Option<&WorkflowStorageExecutionAuthority>,
+) -> Result<()> {
+    if package.compiled.storage.is_empty() {
+        return Ok(());
+    }
+    if !storage_available {
+        return Err(WorkflowExecutionError::Unsupported(
+            "storage_service_required".into(),
+        ));
+    }
+    let authority = authority
+        .ok_or_else(|| WorkflowExecutionError::InvalidCommand("storage_authority_required"))?;
+    if authority.installation_id != request.installation_id
+        || authority.case_id.as_deref()
+            != (!request.case_id.is_empty()).then_some(request.case_id.as_str())
+    {
+        return Err(WorkflowExecutionError::InvalidCommand(
+            "storage_authority_mismatch",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_compiled_subset(compiled: &CompiledWorkflow) -> Result<()> {
@@ -487,6 +628,8 @@ fn validate_compiled_subset(compiled: &CompiledWorkflow) -> Result<()> {
                 "trigger.manual"
                     | "data.validate"
                     | "control.match"
+                    | "storage.read"
+                    | "storage.write"
                     | "terminal.complete"
                     | "terminal.fail"
             )
@@ -518,6 +661,7 @@ fn validate_compiled_subset(compiled: &CompiledWorkflow) -> Result<()> {
 
 fn next_events(
     package: &ExecutionPackage,
+    storage: Option<&mut WorkflowScopedStorage>,
     command: &v1::CommandEnvelope,
     request: &v1::RequestWorkflowRun,
     token_id: &str,
@@ -599,8 +743,7 @@ fn next_events(
     }
 
     if let Some(active) = active_attempt(state)? {
-        let node = compiled_node(&package.compiled, &active.started.node_id)?;
-        return node_event_sequence(package, command, request, token_id, state, active, node);
+        return node_event_sequence(package, storage, command, request, token_id, state, active);
     }
 
     if let Some(last) = state.attempts.last()
@@ -658,15 +801,24 @@ fn next_events(
 
 fn node_event_sequence(
     package: &ExecutionPackage,
+    storage: Option<&mut WorkflowScopedStorage>,
     command: &v1::CommandEnvelope,
     request: &v1::RequestWorkflowRun,
     token_id: &str,
     state: &RecordedRun,
     attempt: &RecordedAttempt,
-    node: &CompiledNode,
 ) -> Result<Vec<v1::EventEnvelope>> {
+    let node = compiled_node(&package.compiled, &attempt.started.node_id)?;
     let (_, input) = node_input(request, state, &node.id)?;
-    let execution = execute_node(package, request, node, &input)?;
+    let execution = execute_node(
+        package,
+        storage,
+        request,
+        node,
+        &attempt.started.attempt_id,
+        command.submitted_at_unix_millis,
+        &input,
+    )?;
     let mut events = Vec::new();
     let mut causation_id = attempt.started_event_id.clone();
 
@@ -777,8 +929,11 @@ fn node_event_sequence(
 
 fn execute_node(
     package: &ExecutionPackage,
+    storage: Option<&mut WorkflowScopedStorage>,
     request: &v1::RequestWorkflowRun,
     node: &CompiledNode,
+    attempt_id: &str,
+    occurred_at_unix_millis: i64,
     input: &v1::WorkflowValueReference,
 ) -> Result<NodeExecution> {
     match node.node_type.as_str() {
@@ -875,6 +1030,17 @@ fn execute_node(
                 error,
             })
         }
+        "storage.read" | "storage.write" => execute_storage_node(
+            package,
+            storage.ok_or_else(|| {
+                WorkflowExecutionError::Unsupported("storage_service_required".into())
+            })?,
+            request,
+            node,
+            attempt_id,
+            occurred_at_unix_millis,
+            input,
+        ),
         "terminal.complete" => Ok(NodeExecution {
             match_trace: None,
             outputs: Vec::new(),
@@ -896,6 +1062,500 @@ fn execute_node(
             "node:{}",
             node.node_type
         ))),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StorageReadConfig {
+    #[serde(default = "default_storage_read_operation")]
+    operation: String,
+    scope: String,
+    key: String,
+    #[serde(default = "default_true")]
+    required: bool,
+    #[serde(default = "default_storage_list_limit")]
+    limit: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StorageWriteConfig {
+    #[serde(default = "default_storage_write_operation")]
+    operation: String,
+    scope: String,
+    key: String,
+    value: Option<StorageValueSelector>,
+    conflict_policy: String,
+    expected_revision: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StorageValueSelector {
+    root: String,
+    pointer: String,
+}
+
+fn default_storage_read_operation() -> String {
+    "read".into()
+}
+
+fn default_storage_write_operation() -> String {
+    "write".into()
+}
+
+const fn default_storage_list_limit() -> u32 {
+    100
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+fn execute_storage_node(
+    package: &ExecutionPackage,
+    storage: &mut WorkflowScopedStorage,
+    request: &v1::RequestWorkflowRun,
+    node: &CompiledNode,
+    attempt_id: &str,
+    occurred_at_unix_millis: i64,
+    input: &v1::WorkflowValueReference,
+) -> Result<NodeExecution> {
+    let operation = if node.node_type == "storage.read" {
+        execute_storage_read(package, storage, request, node, occurred_at_unix_millis)
+    } else {
+        execute_storage_write(
+            package,
+            storage,
+            request,
+            node,
+            attempt_id,
+            occurred_at_unix_millis,
+            input,
+        )
+    };
+    match operation {
+        Ok(value) => Ok(success_output("success", value)),
+        Err(error) => {
+            let code = storage_error_code(&error);
+            let value = value_from_json(
+                &stable_id("value", &[&request.run_id, &node.id, "storage-error"]),
+                &json!({
+                    "code": code,
+                    "operation": node.node_type,
+                    "retryable": matches!(error, WorkflowExecutionError::Storage(WorkflowStorageError::Conflict { .. }))
+                }),
+            )?;
+            Ok(failure_output("error", code, value))
+        }
+    }
+}
+
+fn execute_storage_read(
+    package: &ExecutionPackage,
+    storage: &mut WorkflowScopedStorage,
+    request: &v1::RequestWorkflowRun,
+    node: &CompiledNode,
+    occurred_at_unix_millis: i64,
+) -> Result<v1::WorkflowValueReference> {
+    let config: StorageReadConfig = serde_json::from_value(node.config.clone())
+        .map_err(|_| WorkflowExecutionError::Integrity("storage_read_config".into()))?;
+    let declaration = storage_declaration(package, &config.scope, &config.key)?;
+    let (access, namespace) = storage_access(request, &config.scope)?;
+    storage.ensure_namespace_capacity(
+        namespace.clone(),
+        storage_quota(package, &config.scope)?,
+        occurred_at_unix_millis,
+    )?;
+    match config.operation.as_str() {
+        "read" => {
+            let receipt = storage.read_current(WorkflowStorageReadRequest {
+                command_id: stable_id("storage-command", &[&request.run_id, &node.id, "read"]),
+                access,
+                namespace,
+                logical_key: declaration.key.clone(),
+                read_at_unix_millis: occurred_at_unix_millis,
+            });
+            match receipt {
+                Ok(receipt) => Ok(storage_handle_value(
+                    &stable_id("value", &[&request.run_id, &node.id, "read"]),
+                    &receipt.handle,
+                    "read",
+                )),
+                Err(WorkflowStorageError::NotFound(_)) if !config.required => {
+                    storage_summary_value(
+                        &stable_id("value", &[&request.run_id, &node.id, "missing"]),
+                        &config.scope,
+                        &config.key,
+                        "missing",
+                        &Value::Null,
+                    )
+                }
+                Err(error) => Err(error.into()),
+            }
+        }
+        "list" => {
+            let receipt = storage.list_current_idempotent(WorkflowStorageListRequest {
+                command_id: stable_id("storage-command", &[&request.run_id, &node.id, "list"]),
+                access,
+                namespace,
+                prefix: Some(declaration.key.clone()),
+                limit: config.limit,
+                read_at_unix_millis: occurred_at_unix_millis,
+            })?;
+            let total_count = receipt.handles.len();
+            let mut listed = receipt
+                .handles
+                .iter()
+                .map(handle_summary)
+                .collect::<Vec<_>>();
+            while serde_json::to_vec(&json!({
+                "items": &listed,
+                "count": listed.len(),
+                "totalCount": total_count,
+                "truncated": listed.len() < total_count
+            }))
+            .is_ok_and(|bytes| bytes.len() > MAXIMUM_INLINE_STORAGE_SUMMARY_BYTES)
+            {
+                listed.pop();
+            }
+            storage_summary_value(
+                &stable_id("value", &[&request.run_id, &node.id, "list"]),
+                &config.scope,
+                &config.key,
+                "listed",
+                &json!({
+                    "items": &listed,
+                    "count": listed.len(),
+                    "totalCount": total_count,
+                    "truncated": listed.len() < total_count
+                }),
+            )
+        }
+        _ => Err(WorkflowExecutionError::Integrity(
+            "storage_read_operation".into(),
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_storage_write(
+    package: &ExecutionPackage,
+    storage: &mut WorkflowScopedStorage,
+    request: &v1::RequestWorkflowRun,
+    node: &CompiledNode,
+    attempt_id: &str,
+    occurred_at_unix_millis: i64,
+    input: &v1::WorkflowValueReference,
+) -> Result<v1::WorkflowValueReference> {
+    let config: StorageWriteConfig = serde_json::from_value(node.config.clone())
+        .map_err(|_| WorkflowExecutionError::Integrity("storage_write_config".into()))?;
+    let declaration = storage_declaration(package, &config.scope, &config.key)?;
+    if declaration
+        .conflict_policy
+        .as_deref()
+        .is_some_and(|policy| policy != config.conflict_policy)
+    {
+        return Err(WorkflowExecutionError::Integrity(
+            "storage_conflict_policy".into(),
+        ));
+    }
+    let (access, namespace) = storage_access(request, &config.scope)?;
+    storage.ensure_namespace_capacity(
+        namespace.clone(),
+        storage_quota(package, &config.scope)?,
+        occurred_at_unix_millis,
+    )?;
+    if config.operation == "delete-reference" {
+        let receipt = storage.delete_reference(WorkflowStorageDeleteRequest {
+            command_id: stable_id("storage-command", &[&request.run_id, &node.id, "delete"]),
+            access,
+            namespace,
+            logical_key: declaration.key.clone(),
+            expected_revision: config.expected_revision.ok_or_else(|| {
+                WorkflowExecutionError::Integrity("storage_delete_revision".into())
+            })?,
+            deleted_by_attempt_id: attempt_id.into(),
+            deleted_at_unix_millis: occurred_at_unix_millis,
+        })?;
+        return Ok(storage_handle_value(
+            &stable_id("value", &[&request.run_id, &node.id, "deleted"]),
+            &receipt.handle,
+            "deleted",
+        ));
+    }
+    if config.operation != "write" {
+        return Err(WorkflowExecutionError::Integrity(
+            "storage_write_operation".into(),
+        ));
+    }
+    let expected_revision = match config.conflict_policy.as_str() {
+        "fail" => 0,
+        "compare-and-swap" => config
+            .expected_revision
+            .ok_or_else(|| WorkflowExecutionError::Integrity("storage_expected_revision".into()))?,
+        "replace" => storage
+            .list_current(&access, &namespace, Some(&declaration.key), 1)?
+            .into_iter()
+            .find(|handle| handle.logical_key == declaration.key)
+            .map_or(0, |handle| handle.revision),
+        _ => {
+            return Err(WorkflowExecutionError::Integrity(
+                "storage_conflict_policy".into(),
+            ));
+        }
+    };
+    let selector = config
+        .value
+        .as_ref()
+        .ok_or_else(|| WorkflowExecutionError::Integrity("storage_value_selector".into()))?;
+    let value = storage_input_value(storage, &access, &config.scope, selector, input)?;
+    let version_id = stable_id("storage-version", &[&request.run_id, &node.id, "1"]);
+    let receipt = storage.write_value(WorkflowStorageWriteRequest {
+        command_id: stable_id("storage-command", &[&request.run_id, &node.id, "write"]),
+        access,
+        namespace: namespace.clone(),
+        entry_id: stable_id(
+            "storage-entry",
+            &[&namespace.owner_id, &config.scope, &declaration.key],
+        ),
+        version_id: version_id.clone(),
+        reference_id: matches!(value, WorkflowStorageValueInput::Object { .. })
+            .then(|| stable_id("storage-reference", &[&version_id, "value"])),
+        logical_key: declaration.key.clone(),
+        expected_revision,
+        schema_ref: Some(declaration.schema_ref.clone()),
+        media_type: if declaration.kind == "value" {
+            "application/json".into()
+        } else {
+            input.content_type.clone()
+        },
+        classification: declaration.classification.clone(),
+        purpose: if declaration.kind == "value" {
+            "value".into()
+        } else {
+            "file".into()
+        },
+        value,
+        created_by_attempt_id: attempt_id.into(),
+        created_at_unix_millis: occurred_at_unix_millis,
+    })?;
+    Ok(storage_handle_value(
+        &stable_id("value", &[&request.run_id, &node.id, "written"]),
+        &receipt.handle,
+        "written",
+    ))
+}
+
+fn storage_declaration<'a>(
+    package: &'a ExecutionPackage,
+    scope: &str,
+    key: &str,
+) -> Result<&'a CompiledStorageDeclaration> {
+    package
+        .compiled
+        .storage
+        .get(key)
+        .filter(|declaration| declaration.scope == scope && declaration.key == key)
+        .ok_or_else(|| WorkflowExecutionError::Integrity("storage_declaration".into()))
+}
+
+fn storage_quota(package: &ExecutionPackage, scope: &str) -> Result<WorkflowStorageNamespaceQuota> {
+    let declarations = package
+        .compiled
+        .storage
+        .values()
+        .filter(|declaration| declaration.scope == scope)
+        .collect::<Vec<_>>();
+    let maximum_item_count = declarations.len() as u64;
+    let maximum_total_bytes = declarations.iter().try_fold(0_u64, |total, declaration| {
+        total.checked_add(declaration.maximum_bytes)
+    });
+    let maximum_value_bytes = declarations
+        .iter()
+        .map(|declaration| declaration.maximum_bytes)
+        .max()
+        .unwrap_or_default();
+    Ok(WorkflowStorageNamespaceQuota {
+        maximum_item_count,
+        maximum_total_bytes: maximum_total_bytes
+            .ok_or_else(|| WorkflowExecutionError::Integrity("storage_quota_overflow".into()))?,
+        maximum_value_bytes,
+    })
+}
+
+fn storage_access(
+    request: &v1::RequestWorkflowRun,
+    scope: &str,
+) -> Result<(WorkflowStorageAccessContext, WorkflowStorageNamespace)> {
+    let access = WorkflowStorageAccessContext {
+        run_id: Some(request.run_id.clone()),
+        case_id: (!request.case_id.is_empty()).then(|| request.case_id.clone()),
+        installation_id: request.installation_id.clone(),
+        account_binding_ids: BTreeSet::new(),
+    };
+    let namespace = match scope {
+        "job" => WorkflowStorageNamespace {
+            kind: WorkflowStorageScopeKind::Job,
+            owner_id: request.run_id.clone(),
+            installation_id: Some(request.installation_id.clone()),
+        },
+        "case" => WorkflowStorageNamespace {
+            kind: WorkflowStorageScopeKind::Case,
+            owner_id: request.case_id.clone(),
+            installation_id: Some(request.installation_id.clone()),
+        },
+        "workflow" => WorkflowStorageNamespace {
+            kind: WorkflowStorageScopeKind::Installation,
+            owner_id: request.installation_id.clone(),
+            installation_id: Some(request.installation_id.clone()),
+        },
+        _ => {
+            return Err(WorkflowExecutionError::Integrity("storage_scope".into()));
+        }
+    };
+    Ok((access, namespace))
+}
+
+fn storage_input_value(
+    storage: &WorkflowScopedStorage,
+    access: &WorkflowStorageAccessContext,
+    target_scope: &str,
+    selector: &StorageValueSelector,
+    input: &v1::WorkflowValueReference,
+) -> Result<WorkflowStorageValueInput> {
+    if selector.root != "input" {
+        return Err(WorkflowExecutionError::Unsupported(
+            "storage_value_root".into(),
+        ));
+    }
+    if input.storage_reference_id.is_empty() {
+        let selected = inline_json(input)?
+            .pointer(&selector.pointer)
+            .cloned()
+            .ok_or_else(|| WorkflowExecutionError::Integrity("storage_value_pointer".into()))?;
+        let encoded = serde_json::to_vec(&selected)
+            .map_err(|_| WorkflowExecutionError::Encoding("storage_value"))?;
+        let canonical = workflow_canonical::canonicalize(&encoded)
+            .map_err(|_| WorkflowExecutionError::Encoding("storage_value_canonical"))?;
+        return Ok(WorkflowStorageValueInput::InlineCanonicalJson {
+            bytes: canonical.canonical_bytes,
+        });
+    }
+    if !selector.pointer.is_empty() {
+        return Err(WorkflowExecutionError::Unsupported(
+            "stored_value_pointer".into(),
+        ));
+    }
+    let handle = storage.inspect_handle(access, &input.storage_reference_id)?;
+    if storage_scope_name(handle.scope_kind) != target_scope {
+        return Err(WorkflowExecutionError::Unsupported(
+            "storage_promotion_requires_node".into(),
+        ));
+    }
+    if handle.value_kind == "object" {
+        Ok(WorkflowStorageValueInput::Object {
+            digest: handle.sha256,
+            byte_count: handle.byte_count,
+        })
+    } else {
+        let mut bytes = Vec::new();
+        storage.copy_value(access, &handle.handle_id, handle.byte_count, &mut bytes)?;
+        Ok(WorkflowStorageValueInput::InlineCanonicalJson { bytes })
+    }
+}
+
+fn storage_handle_value(
+    value_id: &str,
+    handle: &WorkflowStorageHandle,
+    result: &str,
+) -> v1::WorkflowValueReference {
+    v1::WorkflowValueReference {
+        value_id: value_id.into(),
+        content_type: handle.media_type.clone(),
+        byte_count: handle.byte_count,
+        sha256: handle.sha256.clone(),
+        inline_canonical_json: Vec::new(),
+        storage_reference_id: handle.handle_id.clone(),
+        storage: Some(storage_metadata(handle, result)),
+    }
+}
+
+fn storage_metadata(
+    handle: &WorkflowStorageHandle,
+    result: &str,
+) -> v1::WorkflowStorageValueMetadata {
+    v1::WorkflowStorageValueMetadata {
+        handle_id: handle.handle_id.clone(),
+        scope: storage_scope_name(handle.scope_kind).into(),
+        logical_key: handle.logical_key.clone(),
+        version_id: handle.version_id.clone(),
+        revision: handle.revision,
+        previous_version_id: handle.previous_version_id.clone().unwrap_or_default(),
+        byte_count: handle.byte_count,
+        result: result.into(),
+    }
+}
+
+fn storage_summary_value(
+    value_id: &str,
+    scope: &str,
+    key: &str,
+    result: &str,
+    value: &Value,
+) -> Result<v1::WorkflowValueReference> {
+    let mut reference = value_from_json(value_id, value)?;
+    reference.storage = Some(v1::WorkflowStorageValueMetadata {
+        handle_id: String::new(),
+        scope: scope.into(),
+        logical_key: key.into(),
+        version_id: String::new(),
+        revision: 0,
+        previous_version_id: String::new(),
+        byte_count: reference.byte_count,
+        result: result.into(),
+    });
+    Ok(reference)
+}
+
+fn handle_summary(handle: &WorkflowStorageHandle) -> Value {
+    json!({
+        "handleId": handle.handle_id,
+        "scope": storage_scope_name(handle.scope_kind),
+        "key": handle.logical_key,
+        "versionId": handle.version_id,
+        "revision": handle.revision,
+        "previousVersionId": handle.previous_version_id,
+        "bytes": handle.byte_count,
+        "sha256": handle.sha256
+    })
+}
+
+const fn storage_scope_name(scope: WorkflowStorageScopeKind) -> &'static str {
+    match scope {
+        WorkflowStorageScopeKind::Job => "job",
+        WorkflowStorageScopeKind::Case => "case",
+        WorkflowStorageScopeKind::Installation => "workflow",
+        WorkflowStorageScopeKind::AccountBinding => "account-binding",
+    }
+}
+
+fn storage_error_code(error: &WorkflowExecutionError) -> &'static str {
+    match error {
+        WorkflowExecutionError::Storage(WorkflowStorageError::Conflict { .. }) => {
+            "storage.conflict"
+        }
+        WorkflowExecutionError::Storage(WorkflowStorageError::NotFound(_)) => "storage.not-found",
+        WorkflowExecutionError::Storage(WorkflowStorageError::QuotaExceeded(_)) => {
+            "storage.quota-exceeded"
+        }
+        WorkflowExecutionError::Storage(WorkflowStorageError::AccessDenied(_)) => {
+            "storage.access-denied"
+        }
+        WorkflowExecutionError::Unsupported(_) => "storage.unsupported",
+        WorkflowExecutionError::Integrity(_) => "storage.invalid",
+        _ => "storage.failed",
     }
 }
 
@@ -1181,6 +1841,7 @@ fn value_from_json(value_id: &str, value: &Value) -> Result<v1::WorkflowValueRef
         sha256,
         inline_canonical_json: canonical.canonical_bytes,
         storage_reference_id: String::new(),
+        storage: None,
     })
 }
 

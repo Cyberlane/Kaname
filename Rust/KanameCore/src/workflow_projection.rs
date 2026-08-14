@@ -23,7 +23,7 @@ use std::{
     time::Duration,
 };
 
-const PROJECTION_SCHEMA_VERSION: i64 = 1;
+const PROJECTION_SCHEMA_VERSION: i64 = 2;
 const DEFAULT_BATCH_SIZE: u32 = 250;
 
 const INITIAL_SCHEMA: &str = r#"
@@ -40,6 +40,13 @@ CREATE TABLE workflow_values (
     sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
     inline_canonical_json BLOB,
     storage_reference_id TEXT,
+    storage_handle_id TEXT,
+    storage_scope TEXT,
+    storage_logical_key TEXT,
+    storage_version_id TEXT,
+    storage_revision INTEGER,
+    storage_previous_version_id TEXT,
+    storage_result TEXT,
     CHECK ((inline_canonical_json IS NULL) <> (storage_reference_id IS NULL))
 ) STRICT;
 
@@ -158,6 +165,16 @@ CREATE TABLE workflow_projected_events (
 
 CREATE INDEX workflow_projected_events_run_position
     ON workflow_projected_events(run_id, store_position);
+"#;
+
+const PROJECTION_MIGRATION_2: &str = r#"
+ALTER TABLE workflow_values ADD COLUMN storage_handle_id TEXT;
+ALTER TABLE workflow_values ADD COLUMN storage_scope TEXT;
+ALTER TABLE workflow_values ADD COLUMN storage_logical_key TEXT;
+ALTER TABLE workflow_values ADD COLUMN storage_version_id TEXT;
+ALTER TABLE workflow_values ADD COLUMN storage_revision INTEGER;
+ALTER TABLE workflow_values ADD COLUMN storage_previous_version_id TEXT;
+ALTER TABLE workflow_values ADD COLUMN storage_result TEXT;
 "#;
 
 #[derive(Debug)]
@@ -297,6 +314,13 @@ impl WorkflowRunProjection {
                 ["0".repeat(64)],
             )?;
             refresh_state_digest(&transaction)?;
+            transaction.commit()?;
+        }
+        if found == 1 {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(PROJECTION_MIGRATION_2)?;
+            transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
             transaction.commit()?;
         }
         connection.pragma_update(None, "journal_mode", "WAL")?;
@@ -881,10 +905,27 @@ impl WorkflowRunProjection {
     }
 
     fn inspect_value(&self, value_id: &str) -> Result<v1::WorkflowProjectedValue> {
-        type ValueRow = (String, String, i64, String, Option<Vec<u8>>, Option<String>);
+        type ValueRow = (
+            String,
+            String,
+            i64,
+            String,
+            Option<Vec<u8>>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+        );
         let row: ValueRow = self.connection.query_row(
             "SELECT value_id, content_type, byte_count, sha256, inline_canonical_json,
-                    storage_reference_id FROM workflow_values WHERE value_id = ?1",
+                    storage_reference_id, storage_handle_id, storage_scope,
+                    storage_logical_key, storage_version_id, storage_revision,
+                    storage_previous_version_id, storage_result
+             FROM workflow_values WHERE value_id = ?1",
             [value_id],
             |row| {
                 Ok((
@@ -894,22 +935,44 @@ impl WorkflowRunProjection {
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
+                    row.get(12)?,
                 ))
             },
         )?;
         let availability = if row.4.is_some() {
             "inline"
+        } else if row.6.is_some() {
+            "scoped_handle"
         } else {
             "storage_unavailable"
         };
+        let byte_count = projected_u64(row.2)?;
+        let storage_revision = row.10.map(projected_u64).transpose()?.unwrap_or_default();
+        let storage = row.6.map(|handle_id| v1::WorkflowStorageValueMetadata {
+            handle_id,
+            scope: row.7.unwrap_or_default(),
+            logical_key: row.8.unwrap_or_default(),
+            version_id: row.9.unwrap_or_default(),
+            revision: storage_revision,
+            previous_version_id: row.11.unwrap_or_default(),
+            byte_count,
+            result: row.12.unwrap_or_default(),
+        });
         Ok(v1::WorkflowProjectedValue {
             value_id: row.0,
             content_type: row.1,
-            byte_count: projected_u64(row.2)?,
+            byte_count,
             sha256: row.3,
             inline_canonical_json: row.4.unwrap_or_default(),
             storage_reference_id: row.5.unwrap_or_default(),
             availability: availability.into(),
+            storage,
         })
     }
 
@@ -1348,10 +1411,13 @@ fn insert_value(transaction: &Transaction<'_>, value: &v1::WorkflowValueReferenc
         (!value.inline_canonical_json.is_empty()).then_some(value.inline_canonical_json.as_slice());
     let storage =
         (!value.storage_reference_id.is_empty()).then_some(value.storage_reference_id.as_str());
+    let metadata = value.storage.as_ref();
     transaction.execute(
         "INSERT OR IGNORE INTO workflow_values
-         (value_id, content_type, byte_count, sha256, inline_canonical_json, storage_reference_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+         (value_id, content_type, byte_count, sha256, inline_canonical_json, storage_reference_id,
+          storage_handle_id, storage_scope, storage_logical_key, storage_version_id,
+          storage_revision, storage_previous_version_id, storage_result)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             value.value_id,
             value.content_type,
@@ -1359,10 +1425,34 @@ fn insert_value(transaction: &Transaction<'_>, value: &v1::WorkflowValueReferenc
             value.sha256,
             inline,
             storage,
+            metadata.map(|value| value.handle_id.as_str()),
+            metadata.map(|value| value.scope.as_str()),
+            metadata.map(|value| value.logical_key.as_str()),
+            metadata.map(|value| value.version_id.as_str()),
+            metadata.map(|value| sql_u64(value.revision)).transpose()?,
+            metadata.and_then(|value| (!value.previous_version_id.is_empty())
+                .then_some(value.previous_version_id.as_str())),
+            metadata.map(|value| value.result.as_str()),
         ],
     )?;
-    let stored: (String, i64, String, Option<Vec<u8>>, Option<String>) = transaction.query_row(
-        "SELECT content_type, byte_count, sha256, inline_canonical_json, storage_reference_id
+    type StoredValue = (
+        String,
+        i64,
+        String,
+        Option<Vec<u8>>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+    );
+    let stored: StoredValue = transaction.query_row(
+        "SELECT content_type, byte_count, sha256, inline_canonical_json, storage_reference_id,
+                storage_handle_id, storage_scope, storage_logical_key, storage_version_id,
+                storage_revision, storage_previous_version_id, storage_result
          FROM workflow_values WHERE value_id = ?1",
         [&value.value_id],
         |row| {
@@ -1372,6 +1462,13 @@ fn insert_value(transaction: &Transaction<'_>, value: &v1::WorkflowValueReferenc
                 row.get(2)?,
                 row.get(3)?,
                 row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+                row.get(9)?,
+                row.get(10)?,
+                row.get(11)?,
             ))
         },
     )?;
@@ -1380,6 +1477,17 @@ fn insert_value(transaction: &Transaction<'_>, value: &v1::WorkflowValueReferenc
         || stored.2 != value.sha256
         || stored.3.as_deref() != inline
         || stored.4.as_deref() != storage
+        || stored.5.as_deref() != metadata.map(|value| value.handle_id.as_str())
+        || stored.6.as_deref() != metadata.map(|value| value.scope.as_str())
+        || stored.7.as_deref() != metadata.map(|value| value.logical_key.as_str())
+        || stored.8.as_deref() != metadata.map(|value| value.version_id.as_str())
+        || stored.9 != metadata.map(|value| sql_u64(value.revision)).transpose()?
+        || stored.10.as_deref()
+            != metadata.and_then(|value| {
+                (!value.previous_version_id.is_empty())
+                    .then_some(value.previous_version_id.as_str())
+            })
+        || stored.11.as_deref() != metadata.map(|value| value.result.as_str())
     {
         return lifecycle("value_identity_reused");
     }
@@ -1475,8 +1583,8 @@ fn canonical_state_bytes(connection: &Connection) -> Result<Vec<u8>> {
             table_rows(
                 connection,
                 "values",
-                "SELECT value_id, content_type, byte_count, sha256, inline_canonical_json, storage_reference_id FROM workflow_values ORDER BY value_id",
-                6,
+                "SELECT value_id, content_type, byte_count, sha256, inline_canonical_json, storage_reference_id, storage_handle_id, storage_scope, storage_logical_key, storage_version_id, storage_revision, storage_previous_version_id, storage_result FROM workflow_values ORDER BY value_id",
+                13,
             )?,
             table_rows(
                 connection,

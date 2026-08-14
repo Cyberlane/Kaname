@@ -15,7 +15,23 @@ message WorkflowValueReference {
   bytes inline_canonical_json = 5;
   string storage_reference_id = 6;
   reserved 7 to 15;
+  WorkflowStorageValueMetadata storage = 16;
   reserved "host_path", "raw_path", "secret";
+}
+
+// Inspectable lineage for a scoped value. The handle is opaque and never a
+// host path; byte access remains mediated by the storage service.
+message WorkflowStorageValueMetadata {
+  string handle_id = 1;
+  string scope = 2;
+  string logical_key = 3;
+  string version_id = 4;
+  uint64 revision = 5;
+  string previous_version_id = 6;
+  uint64 byte_count = 7;
+  string result = 8;
+  reserved 9 to 20;
+  reserved "host_path", "raw_path", "cas_path", "mount_path";
 }
 
 message WorkflowInputBinding {
@@ -34,6 +50,9 @@ message RequestWorkflowRun {
   string trigger_event_id = 6;
   repeated WorkflowInputBinding inputs = 7;
   reserved 8 to 20;
+  string installation_id = 21;
+  string case_id = 22;
+  reserved 23 to 30;
   reserved "workflow_path", "database_path", "credential";
 }
 
@@ -179,6 +198,7 @@ message WorkflowProjectedValue {
   string storage_reference_id = 6;
   string availability = 7;
   reserved 8 to 15;
+  WorkflowStorageValueMetadata storage = 16;
 }
 
 message WorkflowProjectedAttempt {

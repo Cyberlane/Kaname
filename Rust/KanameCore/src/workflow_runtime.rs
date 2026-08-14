@@ -224,6 +224,12 @@ fn validate_run_request(request: &v1::RequestWorkflowRun) -> Result<()> {
     if !request.trigger_event_id.is_empty() {
         validate_identifier(&request.trigger_event_id, 128, "trigger_event_id")?;
     }
+    if !request.installation_id.is_empty() {
+        validate_identifier(&request.installation_id, 128, "installation_id")?;
+    }
+    if !request.case_id.is_empty() {
+        validate_identifier(&request.case_id, 128, "case_id")?;
+    }
     if request.inputs.len() > MAXIMUM_PORT_BINDINGS {
         return invalid("input_count");
     }
@@ -435,6 +441,40 @@ fn validate_value(value: Option<&v1::WorkflowValueReference>) -> Result<()> {
         }
     } else {
         validate_identifier(&value.storage_reference_id, 128, "storage_reference_id")?;
+    }
+    if let Some(storage) = value.storage.as_ref() {
+        validate_text(&storage.logical_key, 512, "storage_logical_key")?;
+        let summary = matches!(storage.result.as_str(), "listed" | "missing");
+        if !summary {
+            validate_identifier(&storage.handle_id, 128, "storage_handle_id")?;
+            validate_identifier(&storage.version_id, 128, "storage_version_id")?;
+        }
+        if !matches!(
+            storage.scope.as_str(),
+            "job" | "case" | "workflow" | "account-binding"
+        ) || (!summary && storage.revision == 0)
+            || (summary
+                && (!storage.handle_id.is_empty()
+                    || !storage.version_id.is_empty()
+                    || storage.revision != 0))
+            || storage.byte_count != value.byte_count
+            || !matches!(
+                storage.result.as_str(),
+                "read" | "written" | "deleted" | "listed" | "missing"
+            )
+        {
+            return invalid("storage_metadata");
+        }
+        if !storage.previous_version_id.is_empty() {
+            validate_identifier(
+                &storage.previous_version_id,
+                128,
+                "storage_previous_version_id",
+            )?;
+        }
+        if stored && value.storage_reference_id != storage.handle_id {
+            return invalid("storage_reference_identity");
+        }
     }
     Ok(())
 }

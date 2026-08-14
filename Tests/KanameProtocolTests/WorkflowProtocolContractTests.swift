@@ -140,6 +140,22 @@ struct WorkflowProtocolContractTests {
         request.packageDigest = String(repeating: "a", count: 64)
         request.triggerKind = "manual"
         request.inputs = [input]
+        request.installationID = "installation-one"
+        request.caseID = "case-one"
+        var storageValue = Kaname_V1_WorkflowValueReference()
+        storageValue.valueID = "value-storage-one"
+        storageValue.contentType = "application/pdf"
+        storageValue.byteCount = 512
+        storageValue.sha256 = String(repeating: "b", count: 64)
+        storageValue.storageReferenceID = "storage-version-two"
+        storageValue.storage.handleID = storageValue.storageReferenceID
+        storageValue.storage.scope = "case"
+        storageValue.storage.logicalKey = "result"
+        storageValue.storage.versionID = "storage-version-two"
+        storageValue.storage.revision = 2
+        storageValue.storage.previousVersionID = "storage-version-one"
+        storageValue.storage.byteCount = storageValue.byteCount
+        storageValue.storage.result = "read"
         var cancel = Kaname_V1_CancelWorkflowRun()
         cancel.runID = request.runID
         cancel.runTokenID = "run-token-one"
@@ -203,6 +219,7 @@ struct WorkflowProtocolContractTests {
         settled.finalEmissionIds = [emitted.emissionID]
 
         try roundTrip(request)
+        try roundTrip(storageValue)
         try roundTrip(cancel)
         try roundTrip(token)
         try roundTrip(started)

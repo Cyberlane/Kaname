@@ -40,7 +40,8 @@
       "root": "input",
       "pointer": "/draft"
     },
-    "conflictPolicy": "compare-and-swap"
+    "conflictPolicy": "compare-and-swap",
+    "expectedRevision": 0
   },
   "storage.promote": {
     "from": "job",

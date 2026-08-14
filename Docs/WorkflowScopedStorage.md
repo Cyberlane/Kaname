@@ -23,6 +23,8 @@ Job access deliberately contains no node or attempt restriction: every node in t
 - one scoped blob reference for every object-backed version;
 - exact command request digests and canonical response receipts for idempotent retry.
 
+Schema version 2 adds the portable declared classification and an active/deleted current-reference state without rewriting immutable version rows. The forward migration retains and verifies the version-1 checksum. Runtime registration may grow a namespace's declared capacity for a newer published revision, but it cannot shrink limits or rebind the namespace to another installation.
+
 An entry's schema reference, media type, and classification are stable. Updating a value requires the exact current revision, appends revision `n + 1`, and atomically advances the current pointer. Historical handles continue to resolve after later writes. Reusing a command identity with changed input or reusing an entry while changing its type contract fails closed.
 
 ## Values and handles
@@ -30,6 +32,8 @@ An entry's schema reference, media type, and classification are stable. Updating
 Canonical JSON is limited to 64 KiB and must arrive in its exact RFC 8785 form. Larger values and files must already exist as a verified WFP-005A object. Scoped storage verifies the digest and byte count before committing a reference.
 
 Callers receive a version handle containing scope kind, logical key, version/revision, schema/media/classification metadata, size, and checksum. It contains no host path. Byte reads are mediated through `copy_value`, which reauthorizes the namespace before copying either inline JSON or verified CAS bytes into the caller's bounded sink.
+
+The handle also identifies the previous immutable version. Idempotent read and list receipts pin what a node observed across restart. Delete-reference marks the logical name inactive at an exact revision while preserving version lineage; a later compare-and-set write may reactivate it as the next revision.
 
 ## Quotas and integrity
 
@@ -39,4 +43,4 @@ Integrity verification checks SQLite, migrations, current-version pointers, obje
 
 ## Qualification
 
-`workflow_storage_tests.rs` proves job/case/installation/account isolation, same-job sharing, cross-run and cross-installation denial, optimistic conflict behavior, command idempotency, persisted current and historical versions, mediated inline and object reads, one physical object with two isolated logical references, all namespace quota classes, object metadata mismatch, namespace identity immutability, bounded lists, newer-schema rejection, corrupt-current-pointer detection, and absence of host paths in serialized handles and receipts.
+`workflow_storage_tests.rs` proves job/case/installation/account isolation, same-job sharing, cross-run and cross-installation denial, optimistic conflict behavior, command idempotency, persisted current and historical versions, idempotent read/list/delete receipts, delete and reactivation lineage, mediated inline and object reads, one physical object with two isolated logical references, all namespace quota classes, object metadata mismatch, namespace identity immutability, bounded lists, newer-schema rejection, corrupt-current-pointer detection, and absence of host paths in serialized handles and receipts. `workflow_executor_tests.rs` additionally kills and resumes the storage graph after every event boundary and proves that only two value versions exist after every recovery.

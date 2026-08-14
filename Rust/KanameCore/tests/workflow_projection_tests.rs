@@ -100,6 +100,34 @@ fn persisted_projection_resumes_after_a_batch_and_rolls_back_mid_batch() {
 }
 
 #[test]
+fn version_one_projection_migrates_storage_lineage_columns_in_place() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("workflow-projection.sqlite");
+    {
+        let projection = WorkflowRunProjection::open(&path).unwrap();
+        assert_eq!(projection.high_water_mark().unwrap(), 0);
+    }
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "ALTER TABLE workflow_values DROP COLUMN storage_result;
+             ALTER TABLE workflow_values DROP COLUMN storage_previous_version_id;
+             ALTER TABLE workflow_values DROP COLUMN storage_revision;
+             ALTER TABLE workflow_values DROP COLUMN storage_version_id;
+             ALTER TABLE workflow_values DROP COLUMN storage_logical_key;
+             ALTER TABLE workflow_values DROP COLUMN storage_scope;
+             ALTER TABLE workflow_values DROP COLUMN storage_handle_id;
+             PRAGMA user_version = 1;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let projection = WorkflowRunProjection::open(&path).unwrap();
+    assert_eq!(projection.high_water_mark().unwrap(), 0);
+    projection.integrity_check().unwrap();
+}
+
+#[test]
 fn corrupt_logical_projection_is_detected_and_rebuilt_from_the_journal() {
     let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
     append_complete_corpus(&mut journal);
@@ -513,6 +541,7 @@ fn inline_value(value_id: &str, bytes: &[u8]) -> WorkflowValueReference {
         sha256: hex::encode(Sha256::digest(bytes)),
         inline_canonical_json: bytes.to_vec(),
         storage_reference_id: String::new(),
+        storage: None,
     }
 }
 

@@ -24,13 +24,28 @@ public struct DesktopWorkflowProjectedValue: Equatable, Sendable {
     public let inlineCanonicalJSON: Data?
     public let storageReferenceID: String?
     public let availability: String
+    public let storage: DesktopWorkflowStorageValueMetadata?
 
     public var absenceExplanation: String? {
         guard inlineCanonicalJSON == nil else { return nil }
+        if availability == "scoped_handle" {
+            return "The value is retained behind an opaque scoped handle. Its host storage path is never exposed."
+        }
         return availability == "storage_unavailable"
             ? "The value metadata is retained, but its stored content is not available in this history view."
             : "The value content was not retained."
     }
+}
+
+public struct DesktopWorkflowStorageValueMetadata: Equatable, Sendable {
+    public let handleID: String?
+    public let scope: String
+    public let logicalKey: String
+    public let versionID: String?
+    public let revision: UInt64?
+    public let previousVersionID: String?
+    public let byteCount: UInt64
+    public let result: String
 }
 
 public struct DesktopWorkflowProjectedAttempt: Identifiable, Equatable, Sendable {
@@ -402,7 +417,32 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
             sha256: value.sha256,
             inlineCanonicalJSON: value.inlineCanonicalJson.isEmpty ? nil : value.inlineCanonicalJson,
             storageReferenceID: value.storageReferenceID.nilIfEmpty,
-            availability: value.availability
+            availability: value.availability,
+            storage: try value.hasStorage ? storage(value.storage) : nil
+        )
+    }
+
+    private static func storage(
+        _ storage: Kaname_V1_WorkflowStorageValueMetadata
+    ) throws -> DesktopWorkflowStorageValueMetadata {
+        guard !storage.scope.isEmpty,
+              !storage.logicalKey.isEmpty,
+              !storage.result.isEmpty else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        let summary = storage.result == "listed" || storage.result == "missing"
+        guard summary || (!storage.handleID.isEmpty && !storage.versionID.isEmpty && storage.revision > 0) else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        return DesktopWorkflowStorageValueMetadata(
+            handleID: storage.handleID.nilIfEmpty,
+            scope: storage.scope,
+            logicalKey: storage.logicalKey,
+            versionID: storage.versionID.nilIfEmpty,
+            revision: storage.revision > 0 ? storage.revision : nil,
+            previousVersionID: storage.previousVersionID.nilIfEmpty,
+            byteCount: storage.byteCount,
+            result: storage.result
         )
     }
 

@@ -46,6 +46,7 @@ struct DesktopDurableWorkflowRunsView: View {
         case inputs = "Inputs"
         case output = "Output"
         case error = "Error"
+        case storage = "Storage"
         case configuration = "Configuration"
         case matchTrace = "Match trace"
         case timing = "Timing"
@@ -247,7 +248,9 @@ struct DesktopDurableWorkflowRunsView: View {
                         let state = run.nodes.first { $0.nodeID == node.id }?.status ?? "not-run"
                         Button {
                             selectedNodeID = node.id
-                            inspectorGroup = run.attempt(for: node.id)?.errorCode == nil ? .inputs : .error
+                            inspectorGroup = node.type.hasPrefix("storage.")
+                                ? .storage
+                                : (run.attempt(for: node.id)?.errorCode == nil ? .inputs : .error)
                         } label: {
                             VStack(alignment: .leading, spacing: 5) {
                                 HStack {
@@ -290,10 +293,27 @@ struct DesktopDurableWorkflowRunsView: View {
                 Spacer()
                 Text("Read-only trace").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
             }
-            Picker("Inspector group", selection: $inspectorGroup) {
-                ForEach(InspectorGroup.allCases) { Text($0.rawValue).tag($0) }
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(InspectorGroup.allCases) { group in
+                        Button(group.rawValue) { inspectorGroup = group }
+                            .font(.caption.weight(.semibold))
+                            .buttonStyle(.plain)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(
+                                inspectorGroup == group ? Nord.frost1.opacity(0.22) : Nord.polarNight0,
+                                in: Capsule()
+                            )
+                            .overlay {
+                                Capsule().stroke(
+                                    inspectorGroup == group ? Nord.frost1 : Nord.polarNight3,
+                                    lineWidth: 1
+                                )
+                            }
+                    }
+                }
             }
-            .pickerStyle(.segmented)
             inspectorContent(snapshot, node: node)
                 .frame(maxWidth: .infinity, minHeight: 145, alignment: .topLeading)
         }
@@ -314,6 +334,20 @@ struct DesktopDurableWorkflowRunsView: View {
                 evidenceCard(title: code, detail: attempt.error.flatMap(valueText) ?? "No error payload was retained.")
             } else {
                 explainedEmpty("This attempt did not report an error.")
+            }
+        case .storage:
+            let values = (run.inputs(for: node.id) + run.outputs(for: node.id))
+                .compactMap { emission -> (String, DesktopWorkflowStorageValueMetadata)? in
+                    emission.value.storage.map { (emission.portID, $0) }
+                }
+            if values.isEmpty {
+                explainedEmpty("This node did not use a scoped storage handle.")
+            } else {
+                VStack(alignment: .leading, spacing: 7) {
+                    ForEach(Array(values.enumerated()), id: \.offset) { _, item in
+                        storageCard(port: item.0, metadata: item.1)
+                    }
+                }
             }
         case .configuration:
             codeBlock(String(decoding: node.configurationJSON, as: UTF8.self))
@@ -365,6 +399,39 @@ struct DesktopDurableWorkflowRunsView: View {
         value.inlineCanonicalJSON.map { String(decoding: $0, as: UTF8.self) }
             ?? value.absenceExplanation
             ?? "Value content unavailable."
+    }
+
+    private func storageCard(
+        port: String,
+        metadata: DesktopWorkflowStorageValueMetadata
+    ) -> some View {
+        let version = metadata.revision.map { "r\($0) · \(metadata.versionID ?? "—")" } ?? "No single version"
+        let lineage = metadata.previousVersionID ?? "First version"
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Label(metadata.result.capitalized, systemImage: "externaldrive.badge.checkmark")
+                    .font(.caption.weight(.bold)).foregroundStyle(Nord.frost1)
+                Spacer()
+                Text(port).font(.caption2).foregroundStyle(.secondary)
+            }
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
+                storageRow("Scope", metadata.scope.capitalized)
+                storageRow("Key", metadata.logicalKey)
+                storageRow("Version", version)
+                storageRow("Lineage", lineage)
+                storageRow("Bytes", String(metadata.byteCount))
+                storageRow("Handle", metadata.handleID ?? "Summary only")
+            }
+        }
+        .padding(9)
+        .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func storageRow(_ label: String, _ value: String) -> some View {
+        GridRow {
+            Text(label).font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+            Text(value).font(.system(size: 10, design: .monospaced)).textSelection(.enabled)
+        }
     }
 
     private func codeBlock(_ text: String) -> some View {

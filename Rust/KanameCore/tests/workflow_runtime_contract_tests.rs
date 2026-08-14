@@ -304,6 +304,7 @@ fn malformed_runtime_contracts_fail_before_journal_mutation() {
         sha256: "b".repeat(64),
         inline_canonical_json: b"{}".to_vec(),
         storage_reference_id: String::new(),
+        storage: None,
     };
     let malformed_event = runtime_event(
         "event-invalid-value",
@@ -399,6 +400,8 @@ fn request_command(command_id: &str, idempotency_key: &str) -> CommandEnvelope {
             port_id: "input".into(),
             value: Some(inline_value("value-input", br#"{"value":5}"#)),
         }],
+        installation_id: String::new(),
+        case_id: String::new(),
     };
     command_envelope(
         command_id,
@@ -520,6 +523,7 @@ fn inline_value(value_id: &str, json: &[u8]) -> WorkflowValueReference {
         sha256: hex::encode(Sha256::digest(json)),
         inline_canonical_json: json.to_vec(),
         storage_reference_id: String::new(),
+        storage: None,
     }
 }
 
