@@ -459,6 +459,7 @@
       "required": [
         "items",
         "as",
+        "maximumItems",
         "maximumConcurrency",
         "failurePolicy"
       ],
@@ -468,6 +469,11 @@
         },
         "as": {
           "const": "item"
+        },
+        "maximumItems": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 256
         },
         "maximumConcurrency": {
           "type": "integer",

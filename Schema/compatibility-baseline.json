@@ -94,12 +94,25 @@
       "2": "WORKFLOW_EXECUTION_TOKEN_OUTCOME_FAILED",
       "3": "WORKFLOW_EXECUTION_TOKEN_OUTCOME_CANCELLED",
       "4": "WORKFLOW_EXECUTION_TOKEN_OUTCOME_FORKED",
-      "5": "WORKFLOW_EXECUTION_TOKEN_OUTCOME_JOINED"
+      "5": "WORKFLOW_EXECUTION_TOKEN_OUTCOME_JOINED",
+      "6": "WORKFLOW_EXECUTION_TOKEN_OUTCOME_ITERATED"
+    },
+    "workflow_runtime.WorkflowIterationDecision": {
+      "0": "WORKFLOW_ITERATION_DECISION_UNSPECIFIED",
+      "1": "WORKFLOW_ITERATION_DECISION_SUCCEEDED",
+      "2": "WORKFLOW_ITERATION_DECISION_FAILED"
     },
     "workflow_runtime.WorkflowJoinDecision": {
       "0": "WORKFLOW_JOIN_DECISION_UNSPECIFIED",
       "1": "WORKFLOW_JOIN_DECISION_SUCCEEDED",
       "2": "WORKFLOW_JOIN_DECISION_FAILED"
+    },
+    "workflow_runtime.WorkflowRetryDecision": {
+      "0": "WORKFLOW_RETRY_DECISION_UNSPECIFIED",
+      "1": "WORKFLOW_RETRY_DECISION_SCHEDULED",
+      "2": "WORKFLOW_RETRY_DECISION_EXHAUSTED",
+      "3": "WORKFLOW_RETRY_DECISION_NOT_RETRYABLE",
+      "4": "WORKFLOW_RETRY_DECISION_UNKNOWN_OUTCOME"
     },
     "workflow_runtime.WorkflowRunOutcome": {
       "0": "WORKFLOW_RUN_OUTCOME_UNSPECIFIED",
@@ -585,6 +598,11 @@
     },
     "workflow_runtime.WorkflowExecutionTokenCreated": {
       "1": "string run_id",
+      "10": "string iteration_node_id",
+      "11": "uint32 iteration_index",
+      "12": "uint32 iteration_count",
+      "13": "string resume_node_id",
+      "14": "string resume_reason",
       "2": "string run_token_id",
       "3": "string execution_token_id",
       "4": "string parent_execution_token_id",
@@ -608,6 +626,34 @@
     "workflow_runtime.WorkflowInputBinding": {
       "1": "string port_id",
       "2": "WorkflowValueReference value"
+    },
+    "workflow_runtime.WorkflowIterationEvaluated": {
+      "1": "string run_id",
+      "10": "string failed_execution_token_ids",
+      "11": "string pending_execution_token_ids",
+      "12": "string error_code",
+      "13": "WorkflowValueReference output",
+      "2": "string run_token_id",
+      "3": "string iteration_node_id",
+      "4": "string parent_execution_token_id",
+      "5": "string resumed_execution_token_id",
+      "6": "string failure_policy",
+      "7": "WorkflowIterationDecision decision",
+      "8": "string expected_execution_token_ids",
+      "9": "string succeeded_execution_token_ids"
+    },
+    "workflow_runtime.WorkflowIterationPlanned": {
+      "1": "string run_id",
+      "10": "uint32 maximum_concurrency",
+      "11": "string failure_policy",
+      "2": "string run_token_id",
+      "3": "string iteration_node_id",
+      "4": "string parent_execution_token_id",
+      "5": "string controller_attempt_id",
+      "6": "string input_value_id",
+      "7": "string input_sha256",
+      "8": "uint32 item_count",
+      "9": "uint32 maximum_items"
     },
     "workflow_runtime.WorkflowJoinEvaluated": {
       "1": "string run_id",
@@ -699,7 +745,12 @@
       "13": "string final_emission_ids",
       "14": "uint64 created_store_position",
       "15": "uint64 settled_store_position",
+      "16": "string iteration_node_id",
+      "17": "uint32 iteration_index",
+      "18": "uint32 iteration_count",
+      "19": "string resume_node_id",
       "2": "string parent_execution_token_id",
+      "20": "string resume_reason",
       "3": "string fork_node_id",
       "4": "string branch_id",
       "5": "string branch_port_id",
@@ -707,6 +758,27 @@
       "7": "string source_emission_id",
       "8": "string status",
       "9": "string outcome"
+    },
+    "workflow_runtime.WorkflowProjectedIteration": {
+      "1": "string iteration_node_id",
+      "10": "string decision",
+      "11": "string resumed_execution_token_id",
+      "12": "string expected_execution_token_ids",
+      "13": "string succeeded_execution_token_ids",
+      "14": "string failed_execution_token_ids",
+      "15": "string pending_execution_token_ids",
+      "16": "string error_code",
+      "17": "WorkflowProjectedValue output",
+      "18": "uint64 planned_store_position",
+      "19": "uint64 evaluated_store_position",
+      "2": "string parent_execution_token_id",
+      "3": "string controller_attempt_id",
+      "4": "string input_value_id",
+      "5": "string input_sha256",
+      "6": "uint32 item_count",
+      "7": "uint32 maximum_items",
+      "8": "uint32 maximum_concurrency",
+      "9": "string failure_policy"
     },
     "workflow_runtime.WorkflowProjectedJoinEvaluation": {
       "1": "string join_node_id",
@@ -744,6 +816,22 @@
       "6": "int64 settled_at_unix_millis",
       "7": "uint64 last_store_position"
     },
+    "workflow_runtime.WorkflowProjectedRetryEvaluation": {
+      "1": "string retry_node_id",
+      "10": "uint64 delay_milliseconds",
+      "11": "int64 eligible_at_unix_millis",
+      "12": "WorkflowProjectedValue retry_input",
+      "13": "WorkflowProjectedValue error",
+      "14": "uint64 store_position",
+      "2": "string execution_token_id",
+      "3": "string controller_attempt_id",
+      "4": "string failed_attempt_id",
+      "5": "string target_node_id",
+      "6": "string error_code",
+      "7": "string decision",
+      "8": "uint32 next_attempt_number",
+      "9": "uint32 maximum_attempts"
+    },
     "workflow_runtime.WorkflowProjectedRun": {
       "1": "string run_id",
       "10": "WorkflowProjectedValue error",
@@ -763,6 +851,8 @@
       "23": "WorkflowProjectedEventReference events",
       "24": "WorkflowProjectedExecutionToken execution_tokens",
       "25": "WorkflowProjectedJoinEvaluation joins",
+      "26": "WorkflowProjectedIteration iterations",
+      "27": "WorkflowProjectedRetryEvaluation retries",
       "3": "string request_command_id",
       "4": "string workflow_id",
       "5": "string revision_id",
@@ -780,6 +870,23 @@
       "5": "bytes inline_canonical_json",
       "6": "string storage_reference_id",
       "7": "string availability"
+    },
+    "workflow_runtime.WorkflowRetryEvaluated": {
+      "1": "string run_id",
+      "10": "uint32 next_attempt_number",
+      "11": "uint32 maximum_attempts",
+      "12": "uint64 delay_milliseconds",
+      "13": "int64 eligible_at_unix_millis",
+      "14": "WorkflowValueReference retry_input",
+      "15": "WorkflowValueReference error",
+      "2": "string run_token_id",
+      "3": "string retry_node_id",
+      "4": "string execution_token_id",
+      "5": "string controller_attempt_id",
+      "6": "string failed_attempt_id",
+      "7": "string target_node_id",
+      "8": "string error_code",
+      "9": "WorkflowRetryDecision decision"
     },
     "workflow_runtime.WorkflowRunCancellationRequested": {
       "1": "string run_id",

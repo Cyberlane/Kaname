@@ -16,6 +16,9 @@ pub const WORKFLOW_RUN_TOKEN_CREATED_KIND: &str = "workflow.run.token-created";
 pub const WORKFLOW_EXECUTION_TOKEN_CREATED_KIND: &str = "workflow.execution-token.created";
 pub const WORKFLOW_EXECUTION_TOKEN_SETTLED_KIND: &str = "workflow.execution-token.settled";
 pub const WORKFLOW_JOIN_EVALUATED_KIND: &str = "workflow.join.evaluated";
+pub const WORKFLOW_ITERATION_PLANNED_KIND: &str = "workflow.iteration.planned";
+pub const WORKFLOW_ITERATION_EVALUATED_KIND: &str = "workflow.iteration.evaluated";
+pub const WORKFLOW_RETRY_EVALUATED_KIND: &str = "workflow.retry.evaluated";
 pub const WORKFLOW_ATTEMPT_STARTED_KIND: &str = "workflow.attempt.started";
 pub const WORKFLOW_ATTEMPT_SETTLED_KIND: &str = "workflow.attempt.settled";
 pub const WORKFLOW_PORT_EMITTED_KIND: &str = "workflow.port.emitted";
@@ -32,6 +35,9 @@ pub const WORKFLOW_EXECUTION_TOKEN_CREATED_TYPE: &str =
 pub const WORKFLOW_EXECUTION_TOKEN_SETTLED_TYPE: &str =
     "kaname.workflow.execution-token-settled.v1";
 pub const WORKFLOW_JOIN_EVALUATED_TYPE: &str = "kaname.workflow.join-evaluated.v1";
+pub const WORKFLOW_ITERATION_PLANNED_TYPE: &str = "kaname.workflow.iteration-planned.v1";
+pub const WORKFLOW_ITERATION_EVALUATED_TYPE: &str = "kaname.workflow.iteration-evaluated.v1";
+pub const WORKFLOW_RETRY_EVALUATED_TYPE: &str = "kaname.workflow.retry-evaluated.v1";
 pub const WORKFLOW_ATTEMPT_STARTED_TYPE: &str = "kaname.workflow.attempt-started.v1";
 pub const WORKFLOW_ATTEMPT_SETTLED_TYPE: &str = "kaname.workflow.attempt-settled.v1";
 pub const WORKFLOW_PORT_EMITTED_TYPE: &str = "kaname.workflow.port-emitted.v1";
@@ -63,11 +69,15 @@ pub enum WorkflowRuntimeCommand {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum WorkflowRuntimeEvent {
     RunTokenCreated(v1::WorkflowRunTokenCreated),
     ExecutionTokenCreated(v1::WorkflowExecutionTokenCreated),
     ExecutionTokenSettled(v1::WorkflowExecutionTokenSettled),
     JoinEvaluated(v1::WorkflowJoinEvaluated),
+    IterationPlanned(v1::WorkflowIterationPlanned),
+    IterationEvaluated(v1::WorkflowIterationEvaluated),
+    RetryEvaluated(v1::WorkflowRetryEvaluated),
     AttemptStarted(v1::WorkflowAttemptStarted),
     AttemptSettled(v1::WorkflowAttemptSettled),
     PortEmitted(v1::WorkflowPortEmitted),
@@ -84,6 +94,9 @@ impl WorkflowRuntimeEvent {
             Self::ExecutionTokenCreated(payload) => &payload.run_id,
             Self::ExecutionTokenSettled(payload) => &payload.run_id,
             Self::JoinEvaluated(payload) => &payload.run_id,
+            Self::IterationPlanned(payload) => &payload.run_id,
+            Self::IterationEvaluated(payload) => &payload.run_id,
+            Self::RetryEvaluated(payload) => &payload.run_id,
             Self::AttemptStarted(payload) => &payload.run_id,
             Self::AttemptSettled(payload) => &payload.run_id,
             Self::PortEmitted(payload) => &payload.run_id,
@@ -104,6 +117,8 @@ pub fn is_workflow_runtime_kind(kind: &str) -> bool {
         "workflow.match.",
         "workflow.execution-token.",
         "workflow.join.",
+        "workflow.iteration.",
+        "workflow.retry.",
     ]
     .iter()
     .any(|prefix| kind.starts_with(prefix))
@@ -169,6 +184,27 @@ pub fn decode_workflow_event(event: &v1::EventEnvelope) -> Result<WorkflowRuntim
             validate_join_evaluated(&payload)?;
             validate_event_context(event, &payload.run_id)?;
             Ok(WorkflowRuntimeEvent::JoinEvaluated(payload))
+        }
+        WORKFLOW_ITERATION_PLANNED_KIND => {
+            let payload: v1::WorkflowIterationPlanned =
+                decode_payload(event.payload.as_ref(), WORKFLOW_ITERATION_PLANNED_TYPE)?;
+            validate_iteration_planned(&payload)?;
+            validate_event_context(event, &payload.run_id)?;
+            Ok(WorkflowRuntimeEvent::IterationPlanned(payload))
+        }
+        WORKFLOW_ITERATION_EVALUATED_KIND => {
+            let payload: v1::WorkflowIterationEvaluated =
+                decode_payload(event.payload.as_ref(), WORKFLOW_ITERATION_EVALUATED_TYPE)?;
+            validate_iteration_evaluated(&payload)?;
+            validate_event_context(event, &payload.run_id)?;
+            Ok(WorkflowRuntimeEvent::IterationEvaluated(payload))
+        }
+        WORKFLOW_RETRY_EVALUATED_KIND => {
+            let payload: v1::WorkflowRetryEvaluated =
+                decode_payload(event.payload.as_ref(), WORKFLOW_RETRY_EVALUATED_TYPE)?;
+            validate_retry_evaluated(&payload)?;
+            validate_event_context(event, &payload.run_id)?;
+            Ok(WorkflowRuntimeEvent::RetryEvaluated(payload))
         }
         WORKFLOW_ATTEMPT_STARTED_KIND => {
             let payload: v1::WorkflowAttemptStarted =
@@ -308,6 +344,11 @@ fn validate_execution_token_created(payload: &v1::WorkflowExecutionTokenCreated)
             || !payload.branch_port_id.is_empty()
             || !payload.join_node_id.is_empty()
             || !payload.source_emission_id.is_empty()
+            || !payload.iteration_node_id.is_empty()
+            || payload.iteration_index != 0
+            || payload.iteration_count != 0
+            || !payload.resume_node_id.is_empty()
+            || !payload.resume_reason.is_empty()
         {
             return invalid("root_execution_token_contract");
         }
@@ -319,8 +360,10 @@ fn validate_execution_token_created(payload: &v1::WorkflowExecutionTokenCreated)
         "parent_execution_token_id",
     )?;
     let branch = !payload.fork_node_id.is_empty();
-    let resumed = !payload.join_node_id.is_empty() && !branch;
-    if branch == resumed {
+    let iteration = !payload.iteration_node_id.is_empty();
+    let resumed =
+        !payload.resume_node_id.is_empty() || (!payload.join_node_id.is_empty() && !branch);
+    if usize::from(branch) + usize::from(iteration) + usize::from(resumed) != 1 {
         return invalid("child_execution_token_contract");
     }
     if branch {
@@ -329,14 +372,47 @@ fn validate_execution_token_created(payload: &v1::WorkflowExecutionTokenCreated)
         validate_identifier(&payload.branch_port_id, 128, "branch_port_id")?;
         validate_identifier(&payload.join_node_id, 128, "join_node_id")?;
         validate_identifier(&payload.source_emission_id, 128, "source_emission_id")?;
+        if !payload.iteration_node_id.is_empty()
+            || payload.iteration_index != 0
+            || payload.iteration_count != 0
+            || !payload.resume_node_id.is_empty()
+            || !payload.resume_reason.is_empty()
+        {
+            return invalid("branch_execution_token_contract");
+        }
+    } else if iteration {
+        if !payload.fork_node_id.is_empty()
+            || !payload.branch_id.is_empty()
+            || payload.branch_port_id != "item"
+            || !payload.join_node_id.is_empty()
+            || payload.iteration_count == 0
+            || payload.iteration_count > 256
+            || payload.iteration_index >= payload.iteration_count
+            || !payload.resume_node_id.is_empty()
+            || !payload.resume_reason.is_empty()
+        {
+            return invalid("iteration_execution_token_contract");
+        }
+        validate_identifier(&payload.iteration_node_id, 128, "iteration_node_id")?;
+        validate_identifier(&payload.source_emission_id, 128, "source_emission_id")?;
     } else {
         if !payload.branch_id.is_empty()
             || !payload.branch_port_id.is_empty()
             || !payload.source_emission_id.is_empty()
+            || !payload.iteration_node_id.is_empty()
+            || payload.iteration_index != 0
+            || payload.iteration_count != 0
         {
             return invalid("resumed_execution_token_contract");
         }
-        validate_identifier(&payload.join_node_id, 128, "join_node_id")?;
+        if !payload.resume_node_id.is_empty() {
+            validate_identifier(&payload.resume_node_id, 128, "resume_node_id")?;
+            if !matches!(payload.resume_reason.as_str(), "join" | "iteration") {
+                return invalid("resume_reason");
+            }
+        } else {
+            validate_identifier(&payload.join_node_id, 128, "join_node_id")?;
+        }
     }
     Ok(())
 }
@@ -388,6 +464,15 @@ fn validate_execution_token_settled(payload: &v1::WorkflowExecutionTokenSettled)
                 return invalid("joined_execution_token_contract");
             }
         }
+        v1::WorkflowExecutionTokenOutcome::Iterated => {
+            if !payload.terminal_node_id.is_empty()
+                || !payload.join_node_id.is_empty()
+                || !payload.error_code.is_empty()
+                || payload.error.is_some()
+            {
+                return invalid("iterated_execution_token_contract");
+            }
+        }
         v1::WorkflowExecutionTokenOutcome::Unspecified => {
             return invalid("execution_token_outcome");
         }
@@ -397,6 +482,157 @@ fn validate_execution_token_settled(payload: &v1::WorkflowExecutionTokenSettled)
         MAXIMUM_PORT_BINDINGS,
         "final_emission_ids",
     )
+}
+
+fn validate_iteration_planned(payload: &v1::WorkflowIterationPlanned) -> Result<()> {
+    validate_run_and_token(&payload.run_id, &payload.run_token_id)?;
+    validate_identifier(&payload.iteration_node_id, 128, "iteration_node_id")?;
+    validate_identifier(
+        &payload.parent_execution_token_id,
+        128,
+        "parent_execution_token_id",
+    )?;
+    validate_identifier(&payload.controller_attempt_id, 128, "controller_attempt_id")?;
+    validate_identifier(&payload.input_value_id, 128, "input_value_id")?;
+    validate_digest(&payload.input_sha256, "input_sha256")?;
+    if payload.maximum_items == 0
+        || payload.maximum_items > 256
+        || payload.item_count > payload.maximum_items
+        || payload.maximum_concurrency == 0
+        || payload.maximum_concurrency > 64
+        || payload.maximum_concurrency > payload.maximum_items
+        || !matches!(payload.failure_policy.as_str(), "fail-fast" | "collect")
+    {
+        return invalid("iteration_plan_bounds");
+    }
+    Ok(())
+}
+
+fn validate_iteration_evaluated(payload: &v1::WorkflowIterationEvaluated) -> Result<()> {
+    validate_run_and_token(&payload.run_id, &payload.run_token_id)?;
+    validate_identifier(&payload.iteration_node_id, 128, "iteration_node_id")?;
+    validate_identifier(
+        &payload.parent_execution_token_id,
+        128,
+        "parent_execution_token_id",
+    )?;
+    validate_identifier(
+        &payload.resumed_execution_token_id,
+        128,
+        "resumed_execution_token_id",
+    )?;
+    if !matches!(payload.failure_policy.as_str(), "fail-fast" | "collect") {
+        return invalid("iteration_failure_policy");
+    }
+    let decision = v1::WorkflowIterationDecision::try_from(payload.decision)
+        .map_err(|_| invalid_error("iteration_decision"))?;
+    if decision == v1::WorkflowIterationDecision::Unspecified {
+        return invalid("iteration_decision");
+    }
+    for (values, code) in [
+        (
+            &payload.expected_execution_token_ids,
+            "iteration_expected_tokens",
+        ),
+        (
+            &payload.succeeded_execution_token_ids,
+            "iteration_succeeded_tokens",
+        ),
+        (
+            &payload.failed_execution_token_ids,
+            "iteration_failed_tokens",
+        ),
+        (
+            &payload.pending_execution_token_ids,
+            "iteration_pending_tokens",
+        ),
+    ] {
+        validate_identifier_list(values, 256, code)?;
+    }
+    let expected = payload
+        .expected_execution_token_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let succeeded = payload
+        .succeeded_execution_token_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let failed = payload
+        .failed_execution_token_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let pending = payload
+        .pending_execution_token_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let partition = succeeded
+        .iter()
+        .chain(failed.iter())
+        .chain(pending.iter())
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if succeeded.len() + failed.len() + pending.len() != expected.len() || partition != expected {
+        return invalid("iteration_token_partition");
+    }
+    validate_value(payload.output.as_ref())?;
+    match decision {
+        v1::WorkflowIterationDecision::Succeeded
+            if !payload.error_code.is_empty()
+                || !payload.pending_execution_token_ids.is_empty()
+                || (payload.failure_policy == "fail-fast"
+                    && !payload.failed_execution_token_ids.is_empty()) =>
+        {
+            invalid("iteration_success_contract")
+        }
+        v1::WorkflowIterationDecision::Failed => {
+            validate_identifier(&payload.error_code, 128, "iteration_error_code")?;
+            if payload.failed_execution_token_ids.is_empty() {
+                return invalid("iteration_failure_contract");
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_retry_evaluated(payload: &v1::WorkflowRetryEvaluated) -> Result<()> {
+    validate_run_and_token(&payload.run_id, &payload.run_token_id)?;
+    for (value, code) in [
+        (&payload.retry_node_id, "retry_node_id"),
+        (&payload.execution_token_id, "execution_token_id"),
+        (&payload.controller_attempt_id, "controller_attempt_id"),
+        (&payload.failed_attempt_id, "failed_attempt_id"),
+        (&payload.target_node_id, "target_node_id"),
+        (&payload.error_code, "retry_error_code"),
+    ] {
+        validate_identifier(value, 128, code)?;
+    }
+    let decision = v1::WorkflowRetryDecision::try_from(payload.decision)
+        .map_err(|_| invalid_error("retry_decision"))?;
+    if decision == v1::WorkflowRetryDecision::Unspecified
+        || payload.maximum_attempts == 0
+        || payload.maximum_attempts > 100
+        || payload.next_attempt_number < 2
+    {
+        return invalid("retry_bounds");
+    }
+    validate_value(payload.retry_input.as_ref())?;
+    validate_value(payload.error.as_ref())?;
+    if decision == v1::WorkflowRetryDecision::Scheduled {
+        if payload.next_attempt_number > payload.maximum_attempts
+            || payload.delay_milliseconds == 0
+            || payload.eligible_at_unix_millis <= 0
+        {
+            return invalid("retry_schedule");
+        }
+    } else if payload.delay_milliseconds != 0 || payload.eligible_at_unix_millis != 0 {
+        return invalid("retry_non_schedule_deadline");
+    }
+    Ok(())
 }
 
 fn validate_join_evaluated(payload: &v1::WorkflowJoinEvaluated) -> Result<()> {

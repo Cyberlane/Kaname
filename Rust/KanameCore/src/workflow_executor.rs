@@ -29,6 +29,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 const MAXIMUM_EXECUTOR_TRANSITIONS: usize = 1_024;
@@ -45,6 +46,7 @@ pub enum WorkflowExecutionError {
     Integrity(String),
     Lifecycle(String),
     Encoding(&'static str),
+    WaitingUntil(i64),
     InjectedInterruption,
 }
 
@@ -59,6 +61,9 @@ impl fmt::Display for WorkflowExecutionError {
             Self::Integrity(code) => write!(formatter, "workflow execution integrity: {code}"),
             Self::Lifecycle(code) => write!(formatter, "workflow execution lifecycle: {code}"),
             Self::Encoding(code) => write!(formatter, "workflow execution encoding: {code}"),
+            Self::WaitingUntil(deadline) => {
+                write!(formatter, "workflow execution waiting until: {deadline}")
+            }
             Self::InjectedInterruption => formatter.write_str("workflow execution interrupted"),
         }
     }
@@ -88,6 +93,8 @@ pub type Result<T> = std::result::Result<T, WorkflowExecutionError>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DurableRunOutcome {
+    Running,
+    Waiting,
     Succeeded,
     Failed,
     Cancelled,
@@ -99,6 +106,7 @@ pub struct WorkflowExecutionResult {
     pub run_token_id: String,
     pub outcome: DurableRunOutcome,
     pub event_count: usize,
+    pub next_attempt_at_unix_millis: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,6 +231,8 @@ struct RecordedRun {
     token: Option<v1::WorkflowRunTokenCreated>,
     execution_tokens: BTreeMap<String, RecordedExecutionToken>,
     joins: Vec<RecordedJoin>,
+    iterations: Vec<RecordedIteration>,
+    retries: Vec<RecordedRetry>,
     attempts: Vec<RecordedAttempt>,
     emissions: BTreeMap<String, RecordedEmission>,
     edges: Vec<RecordedEdge>,
@@ -244,9 +254,23 @@ struct RecordedJoin {
     payload: v1::WorkflowJoinEvaluated,
 }
 
+struct RecordedIteration {
+    planned_event_id: String,
+    planned: v1::WorkflowIterationPlanned,
+    evaluated_event_id: Option<String>,
+    evaluated_store_position: Option<u64>,
+    evaluated: Option<v1::WorkflowIterationEvaluated>,
+}
+
+struct RecordedRetry {
+    event_id: String,
+    payload: v1::WorkflowRetryEvaluated,
+}
+
 struct RecordedAttempt {
     started_event_id: String,
     started_store_position: u64,
+    started_at_unix_millis: i64,
     started: v1::WorkflowAttemptStarted,
     settled_event_id: Option<String>,
     settled: Option<v1::WorkflowAttemptSettled>,
@@ -292,7 +316,24 @@ pub fn execute(
     library: &WorkflowLibraryStore,
     command: &v1::CommandEnvelope,
 ) -> Result<WorkflowExecutionResult> {
-    execute_internal(journal, library, None, None, command, None)
+    execute_internal(
+        journal,
+        library,
+        None,
+        None,
+        command,
+        current_unix_millis(),
+        None,
+    )
+}
+
+pub fn execute_at_unix_millis(
+    journal: &mut Journal,
+    library: &WorkflowLibraryStore,
+    command: &v1::CommandEnvelope,
+    now_unix_millis: i64,
+) -> Result<WorkflowExecutionResult> {
+    execute_internal(journal, library, None, None, command, now_unix_millis, None)
 }
 
 pub fn execute_with_storage(
@@ -308,6 +349,7 @@ pub fn execute_with_storage(
         Some(storage),
         Some(authority),
         command,
+        current_unix_millis(),
         None,
     )
 }
@@ -319,7 +361,15 @@ pub fn execute_with_fault_for_test(
     command: &v1::CommandEnvelope,
     fault: WorkflowExecutionFault,
 ) -> Result<WorkflowExecutionResult> {
-    execute_internal(journal, library, None, None, command, Some(fault))
+    execute_internal(
+        journal,
+        library,
+        None,
+        None,
+        command,
+        current_unix_millis(),
+        Some(fault),
+    )
 }
 
 #[doc(hidden)]
@@ -337,6 +387,7 @@ pub fn execute_with_storage_fault_for_test(
         Some(storage),
         Some(authority),
         command,
+        current_unix_millis(),
         Some(fault),
     )
 }
@@ -347,6 +398,7 @@ fn execute_internal(
     mut storage: Option<&mut WorkflowScopedStorage>,
     authority: Option<&WorkflowStorageExecutionAuthority>,
     command: &v1::CommandEnvelope,
+    now_unix_millis: i64,
     fault: Option<WorkflowExecutionFault>,
 ) -> Result<WorkflowExecutionResult> {
     let request = match workflow_runtime::decode_workflow_command(command)
@@ -373,17 +425,31 @@ fn execute_internal(
                 run_token_id: token_id,
                 outcome: durable_outcome(settled.outcome)?,
                 event_count: state.events.len(),
+                next_attempt_at_unix_millis: None,
             });
         }
 
-        let candidates = next_events(
+        let candidates = match next_events(
             &package,
             storage.as_deref_mut(),
             command,
             &request,
             &token_id,
             &state,
-        )?;
+            now_unix_millis,
+        ) {
+            Ok(events) => events,
+            Err(WorkflowExecutionError::WaitingUntil(deadline)) => {
+                return Ok(WorkflowExecutionResult {
+                    run_id: request.run_id.clone(),
+                    run_token_id: token_id,
+                    outcome: DurableRunOutcome::Waiting,
+                    event_count: state.events.len(),
+                    next_attempt_at_unix_millis: Some(deadline),
+                });
+            }
+            Err(error) => return Err(error),
+        };
         if candidates.is_empty() {
             return Err(WorkflowExecutionError::Lifecycle(
                 "no_deterministic_transition".into(),
@@ -405,7 +471,14 @@ fn execute_internal(
             continue;
         }
     }
-    Err(WorkflowExecutionError::Lifecycle("transition_limit".into()))
+    let state = recorded_run(journal, &request.run_id)?;
+    Ok(WorkflowExecutionResult {
+        run_id: request.run_id,
+        run_token_id: token_id,
+        outcome: DurableRunOutcome::Running,
+        event_count: state.events.len(),
+        next_attempt_at_unix_millis: None,
+    })
 }
 
 pub fn request_cancellation(
@@ -578,6 +651,38 @@ fn load_execution_package(
                 ));
             }
         }
+        if node.node_type == "control.for-each" {
+            let config: ForEachConfig = serde_json::from_value(node.config.clone())
+                .map_err(|_| WorkflowExecutionError::Integrity("for_each_config".into()))?;
+            if config.items.root != "input"
+                || config.item_binding != "item"
+                || config.maximum_items == 0
+                || config.maximum_items > 256
+                || config.maximum_concurrency == 0
+                || config.maximum_concurrency > 64
+                || config.maximum_concurrency > config.maximum_items
+                || !matches!(config.failure_policy.as_str(), "fail-fast" | "collect")
+            {
+                return Err(WorkflowExecutionError::Unsupported(
+                    "for_each_contract".into(),
+                ));
+            }
+        }
+        if node.node_type == "control.retry" {
+            let config: RetryConfig = serde_json::from_value(node.config.clone())
+                .map_err(|_| WorkflowExecutionError::Integrity("retry_config".into()))?;
+            if config.maximum_attempts == 0
+                || config.maximum_attempts > 100
+                || config.retry_on.is_empty()
+                || config.retry_on.len() > 64
+                || config.backoff.initial_seconds <= 0.0
+                || config.backoff.initial_seconds > config.backoff.maximum_seconds
+                || !matches!(config.backoff.mode.as_str(), "fixed" | "exponential")
+                || !matches!(config.backoff.jitter.as_str(), "none" | "deterministic")
+            {
+                return Err(WorkflowExecutionError::Unsupported("retry_contract".into()));
+            }
+        }
     }
     for (key, declaration) in &compiled.storage {
         if key != &declaration.key
@@ -678,6 +783,8 @@ fn validate_compiled_subset(compiled: &CompiledWorkflow) -> Result<()> {
                     | "control.match"
                     | "control.parallel"
                     | "control.join"
+                    | "control.for-each"
+                    | "control.retry"
                     | "storage.read"
                     | "storage.write"
                     | "storage.promote"
@@ -717,6 +824,7 @@ fn next_events(
     request: &v1::RequestWorkflowRun,
     token_id: &str,
     state: &RecordedRun,
+    now_unix_millis: i64,
 ) -> Result<Vec<v1::EventEnvelope>> {
     if state.token.is_none() {
         return Ok(vec![runtime_event(
@@ -764,6 +872,11 @@ fn next_events(
                 branch_port_id: String::new(),
                 join_node_id: String::new(),
                 source_emission_id: String::new(),
+                iteration_node_id: String::new(),
+                iteration_index: 0,
+                iteration_count: 0,
+                resume_node_id: String::new(),
+                resume_reason: String::new(),
             },
             &stable_id("event", &[&request.run_id, "token"]),
             &request.run_id,
@@ -833,11 +946,26 @@ fn next_events(
     }
 
     if let Some(active) = active_attempt(state)? {
-        return node_event_sequence(package, storage, command, request, token_id, state, active);
+        return node_event_sequence(
+            package,
+            storage,
+            command,
+            request,
+            token_id,
+            state,
+            active,
+            now_unix_millis,
+        );
     }
 
     if let Some(event) =
         pending_execution_token_settlement(package, command, request, token_id, state)?
+    {
+        return Ok(vec![event]);
+    }
+
+    if let Some(event) =
+        pending_iteration_lifecycle_event(package, command, request, token_id, state)?
     {
         return Ok(vec![event]);
     }
@@ -861,9 +989,23 @@ fn next_events(
     }
 
     let (node_id, causation_id, execution_token_id) = next_ready_node(&package.compiled, state)?;
+    let attempt_number = state
+        .attempts
+        .iter()
+        .filter(|attempt| {
+            attempt.started.execution_token_id == execution_token_id
+                && attempt.started.node_id == node_id
+        })
+        .count() as u32
+        + 1;
     let attempt_id = stable_id(
         "attempt",
-        &[&request.run_id, &execution_token_id, &node_id, "1"],
+        &[
+            &request.run_id,
+            &execution_token_id,
+            &node_id,
+            &attempt_number.to_string(),
+        ],
     );
     Ok(vec![runtime_event(
         command.submitted_at_unix_millis,
@@ -874,6 +1016,7 @@ fn next_events(
                 "attempt-started",
                 &execution_token_id,
                 &node_id,
+                &attempt_number.to_string(),
             ],
         ),
         workflow_runtime::WORKFLOW_ATTEMPT_STARTED_KIND,
@@ -883,7 +1026,7 @@ fn next_events(
             run_token_id: token_id.to_owned(),
             attempt_id,
             node_id,
-            attempt_number: 1,
+            attempt_number,
             execution_token_id,
         },
         &causation_id,
@@ -891,6 +1034,7 @@ fn next_events(
     )])
 }
 
+#[allow(clippy::too_many_arguments)]
 fn node_event_sequence(
     package: &ExecutionPackage,
     storage: Option<&mut WorkflowScopedStorage>,
@@ -899,6 +1043,7 @@ fn node_event_sequence(
     token_id: &str,
     state: &RecordedRun,
     attempt: &RecordedAttempt,
+    now_unix_millis: i64,
 ) -> Result<Vec<v1::EventEnvelope>> {
     let node = compiled_node(&package.compiled, &attempt.started.node_id)?;
     let inputs = node_inputs(
@@ -907,6 +1052,30 @@ fn node_event_sequence(
         &node.id,
         &attempt.started.execution_token_id,
     )?;
+    if node.node_type == "control.for-each"
+        && !state.iterations.iter().any(|iteration| {
+            iteration.evaluated.as_ref().is_some_and(|evaluated| {
+                evaluated.resumed_execution_token_id == attempt.started.execution_token_id
+            })
+        })
+    {
+        return for_each_controller_event_sequence(
+            package, command, request, token_id, state, attempt, node, &inputs,
+        );
+    }
+    if node.node_type == "control.retry" {
+        return retry_controller_event_sequence(
+            package,
+            command,
+            request,
+            token_id,
+            state,
+            attempt,
+            node,
+            &inputs,
+            now_unix_millis,
+        );
+    }
     let execution = if node.node_type == "control.join" {
         execute_join_node(
             request,
@@ -917,19 +1086,23 @@ fn node_event_sequence(
         )?
     } else {
         let input = inputs
-            .first()
+            .last()
             .ok_or_else(|| WorkflowExecutionError::Lifecycle("node_input_missing".into()))?
             .1
             .clone();
-        execute_node(
-            package,
-            storage,
-            request,
-            node,
-            &attempt.started.attempt_id,
-            command.submitted_at_unix_millis,
-            &input,
-        )?
+        if node.node_type == "control.for-each" {
+            execute_iteration_resume_node(node, state, &attempt.started.execution_token_id)?
+        } else {
+            execute_node(
+                package,
+                storage,
+                request,
+                node,
+                &attempt.started.attempt_id,
+                command.submitted_at_unix_millis,
+                &input,
+            )?
+        }
     };
     let mut events = Vec::new();
     let mut causation_id = attempt.started_event_id.clone();
@@ -938,7 +1111,7 @@ fn node_event_sequence(
     if let Some(trace) = execution.match_trace {
         let event_id = stable_id(
             "event",
-            &[&request.run_id, "match-trace", execution_token_id, &node.id],
+            &[&request.run_id, "match-trace", &attempt.started.attempt_id],
         );
         events.push(runtime_event(
             command.submitted_at_unix_millis,
@@ -967,7 +1140,7 @@ fn node_event_sequence(
     for (port_id, value) in execution.outputs {
         let emission_id = stable_id(
             "emission",
-            &[&request.run_id, execution_token_id, &node.id, &port_id, "1"],
+            &[&request.run_id, &attempt.started.attempt_id, &port_id],
         );
         let edge_execution_token_id = if node.node_type == "control.parallel" {
             let config: ParallelConfig = serde_json::from_value(node.config.clone())
@@ -1005,6 +1178,11 @@ fn node_event_sequence(
                     branch_port_id: port_id.clone(),
                     join_node_id: parallel_join_node(&package.compiled, node, &config)?,
                     source_emission_id: emission_id.clone(),
+                    iteration_node_id: String::new(),
+                    iteration_index: 0,
+                    iteration_count: 0,
+                    resume_node_id: String::new(),
+                    resume_reason: String::new(),
                 },
                 &causation_id,
                 &request.run_id,
@@ -1020,7 +1198,7 @@ fn node_event_sequence(
                 &request.run_id,
                 "port",
                 execution_token_id,
-                &node.id,
+                &attempt.started.attempt_id,
                 &port_id,
             ],
         );
@@ -1095,7 +1273,7 @@ fn node_event_sequence(
             &request.run_id,
             "attempt-settled",
             execution_token_id,
-            &node.id,
+            &attempt.started.attempt_id,
         ],
     );
     events.push(runtime_event(
@@ -1119,6 +1297,611 @@ fn node_event_sequence(
         &request.run_id,
     ));
     Ok(events)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn for_each_controller_event_sequence(
+    package: &ExecutionPackage,
+    command: &v1::CommandEnvelope,
+    request: &v1::RequestWorkflowRun,
+    run_token_id: &str,
+    state: &RecordedRun,
+    attempt: &RecordedAttempt,
+    node: &CompiledNode,
+    inputs: &[(
+        Option<&v1::WorkflowEdgeCheckpointed>,
+        v1::WorkflowValueReference,
+    )],
+) -> Result<Vec<v1::EventEnvelope>> {
+    let config: ForEachConfig = serde_json::from_value(node.config.clone())
+        .map_err(|_| WorkflowExecutionError::Integrity("for_each_config".into()))?;
+    let input = inputs
+        .last()
+        .ok_or_else(|| WorkflowExecutionError::Lifecycle("iteration_input_missing".into()))?
+        .1
+        .clone();
+    let items = selected_iteration_items(&input, &config)?;
+    let iteration = state
+        .iterations
+        .iter()
+        .find(|iteration| iteration.planned.controller_attempt_id == attempt.started.attempt_id);
+    if iteration.is_none() {
+        return Ok(vec![runtime_event(
+            command.submitted_at_unix_millis,
+            &stable_id(
+                "event",
+                &[
+                    &request.run_id,
+                    "iteration-plan",
+                    &attempt.started.attempt_id,
+                ],
+            ),
+            workflow_runtime::WORKFLOW_ITERATION_PLANNED_KIND,
+            workflow_runtime::WORKFLOW_ITERATION_PLANNED_TYPE,
+            v1::WorkflowIterationPlanned {
+                run_id: request.run_id.clone(),
+                run_token_id: run_token_id.to_owned(),
+                iteration_node_id: node.id.clone(),
+                parent_execution_token_id: attempt.started.execution_token_id.clone(),
+                controller_attempt_id: attempt.started.attempt_id.clone(),
+                input_value_id: input.value_id.clone(),
+                input_sha256: input.sha256.clone(),
+                item_count: items.len() as u32,
+                maximum_items: config.maximum_items,
+                maximum_concurrency: config.maximum_concurrency,
+                failure_policy: config.failure_policy,
+            },
+            &attempt.started_event_id,
+            &request.run_id,
+        )]);
+    }
+    let iteration = iteration.unwrap();
+    if iteration.planned.input_value_id != input.value_id
+        || iteration.planned.input_sha256 != input.sha256
+        || iteration.planned.item_count as usize != items.len()
+    {
+        return Err(WorkflowExecutionError::Integrity(
+            "iteration_plan_input_drift".into(),
+        ));
+    }
+    let mut events = Vec::new();
+    let item_edge = single_outgoing_edge(&package.compiled, node, "item")?;
+    for (index, item) in items.iter().enumerate() {
+        let emission_id = iteration_emission_id(request, node, index);
+        events.push(runtime_event(
+            command.submitted_at_unix_millis,
+            &iteration_emission_event_id(request, node, index),
+            workflow_runtime::WORKFLOW_PORT_EMITTED_KIND,
+            workflow_runtime::WORKFLOW_PORT_EMITTED_TYPE,
+            v1::WorkflowPortEmitted {
+                run_id: request.run_id.clone(),
+                run_token_id: run_token_id.to_owned(),
+                emission_id,
+                attempt_id: attempt.started.attempt_id.clone(),
+                node_id: node.id.clone(),
+                port_id: "item".into(),
+                value: Some(iteration_item_value(request, node, index, item)?),
+                execution_token_id: attempt.started.execution_token_id.clone(),
+            },
+            &iteration.planned_event_id,
+            &request.run_id,
+        ));
+    }
+    for index in 0..usize::min(items.len(), config.maximum_concurrency as usize) {
+        events.extend(iteration_item_admission_events(
+            command,
+            request,
+            run_token_id,
+            node,
+            attempt,
+            item_edge,
+            index,
+            items.len(),
+        ));
+    }
+    events.push(runtime_event(
+        command.submitted_at_unix_millis,
+        &stable_id(
+            "event",
+            &[
+                &request.run_id,
+                "attempt-settled",
+                &attempt.started.attempt_id,
+            ],
+        ),
+        workflow_runtime::WORKFLOW_ATTEMPT_SETTLED_KIND,
+        workflow_runtime::WORKFLOW_ATTEMPT_SETTLED_TYPE,
+        v1::WorkflowAttemptSettled {
+            run_id: request.run_id.clone(),
+            run_token_id: run_token_id.to_owned(),
+            attempt_id: attempt.started.attempt_id.clone(),
+            node_id: node.id.clone(),
+            attempt_number: attempt.started.attempt_number,
+            outcome: v1::WorkflowAttemptOutcome::Succeeded as i32,
+            error_code: String::new(),
+            error: None,
+            emission_ids: (0..items.len())
+                .map(|index| iteration_emission_id(request, node, index))
+                .collect(),
+            execution_token_id: attempt.started.execution_token_id.clone(),
+        },
+        events
+            .last()
+            .map(|event| event.event_id.as_str())
+            .unwrap_or(iteration.planned_event_id.as_str()),
+        &request.run_id,
+    ));
+    Ok(events)
+}
+
+fn selected_iteration_items(
+    input: &v1::WorkflowValueReference,
+    config: &ForEachConfig,
+) -> Result<Vec<Value>> {
+    let root = inline_json(input)?;
+    let selected = root
+        .pointer(&config.items.pointer)
+        .ok_or_else(|| WorkflowExecutionError::Integrity("iteration_items_pointer".into()))?;
+    let items = selected
+        .as_array()
+        .ok_or_else(|| WorkflowExecutionError::Integrity("iteration_items_array".into()))?;
+    if items.len() > config.maximum_items as usize {
+        return Err(WorkflowExecutionError::Lifecycle(
+            "iteration_item_bound_exceeded".into(),
+        ));
+    }
+    Ok(items.clone())
+}
+
+fn iteration_token_id(
+    request: &v1::RequestWorkflowRun,
+    node: &CompiledNode,
+    index: usize,
+) -> String {
+    stable_id(
+        "execution-token",
+        &[&request.run_id, &node.id, "iteration", &index.to_string()],
+    )
+}
+
+fn iteration_emission_id(
+    request: &v1::RequestWorkflowRun,
+    node: &CompiledNode,
+    index: usize,
+) -> String {
+    stable_id(
+        "emission",
+        &[&request.run_id, &node.id, "item", &index.to_string()],
+    )
+}
+
+fn iteration_emission_event_id(
+    request: &v1::RequestWorkflowRun,
+    node: &CompiledNode,
+    index: usize,
+) -> String {
+    stable_id(
+        "event",
+        &[
+            &request.run_id,
+            &node.id,
+            "item-emitted",
+            &index.to_string(),
+        ],
+    )
+}
+
+fn iteration_item_value(
+    request: &v1::RequestWorkflowRun,
+    node: &CompiledNode,
+    index: usize,
+    item: &Value,
+) -> Result<v1::WorkflowValueReference> {
+    value_from_json(
+        &stable_id(
+            "value",
+            &[&request.run_id, &node.id, "item", &index.to_string()],
+        ),
+        item,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn iteration_item_admission_events(
+    command: &v1::CommandEnvelope,
+    request: &v1::RequestWorkflowRun,
+    run_token_id: &str,
+    node: &CompiledNode,
+    attempt: &RecordedAttempt,
+    edge: &CompiledEdge,
+    index: usize,
+    item_count: usize,
+) -> Vec<v1::EventEnvelope> {
+    let execution_token_id = iteration_token_id(request, node, index);
+    let emission_id = iteration_emission_id(request, node, index);
+    let token_event_id = stable_id(
+        "event",
+        &[&request.run_id, &node.id, "item-token", &index.to_string()],
+    );
+    let edge_event_id = stable_id(
+        "event",
+        &[&request.run_id, &node.id, "item-edge", &index.to_string()],
+    );
+    vec![
+        runtime_event(
+            command.submitted_at_unix_millis,
+            &token_event_id,
+            workflow_runtime::WORKFLOW_EXECUTION_TOKEN_CREATED_KIND,
+            workflow_runtime::WORKFLOW_EXECUTION_TOKEN_CREATED_TYPE,
+            v1::WorkflowExecutionTokenCreated {
+                run_id: request.run_id.clone(),
+                run_token_id: run_token_id.to_owned(),
+                execution_token_id: execution_token_id.clone(),
+                parent_execution_token_id: attempt.started.execution_token_id.clone(),
+                fork_node_id: String::new(),
+                branch_id: String::new(),
+                branch_port_id: "item".into(),
+                join_node_id: String::new(),
+                source_emission_id: emission_id.clone(),
+                iteration_node_id: node.id.clone(),
+                iteration_index: index as u32,
+                iteration_count: item_count as u32,
+                resume_node_id: String::new(),
+                resume_reason: String::new(),
+            },
+            &iteration_emission_event_id(request, node, index),
+            &request.run_id,
+        ),
+        runtime_event(
+            command.submitted_at_unix_millis,
+            &edge_event_id,
+            workflow_runtime::WORKFLOW_EDGE_CHECKPOINTED_KIND,
+            workflow_runtime::WORKFLOW_EDGE_CHECKPOINTED_TYPE,
+            v1::WorkflowEdgeCheckpointed {
+                run_id: request.run_id.clone(),
+                run_token_id: run_token_id.to_owned(),
+                edge_id: edge.id.clone(),
+                emission_id,
+                target_node_id: edge.to.node_id.clone(),
+                target_port_id: edge.to.port_id.clone(),
+                state: v1::WorkflowEdgeCheckpointState::Admitted as i32,
+                execution_token_id,
+            },
+            &token_event_id,
+            &request.run_id,
+        ),
+    ]
+}
+
+#[allow(clippy::too_many_arguments)]
+fn retry_controller_event_sequence(
+    package: &ExecutionPackage,
+    command: &v1::CommandEnvelope,
+    request: &v1::RequestWorkflowRun,
+    run_token_id: &str,
+    state: &RecordedRun,
+    attempt: &RecordedAttempt,
+    node: &CompiledNode,
+    inputs: &[(
+        Option<&v1::WorkflowEdgeCheckpointed>,
+        v1::WorkflowValueReference,
+    )],
+    now_unix_millis: i64,
+) -> Result<Vec<v1::EventEnvelope>> {
+    let config: RetryConfig = serde_json::from_value(node.config.clone())
+        .map_err(|_| WorkflowExecutionError::Integrity("retry_config".into()))?;
+    let recorded = state
+        .retries
+        .iter()
+        .find(|retry| retry.payload.controller_attempt_id == attempt.started.attempt_id);
+    if recorded.is_none() {
+        let (incoming, error) = inputs
+            .last()
+            .ok_or_else(|| WorkflowExecutionError::Lifecycle("retry_error_missing".into()))?;
+        let incoming = incoming
+            .ok_or_else(|| WorkflowExecutionError::Lifecycle("retry_source_edge_missing".into()))?;
+        let source_emission = state
+            .emissions
+            .get(&incoming.emission_id)
+            .ok_or_else(|| WorkflowExecutionError::Lifecycle("retry_source_emission".into()))?;
+        let failed_attempt = state
+            .attempts
+            .iter()
+            .find(|candidate| candidate.started.attempt_id == source_emission.payload.attempt_id)
+            .ok_or_else(|| WorkflowExecutionError::Lifecycle("retry_failed_attempt".into()))?;
+        let target_edge = single_outgoing_edge(&package.compiled, node, "retry")?;
+        if target_edge.to.node_id != failed_attempt.started.node_id {
+            return Err(WorkflowExecutionError::Integrity(
+                "retry_target_mismatch".into(),
+            ));
+        }
+        let target_inputs = node_inputs(
+            request,
+            state,
+            &failed_attempt.started.node_id,
+            &attempt.started.execution_token_id,
+        )?;
+        let retry_input = target_inputs
+            .last()
+            .ok_or_else(|| WorkflowExecutionError::Lifecycle("retry_input_missing".into()))?
+            .1
+            .clone();
+        let target_attempt_count = state
+            .attempts
+            .iter()
+            .filter(|candidate| {
+                candidate.started.execution_token_id == attempt.started.execution_token_id
+                    && candidate.started.node_id == failed_attempt.started.node_id
+            })
+            .count() as u32;
+        let next_attempt_number = target_attempt_count + 1;
+        let error_json = inline_json(error)?;
+        let error_code = error_code(error)?;
+        let decision =
+            classify_retry_decision(&error_json, &error_code, &config, next_attempt_number);
+        let delay_milliseconds = if decision == v1::WorkflowRetryDecision::Scheduled {
+            retry_delay_milliseconds(request, node, &config, next_attempt_number)?
+        } else {
+            0
+        };
+        let eligible_at_unix_millis = if delay_milliseconds == 0 {
+            0
+        } else {
+            attempt
+                .started_at_unix_millis
+                .checked_add(delay_milliseconds as i64)
+                .ok_or_else(|| {
+                    WorkflowExecutionError::Integrity("retry_deadline_overflow".into())
+                })?
+        };
+        return Ok(vec![runtime_event(
+            command.submitted_at_unix_millis,
+            &stable_id(
+                "event",
+                &[
+                    &request.run_id,
+                    "retry-evaluated",
+                    &attempt.started.attempt_id,
+                ],
+            ),
+            workflow_runtime::WORKFLOW_RETRY_EVALUATED_KIND,
+            workflow_runtime::WORKFLOW_RETRY_EVALUATED_TYPE,
+            v1::WorkflowRetryEvaluated {
+                run_id: request.run_id.clone(),
+                run_token_id: run_token_id.to_owned(),
+                retry_node_id: node.id.clone(),
+                execution_token_id: attempt.started.execution_token_id.clone(),
+                controller_attempt_id: attempt.started.attempt_id.clone(),
+                failed_attempt_id: failed_attempt.started.attempt_id.clone(),
+                target_node_id: failed_attempt.started.node_id.clone(),
+                error_code,
+                decision: decision as i32,
+                next_attempt_number,
+                maximum_attempts: config.maximum_attempts,
+                delay_milliseconds,
+                eligible_at_unix_millis,
+                retry_input: Some(retry_input),
+                error: Some(error.clone()),
+            },
+            &attempt.started_event_id,
+            &request.run_id,
+        )]);
+    }
+    let recorded = recorded.unwrap();
+    let decision = v1::WorkflowRetryDecision::try_from(recorded.payload.decision)
+        .map_err(|_| WorkflowExecutionError::Integrity("retry_decision".into()))?;
+    if decision == v1::WorkflowRetryDecision::Scheduled
+        && now_unix_millis < recorded.payload.eligible_at_unix_millis
+    {
+        return Err(WorkflowExecutionError::WaitingUntil(
+            recorded.payload.eligible_at_unix_millis,
+        ));
+    }
+    let (port_id, value) =
+        match decision {
+            v1::WorkflowRetryDecision::Scheduled => (
+                "retry",
+                recorded.payload.retry_input.clone().ok_or_else(|| {
+                    WorkflowExecutionError::Integrity("retry_input_recorded".into())
+                })?,
+            ),
+            v1::WorkflowRetryDecision::UnknownOutcome => (
+                "unknown",
+                recorded.payload.error.clone().ok_or_else(|| {
+                    WorkflowExecutionError::Integrity("retry_error_recorded".into())
+                })?,
+            ),
+            v1::WorkflowRetryDecision::Exhausted | v1::WorkflowRetryDecision::NotRetryable => (
+                "exhausted",
+                recorded.payload.error.clone().ok_or_else(|| {
+                    WorkflowExecutionError::Integrity("retry_error_recorded".into())
+                })?,
+            ),
+            v1::WorkflowRetryDecision::Unspecified => {
+                return Err(WorkflowExecutionError::Integrity("retry_decision".into()));
+            }
+        };
+    controller_output_events(
+        &package.compiled,
+        command,
+        request,
+        run_token_id,
+        attempt,
+        node,
+        port_id,
+        value,
+        &recorded.event_id,
+    )
+}
+
+fn classify_retry_decision(
+    error: &Value,
+    error_code: &str,
+    config: &RetryConfig,
+    next_attempt_number: u32,
+) -> v1::WorkflowRetryDecision {
+    let unknown = error.get("outcome").and_then(Value::as_str) == Some("unknown")
+        || error.get("retryability").and_then(Value::as_str) == Some("reconcile-first");
+    if unknown {
+        v1::WorkflowRetryDecision::UnknownOutcome
+    } else if next_attempt_number > config.maximum_attempts {
+        v1::WorkflowRetryDecision::Exhausted
+    } else if error.get("retryability").and_then(Value::as_str) == Some("never")
+        || !config.retry_on.iter().any(|code| code == error_code)
+    {
+        v1::WorkflowRetryDecision::NotRetryable
+    } else {
+        v1::WorkflowRetryDecision::Scheduled
+    }
+}
+
+fn retry_delay_milliseconds(
+    request: &v1::RequestWorkflowRun,
+    node: &CompiledNode,
+    config: &RetryConfig,
+    next_attempt_number: u32,
+) -> Result<u64> {
+    let exponent = next_attempt_number.saturating_sub(2).min(31);
+    let seconds = if config.backoff.mode == "fixed" {
+        config.backoff.initial_seconds
+    } else {
+        (config.backoff.initial_seconds * 2_f64.powi(exponent as i32))
+            .min(config.backoff.maximum_seconds)
+    };
+    let mut milliseconds = (seconds * 1000.0).round() as u64;
+    if config.backoff.jitter == "deterministic" {
+        let digest = Sha256::digest(
+            format!("{}:{}:{}", request.run_id, node.id, next_attempt_number).as_bytes(),
+        );
+        let basis_points = 7_500 + u16::from_be_bytes([digest[0], digest[1]]) as u64 % 5_001;
+        milliseconds = milliseconds
+            .checked_mul(basis_points)
+            .and_then(|value| value.checked_div(10_000))
+            .ok_or_else(|| WorkflowExecutionError::Integrity("retry_delay_overflow".into()))?;
+    }
+    Ok(milliseconds.max(1))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn controller_output_events(
+    compiled: &CompiledWorkflow,
+    command: &v1::CommandEnvelope,
+    request: &v1::RequestWorkflowRun,
+    run_token_id: &str,
+    attempt: &RecordedAttempt,
+    node: &CompiledNode,
+    port_id: &str,
+    value: v1::WorkflowValueReference,
+    causation_id: &str,
+) -> Result<Vec<v1::EventEnvelope>> {
+    let edge = single_outgoing_edge(compiled, node, port_id)?;
+    let emission_id = stable_id(
+        "emission",
+        &[&request.run_id, &attempt.started.attempt_id, port_id],
+    );
+    let emission_event_id = stable_id(
+        "event",
+        &[
+            &request.run_id,
+            "port",
+            &attempt.started.attempt_id,
+            port_id,
+        ],
+    );
+    let edge_event_id = stable_id(
+        "event",
+        &[
+            &request.run_id,
+            "edge",
+            &attempt.started.attempt_id,
+            &edge.id,
+        ],
+    );
+    let settle_event_id = stable_id(
+        "event",
+        &[
+            &request.run_id,
+            "attempt-settled",
+            &attempt.started.attempt_id,
+        ],
+    );
+    Ok(vec![
+        runtime_event(
+            command.submitted_at_unix_millis,
+            &emission_event_id,
+            workflow_runtime::WORKFLOW_PORT_EMITTED_KIND,
+            workflow_runtime::WORKFLOW_PORT_EMITTED_TYPE,
+            v1::WorkflowPortEmitted {
+                run_id: request.run_id.clone(),
+                run_token_id: run_token_id.to_owned(),
+                emission_id: emission_id.clone(),
+                attempt_id: attempt.started.attempt_id.clone(),
+                node_id: node.id.clone(),
+                port_id: port_id.into(),
+                value: Some(value),
+                execution_token_id: attempt.started.execution_token_id.clone(),
+            },
+            causation_id,
+            &request.run_id,
+        ),
+        runtime_event(
+            command.submitted_at_unix_millis,
+            &edge_event_id,
+            workflow_runtime::WORKFLOW_EDGE_CHECKPOINTED_KIND,
+            workflow_runtime::WORKFLOW_EDGE_CHECKPOINTED_TYPE,
+            v1::WorkflowEdgeCheckpointed {
+                run_id: request.run_id.clone(),
+                run_token_id: run_token_id.to_owned(),
+                edge_id: edge.id.clone(),
+                emission_id: emission_id.clone(),
+                target_node_id: edge.to.node_id.clone(),
+                target_port_id: edge.to.port_id.clone(),
+                state: v1::WorkflowEdgeCheckpointState::Admitted as i32,
+                execution_token_id: attempt.started.execution_token_id.clone(),
+            },
+            &emission_event_id,
+            &request.run_id,
+        ),
+        runtime_event(
+            command.submitted_at_unix_millis,
+            &settle_event_id,
+            workflow_runtime::WORKFLOW_ATTEMPT_SETTLED_KIND,
+            workflow_runtime::WORKFLOW_ATTEMPT_SETTLED_TYPE,
+            v1::WorkflowAttemptSettled {
+                run_id: request.run_id.clone(),
+                run_token_id: run_token_id.to_owned(),
+                attempt_id: attempt.started.attempt_id.clone(),
+                node_id: node.id.clone(),
+                attempt_number: attempt.started.attempt_number,
+                outcome: v1::WorkflowAttemptOutcome::Succeeded as i32,
+                error_code: String::new(),
+                error: None,
+                emission_ids: vec![emission_id],
+                execution_token_id: attempt.started.execution_token_id.clone(),
+            },
+            &edge_event_id,
+            &request.run_id,
+        ),
+    ])
+}
+
+fn single_outgoing_edge<'a>(
+    compiled: &'a CompiledWorkflow,
+    node: &CompiledNode,
+    port_id: &str,
+) -> Result<&'a CompiledEdge> {
+    let edges = compiled
+        .edges
+        .iter()
+        .filter(|edge| edge.from.node_id == node.id && edge.from.port_id == port_id)
+        .collect::<Vec<_>>();
+    if edges.len() != 1 {
+        return Err(WorkflowExecutionError::Unsupported(format!(
+            "selected_port_edge_count:{}:{}",
+            node.id, port_id
+        )));
+    }
+    Ok(edges[0])
 }
 
 fn execute_node(
@@ -1378,7 +2161,7 @@ struct StoragePromoteConfig {
     expected_revision: Option<u64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StorageValueSelector {
     root: String,
@@ -1407,6 +2190,39 @@ struct JoinConfig {
     #[serde(default)]
     required_branches: Vec<String>,
     cancel_remaining: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ForEachConfig {
+    items: StorageValueSelector,
+    #[serde(rename = "as")]
+    item_binding: String,
+    maximum_items: u32,
+    maximum_concurrency: u32,
+    failure_policy: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RetryConfig {
+    maximum_attempts: u32,
+    retry_on: Vec<String>,
+    backoff: RetryBackoffConfig,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RetryBackoffConfig {
+    mode: String,
+    initial_seconds: f64,
+    maximum_seconds: f64,
+    #[serde(default = "default_retry_jitter")]
+    jitter: String,
+}
+
+fn default_retry_jitter() -> String {
+    "none".into()
 }
 
 fn default_storage_read_operation() -> String {
@@ -2050,6 +2866,13 @@ fn pending_execution_token_settlement(
                     None,
                     Vec::new(),
                 ),
+                "control.for-each" if token.created.resume_reason != "iteration" => (
+                    v1::WorkflowExecutionTokenOutcome::Forked,
+                    String::new(),
+                    String::new(),
+                    None,
+                    Vec::new(),
+                ),
                 "terminal.complete" => {
                     let inputs =
                         node_inputs(request, state, &node.id, &token.created.execution_token_id)?;
@@ -2094,6 +2917,351 @@ fn pending_execution_token_settlement(
         )));
     }
     Ok(None)
+}
+
+fn pending_iteration_lifecycle_event(
+    package: &ExecutionPackage,
+    command: &v1::CommandEnvelope,
+    request: &v1::RequestWorkflowRun,
+    run_token_id: &str,
+    state: &RecordedRun,
+) -> Result<Option<v1::EventEnvelope>> {
+    for iteration in &state.iterations {
+        let node = compiled_node(&package.compiled, &iteration.planned.iteration_node_id)?;
+        let controller_attempt = state
+            .attempts
+            .iter()
+            .find(|attempt| attempt.started.attempt_id == iteration.planned.controller_attempt_id)
+            .ok_or_else(|| WorkflowExecutionError::Lifecycle("iteration_attempt_missing".into()))?;
+        if controller_attempt.settled.is_none() {
+            continue;
+        }
+        if let Some(evaluated) = iteration.evaluated.as_ref() {
+            if !state
+                .execution_tokens
+                .contains_key(&evaluated.resumed_execution_token_id)
+            {
+                return Ok(Some(runtime_event(
+                    command.submitted_at_unix_millis,
+                    &stable_id(
+                        "event",
+                        &[
+                            &request.run_id,
+                            "execution-token",
+                            &evaluated.resumed_execution_token_id,
+                            "created",
+                        ],
+                    ),
+                    workflow_runtime::WORKFLOW_EXECUTION_TOKEN_CREATED_KIND,
+                    workflow_runtime::WORKFLOW_EXECUTION_TOKEN_CREATED_TYPE,
+                    v1::WorkflowExecutionTokenCreated {
+                        run_id: request.run_id.clone(),
+                        run_token_id: run_token_id.to_owned(),
+                        execution_token_id: evaluated.resumed_execution_token_id.clone(),
+                        parent_execution_token_id: iteration
+                            .planned
+                            .parent_execution_token_id
+                            .clone(),
+                        fork_node_id: String::new(),
+                        branch_id: String::new(),
+                        branch_port_id: String::new(),
+                        join_node_id: String::new(),
+                        source_emission_id: String::new(),
+                        iteration_node_id: String::new(),
+                        iteration_index: 0,
+                        iteration_count: 0,
+                        resume_node_id: iteration.planned.iteration_node_id.clone(),
+                        resume_reason: "iteration".into(),
+                    },
+                    iteration.evaluated_event_id.as_deref().ok_or_else(|| {
+                        WorkflowExecutionError::Lifecycle("iteration_event".into())
+                    })?,
+                    &request.run_id,
+                )));
+            }
+            if evaluated.decision == v1::WorkflowIterationDecision::Failed as i32 {
+                for token_id in &evaluated.pending_execution_token_ids {
+                    if state
+                        .execution_tokens
+                        .get(token_id)
+                        .is_some_and(|token| token.settled.is_none())
+                    {
+                        return Ok(Some(execution_token_settled_event(
+                            command.submitted_at_unix_millis,
+                            request,
+                            run_token_id,
+                            token_id,
+                            v1::WorkflowExecutionTokenOutcome::Cancelled,
+                            String::new(),
+                            String::new(),
+                            "iteration.fail-fast-cancelled".into(),
+                            None,
+                            Vec::new(),
+                            iteration.evaluated_event_id.as_deref().unwrap(),
+                        )));
+                    }
+                }
+            }
+            continue;
+        }
+
+        let item_tokens = state
+            .execution_tokens
+            .values()
+            .filter(|token| {
+                token.created.iteration_node_id == iteration.planned.iteration_node_id
+                    && token.created.parent_execution_token_id
+                        == iteration.planned.parent_execution_token_id
+            })
+            .collect::<Vec<_>>();
+        for token in item_tokens.iter().filter(|token| token.settled.is_none()) {
+            if let Some(edge) = state.edges.iter().rev().find(|edge| {
+                edge.payload.execution_token_id == token.created.execution_token_id
+                    && edge.payload.target_node_id == iteration.planned.iteration_node_id
+                    && matches!(
+                        edge.payload.target_port_id.as_str(),
+                        "item-success" | "item-error"
+                    )
+            }) {
+                if edge.payload.target_port_id == "item-success" {
+                    return Ok(Some(execution_token_settled_event(
+                        command.submitted_at_unix_millis,
+                        request,
+                        run_token_id,
+                        &token.created.execution_token_id,
+                        v1::WorkflowExecutionTokenOutcome::Iterated,
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                        None,
+                        vec![edge.payload.emission_id.clone()],
+                        &edge.event_id,
+                    )));
+                }
+                let emission = state
+                    .emissions
+                    .get(&edge.payload.emission_id)
+                    .ok_or_else(|| {
+                        WorkflowExecutionError::Lifecycle("iteration_error_emission".into())
+                    })?;
+                let error = emission.payload.value.clone().ok_or_else(|| {
+                    WorkflowExecutionError::Lifecycle("iteration_error_value".into())
+                })?;
+                return Ok(Some(execution_token_settled_event(
+                    command.submitted_at_unix_millis,
+                    request,
+                    run_token_id,
+                    &token.created.execution_token_id,
+                    v1::WorkflowExecutionTokenOutcome::Failed,
+                    iteration.planned.iteration_node_id.clone(),
+                    String::new(),
+                    error_code(&error)?,
+                    Some(error),
+                    Vec::new(),
+                    &edge.event_id,
+                )));
+            }
+        }
+
+        let expected = (0..iteration.planned.item_count as usize)
+            .map(|index| iteration_token_id(request, node, index))
+            .collect::<Vec<_>>();
+        let succeeded = expected
+            .iter()
+            .filter(|token_id| {
+                state.execution_tokens.get(*token_id).is_some_and(|token| {
+                    token.settled.as_ref().is_some_and(|settled| {
+                        settled.outcome == v1::WorkflowExecutionTokenOutcome::Iterated as i32
+                    })
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let failed = expected
+            .iter()
+            .filter(|token_id| {
+                state.execution_tokens.get(*token_id).is_some_and(|token| {
+                    token.settled.as_ref().is_some_and(|settled| {
+                        settled.outcome == v1::WorkflowExecutionTokenOutcome::Failed as i32
+                    })
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let pending = expected
+            .iter()
+            .filter(|token_id| !succeeded.contains(token_id) && !failed.contains(token_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let fail_fast = iteration.planned.failure_policy == "fail-fast";
+        let decision = if fail_fast && !failed.is_empty() {
+            Some(v1::WorkflowIterationDecision::Failed)
+        } else if pending.is_empty() {
+            Some(v1::WorkflowIterationDecision::Succeeded)
+        } else {
+            None
+        };
+        if let Some(decision) = decision {
+            let error_code = if decision == v1::WorkflowIterationDecision::Failed {
+                "iteration.item-failed"
+            } else {
+                ""
+            };
+            let output = value_from_json(
+                &stable_id(
+                    "value",
+                    &[
+                        &request.run_id,
+                        &iteration.planned.iteration_node_id,
+                        "iteration-result",
+                    ],
+                ),
+                &json!({
+                    "code": error_code,
+                    "itemCount": iteration.planned.item_count,
+                    "succeededCount": succeeded.len(),
+                    "failedCount": failed.len(),
+                    "pendingCount": pending.len(),
+                    "failurePolicy": iteration.planned.failure_policy,
+                    "decision": if decision == v1::WorkflowIterationDecision::Succeeded { "succeeded" } else { "failed" }
+                }),
+            )?;
+            let resumed_execution_token_id = stable_id(
+                "execution-token",
+                &[
+                    &request.run_id,
+                    &iteration.planned.iteration_node_id,
+                    &iteration.planned.parent_execution_token_id,
+                    "resumed",
+                ],
+            );
+            let causation_id = item_tokens
+                .iter()
+                .filter_map(|token| token.settled_event_id.as_deref())
+                .next_back()
+                .unwrap_or(iteration.planned_event_id.as_str());
+            return Ok(Some(runtime_event(
+                command.submitted_at_unix_millis,
+                &stable_id(
+                    "event",
+                    &[
+                        &request.run_id,
+                        "iteration-evaluated",
+                        &iteration.planned.iteration_node_id,
+                        &iteration.planned.parent_execution_token_id,
+                    ],
+                ),
+                workflow_runtime::WORKFLOW_ITERATION_EVALUATED_KIND,
+                workflow_runtime::WORKFLOW_ITERATION_EVALUATED_TYPE,
+                v1::WorkflowIterationEvaluated {
+                    run_id: request.run_id.clone(),
+                    run_token_id: run_token_id.to_owned(),
+                    iteration_node_id: iteration.planned.iteration_node_id.clone(),
+                    parent_execution_token_id: iteration.planned.parent_execution_token_id.clone(),
+                    resumed_execution_token_id,
+                    failure_policy: iteration.planned.failure_policy.clone(),
+                    decision: decision as i32,
+                    expected_execution_token_ids: expected,
+                    succeeded_execution_token_ids: succeeded,
+                    failed_execution_token_ids: failed,
+                    pending_execution_token_ids: pending,
+                    error_code: error_code.into(),
+                    output: Some(output),
+                },
+                causation_id,
+                &request.run_id,
+            )));
+        }
+
+        let edge = single_outgoing_edge(&package.compiled, node, "item")?;
+        for index in 0..iteration.planned.item_count as usize {
+            if state
+                .execution_tokens
+                .contains_key(&iteration_token_id(request, node, index))
+            {
+                let candidates = iteration_item_admission_events(
+                    command,
+                    request,
+                    run_token_id,
+                    node,
+                    controller_attempt,
+                    edge,
+                    index,
+                    iteration.planned.item_count as usize,
+                );
+                if let Some(candidate) = candidates
+                    .into_iter()
+                    .find(|candidate| !event_recorded(state, &candidate.event_id))
+                {
+                    return Ok(Some(candidate));
+                }
+            }
+        }
+        let active_count = item_tokens
+            .iter()
+            .filter(|token| token.settled.is_none())
+            .count();
+        if active_count < iteration.planned.maximum_concurrency as usize
+            && let Some(index) = (0..iteration.planned.item_count as usize).find(|index| {
+                !state
+                    .execution_tokens
+                    .contains_key(&iteration_token_id(request, node, *index))
+            })
+        {
+            let candidates = iteration_item_admission_events(
+                command,
+                request,
+                run_token_id,
+                node,
+                controller_attempt,
+                edge,
+                index,
+                iteration.planned.item_count as usize,
+            );
+            if let Some(candidate) = candidates
+                .into_iter()
+                .find(|candidate| !event_recorded(state, &candidate.event_id))
+            {
+                return Ok(Some(candidate));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn execute_iteration_resume_node(
+    node: &CompiledNode,
+    state: &RecordedRun,
+    execution_token_id: &str,
+) -> Result<NodeExecution> {
+    let evaluated = state
+        .iterations
+        .iter()
+        .filter_map(|iteration| iteration.evaluated.as_ref())
+        .find(|evaluated| evaluated.resumed_execution_token_id == execution_token_id)
+        .ok_or_else(|| WorkflowExecutionError::Lifecycle("iteration_resume_missing".into()))?;
+    if evaluated.iteration_node_id != node.id {
+        return Err(WorkflowExecutionError::Integrity(
+            "iteration_resume_node".into(),
+        ));
+    }
+    let output = evaluated
+        .output
+        .clone()
+        .ok_or_else(|| WorkflowExecutionError::Integrity("iteration_output".into()))?;
+    match v1::WorkflowIterationDecision::try_from(evaluated.decision) {
+        Ok(v1::WorkflowIterationDecision::Succeeded) => Ok(success_output("success", output)),
+        Ok(v1::WorkflowIterationDecision::Failed) => {
+            Ok(failure_output("error", &evaluated.error_code, output))
+        }
+        _ => Err(WorkflowExecutionError::Integrity(
+            "iteration_decision".into(),
+        )),
+    }
+}
+
+fn event_recorded(state: &RecordedRun, event_id: &str) -> bool {
+    state.events.iter().any(|event| event.event_id == event_id)
 }
 
 fn pending_join_lifecycle_event(
@@ -2142,6 +3310,11 @@ fn pending_join_lifecycle_event(
                     branch_port_id: String::new(),
                     join_node_id: join.payload.join_node_id.clone(),
                     source_emission_id: String::new(),
+                    iteration_node_id: String::new(),
+                    iteration_index: 0,
+                    iteration_count: 0,
+                    resume_node_id: join.payload.join_node_id.clone(),
+                    resume_reason: "join".into(),
                 },
                 &join.event_id,
                 &request.run_id,
@@ -2361,6 +3534,7 @@ fn completed_run_outcome(state: &RecordedRun) -> Result<CompletedRunOutcome> {
         .values()
         .filter(|token| {
             !joined_forks.contains(token.created.fork_node_id.as_str())
+                && token.created.iteration_node_id.is_empty()
                 && token.settled.as_ref().is_some_and(|settled| {
                     matches!(
                         v1::WorkflowExecutionTokenOutcome::try_from(settled.outcome),
@@ -2414,22 +3588,50 @@ fn next_ready_node(
     compiled: &CompiledWorkflow,
     state: &RecordedRun,
 ) -> Result<(String, String, String)> {
-    let attempted = state
-        .attempts
-        .iter()
-        .map(|attempt| {
-            (
-                attempt.started.execution_token_id.as_str(),
-                attempt.started.node_id.as_str(),
-            )
-        })
-        .collect::<BTreeSet<_>>();
     let mut ready = Vec::<(u8, u64, String, String, String)>::new();
     for token in active_execution_tokens(state) {
         let token_id = token.created.execution_token_id.as_str();
+        if !token.created.resume_node_id.is_empty()
+            && !state.attempts.iter().any(|attempt| {
+                attempt.started.execution_token_id == token_id
+                    && attempt.started.node_id == token.created.resume_node_id
+            })
+        {
+            let causation = if token.created.resume_reason == "join" {
+                state
+                    .joins
+                    .iter()
+                    .find(|join| join.payload.resumed_execution_token_id == token_id)
+                    .map(|join| (join.store_position, join.event_id.clone()))
+            } else {
+                state.iterations.iter().find_map(|iteration| {
+                    iteration.evaluated.as_ref().and_then(|evaluated| {
+                        (evaluated.resumed_execution_token_id == token_id).then(|| {
+                            (
+                                iteration.evaluated_store_position.unwrap_or_default(),
+                                iteration.evaluated_event_id.clone().unwrap_or_default(),
+                            )
+                        })
+                    })
+                })
+            }
+            .ok_or_else(|| WorkflowExecutionError::Lifecycle("resume_source_missing".into()))?;
+            ready.push((
+                0,
+                causation.0,
+                token.created.resume_node_id.clone(),
+                causation.1,
+                token_id.to_owned(),
+            ));
+            continue;
+        }
         if !token.created.join_node_id.is_empty()
             && token.created.fork_node_id.is_empty()
-            && !attempted.contains(&(token_id, token.created.join_node_id.as_str()))
+            && token.created.resume_node_id.is_empty()
+            && !state.attempts.iter().any(|attempt| {
+                attempt.started.execution_token_id == token_id
+                    && attempt.started.node_id == token.created.join_node_id
+            })
         {
             let join = state
                 .joins
@@ -2446,7 +3648,10 @@ fn next_ready_node(
             continue;
         }
         if token.created.parent_execution_token_id.is_empty()
-            && !attempted.contains(&(token_id, compiled.entrypoints[0].node_id.as_str()))
+            && !state.attempts.iter().any(|attempt| {
+                attempt.started.execution_token_id == token_id
+                    && attempt.started.node_id == compiled.entrypoints[0].node_id
+            })
         {
             ready.push((
                 1,
@@ -2459,9 +3664,22 @@ fn next_ready_node(
         for edge in state.edges.iter().filter(|edge| {
             edge.payload.execution_token_id == token_id
                 && edge.payload.state == v1::WorkflowEdgeCheckpointState::Admitted as i32
-                && !attempted.contains(&(token_id, edge.payload.target_node_id.as_str()))
+                && !state.attempts.iter().any(|attempt| {
+                    attempt.started.execution_token_id == token_id
+                        && attempt.started.node_id == edge.payload.target_node_id
+                        && attempt.started_store_position > edge.store_position
+                })
         }) {
             if compiled_node(compiled, &edge.payload.target_node_id)?.node_type == "control.join" {
+                continue;
+            }
+            if compiled_node(compiled, &edge.payload.target_node_id)?.node_type
+                == "control.for-each"
+                && matches!(
+                    edge.payload.target_port_id.as_str(),
+                    "item-success" | "item-error"
+                )
+            {
                 continue;
             }
             ready.push((
@@ -2519,6 +3737,22 @@ fn node_inputs<'a>(
     if state
         .execution_tokens
         .get(execution_token_id)
+        .is_some_and(|token| {
+            token.created.resume_reason == "iteration" && token.created.resume_node_id == node_id
+        })
+    {
+        let output = state
+            .iterations
+            .iter()
+            .filter_map(|iteration| iteration.evaluated.as_ref())
+            .find(|evaluated| evaluated.resumed_execution_token_id == execution_token_id)
+            .and_then(|evaluated| evaluated.output.clone())
+            .ok_or_else(|| WorkflowExecutionError::Lifecycle("iteration_resume_input".into()))?;
+        return Ok(vec![(None, output)]);
+    }
+    if state
+        .execution_tokens
+        .get(execution_token_id)
         .is_some_and(|token| token.created.parent_execution_token_id.is_empty())
         && state.edges.iter().all(|edge| {
             edge.payload.execution_token_id != execution_token_id
@@ -2560,7 +3794,10 @@ fn node_inputs<'a>(
         })
         .collect::<Vec<_>>();
     incoming.sort_by_key(|edge| edge.store_position);
-    if incoming.is_empty() || (join_tokens.is_none() && incoming.len() != 1) {
+    if join_tokens.is_none() && incoming.len() > 1 {
+        incoming = incoming.into_iter().rev().take(1).collect();
+    }
+    if incoming.is_empty() {
         return Err(WorkflowExecutionError::Lifecycle(format!(
             "node_input_cardinality:{node_id}:{}",
             incoming.len()
@@ -2671,6 +3908,57 @@ fn recorded_run(journal: &Journal, run_id: &str) -> Result<RecordedRun> {
                     payload,
                 });
             }
+            WorkflowRuntimeEvent::IterationPlanned(payload) => {
+                if state.iterations.iter().any(|iteration| {
+                    iteration.planned.iteration_node_id == payload.iteration_node_id
+                        && iteration.planned.parent_execution_token_id
+                            == payload.parent_execution_token_id
+                }) {
+                    return Err(WorkflowExecutionError::Lifecycle(
+                        "iteration_planned_twice".into(),
+                    ));
+                }
+                state.iterations.push(RecordedIteration {
+                    planned_event_id: envelope.event_id,
+                    planned: payload,
+                    evaluated_event_id: None,
+                    evaluated_store_position: None,
+                    evaluated: None,
+                });
+            }
+            WorkflowRuntimeEvent::IterationEvaluated(payload) => {
+                let iteration = state
+                    .iterations
+                    .iter_mut()
+                    .find(|iteration| {
+                        iteration.planned.iteration_node_id == payload.iteration_node_id
+                            && iteration.planned.parent_execution_token_id
+                                == payload.parent_execution_token_id
+                    })
+                    .ok_or_else(|| {
+                        WorkflowExecutionError::Lifecycle("iteration_plan_missing".into())
+                    })?;
+                if iteration.evaluated.replace(payload).is_some() {
+                    return Err(WorkflowExecutionError::Lifecycle(
+                        "iteration_evaluated_twice".into(),
+                    ));
+                }
+                iteration.evaluated_event_id = Some(envelope.event_id);
+                iteration.evaluated_store_position = Some(envelope.store_position);
+            }
+            WorkflowRuntimeEvent::RetryEvaluated(payload) => {
+                if state.retries.iter().any(|retry| {
+                    retry.payload.controller_attempt_id == payload.controller_attempt_id
+                }) {
+                    return Err(WorkflowExecutionError::Lifecycle(
+                        "retry_evaluated_twice".into(),
+                    ));
+                }
+                state.retries.push(RecordedRetry {
+                    event_id: envelope.event_id,
+                    payload,
+                });
+            }
             WorkflowRuntimeEvent::AttemptStarted(payload) => {
                 if state
                     .attempts
@@ -2684,6 +3972,7 @@ fn recorded_run(journal: &Journal, run_id: &str) -> Result<RecordedRun> {
                 state.attempts.push(RecordedAttempt {
                     started_event_id: envelope.event_id,
                     started_store_position: envelope.store_position,
+                    started_at_unix_millis: envelope.occurred_at_unix_millis,
                     started: payload,
                     settled_event_id: None,
                     settled: None,
@@ -2970,6 +4259,14 @@ fn cancellation_time(state: &RecordedRun, fallback: i64) -> i64 {
         .map_or(fallback, |event| event.occurred_at_unix_millis)
 }
 
+fn current_unix_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+        .unwrap_or_default()
+}
+
 fn durable_outcome(value: i32) -> Result<DurableRunOutcome> {
     match v1::WorkflowRunOutcome::try_from(value) {
         Ok(v1::WorkflowRunOutcome::Succeeded) => Ok(DurableRunOutcome::Succeeded),
@@ -3024,5 +4321,55 @@ fn runtime_event<M: Message>(
             raw_evidence_digest: String::new(),
             retention_class: v1::EvidenceRetentionClass::None as i32,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn retry_config() -> RetryConfig {
+        RetryConfig {
+            maximum_attempts: 3,
+            retry_on: vec!["connector.timeout".into()],
+            backoff: RetryBackoffConfig {
+                mode: "fixed".into(),
+                initial_seconds: 1.0,
+                maximum_seconds: 1.0,
+                jitter: "none".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn unknown_effect_outcomes_always_route_to_reconciliation_before_retry() {
+        let config = retry_config();
+        for error in [
+            json!({"code": "connector.timeout", "outcome": "unknown"}),
+            json!({"code": "connector.timeout", "retryability": "reconcile-first"}),
+        ] {
+            assert_eq!(
+                classify_retry_decision(&error, "connector.timeout", &config, 2),
+                v1::WorkflowRetryDecision::UnknownOutcome
+            );
+        }
+        assert_eq!(
+            classify_retry_decision(
+                &json!({"code": "connector.timeout"}),
+                "connector.timeout",
+                &config,
+                2,
+            ),
+            v1::WorkflowRetryDecision::Scheduled
+        );
+        assert_eq!(
+            classify_retry_decision(
+                &json!({"code": "connector.timeout", "retryability": "never"}),
+                "connector.timeout",
+                &config,
+                2,
+            ),
+            v1::WorkflowRetryDecision::NotRetryable
+        );
     }
 }

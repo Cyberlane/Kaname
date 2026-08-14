@@ -374,6 +374,14 @@ fn compiler_checks_storage_dependencies_joins_fanout_and_bounded_cycles() {
             "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
         }]
     });
+    let mut unsafe_retry = bounded.clone();
+    unsafe_retry["graph"]["nodes"][0]["config"] = json!({"connectorClass":"dev.kaname.synthetic"});
+    let unsafe_retry_result = workflow_compiler::compile(&request(unsafe_retry, lock.clone()));
+    assert!(
+        diagnostic_pairs(&unsafe_retry_result)
+            .contains(&("graph.retry.target-not-idempotent", "/graph/nodes/1"))
+    );
+
     let bounded_result = workflow_compiler::compile(&request(bounded, lock));
     assert_eq!(bounded_result.outcome, WorkflowCheckOutcome::Valid as i32);
     assert!(
@@ -406,10 +414,14 @@ fn bounded_retry_workflow() -> Value {
                     "name": "effect",
                     "type": "effect.connector",
                     "typeVersion": 1,
-                    "config": {"connectorClass":"dev.kaname.synthetic"},
+                    "config": {"connectorClass":"dev.kaname.synthetic","idempotency":"required"},
                     "policyRefs": {"authority":"effect-authority"}
                 },
-                node(retry_id, "retry", "control.retry", json!({"maximumAttempts":3})),
+                node(retry_id, "retry", "control.retry", json!({
+                    "maximumAttempts":3,
+                    "retryOn":["TRANSIENT"],
+                    "backoff":{"mode":"fixed","initialSeconds":1,"maximumSeconds":60,"jitter":"none"}
+                })),
                 node(END_ID, "complete", "terminal.complete", json!({})),
                 node(FAIL_ID, "failed", "terminal.fail", json!({}))
             ],
@@ -426,6 +438,12 @@ fn bounded_retry_workflow() -> Value {
                     FAIL_EDGE_ID,
                     FAIL_MAPPING_ID,
                     (retry_id, "exhausted"),
+                    (FAIL_ID, "input")
+                ),
+                edge(
+                    "018f1000-0015-7000-8000-000000000015",
+                    "018f1000-0016-7000-8000-000000000016",
+                    (retry_id, "unknown"),
                     (FAIL_ID, "input")
                 )
             ]

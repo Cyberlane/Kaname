@@ -89,7 +89,12 @@ message WorkflowExecutionTokenCreated {
   string branch_port_id = 7;
   string join_node_id = 8;
   string source_emission_id = 9;
-  reserved 10 to 20;
+  string iteration_node_id = 10;
+  uint32 iteration_index = 11;
+  uint32 iteration_count = 12;
+  string resume_node_id = 13;
+  string resume_reason = 14;
+  reserved 15 to 20;
 }
 
 enum WorkflowExecutionTokenOutcome {
@@ -99,6 +104,7 @@ enum WorkflowExecutionTokenOutcome {
   WORKFLOW_EXECUTION_TOKEN_OUTCOME_CANCELLED = 3;
   WORKFLOW_EXECUTION_TOKEN_OUTCOME_FORKED = 4;
   WORKFLOW_EXECUTION_TOKEN_OUTCOME_JOINED = 5;
+  WORKFLOW_EXECUTION_TOKEN_OUTCOME_ITERATED = 6;
 }
 
 message WorkflowExecutionTokenSettled {
@@ -139,6 +145,78 @@ message WorkflowJoinEvaluated {
   bool cancel_remaining = 13;
   string error_code = 14;
   reserved 15 to 25;
+}
+
+enum WorkflowIterationDecision {
+  WORKFLOW_ITERATION_DECISION_UNSPECIFIED = 0;
+  WORKFLOW_ITERATION_DECISION_SUCCEEDED = 1;
+  WORKFLOW_ITERATION_DECISION_FAILED = 2;
+}
+
+// Immutable expansion and bounds for one for-each controller attempt. Item
+// values remain visible through ordinary port emissions and edge checkpoints.
+message WorkflowIterationPlanned {
+  string run_id = 1;
+  string run_token_id = 2;
+  string iteration_node_id = 3;
+  string parent_execution_token_id = 4;
+  string controller_attempt_id = 5;
+  string input_value_id = 6;
+  string input_sha256 = 7;
+  uint32 item_count = 8;
+  uint32 maximum_items = 9;
+  uint32 maximum_concurrency = 10;
+  string failure_policy = 11;
+  reserved 12 to 20;
+}
+
+// One terminal decision for an iteration. The exact token partition is
+// durable, while the compact output is passed to the controller's success or
+// error edge by the resumed execution token.
+message WorkflowIterationEvaluated {
+  string run_id = 1;
+  string run_token_id = 2;
+  string iteration_node_id = 3;
+  string parent_execution_token_id = 4;
+  string resumed_execution_token_id = 5;
+  string failure_policy = 6;
+  WorkflowIterationDecision decision = 7;
+  repeated string expected_execution_token_ids = 8;
+  repeated string succeeded_execution_token_ids = 9;
+  repeated string failed_execution_token_ids = 10;
+  repeated string pending_execution_token_ids = 11;
+  string error_code = 12;
+  WorkflowValueReference output = 13;
+  reserved 14 to 25;
+}
+
+enum WorkflowRetryDecision {
+  WORKFLOW_RETRY_DECISION_UNSPECIFIED = 0;
+  WORKFLOW_RETRY_DECISION_SCHEDULED = 1;
+  WORKFLOW_RETRY_DECISION_EXHAUSTED = 2;
+  WORKFLOW_RETRY_DECISION_NOT_RETRYABLE = 3;
+  WORKFLOW_RETRY_DECISION_UNKNOWN_OUTCOME = 4;
+}
+
+// The retry controller records its classification and exact deterministic
+// deadline before a retry edge can be admitted.
+message WorkflowRetryEvaluated {
+  string run_id = 1;
+  string run_token_id = 2;
+  string retry_node_id = 3;
+  string execution_token_id = 4;
+  string controller_attempt_id = 5;
+  string failed_attempt_id = 6;
+  string target_node_id = 7;
+  string error_code = 8;
+  WorkflowRetryDecision decision = 9;
+  uint32 next_attempt_number = 10;
+  uint32 maximum_attempts = 11;
+  uint64 delay_milliseconds = 12;
+  int64 eligible_at_unix_millis = 13;
+  WorkflowValueReference retry_input = 14;
+  WorkflowValueReference error = 15;
+  reserved 16 to 25;
 }
 
 // Payload for event kind `workflow.attempt.started`.
@@ -342,7 +420,12 @@ message WorkflowProjectedExecutionToken {
   repeated string final_emission_ids = 13;
   uint64 created_store_position = 14;
   uint64 settled_store_position = 15;
-  reserved 16 to 25;
+  string iteration_node_id = 16;
+  uint32 iteration_index = 17;
+  uint32 iteration_count = 18;
+  string resume_node_id = 19;
+  string resume_reason = 20;
+  reserved 21 to 25;
 }
 
 message WorkflowProjectedJoinEvaluation {
@@ -360,6 +443,47 @@ message WorkflowProjectedJoinEvaluation {
   string error_code = 12;
   uint64 store_position = 13;
   reserved 14 to 25;
+}
+
+message WorkflowProjectedIteration {
+  string iteration_node_id = 1;
+  string parent_execution_token_id = 2;
+  string controller_attempt_id = 3;
+  string input_value_id = 4;
+  string input_sha256 = 5;
+  uint32 item_count = 6;
+  uint32 maximum_items = 7;
+  uint32 maximum_concurrency = 8;
+  string failure_policy = 9;
+  string decision = 10;
+  string resumed_execution_token_id = 11;
+  repeated string expected_execution_token_ids = 12;
+  repeated string succeeded_execution_token_ids = 13;
+  repeated string failed_execution_token_ids = 14;
+  repeated string pending_execution_token_ids = 15;
+  string error_code = 16;
+  WorkflowProjectedValue output = 17;
+  uint64 planned_store_position = 18;
+  uint64 evaluated_store_position = 19;
+  reserved 20 to 30;
+}
+
+message WorkflowProjectedRetryEvaluation {
+  string retry_node_id = 1;
+  string execution_token_id = 2;
+  string controller_attempt_id = 3;
+  string failed_attempt_id = 4;
+  string target_node_id = 5;
+  string error_code = 6;
+  string decision = 7;
+  uint32 next_attempt_number = 8;
+  uint32 maximum_attempts = 9;
+  uint64 delay_milliseconds = 10;
+  int64 eligible_at_unix_millis = 11;
+  WorkflowProjectedValue retry_input = 12;
+  WorkflowProjectedValue error = 13;
+  uint64 store_position = 14;
+  reserved 15 to 25;
 }
 
 message WorkflowProjectedMatchTrace {
@@ -411,7 +535,9 @@ message WorkflowProjectedRun {
   repeated WorkflowProjectedEventReference events = 23;
   repeated WorkflowProjectedExecutionToken execution_tokens = 24;
   repeated WorkflowProjectedJoinEvaluation joins = 25;
-  reserved 26 to 35;
+  repeated WorkflowProjectedIteration iterations = 26;
+  repeated WorkflowProjectedRetryEvaluation retries = 27;
+  reserved 28 to 35;
 }
 
 message WorkflowRunInspectionResponse {

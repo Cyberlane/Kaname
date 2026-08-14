@@ -424,6 +424,8 @@ fn execution_availability(node: &Node) -> &'static str {
             "executable"
         }
         "control.parallel" => "executable",
+        "control.for-each" => "executable",
+        "control.retry" => "executable",
         "control.join"
             if matches!(
                 node.config.get("policy").and_then(Value::as_str),
@@ -508,6 +510,7 @@ fn compile_graph(
     validate_required_ports(graph, &incoming, &outgoing, &port_sets, diagnostics);
     validate_fan_out(graph, &outgoing, &port_sets, diagnostics);
     validate_joins(graph, &incoming, diagnostics);
+    validate_iteration_and_retry(graph, &incoming, &outgoing, diagnostics);
     validate_cycles(graph, &reachable, diagnostics);
     validate_storage(workflow, diagnostics);
     validate_dependencies(workflow, dependency_lock, diagnostics);
@@ -800,6 +803,106 @@ fn validate_joins(
     }
 }
 
+fn validate_iteration_and_retry(
+    graph: &Graph,
+    incoming: &BTreeMap<&str, Vec<(usize, &Edge)>>,
+    outgoing: &BTreeMap<&str, Vec<(usize, &Edge)>>,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) {
+    for (index, node) in graph.nodes.iter().enumerate() {
+        match node.node_type.as_str() {
+            "control.for-each" => {
+                let item_edges = outgoing
+                    .get(node.id.as_str())
+                    .into_iter()
+                    .flatten()
+                    .filter(|(_, edge)| edge.from.port_id == "item")
+                    .count();
+                let success_returns = incoming
+                    .get(node.id.as_str())
+                    .into_iter()
+                    .flatten()
+                    .filter(|(_, edge)| edge.to.port_id == "item-success")
+                    .count();
+                if item_edges != 1 || success_returns != 1 {
+                    diagnostics.push(CompilerDiagnostic::new(
+                        "graph.iteration.body-invalid",
+                        "workflow.json",
+                        format!("/graph/nodes/{index}"),
+                        "For each requires one item body edge and one explicit item-success return edge.",
+                    ));
+                }
+                let maximum_items = integer_field(&node.config, "maximumItems").unwrap_or(0);
+                let maximum_concurrency =
+                    integer_field(&node.config, "maximumConcurrency").unwrap_or(0);
+                if maximum_items < 1
+                    || maximum_concurrency < 1
+                    || maximum_concurrency > maximum_items
+                {
+                    diagnostics.push(CompilerDiagnostic::new(
+                        "graph.iteration.bounds-invalid",
+                        "workflow.json",
+                        format!("/graph/nodes/{index}/config"),
+                        "For each concurrency must be positive and cannot exceed its explicit item bound.",
+                    ));
+                }
+            }
+            "control.retry" => {
+                let retry_edges = outgoing
+                    .get(node.id.as_str())
+                    .into_iter()
+                    .flatten()
+                    .filter(|(_, edge)| edge.from.port_id == "retry")
+                    .collect::<Vec<_>>();
+                if retry_edges.len() == 1 {
+                    let target = graph
+                        .nodes
+                        .iter()
+                        .find(|candidate| candidate.id == retry_edges[0].1.to.node_id);
+                    if target.is_none_or(|target| !retry_safe_node(target)) {
+                        diagnostics.push(CompilerDiagnostic::new(
+                            "graph.retry.target-not-idempotent",
+                            "workflow.json",
+                            format!("/graph/nodes/{index}"),
+                            "Retry must target a pure operation or an effect with required idempotency.",
+                        ));
+                    }
+                }
+                let initial = node
+                    .config
+                    .get("backoff")
+                    .and_then(|value| value.get("initialSeconds"))
+                    .and_then(Value::as_f64);
+                let maximum = node
+                    .config
+                    .get("backoff")
+                    .and_then(|value| value.get("maximumSeconds"))
+                    .and_then(Value::as_f64);
+                if initial
+                    .zip(maximum)
+                    .is_none_or(|(initial, maximum)| initial <= 0.0 || initial > maximum)
+                {
+                    diagnostics.push(CompilerDiagnostic::new(
+                        "graph.retry.backoff-invalid",
+                        "workflow.json",
+                        format!("/graph/nodes/{index}/config/backoff"),
+                        "Retry initial backoff must be positive and no greater than its maximum.",
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn retry_safe_node(node: &Node) -> bool {
+    matches!(
+        node.node_type.as_str(),
+        "data.map" | "data.validate" | "storage.read" | "control.decision" | "control.match"
+    ) || (node.node_type == "effect.connector"
+        && string_field(&node.config, "idempotency") == Some("required"))
+}
+
 fn validate_cycles(
     graph: &Graph,
     reachable: &BTreeSet<&str>,
@@ -831,14 +934,17 @@ fn validate_cycles(
         if !component.iter().any(|id| reachable.contains(id)) {
             continue;
         }
-        let bounded = component.iter().any(|id| {
-            graph
-                .nodes
-                .iter()
-                .find(|node| node.id == *id)
-                .is_some_and(|node| node.node_type == "control.retry")
-        });
-        if !bounded {
+        let controllers = component
+            .iter()
+            .filter_map(|id| graph.nodes.iter().find(|node| node.id == *id))
+            .filter(|node| {
+                matches!(
+                    node.node_type.as_str(),
+                    "control.retry" | "control.for-each"
+                )
+            })
+            .collect::<Vec<_>>();
+        if controllers.len() != 1 {
             let first = component
                 .iter()
                 .filter_map(|id| graph.nodes.iter().position(|node| node.id == *id))
@@ -848,7 +954,7 @@ fn validate_cycles(
                 "graph.cycle.unbounded",
                 "workflow.json",
                 format!("/graph/nodes/{first}"),
-                "A cycle requires an explicit bounded retry controller.",
+                "A cycle requires exactly one explicit bounded retry or for-each controller.",
             ));
         }
     }
@@ -1178,6 +1284,13 @@ fn ports_for(node: &Node) -> Result<Vec<PortContract>, &'static str> {
                     ERROR_SCHEMA,
                     true,
                 ),
+                port(
+                    "unknown",
+                    PortDirection::Output,
+                    PortCardinality::One,
+                    ERROR_SCHEMA,
+                    true,
+                ),
             ],
             "control.reconcile" => vec![
                 port(
@@ -1224,9 +1337,23 @@ fn ports_for(node: &Node) -> Result<Vec<PortContract>, &'static str> {
             "control.for-each" => vec![
                 input(),
                 port(
+                    "item-success",
+                    PortDirection::Input,
+                    PortCardinality::One,
+                    DATA_SCHEMA,
+                    true,
+                ),
+                port(
+                    "item-error",
+                    PortDirection::Input,
+                    PortCardinality::One,
+                    ERROR_SCHEMA,
+                    false,
+                ),
+                port(
                     "item",
                     PortDirection::Output,
-                    PortCardinality::Many,
+                    PortCardinality::One,
                     DATA_SCHEMA,
                     true,
                 ),

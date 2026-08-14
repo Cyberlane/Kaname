@@ -41,6 +41,12 @@ struct DesktopWorkflowRunInspectionTests {
         #expect(run.outputs(for: "trigger").first?.value.storage?.result == "read")
         #expect(run.attempt(for: "trigger")?.executionTokenID == "token-run-v2")
         #expect(run.executionTokens.first?.status == "completed")
+        #expect(run.executionTokens.first?.iterationNodeID == "trigger")
+        #expect(run.executionTokens.first?.iterationIndex == 0)
+        #expect(run.iterations.first?.maximumConcurrency == 2)
+        #expect(run.iterations.first?.failedExecutionTokenIDs == ["token-failed"])
+        #expect(run.retries.first?.decision == "scheduled")
+        #expect(run.retries.first?.eligibleAtUnixMillis == 2_000)
         #expect(run.events.map(\.storePosition) == [11, 12, 13, 14, 15])
     }
 }
@@ -172,8 +178,44 @@ private actor HistoricalRunTransport:
         token.status = "completed"
         token.outcome = "completed"
         token.terminalNodeID = "complete"
+        token.iterationNodeID = "trigger"
+        token.iterationIndex = 0
+        token.iterationCount = 2
         token.createdStorePosition = 11
         token.settledStorePosition = 15
+        var iteration = Kaname_V1_WorkflowProjectedIteration()
+        iteration.iterationNodeID = "trigger"
+        iteration.parentExecutionTokenID = "token-parent"
+        iteration.controllerAttemptID = attempt.attemptID
+        iteration.inputValueID = value.valueID
+        iteration.inputSha256 = value.sha256
+        iteration.itemCount = 2
+        iteration.maximumItems = 4
+        iteration.maximumConcurrency = 2
+        iteration.failurePolicy = "collect"
+        iteration.decision = "succeeded"
+        iteration.resumedExecutionTokenID = "token-resumed"
+        iteration.expectedExecutionTokenIds = [token.executionTokenID, "token-failed"]
+        iteration.succeededExecutionTokenIds = [token.executionTokenID]
+        iteration.failedExecutionTokenIds = ["token-failed"]
+        iteration.output = value
+        iteration.plannedStorePosition = 12
+        iteration.evaluatedStorePosition = 15
+        var retry = Kaname_V1_WorkflowProjectedRetryEvaluation()
+        retry.retryNodeID = "trigger"
+        retry.executionTokenID = token.executionTokenID
+        retry.controllerAttemptID = "attempt-retry-(id)"
+        retry.failedAttemptID = attempt.attemptID
+        retry.targetNodeID = "trigger"
+        retry.errorCode = "connector.timeout"
+        retry.decision = "scheduled"
+        retry.nextAttemptNumber = 2
+        retry.maximumAttempts = 3
+        retry.delayMilliseconds = 1_000
+        retry.eligibleAtUnixMillis = 2_000
+        retry.retryInput = value
+        retry.error = value
+        retry.storePosition = 15
         var trace = Kaname_V1_WorkflowProjectedMatchTrace()
         trace.eventID = "event-trace-\(id)"
         trace.attemptID = attempt.attemptID
@@ -202,6 +244,8 @@ private actor HistoricalRunTransport:
         projected.edges = [edge]
         projected.matchTraces = [trace]
         projected.executionTokens = [token]
+        projected.iterations = [iteration]
+        projected.retries = [retry]
         projected.events = (11...15).map { position in
             var event = Kaname_V1_WorkflowProjectedEventReference()
             event.eventID = "event-\(id)-\(position)"

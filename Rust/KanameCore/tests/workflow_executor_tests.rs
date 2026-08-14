@@ -42,6 +42,174 @@ const STORAGE_WORKFLOW_ID: &str = "018f5300-0001-7000-8000-000000000001";
 const STORAGE_REVISION_ID: &str = "revision-storage-001";
 const PARALLEL_WORKFLOW_ID: &str = "018f5600-0001-7000-8000-000000000001";
 const PARALLEL_REVISION_ID: &str = "revision-parallel-001";
+const ITERATION_WORKFLOW_ID: &str = "018f5900-0001-7000-8000-000000000001";
+const ITERATION_REVISION_ID: &str = "revision-iteration-001";
+const RETRY_WORKFLOW_ID: &str = "018f5c00-0001-7000-8000-000000000001";
+const RETRY_REVISION_ID: &str = "revision-retry-001";
+
+#[test]
+fn bounded_iteration_limits_concurrency_collects_failures_and_is_crash_exact() {
+    let expected = {
+        let directory = tempdir().unwrap();
+        let (library, published) = published_iteration_library(directory.path(), "collect");
+        let command = control_run_command(
+            "run-iteration-001",
+            &published,
+            ITERATION_WORKFLOW_ID,
+            ITERATION_REVISION_ID,
+            json!({"items": [1, "invalid", 3]}),
+        );
+        let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+        let result = workflow_executor::execute(&mut journal, &library, &command).unwrap();
+        assert_eq!(result.outcome, DurableRunOutcome::Succeeded);
+        let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+        projection.catch_up(&journal).unwrap();
+        assert_eq!(projection.row_count("iterations").unwrap(), 1);
+        let run = projection
+            .inspect_runs(None, Some("run-iteration-001"), 1)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let iteration = &run.iterations[0];
+        assert_eq!(iteration.item_count, 3);
+        assert_eq!(iteration.maximum_items, 4);
+        assert_eq!(iteration.maximum_concurrency, 2);
+        assert_eq!(iteration.decision, "succeeded");
+        assert_eq!(iteration.succeeded_execution_token_ids.len(), 2);
+        assert_eq!(iteration.failed_execution_token_ids.len(), 1);
+        assert!(iteration.pending_execution_token_ids.is_empty());
+        assert_eq!(
+            run.execution_tokens
+                .iter()
+                .filter(|token| !token.iteration_node_id.is_empty())
+                .count(),
+            3
+        );
+        run_wires(&journal, "run-iteration-001")
+    };
+
+    for boundary in 1..=expected.len() {
+        let directory = tempdir().unwrap();
+        let (library, published) = published_iteration_library(directory.path(), "collect");
+        let command = control_run_command(
+            "run-iteration-001",
+            &published,
+            ITERATION_WORKFLOW_ID,
+            ITERATION_REVISION_ID,
+            json!({"items": [1, "invalid", 3]}),
+        );
+        let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+        assert!(matches!(
+            workflow_executor::execute_with_fault_for_test(
+                &mut journal,
+                &library,
+                &command,
+                WorkflowExecutionFault::AfterNewEvent(boundary),
+            ),
+            Err(WorkflowExecutionError::InjectedInterruption)
+        ));
+        assert_eq!(
+            workflow_executor::execute(&mut journal, &library, &command)
+                .unwrap()
+                .outcome,
+            DurableRunOutcome::Succeeded
+        );
+        assert_eq!(run_wires(&journal, "run-iteration-001"), expected);
+    }
+}
+
+#[test]
+fn fail_fast_iteration_records_pending_partition_and_cancels_remaining_items() {
+    let directory = tempdir().unwrap();
+    let (library, published) = published_iteration_library(directory.path(), "fail-fast");
+    let command = control_run_command(
+        "run-iteration-fail-fast-001",
+        &published,
+        ITERATION_WORKFLOW_ID,
+        ITERATION_REVISION_ID,
+        json!({"items": [1, "invalid", 3]}),
+    );
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    assert_eq!(
+        workflow_executor::execute(&mut journal, &library, &command)
+            .unwrap()
+            .outcome,
+        DurableRunOutcome::Failed
+    );
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    projection.catch_up(&journal).unwrap();
+    let run = projection
+        .inspect_runs(None, Some("run-iteration-fail-fast-001"), 1)
+        .unwrap()
+        .pop()
+        .unwrap();
+    let iteration = &run.iterations[0];
+    assert_eq!(iteration.decision, "failed");
+    assert_eq!(iteration.succeeded_execution_token_ids.len(), 1);
+    assert_eq!(iteration.failed_execution_token_ids.len(), 1);
+    assert_eq!(iteration.pending_execution_token_ids.len(), 1);
+    assert!(run.execution_tokens.iter().any(|token| {
+        iteration
+            .pending_execution_token_ids
+            .contains(&token.execution_token_id)
+            && token.outcome == "cancelled"
+    }));
+}
+
+#[test]
+fn retry_deadline_and_attempt_counter_survive_restart_before_exhaustion() {
+    let directory = tempdir().unwrap();
+    let (library, published) = published_retry_library(directory.path());
+    let command = control_run_command(
+        "run-retry-001",
+        &published,
+        RETRY_WORKFLOW_ID,
+        RETRY_REVISION_ID,
+        json!({}),
+    );
+    let started_at = command.submitted_at_unix_millis;
+    let deadline = started_at + 1_000;
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    let waiting =
+        workflow_executor::execute_at_unix_millis(&mut journal, &library, &command, started_at)
+            .unwrap();
+    assert_eq!(waiting.outcome, DurableRunOutcome::Waiting);
+    assert_eq!(waiting.next_attempt_at_unix_millis, Some(deadline));
+    let waiting_wires = run_wires(&journal, "run-retry-001");
+
+    let still_waiting =
+        workflow_executor::execute_at_unix_millis(&mut journal, &library, &command, deadline - 1)
+            .unwrap();
+    assert_eq!(still_waiting.outcome, DurableRunOutcome::Waiting);
+    assert_eq!(still_waiting.next_attempt_at_unix_millis, Some(deadline));
+    assert_eq!(run_wires(&journal, "run-retry-001"), waiting_wires);
+
+    let settled =
+        workflow_executor::execute_at_unix_millis(&mut journal, &library, &command, deadline)
+            .unwrap();
+    assert_eq!(settled.outcome, DurableRunOutcome::Failed);
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    projection.catch_up(&journal).unwrap();
+    assert_eq!(projection.row_count("retries").unwrap(), 2);
+    let run = projection
+        .inspect_runs(None, Some("run-retry-001"), 1)
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(
+        run.attempts
+            .iter()
+            .filter(|attempt| attempt.node_id == "018f5c00-0003-7000-8000-000000000003")
+            .map(|attempt| attempt.attempt_number)
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert_eq!(run.retries[0].decision, "scheduled");
+    assert_eq!(run.retries[0].eligible_at_unix_millis, deadline);
+    assert_eq!(run.retries[0].next_attempt_number, 2);
+    assert_eq!(run.retries[1].decision, "exhausted");
+    assert_eq!(run.retries[1].next_attempt_number, 3);
+}
 
 #[test]
 fn durable_parallel_tokens_apply_all_any_and_quorum_deterministically() {
@@ -710,6 +878,96 @@ fn published_parallel_library(
     (library, published)
 }
 
+fn published_iteration_library(
+    application_support: &std::path::Path,
+    failure_policy: &str,
+) -> (
+    kaname_core::workflow_library::WorkflowLibraryStore,
+    PublishedWorkflowRevision,
+) {
+    publish_control_library(
+        application_support,
+        ITERATION_WORKFLOW_ID,
+        ITERATION_REVISION_ID,
+        "dev.kaname.iteration-runtime",
+        iteration_workflow_source(failure_policy),
+        json!({
+            "bundleVersion": 1,
+            "schemas": [{
+                "id": "dev.kaname.iteration/item-v1",
+                "schema": {"type": "integer"}
+            }]
+        }),
+    )
+}
+
+fn published_retry_library(
+    application_support: &std::path::Path,
+) -> (
+    kaname_core::workflow_library::WorkflowLibraryStore,
+    PublishedWorkflowRevision,
+) {
+    publish_control_library(
+        application_support,
+        RETRY_WORKFLOW_ID,
+        RETRY_REVISION_ID,
+        "dev.kaname.retry-runtime",
+        retry_workflow_source(),
+        json!({
+            "bundleVersion": 1,
+            "schemas": [{
+                "id": "dev.kaname.retry/always-fails-v1",
+                "schema": {
+                    "type": "object",
+                    "required": ["required"],
+                    "properties": {"required": {"const": true}}
+                }
+            }]
+        }),
+    )
+}
+
+fn publish_control_library(
+    application_support: &std::path::Path,
+    workflow_id: &str,
+    revision_id: &str,
+    package_id: &str,
+    source: Value,
+    schema_bundle: Value,
+) -> (
+    kaname_core::workflow_library::WorkflowLibraryStore,
+    PublishedWorkflowRevision,
+) {
+    let mut library = open_workflow_library(application_support).unwrap();
+    library
+        .create_draft(CreateWorkflowDraft {
+            workflow_id: workflow_id.into(),
+            package_id: package_id.into(),
+            name: "Bounded control runtime".into(),
+            summary: "Synthetic bounded iteration or retry fixture".into(),
+            edit_id: format!("edit-{revision_id}"),
+            session_id: "executor-tests".into(),
+            workflow_source: serde_json::to_vec(&source).unwrap(),
+            layout_source: br#"{"nodes":[]}"#.to_vec(),
+            recorded_at_unix_millis: 70,
+        })
+        .unwrap();
+    let published = library
+        .publish_revision(PublishWorkflowRevision {
+            workflow_id: workflow_id.into(),
+            expected_draft_sequence: 0,
+            revision_id: revision_id.into(),
+            registration_id: format!("registration-{revision_id}"),
+            release_version: "1.0.0".into(),
+            schema_bundle_json: serde_json::to_vec(&schema_bundle).unwrap(),
+            dependency_lock_json: br#"{"lockVersion":1,"dependencies":[]}"#.to_vec(),
+            configuration_contract_json: br#"{"type":"object"}"#.to_vec(),
+            published_at_unix_millis: 80,
+        })
+        .unwrap();
+    (library, published)
+}
+
 fn published_storage_library(
     application_support: &std::path::Path,
 ) -> (
@@ -765,6 +1023,152 @@ fn storage_authority() -> WorkflowStorageExecutionAuthority {
         installation_id: "installation-storage-001".into(),
         case_id: None,
     }
+}
+
+fn iteration_workflow_source(failure_policy: &str) -> Value {
+    let ids = [
+        "018f5900-0002-7000-8000-000000000002",
+        "018f5900-0003-7000-8000-000000000003",
+        "018f5900-0004-7000-8000-000000000004",
+        "018f5900-0005-7000-8000-000000000005",
+        "018f5900-0006-7000-8000-000000000006",
+    ];
+    control_graph_source(
+        ITERATION_WORKFLOW_ID,
+        "dev.kaname.iteration-runtime",
+        &ids,
+        vec![
+            ("manual", "trigger.manual", json!({})),
+            (
+                "for-each",
+                "control.for-each",
+                json!({
+                    "items": {"root": "input", "pointer": "/items"},
+                    "as": "item",
+                    "maximumItems": 4,
+                    "maximumConcurrency": 2,
+                    "failurePolicy": failure_policy
+                }),
+            ),
+            (
+                "validate-item",
+                "data.validate",
+                json!({
+                    "schemaRef": "dev.kaname.iteration/item-v1"
+                }),
+            ),
+            ("complete", "terminal.complete", json!({})),
+            ("fail", "terminal.fail", json!({})),
+        ],
+        vec![
+            ((0, "success"), (1, "input")),
+            ((1, "item"), (2, "input")),
+            ((2, "success"), (1, "item-success")),
+            ((2, "error"), (1, "item-error")),
+            ((1, "success"), (3, "input")),
+            ((1, "error"), (4, "input")),
+        ],
+    )
+}
+
+fn retry_workflow_source() -> Value {
+    let ids = [
+        "018f5c00-0002-7000-8000-000000000002",
+        "018f5c00-0003-7000-8000-000000000003",
+        "018f5c00-0004-7000-8000-000000000004",
+        "018f5c00-0005-7000-8000-000000000005",
+        "018f5c00-0006-7000-8000-000000000006",
+    ];
+    control_graph_source(
+        RETRY_WORKFLOW_ID,
+        "dev.kaname.retry-runtime",
+        &ids,
+        vec![
+            ("manual", "trigger.manual", json!({})),
+            (
+                "validate",
+                "data.validate",
+                json!({
+                    "schemaRef": "dev.kaname.retry/always-fails-v1"
+                }),
+            ),
+            (
+                "retry",
+                "control.retry",
+                json!({
+                    "maximumAttempts": 2,
+                    "retryOn": ["validation.failed"],
+                    "backoff": {
+                        "mode": "fixed",
+                        "initialSeconds": 1.0,
+                        "maximumSeconds": 1.0,
+                        "jitter": "none"
+                    }
+                }),
+            ),
+            ("complete", "terminal.complete", json!({})),
+            ("fail", "terminal.fail", json!({})),
+        ],
+        vec![
+            ((0, "success"), (1, "input")),
+            ((1, "success"), (3, "input")),
+            ((1, "error"), (2, "error")),
+            ((2, "retry"), (1, "input")),
+            ((2, "exhausted"), (4, "input")),
+            ((2, "unknown"), (4, "input")),
+        ],
+    )
+}
+
+type ControlEdge<'a> = ((usize, &'a str), (usize, &'a str));
+
+fn control_graph_source(
+    workflow_id: &str,
+    package_id: &str,
+    ids: &[&str],
+    nodes: Vec<(&str, &str, Value)>,
+    edges: Vec<ControlEdge<'_>>,
+) -> Value {
+    let nodes = nodes
+        .into_iter()
+        .enumerate()
+        .map(|(index, (key, node_type, config))| {
+            json!({
+                "id": ids[index], "key": key, "name": key,
+                "type": node_type, "typeVersion": 1, "config": config
+            })
+        })
+        .collect::<Vec<_>>();
+    let edges = edges
+        .into_iter()
+        .enumerate()
+        .map(|(index, (from, to))| {
+            let sequence = index + 1;
+            json!({
+                "id": format!("018f5d00-{sequence:04}-7000-8000-{sequence:012}"),
+                "from": {"nodeId": ids[from.0], "portId": from.1},
+                "to": {"nodeId": ids[to.0], "portId": to.1},
+                "mappingId": format!("018f5e00-{sequence:04}-7000-8000-{sequence:012}"),
+                "mapping": {"whole": true}
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "formatVersion": 1,
+        "workflowId": workflow_id,
+        "packageId": package_id,
+        "name": "Bounded control runtime",
+        "summary": "Synthetic and effect free",
+        "graph": {
+            "entrypoints": [{
+                "id": "018f5f00-0001-7000-8000-000000000001",
+                "nodeId": ids[0]
+            }],
+            "nodes": nodes,
+            "edges": edges
+        },
+        "interfaces": {}, "resources": {}, "policies": {}, "storage": {}, "metadata": {}
+    })
 }
 
 fn storage_workflow_source() -> Value {
@@ -957,6 +1361,22 @@ fn parallel_run_command(run_id: &str, published: &PublishedWorkflowRevision) -> 
         RequestWorkflowRun::decode(envelope.payload.as_ref().unwrap().value.as_slice()).unwrap();
     request.workflow_id = PARALLEL_WORKFLOW_ID.into();
     request.revision_id = PARALLEL_REVISION_ID.into();
+    envelope.payload.as_mut().unwrap().value = request.encode_to_vec();
+    envelope
+}
+
+fn control_run_command(
+    run_id: &str,
+    published: &PublishedWorkflowRevision,
+    workflow_id: &str,
+    revision_id: &str,
+    input: Value,
+) -> CommandEnvelope {
+    let mut envelope = run_command(run_id, published, input);
+    let mut request =
+        RequestWorkflowRun::decode(envelope.payload.as_ref().unwrap().value.as_slice()).unwrap();
+    request.workflow_id = workflow_id.into();
+    request.revision_id = revision_id.into();
     envelope.payload.as_mut().unwrap().value = request.encode_to_vec();
     envelope
 }

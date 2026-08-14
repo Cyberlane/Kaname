@@ -48,6 +48,7 @@ struct DesktopDurableWorkflowRunsView: View {
         case error = "Error"
         case storage = "Storage"
         case tokens = "Tokens"
+        case control = "Control flow"
         case configuration = "Configuration"
         case matchTrace = "Match trace"
         case timing = "Timing"
@@ -356,6 +357,8 @@ struct DesktopDurableWorkflowRunsView: View {
                 attemptTokenIDs.contains($0.executionTokenID)
                     || $0.forkNodeID == node.id
                     || $0.joinNodeID == node.id
+                    || $0.iterationNodeID == node.id
+                    || $0.resumeNodeID == node.id
                     || $0.terminalNodeID == node.id
             }
             let joins = run.joins.filter { $0.forkNodeID == node.id || $0.joinNodeID == node.id }
@@ -366,13 +369,36 @@ struct DesktopDurableWorkflowRunsView: View {
                     ForEach(tokens) { token in
                         evidenceCard(
                             title: "\(token.status.capitalized) · \(token.branchPortID ?? "execution path")",
-                            detail: "Token \(token.executionTokenID)\nParent \(token.parentExecutionTokenID ?? "root")\nFork \(token.forkNodeID ?? "—") · Join \(token.joinNodeID ?? "—")\nJournal \(token.createdStorePosition)…\(token.settledStorePosition.map(String.init) ?? "active")"
+                            detail: "Token \(token.executionTokenID)\nParent \(token.parentExecutionTokenID ?? "root")\nFork \(token.forkNodeID ?? "—") · Join \(token.joinNodeID ?? "—")\nIteration \(token.iterationNodeID ?? "—") \(token.iterationIndex.map { "item \($0 + 1)/\(token.iterationCount ?? 0)" } ?? "")\nResume \(token.resumeNodeID ?? "—") \(token.resumeReason ?? "")\nJournal \(token.createdStorePosition)…\(token.settledStorePosition.map(String.init) ?? "active")"
                         )
                     }
                     ForEach(joins) { join in
                         evidenceCard(
                             title: "Join \(join.decision) · \(join.policy) \(join.threshold)/\(join.expectedExecutionTokenIDs.count)",
                             detail: "Arrived \(join.arrivedExecutionTokenIDs.count) · failed \(join.failedExecutionTokenIDs.count) · pending at decision \(join.pendingExecutionTokenIDs.count)\nResume \(join.resumedExecutionTokenID)\nCancel remaining: \(join.cancelRemaining ? "yes" : "no")"
+                        )
+                    }
+                }
+            }
+        case .control:
+            let iterations = run.iterations.filter { $0.iterationNodeID == node.id }
+            let retries = run.retries.filter {
+                $0.retryNodeID == node.id || $0.targetNodeID == node.id
+            }
+            if iterations.isEmpty, retries.isEmpty {
+                explainedEmpty("This node has no iteration or retry controller evidence.")
+            } else {
+                VStack(alignment: .leading, spacing: 7) {
+                    ForEach(iterations) { iteration in
+                        evidenceCard(
+                            title: "Iteration \(iteration.decision ?? "running") · \(iteration.failurePolicy)",
+                            detail: "Items \(iteration.itemCount)/\(iteration.maximumItems) · concurrency \(iteration.maximumConcurrency)\nSucceeded \(iteration.succeededExecutionTokenIDs.count) · failed \(iteration.failedExecutionTokenIDs.count) · pending at decision \(iteration.pendingExecutionTokenIDs.count)\nResume \(iteration.resumedExecutionTokenID ?? "not yet")\nJournal \(iteration.plannedStorePosition)…\(iteration.evaluatedStorePosition.map(String.init) ?? "active")"
+                        )
+                    }
+                    ForEach(retries) { retry in
+                        evidenceCard(
+                            title: "Retry \(retry.decision) · attempt \(retry.nextAttemptNumber)/\(retry.maximumAttempts)",
+                            detail: "Target \(retry.targetNodeID)\nError \(retry.errorCode)\nDelay \(retry.delayMilliseconds) ms · eligible \(retry.eligibleAtUnixMillis.map(String.init) ?? "not scheduled")\nJournal \(retry.storePosition)"
                         )
                     }
                 }

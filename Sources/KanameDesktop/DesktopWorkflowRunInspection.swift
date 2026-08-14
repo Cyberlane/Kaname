@@ -173,6 +173,11 @@ public struct DesktopWorkflowProjectedExecutionToken: Identifiable, Equatable, S
     public let finalEmissionIDs: [String]
     public let createdStorePosition: UInt64
     public let settledStorePosition: UInt64?
+    public let iterationNodeID: String?
+    public let iterationIndex: UInt32?
+    public let iterationCount: UInt32?
+    public let resumeNodeID: String?
+    public let resumeReason: String?
 }
 
 public struct DesktopWorkflowProjectedJoin: Identifiable, Equatable, Sendable {
@@ -189,6 +194,47 @@ public struct DesktopWorkflowProjectedJoin: Identifiable, Equatable, Sendable {
     public let pendingExecutionTokenIDs: [String]
     public let cancelRemaining: Bool
     public let errorCode: String?
+    public let storePosition: UInt64
+}
+
+public struct DesktopWorkflowProjectedIteration: Identifiable, Equatable, Sendable {
+    public var id: String { "\(iterationNodeID):\(parentExecutionTokenID)" }
+    public let iterationNodeID: String
+    public let parentExecutionTokenID: String
+    public let controllerAttemptID: String
+    public let inputValueID: String
+    public let inputSHA256: String
+    public let itemCount: UInt32
+    public let maximumItems: UInt32
+    public let maximumConcurrency: UInt32
+    public let failurePolicy: String
+    public let decision: String?
+    public let resumedExecutionTokenID: String?
+    public let expectedExecutionTokenIDs: [String]
+    public let succeededExecutionTokenIDs: [String]
+    public let failedExecutionTokenIDs: [String]
+    public let pendingExecutionTokenIDs: [String]
+    public let errorCode: String?
+    public let output: DesktopWorkflowProjectedValue?
+    public let plannedStorePosition: UInt64
+    public let evaluatedStorePosition: UInt64?
+}
+
+public struct DesktopWorkflowProjectedRetry: Identifiable, Equatable, Sendable {
+    public var id: String { controllerAttemptID }
+    public let retryNodeID: String
+    public let executionTokenID: String
+    public let controllerAttemptID: String
+    public let failedAttemptID: String
+    public let targetNodeID: String
+    public let errorCode: String
+    public let decision: String
+    public let nextAttemptNumber: UInt32
+    public let maximumAttempts: UInt32
+    public let delayMilliseconds: UInt64
+    public let eligibleAtUnixMillis: Int64?
+    public let retryInput: DesktopWorkflowProjectedValue
+    public let error: DesktopWorkflowProjectedValue
     public let storePosition: UInt64
 }
 
@@ -237,6 +283,8 @@ public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
     public let events: [DesktopWorkflowProjectedEvent]
     public let executionTokens: [DesktopWorkflowProjectedExecutionToken]
     public let joins: [DesktopWorkflowProjectedJoin]
+    public let iterations: [DesktopWorkflowProjectedIteration]
+    public let retries: [DesktopWorkflowProjectedRetry]
 
     public init(
         runID: String, workflowID: String, revisionID: String, packageDigest: String,
@@ -247,7 +295,9 @@ public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
         edges: [DesktopWorkflowProjectedEdge], matchTraces: [DesktopWorkflowProjectedMatchTrace],
         events: [DesktopWorkflowProjectedEvent],
         executionTokens: [DesktopWorkflowProjectedExecutionToken] = [],
-        joins: [DesktopWorkflowProjectedJoin] = []
+        joins: [DesktopWorkflowProjectedJoin] = [],
+        iterations: [DesktopWorkflowProjectedIteration] = [],
+        retries: [DesktopWorkflowProjectedRetry] = []
     ) {
         self.runID = runID
         self.workflowID = workflowID
@@ -269,6 +319,8 @@ public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
         self.events = events
         self.executionTokens = executionTokens
         self.joins = joins
+        self.iterations = iterations
+        self.retries = retries
     }
 
     public func attempt(for nodeID: String) -> DesktopWorkflowProjectedAttempt? {
@@ -531,7 +583,9 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
             matchTraces: try run.matchTraces.map(matchTrace),
             events: try run.events.map(event),
             executionTokens: try run.executionTokens.map(executionToken),
-            joins: try run.joins.map(join)
+            joins: try run.joins.map(join),
+            iterations: try run.iterations.map(iteration),
+            retries: try run.retries.map(retry)
         )
     }
 
@@ -659,7 +713,12 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
             error: try item.hasError ? value(item.error) : nil,
             finalEmissionIDs: item.finalEmissionIds,
             createdStorePosition: item.createdStorePosition,
-            settledStorePosition: item.settledStorePosition > 0 ? item.settledStorePosition : nil
+            settledStorePosition: item.settledStorePosition > 0 ? item.settledStorePosition : nil,
+            iterationNodeID: item.iterationNodeID.nilIfEmpty,
+            iterationIndex: item.iterationNodeID.isEmpty ? nil : item.iterationIndex,
+            iterationCount: item.iterationNodeID.isEmpty ? nil : item.iterationCount,
+            resumeNodeID: item.resumeNodeID.nilIfEmpty,
+            resumeReason: item.resumeReason.nilIfEmpty
         )
     }
 
@@ -684,6 +743,74 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
             pendingExecutionTokenIDs: item.pendingExecutionTokenIds,
             cancelRemaining: item.cancelRemaining,
             errorCode: item.errorCode.nilIfEmpty,
+            storePosition: item.storePosition
+        )
+    }
+
+    private static func iteration(
+        _ item: Kaname_V1_WorkflowProjectedIteration
+    ) throws -> DesktopWorkflowProjectedIteration {
+        guard !item.iterationNodeID.isEmpty, !item.parentExecutionTokenID.isEmpty,
+              !item.controllerAttemptID.isEmpty, !item.inputValueID.isEmpty,
+              item.inputSha256.count == 64, item.maximumItems > 0,
+              item.maximumConcurrency > 0,
+              item.maximumConcurrency <= item.maximumItems,
+              !item.failurePolicy.isEmpty, item.plannedStorePosition > 0 else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        let evaluated = !item.decision.isEmpty
+        guard !evaluated || (!item.resumedExecutionTokenID.isEmpty
+            && item.hasOutput && item.evaluatedStorePosition > 0) else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        return DesktopWorkflowProjectedIteration(
+            iterationNodeID: item.iterationNodeID,
+            parentExecutionTokenID: item.parentExecutionTokenID,
+            controllerAttemptID: item.controllerAttemptID,
+            inputValueID: item.inputValueID,
+            inputSHA256: item.inputSha256,
+            itemCount: item.itemCount,
+            maximumItems: item.maximumItems,
+            maximumConcurrency: item.maximumConcurrency,
+            failurePolicy: item.failurePolicy,
+            decision: item.decision.nilIfEmpty,
+            resumedExecutionTokenID: item.resumedExecutionTokenID.nilIfEmpty,
+            expectedExecutionTokenIDs: item.expectedExecutionTokenIds,
+            succeededExecutionTokenIDs: item.succeededExecutionTokenIds,
+            failedExecutionTokenIDs: item.failedExecutionTokenIds,
+            pendingExecutionTokenIDs: item.pendingExecutionTokenIds,
+            errorCode: item.errorCode.nilIfEmpty,
+            output: try item.hasOutput ? value(item.output) : nil,
+            plannedStorePosition: item.plannedStorePosition,
+            evaluatedStorePosition: item.evaluatedStorePosition > 0 ? item.evaluatedStorePosition : nil
+        )
+    }
+
+    private static func retry(
+        _ item: Kaname_V1_WorkflowProjectedRetryEvaluation
+    ) throws -> DesktopWorkflowProjectedRetry {
+        guard !item.retryNodeID.isEmpty, !item.executionTokenID.isEmpty,
+              !item.controllerAttemptID.isEmpty, !item.failedAttemptID.isEmpty,
+              !item.targetNodeID.isEmpty, !item.errorCode.isEmpty,
+              !item.decision.isEmpty, item.nextAttemptNumber > 1,
+              item.maximumAttempts > 0, item.hasRetryInput, item.hasError,
+              item.storePosition > 0 else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        return DesktopWorkflowProjectedRetry(
+            retryNodeID: item.retryNodeID,
+            executionTokenID: item.executionTokenID,
+            controllerAttemptID: item.controllerAttemptID,
+            failedAttemptID: item.failedAttemptID,
+            targetNodeID: item.targetNodeID,
+            errorCode: item.errorCode,
+            decision: item.decision,
+            nextAttemptNumber: item.nextAttemptNumber,
+            maximumAttempts: item.maximumAttempts,
+            delayMilliseconds: item.delayMilliseconds,
+            eligibleAtUnixMillis: item.eligibleAtUnixMillis > 0 ? item.eligibleAtUnixMillis : nil,
+            retryInput: try value(item.retryInput),
+            error: try value(item.error),
             storePosition: item.storePosition
         )
     }

@@ -124,6 +124,7 @@
       "pointer": "/items"
     },
     "as": "item",
+    "maximumItems": 256,
     "maximumConcurrency": 4,
     "failurePolicy": "collect"
   },
