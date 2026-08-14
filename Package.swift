@@ -30,6 +30,10 @@ let package = Package(
         .executable(name: "KanameWorkflowWorker", targets: ["KanameWorkflowWorker"]),
         .executable(name: "KanameProtocolFixtureTool", targets: ["KanameProtocolFixtureTool"]),
         .executable(name: "KanamePhase3Qualification", targets: ["KanamePhase3Qualification"]),
+        .executable(
+            name: "KanameWorkflowSchemaQualification",
+            targets: ["KanameWorkflowSchemaQualification"]
+        ),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-protobuf.git", exact: "1.38.1"),
@@ -133,6 +137,10 @@ let package = Package(
         .executableTarget(
             name: "KanamePhase3Qualification",
             dependencies: ["KanameMobileSync", "KanameProtocol"]
+        ),
+        .executableTarget(
+            name: "KanameWorkflowSchemaQualification",
+            dependencies: ["KanameDesktop"]
         ),
         .testTarget(
             name: "KanameDomainTests",

@@ -4,6 +4,7 @@ use kaname_core::{
     mobile::{EnrollmentAdmission, SyncAdmission},
     policy::{ApprovalResolutionResult, LocalPolicyCore, approval_fingerprint},
     v1::{self, EventEnvelope},
+    workflow_schema::{self, WorkflowSchemaCheckRequest},
 };
 use prost::Message;
 use serde::{Deserialize, Serialize};
@@ -50,7 +51,8 @@ fn main() {
             mobile_admit(journal_path, recipient_device_id, recipient_key_id)
         }
         [operation, fixture_id] if operation == "scale" => scale(fixture_id),
-        _ => Err("usage: kaname-local-core scenario <F-01..F-14> | scenario-store <F-01..F-14> <journal-path> | append-event <journal-path> < event-envelope.bin | authorize-action <journal-path> < approval-command.bin | record-review <journal-path> < command-envelope.bin | replay <journal-path> < replay-request.bin | mobile-propose <journal-path> < enrollment-challenge.bin | mobile-decide <journal-path> < enrollment-decision.bin | mobile-admit <journal-path> <recipient-device-id> <recipient-key-id> < encrypted-envelope.bin | scale <S-01..S-04>".to_owned()),
+        [operation] if operation == "workflow-schema-check" => workflow_schema_check(),
+        _ => Err("usage: kaname-local-core scenario <F-01..F-14> | scenario-store <F-01..F-14> <journal-path> | append-event <journal-path> < event-envelope.bin | authorize-action <journal-path> < approval-command.bin | record-review <journal-path> < command-envelope.bin | replay <journal-path> < replay-request.bin | mobile-propose <journal-path> < enrollment-challenge.bin | mobile-decide <journal-path> < enrollment-decision.bin | mobile-admit <journal-path> <recipient-device-id> <recipient-key-id> < encrypted-envelope.bin | scale <S-01..S-04> | workflow-schema-check < request.json".to_owned()),
     };
     match result {
         Ok(json) => println!("{json}"),
@@ -69,6 +71,21 @@ fn read_standard_input() -> Result<Vec<u8>, String> {
     Ok(wire)
 }
 
+fn workflow_schema_check() -> Result<String, String> {
+    let wire = read_standard_input()?;
+    workflow_schema_check_wire(&wire)
+}
+
+fn workflow_schema_check_wire(wire: &[u8]) -> Result<String, String> {
+    if wire.is_empty() || wire.len() > workflow_schema::MAXIMUM_SCHEMA_CHECK_REQUEST_BYTES {
+        return Err("workflow_schema_request_out_of_bounds".into());
+    }
+    let request: WorkflowSchemaCheckRequest =
+        serde_json::from_slice(&wire).map_err(|_| "malformed_workflow_schema_request")?;
+    serde_json::to_string(&workflow_schema::check(&request))
+        .map_err(|_| "workflow_schema_report_encoding_failed".into())
+}
+
 fn append_event(journal_path: &str) -> Result<String, String> {
     let wire = read_standard_input()?;
     append_event_wire(journal_path, &wire)
@@ -80,11 +97,8 @@ fn authorize_action(journal_path: &str) -> Result<String, String> {
 }
 
 fn authorize_action_wire(journal_path: &str, wire: &[u8]) -> Result<String, String> {
-    let command = v1::ApprovalCommand::decode(wire)
-        .map_err(|_| "malformed_approval_command")?;
-    let request = command
-        .request
-        .ok_or("approval_command_missing_request")?;
+    let command = v1::ApprovalCommand::decode(wire).map_err(|_| "malformed_approval_command")?;
+    let request = command.request.ok_or("approval_command_missing_request")?;
     let resolution = command
         .resolution
         .ok_or("approval_command_missing_resolution")?;
@@ -170,8 +184,7 @@ fn record_review(journal_path: &str) -> Result<String, String> {
 }
 
 fn record_review_wire(journal_path: &str, wire: &[u8]) -> Result<String, String> {
-    let command = v1::CommandEnvelope::decode(wire)
-        .map_err(|_| "malformed_review_command")?;
+    let command = v1::CommandEnvelope::decode(wire).map_err(|_| "malformed_review_command")?;
     let review_payload = command
         .payload
         .as_ref()
@@ -203,8 +216,8 @@ fn record_review_wire(journal_path: &str, wire: &[u8]) -> Result<String, String>
         return Err("review_scope_not_allowed".into());
     }
 
-    let mut journal = Journal::open(journal_path, &CURSOR_KEY)
-        .map_err(|error| error.to_string())?;
+    let mut journal =
+        Journal::open(journal_path, &CURSOR_KEY).map_err(|error| error.to_string())?;
     let selector = format!("thread:{}", review.stream_id);
     let current_position = journal
         .replay(&selector, None, 1)
@@ -261,10 +274,8 @@ fn replay(journal_path: &str) -> Result<String, String> {
 }
 
 fn replay_wire(journal_path: &str, wire: &[u8]) -> Result<String, String> {
-    let request = v1::ReplayRequest::decode(wire)
-        .map_err(|_| "malformed_replay_request")?;
-    let journal = Journal::open(journal_path, &CURSOR_KEY)
-        .map_err(|error| error.to_string())?;
+    let request = v1::ReplayRequest::decode(wire).map_err(|_| "malformed_replay_request")?;
+    let journal = Journal::open(journal_path, &CURSOR_KEY).map_err(|error| error.to_string())?;
     let page = journal
         .replay(
             &request.selector_id,
@@ -312,7 +323,8 @@ fn mobile_propose_wire(
         .as_ref()
         .map(|identity| identity.device_id.clone())
         .ok_or("enrollment_missing_device")?;
-    let mut journal = Journal::open(journal_path, &CURSOR_KEY).map_err(|error| error.to_string())?;
+    let mut journal =
+        Journal::open(journal_path, &CURSOR_KEY).map_err(|error| error.to_string())?;
     let admission = journal
         .propose_mobile_device(&challenge, now_unix_millis)
         .map_err(|error| error.to_string())?;
@@ -342,7 +354,8 @@ fn mobile_decide_wire(
 ) -> Result<String, String> {
     let decision = v1::DeviceEnrollmentDecision::decode(wire)
         .map_err(|_| "malformed_device_enrollment_decision")?;
-    let mut journal = Journal::open(journal_path, &CURSOR_KEY).map_err(|error| error.to_string())?;
+    let mut journal =
+        Journal::open(journal_path, &CURSOR_KEY).map_err(|error| error.to_string())?;
     let result = journal
         .decide_mobile_device(&decision, now_unix_millis)
         .map_err(|error| error.to_string())?;
@@ -383,11 +396,12 @@ fn mobile_admit_wire(
     expected_recipient_key_id: &str,
     now_unix_millis: i64,
 ) -> Result<String, String> {
-    let envelope = v1::EncryptedSyncEnvelope::decode(wire)
-        .map_err(|_| "malformed_encrypted_sync_envelope")?;
+    let envelope =
+        v1::EncryptedSyncEnvelope::decode(wire).map_err(|_| "malformed_encrypted_sync_envelope")?;
     let header = v1::SyncAuthenticatedHeader::decode(envelope.authenticated_header.as_slice())
         .map_err(|_| "malformed_sync_header")?;
-    let mut journal = Journal::open(journal_path, &CURSOR_KEY).map_err(|error| error.to_string())?;
+    let mut journal =
+        Journal::open(journal_path, &CURSOR_KEY).map_err(|error| error.to_string())?;
     let admission = journal
         .record_authenticated_mobile_sync_wire(
             wire,
@@ -405,10 +419,9 @@ fn mobile_admit_wire(
             v1::SyncReceiptState::Decrypted,
             "duplicate_authenticated_envelope",
         ),
-        SyncAdmission::ResyncRequired { .. } => (
-            v1::SyncReceiptState::ResyncRequired,
-            "sender_sequence_gap",
-        ),
+        SyncAdmission::ResyncRequired { .. } => {
+            (v1::SyncReceiptState::ResyncRequired, "sender_sequence_gap")
+        }
     };
     let receipt = v1::SyncReceipt {
         envelope_id: header.envelope_id,
@@ -540,11 +553,35 @@ mod tests {
     use kaname_core::v1::{
         ApprovalCommand, ApprovalDecision, ApprovalRequest, ApprovalResolution, CommandDisposition,
         CommandEnvelope, DeviceEnrollmentChallenge, DeviceEnrollmentDecision,
-        DeviceEnrollmentReceipt, DeviceEnrollmentState, DevicePublicIdentity, EncryptedSyncEnvelope,
-        EventProvenance, EvidenceRetentionClass, OpaqueTypedPayload, ReplayRequest, ReviewDecision,
-        SchemaVersion, Scope, SyncAuthenticatedHeader, SyncReceipt, SyncReceiptState,
+        DeviceEnrollmentReceipt, DeviceEnrollmentState, DevicePublicIdentity,
+        EncryptedSyncEnvelope, EventProvenance, EvidenceRetentionClass, OpaqueTypedPayload,
+        ReplayRequest, ReviewDecision, SchemaVersion, Scope, SyncAuthenticatedHeader, SyncReceipt,
+        SyncReceiptState,
     };
     use tempfile::tempdir;
+
+    #[test]
+    fn workflow_schema_check_rejects_malformed_and_oversized_requests() {
+        assert_eq!(
+            workflow_schema_check_wire(b"not-json").unwrap_err(),
+            "malformed_workflow_schema_request"
+        );
+        let oversized = vec![b' '; workflow_schema::MAXIMUM_SCHEMA_CHECK_REQUEST_BYTES + 1];
+        assert_eq!(
+            workflow_schema_check_wire(&oversized).unwrap_err(),
+            "workflow_schema_request_out_of_bounds"
+        );
+    }
+
+    #[test]
+    fn workflow_schema_check_returns_structured_json() {
+        let response =
+            workflow_schema_check_wire(br#"{"schema":{"type":"string"},"instance":5}"#).unwrap();
+        let report: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(report["draft"], "2020-12");
+        assert_eq!(report["outcome"], "invalid_instance");
+        assert_eq!(report["diagnostics"][0]["instance_path"], "");
+    }
 
     #[test]
     fn append_event_wire_assigns_order_and_retries_idempotently() {
@@ -577,13 +614,17 @@ mod tests {
         };
         let wire = event.encode_to_vec();
 
-        let first: EventAppendReport = serde_json::from_str(&append_event_wire(path.to_str().unwrap(), &wire).unwrap()).unwrap();
+        let first: EventAppendReport =
+            serde_json::from_str(&append_event_wire(path.to_str().unwrap(), &wire).unwrap())
+                .unwrap();
         assert_eq!(first.event_id, "codex-run-001-1");
         assert_eq!(first.store_position, 1);
         assert_eq!(first.stream_sequence, 1);
         assert!(!first.duplicate);
 
-        let second: EventAppendReport = serde_json::from_str(&append_event_wire(path.to_str().unwrap(), &wire).unwrap()).unwrap();
+        let second: EventAppendReport =
+            serde_json::from_str(&append_event_wire(path.to_str().unwrap(), &wire).unwrap())
+                .unwrap();
         assert!(second.duplicate);
         assert_eq!(second.store_position, 1);
 
@@ -681,14 +722,16 @@ mod tests {
         .unwrap();
         assert_eq!(admitted.state, SyncReceiptState::Decrypted as i32);
         assert_eq!(admitted.sender_sequence, 1);
-        assert!(mobile_admit_wire(
-            path,
-            &envelope.encode_to_vec(),
-            "wrong-mac",
-            "mac-key-1",
-            now,
-        )
-        .is_err());
+        assert!(
+            mobile_admit_wire(
+                path,
+                &envelope.encode_to_vec(),
+                "wrong-mac",
+                "mac-key-1",
+                now,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -735,7 +778,9 @@ mod tests {
             current_target_revision: request.target_revision.clone(),
         };
         let receipt = v1::ApprovalCommandReceipt::decode(
-            hex::decode(authorize_action_wire(path, &command.encode_to_vec()).unwrap()).unwrap().as_slice(),
+            hex::decode(authorize_action_wire(path, &command.encode_to_vec()).unwrap())
+                .unwrap()
+                .as_slice(),
         )
         .unwrap();
         assert_eq!(receipt.decision, ApprovalDecision::Approve as i32);
@@ -768,7 +813,9 @@ mod tests {
             submitted_at_unix_millis: 3_000,
         };
         let outcome = v1::CommandOutcome::decode(
-            hex::decode(record_review_wire(path, &review.encode_to_vec()).unwrap()).unwrap().as_slice(),
+            hex::decode(record_review_wire(path, &review.encode_to_vec()).unwrap())
+                .unwrap()
+                .as_slice(),
         )
         .unwrap();
         assert_eq!(outcome.disposition, CommandDisposition::Accepted as i32);
@@ -780,7 +827,9 @@ mod tests {
             page_size: 20,
         };
         let response = v1::ReplayResponse::decode(
-            hex::decode(replay_wire(path, &replay.encode_to_vec()).unwrap()).unwrap().as_slice(),
+            hex::decode(replay_wire(path, &replay.encode_to_vec()).unwrap())
+                .unwrap()
+                .as_slice(),
         )
         .unwrap();
         assert_eq!(response.high_water_mark, 3);
