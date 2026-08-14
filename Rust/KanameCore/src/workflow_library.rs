@@ -10,15 +10,16 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
     fmt, fs,
-    fs::{File, OpenOptions},
+    fs::File,
     io,
-    io::Write,
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::MetadataExt;
+
+use crate::private_filesystem::{self, PrivateFilesystemError};
 
 pub(crate) fn is_workflow_identifier(value: &str, maximum: usize) -> bool {
     !value.is_empty()
@@ -497,66 +498,45 @@ pub(crate) fn prepare_database_path(path: &Path) -> Result<()> {
     protect_private_path(parent, PrivatePathKind::Directory)
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum PrivatePathKind {
-    File,
-    Directory,
-}
+pub(crate) use crate::private_filesystem::PrivatePathKind;
 
 pub(crate) fn protect_private_path(path: &Path, kind: PrivatePathKind) -> Result<()> {
-    let metadata = fs::symlink_metadata(path)?;
-    let expected_type = match kind {
-        PrivatePathKind::File => metadata.is_file(),
-        PrivatePathKind::Directory => metadata.is_dir(),
-    };
-    if metadata.file_type().is_symlink() || !expected_type {
-        return Err(WorkflowLibraryError::UnsafePath(
-            "private_path_type_mismatch",
-        ));
-    }
-    #[cfg(unix)]
-    fs::set_permissions(
-        path,
-        fs::Permissions::from_mode(match kind {
-            PrivatePathKind::File => 0o600,
-            PrivatePathKind::Directory => 0o700,
-        }),
-    )?;
-    Ok(())
+    private_filesystem::protect_path(path, kind).map_err(|error| match error {
+        PrivateFilesystemError::Io(error) => WorkflowLibraryError::Io(error),
+        _ => WorkflowLibraryError::UnsafePath("private_path_type_mismatch"),
+    })
 }
 
 pub(crate) fn ensure_private_directory(path: &Path) -> Result<()> {
-    fs::create_dir_all(path)?;
-    protect_private_path(path, PrivatePathKind::Directory)
+    private_filesystem::ensure_directory(path).map_err(workflow_private_filesystem_error)
 }
 
 pub(crate) fn write_new_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
-    let file = write_new_private_file_unflushed(path, bytes)?;
-    file.sync_all()?;
-    Ok(())
+    private_filesystem::write_new_file(path, bytes).map_err(workflow_private_filesystem_error)
 }
 
 pub(crate) fn write_new_private_file_unflushed(path: &Path, bytes: &[u8]) -> Result<File> {
-    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
-    file.write_all(bytes)?;
-    protect_private_path(path, PrivatePathKind::File)?;
-    Ok(file)
+    private_filesystem::write_new_file_unflushed(path, bytes)
+        .map_err(workflow_private_filesystem_error)
 }
 
 pub(crate) fn read_bounded_private_file(path: &Path, maximum: usize) -> Result<Vec<u8>> {
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() as usize > maximum
-    {
-        return Err(WorkflowLibraryError::Integrity(
-            "private_file_bounds".into(),
-        ));
-    }
-    Ok(fs::read(path)?)
+    private_filesystem::read_bounded_file(path, maximum as u64).map_err(|error| match error {
+        PrivateFilesystemError::Io(error) => WorkflowLibraryError::Io(error),
+        _ => WorkflowLibraryError::Integrity("private_file_bounds".into()),
+    })
 }
 
 pub(crate) fn sync_directory(path: &Path) -> Result<()> {
-    File::open(path)?.sync_all()?;
-    Ok(())
+    private_filesystem::sync_directory(path).map_err(workflow_private_filesystem_error)
+}
+
+fn workflow_private_filesystem_error(error: PrivateFilesystemError) -> WorkflowLibraryError {
+    match error {
+        PrivateFilesystemError::Io(error) => WorkflowLibraryError::Io(error),
+        PrivateFilesystemError::UnsafePath(code) => WorkflowLibraryError::UnsafePath(code),
+        PrivateFilesystemError::Bounds(code) => WorkflowLibraryError::Integrity(code.into()),
+    }
 }
 
 use rusqlite::OptionalExtension;
