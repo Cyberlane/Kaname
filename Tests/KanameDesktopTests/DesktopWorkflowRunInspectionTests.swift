@@ -51,6 +51,11 @@ struct DesktopWorkflowRunInspectionTests {
         #expect(run.waits.first?.decision == "resumed")
         #expect(run.waits.first?.revisionID == "revision-v2")
         #expect(run.waitSignals.first?.signalID == "signal-run-v2")
+        #expect(run.episode?.caseID == "case-kay-42")
+        #expect(run.episode?.ordinal == 2)
+        #expect(run.episode?.priorEpisodeID == "episode-run-v1")
+        #expect(run.episode?.inputs.first?.portID == "input")
+        #expect(run.episode?.compiledContext.id == "context-run-v2")
         #expect(run.events.map(\.storePosition) == [11, 12, 13, 14, 15])
     }
 }
@@ -286,6 +291,33 @@ private actor HistoricalRunTransport:
         projected.retries = [retry]
         projected.waits = [wait]
         projected.waitSignals = [waitSignal]
+        if id == "run-v2" {
+            var context = Kaname_V1_WorkflowProjectedValue()
+            context.valueID = "context-run-v2"
+            context.contentType = "application/json"
+            context.availability = "inline"
+            context.inlineCanonicalJson = Data(#"{"priorEpisodes":[{"episodeId":"episode-run-v1"}]}"#.utf8)
+            context.byteCount = UInt64(context.inlineCanonicalJson.count)
+            context.sha256 = String(repeating: "e", count: 64)
+            var input = Kaname_V1_WorkflowProjectedInputBinding()
+            input.portID = "input"
+            input.value = value
+            var episode = Kaname_V1_WorkflowProjectedCaseEpisode()
+            episode.installationID = "installation-kay"
+            episode.caseID = "case-kay-42"
+            episode.episodeID = "episode-run-v2"
+            episode.ordinal = 2
+            episode.kind = "correction"
+            episode.priorEpisodeID = "episode-run-v1"
+            episode.triggerKind = "email.received"
+            episode.triggerEventID = "email-correction"
+            episode.inputs = [input]
+            episode.compiledContext = context
+            episode.sourceEpisodeIds = ["episode-run-v1"]
+            episode.sourceEventIds = ["event-run-v1"]
+            episode.startedStorePosition = 11
+            projected.episode = episode
+        }
         projected.events = (11...15).map { position in
             var event = Kaname_V1_WorkflowProjectedEventReference()
             event.eventID = "event-\(id)-\(position)"

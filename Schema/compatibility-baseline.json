@@ -566,6 +566,9 @@
       "2": "string workflow_id",
       "21": "string installation_id",
       "22": "string case_id",
+      "23": "string episode_id",
+      "24": "string episode_kind",
+      "25": "string prior_episode_id",
       "3": "string revision_id",
       "4": "string package_digest",
       "5": "string trigger_kind",
@@ -600,6 +603,25 @@
       "4": "string node_id",
       "5": "uint32 attempt_number",
       "6": "string execution_token_id"
+    },
+    "workflow_runtime.WorkflowCaseEpisodeStarted": {
+      "1": "string run_id",
+      "10": "string revision_id",
+      "11": "string package_digest",
+      "12": "string trigger_kind",
+      "13": "string trigger_event_id",
+      "14": "WorkflowInputBinding inputs",
+      "15": "WorkflowValueReference compiled_context",
+      "16": "string source_episode_ids",
+      "17": "string source_event_ids",
+      "2": "string run_token_id",
+      "3": "string installation_id",
+      "4": "string case_id",
+      "5": "string episode_id",
+      "6": "uint32 ordinal",
+      "7": "string kind",
+      "8": "string prior_episode_id",
+      "9": "string workflow_id"
     },
     "workflow_runtime.WorkflowEdgeCheckpointed": {
       "1": "string run_id",
@@ -723,6 +745,21 @@
       "8": "int64 started_at_unix_millis",
       "9": "int64 settled_at_unix_millis"
     },
+    "workflow_runtime.WorkflowProjectedCaseEpisode": {
+      "1": "string installation_id",
+      "10": "WorkflowProjectedValue compiled_context",
+      "11": "string source_episode_ids",
+      "12": "string source_event_ids",
+      "13": "uint64 started_store_position",
+      "2": "string case_id",
+      "3": "string episode_id",
+      "4": "uint32 ordinal",
+      "5": "string kind",
+      "6": "string prior_episode_id",
+      "7": "string trigger_kind",
+      "8": "string trigger_event_id",
+      "9": "WorkflowProjectedInputBinding inputs"
+    },
     "workflow_runtime.WorkflowProjectedEdgeCheckpoint": {
       "1": "string event_id",
       "2": "string edge_id",
@@ -773,6 +810,10 @@
       "7": "string source_emission_id",
       "8": "string status",
       "9": "string outcome"
+    },
+    "workflow_runtime.WorkflowProjectedInputBinding": {
+      "1": "string port_id",
+      "2": "WorkflowProjectedValue value"
     },
     "workflow_runtime.WorkflowProjectedIteration": {
       "1": "string iteration_node_id",
@@ -871,6 +912,7 @@
       "28": "WorkflowProjectedWait waits",
       "29": "WorkflowProjectedWaitSignal wait_signals",
       "3": "string request_command_id",
+      "30": "WorkflowProjectedCaseEpisode episode",
       "4": "string workflow_id",
       "5": "string revision_id",
       "6": "string package_digest",

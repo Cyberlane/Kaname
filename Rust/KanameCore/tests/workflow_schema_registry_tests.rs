@@ -120,7 +120,7 @@ fn node(node_type: &str, config: Value) -> Value {
 fn every_schema_is_draft_2020_12_valid_and_resolves_offline() {
     let documents = schema_documents();
     assert!(
-        documents.len() == 53,
+        documents.len() == 54,
         "the registry unexpectedly lost schema contracts"
     );
     let mut ids = std::collections::BTreeSet::new();

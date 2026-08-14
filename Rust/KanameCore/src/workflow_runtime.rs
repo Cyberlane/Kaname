@@ -13,6 +13,7 @@ use std::collections::BTreeSet;
 pub const WORKFLOW_RUN_REQUEST_KIND: &str = "workflow.run.request";
 pub const WORKFLOW_RUN_CANCEL_KIND: &str = "workflow.run.cancel";
 pub const WORKFLOW_WAIT_SIGNAL_KIND: &str = "workflow.wait.signal";
+pub const WORKFLOW_CASE_EPISODE_STARTED_KIND: &str = "workflow.case.episode-started";
 pub const WORKFLOW_RUN_TOKEN_CREATED_KIND: &str = "workflow.run.token-created";
 pub const WORKFLOW_EXECUTION_TOKEN_CREATED_KIND: &str = "workflow.execution-token.created";
 pub const WORKFLOW_EXECUTION_TOKEN_SETTLED_KIND: &str = "workflow.execution-token.settled";
@@ -34,6 +35,7 @@ pub const WORKFLOW_RUN_SETTLED_KIND: &str = "workflow.run.settled";
 pub const WORKFLOW_RUN_REQUEST_TYPE: &str = "kaname.workflow.run-request.v1";
 pub const WORKFLOW_RUN_CANCEL_TYPE: &str = "kaname.workflow.run-cancel.v1";
 pub const WORKFLOW_WAIT_SIGNAL_TYPE: &str = "kaname.workflow.wait-signal.v1";
+pub const WORKFLOW_CASE_EPISODE_STARTED_TYPE: &str = "kaname.workflow.case-episode-started.v1";
 pub const WORKFLOW_RUN_TOKEN_CREATED_TYPE: &str = "kaname.workflow.run-token-created.v1";
 pub const WORKFLOW_EXECUTION_TOKEN_CREATED_TYPE: &str =
     "kaname.workflow.execution-token-created.v1";
@@ -81,6 +83,7 @@ pub enum WorkflowRuntimeCommand {
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub enum WorkflowRuntimeEvent {
+    CaseEpisodeStarted(v1::WorkflowCaseEpisodeStarted),
     RunTokenCreated(v1::WorkflowRunTokenCreated),
     ExecutionTokenCreated(v1::WorkflowExecutionTokenCreated),
     ExecutionTokenSettled(v1::WorkflowExecutionTokenSettled),
@@ -103,6 +106,7 @@ pub enum WorkflowRuntimeEvent {
 impl WorkflowRuntimeEvent {
     pub fn run_id(&self) -> &str {
         match self {
+            Self::CaseEpisodeStarted(payload) => &payload.run_id,
             Self::RunTokenCreated(payload) => &payload.run_id,
             Self::ExecutionTokenCreated(payload) => &payload.run_id,
             Self::ExecutionTokenSettled(payload) => &payload.run_id,
@@ -136,6 +140,7 @@ pub fn is_workflow_runtime_kind(kind: &str) -> bool {
         "workflow.iteration.",
         "workflow.retry.",
         "workflow.wait.",
+        "workflow.case.",
     ]
     .iter()
     .any(|prefix| kind.starts_with(prefix))
@@ -176,6 +181,13 @@ pub fn validate_workflow_event(event: &v1::EventEnvelope) -> Result<()> {
 
 pub fn decode_workflow_event(event: &v1::EventEnvelope) -> Result<WorkflowRuntimeEvent> {
     match event.kind.as_str() {
+        WORKFLOW_CASE_EPISODE_STARTED_KIND => {
+            let payload: v1::WorkflowCaseEpisodeStarted =
+                decode_payload(event.payload.as_ref(), WORKFLOW_CASE_EPISODE_STARTED_TYPE)?;
+            validate_case_episode_started(&payload)?;
+            validate_event_context(event, &payload.run_id)?;
+            Ok(WorkflowRuntimeEvent::CaseEpisodeStarted(payload))
+        }
         WORKFLOW_RUN_TOKEN_CREATED_KIND => {
             let payload: v1::WorkflowRunTokenCreated =
                 decode_payload(event.payload.as_ref(), WORKFLOW_RUN_TOKEN_CREATED_TYPE)?;
@@ -352,6 +364,23 @@ fn validate_run_request(request: &v1::RequestWorkflowRun) -> Result<()> {
     if !request.case_id.is_empty() {
         validate_identifier(&request.case_id, 128, "case_id")?;
     }
+    let has_episode = !request.episode_id.is_empty()
+        || !request.episode_kind.is_empty()
+        || !request.prior_episode_id.is_empty();
+    if has_episode {
+        if request.installation_id.is_empty() || request.case_id.is_empty() {
+            return invalid("episode_owner");
+        }
+        validate_identifier(&request.episode_id, 128, "episode_id")?;
+        validate_episode_kind(&request.episode_kind)?;
+        if request.episode_kind == "initial" {
+            if !request.prior_episode_id.is_empty() {
+                return invalid("initial_episode_prior");
+            }
+        } else {
+            validate_identifier(&request.prior_episode_id, 128, "prior_episode_id")?;
+        }
+    }
     if request.inputs.len() > MAXIMUM_PORT_BINDINGS {
         return invalid("input_count");
     }
@@ -364,6 +393,64 @@ fn validate_run_request(request: &v1::RequestWorkflowRun) -> Result<()> {
         validate_value(input.value.as_ref())?;
     }
     Ok(())
+}
+
+fn validate_case_episode_started(payload: &v1::WorkflowCaseEpisodeStarted) -> Result<()> {
+    validate_run_and_token(&payload.run_id, &payload.run_token_id)?;
+    for (value, code) in [
+        (&payload.installation_id, "installation_id"),
+        (&payload.case_id, "case_id"),
+        (&payload.episode_id, "episode_id"),
+        (&payload.workflow_id, "workflow_id"),
+        (&payload.revision_id, "revision_id"),
+        (&payload.trigger_kind, "trigger_kind"),
+    ] {
+        validate_identifier(value, 128, code)?;
+    }
+    if payload.ordinal == 0 {
+        return invalid("episode_ordinal");
+    }
+    validate_episode_kind(&payload.kind)?;
+    if payload.kind == "initial" {
+        if !payload.prior_episode_id.is_empty() || payload.ordinal != 1 {
+            return invalid("initial_episode_contract");
+        }
+    } else {
+        validate_identifier(&payload.prior_episode_id, 128, "prior_episode_id")?;
+        if payload.ordinal == 1 {
+            return invalid("related_episode_ordinal");
+        }
+    }
+    validate_digest(&payload.package_digest, "package_digest")?;
+    if !payload.trigger_event_id.is_empty() {
+        validate_identifier(&payload.trigger_event_id, 128, "trigger_event_id")?;
+    }
+    if payload.inputs.is_empty() || payload.inputs.len() > MAXIMUM_PORT_BINDINGS {
+        return invalid("episode_input_count");
+    }
+    let mut ports = BTreeSet::new();
+    for input in &payload.inputs {
+        validate_identifier(&input.port_id, 128, "input_port_id")?;
+        if !ports.insert(input.port_id.as_str()) {
+            return invalid("duplicate_input_port");
+        }
+        validate_value(input.value.as_ref())?;
+    }
+    validate_value(payload.compiled_context.as_ref())?;
+    validate_identifier_list(&payload.source_episode_ids, 64, "source_episode_id")?;
+    validate_identifier_list(&payload.source_event_ids, 512, "source_event_id")?;
+    if payload.source_episode_ids.len() + 1 != payload.ordinal as usize {
+        return invalid("episode_source_count");
+    }
+    Ok(())
+}
+
+fn validate_episode_kind(kind: &str) -> Result<()> {
+    if matches!(kind, "initial" | "delivery" | "correction" | "redelivery") {
+        Ok(())
+    } else {
+        invalid("episode_kind")
+    }
 }
 
 fn validate_cancel_request(request: &v1::CancelWorkflowRun) -> Result<()> {

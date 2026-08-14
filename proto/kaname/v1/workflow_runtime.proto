@@ -53,7 +53,10 @@ message RequestWorkflowRun {
   reserved 8 to 20;
   string installation_id = 21;
   string case_id = 22;
-  reserved 23 to 30;
+  string episode_id = 23;
+  string episode_kind = 24;
+  string prior_episode_id = 25;
+  reserved 26 to 30;
   reserved "workflow_path", "database_path", "credential";
 }
 
@@ -92,6 +95,30 @@ message WorkflowRunTokenCreated {
   string revision_id = 5;
   string package_digest = 6;
   reserved 7 to 20;
+}
+
+// The immutable boundary between a durable case and one version-pinned run.
+// Context is compiled from earlier settled episodes in journal order; it is
+// never process-local conversation state and never mutates an earlier run.
+message WorkflowCaseEpisodeStarted {
+  string run_id = 1;
+  string run_token_id = 2;
+  string installation_id = 3;
+  string case_id = 4;
+  string episode_id = 5;
+  uint32 ordinal = 6;
+  string kind = 7;
+  string prior_episode_id = 8;
+  string workflow_id = 9;
+  string revision_id = 10;
+  string package_digest = 11;
+  string trigger_kind = 12;
+  string trigger_event_id = 13;
+  repeated WorkflowInputBinding inputs = 14;
+  WorkflowValueReference compiled_context = 15;
+  repeated string source_episode_ids = 16;
+  repeated string source_event_ids = 17;
+  reserved 18 to 30;
 }
 
 // One durable path through the graph. The run token pins the immutable run;
@@ -592,6 +619,29 @@ message WorkflowProjectedWaitSignal {
   reserved 10 to 20;
 }
 
+message WorkflowProjectedInputBinding {
+  string port_id = 1;
+  WorkflowProjectedValue value = 2;
+  reserved 3 to 10;
+}
+
+message WorkflowProjectedCaseEpisode {
+  string installation_id = 1;
+  string case_id = 2;
+  string episode_id = 3;
+  uint32 ordinal = 4;
+  string kind = 5;
+  string prior_episode_id = 6;
+  string trigger_kind = 7;
+  string trigger_event_id = 8;
+  repeated WorkflowProjectedInputBinding inputs = 9;
+  WorkflowProjectedValue compiled_context = 10;
+  repeated string source_episode_ids = 11;
+  repeated string source_event_ids = 12;
+  uint64 started_store_position = 13;
+  reserved 14 to 25;
+}
+
 message WorkflowProjectedMatchTrace {
   string event_id = 1;
   string attempt_id = 2;
@@ -645,7 +695,8 @@ message WorkflowProjectedRun {
   repeated WorkflowProjectedRetryEvaluation retries = 27;
   repeated WorkflowProjectedWait waits = 28;
   repeated WorkflowProjectedWaitSignal wait_signals = 29;
-  reserved 30 to 35;
+  WorkflowProjectedCaseEpisode episode = 30;
+  reserved 31 to 35;
 }
 
 message WorkflowRunInspectionResponse {

@@ -34,6 +34,8 @@ use std::{
 
 const MAXIMUM_EXECUTOR_TRANSITIONS: usize = 1_024;
 const RUN_REPLAY_PAGE: u32 = 500;
+const CASE_HISTORY_PAGE: u32 = 500;
+const MAXIMUM_CASE_EPISODES: usize = 64;
 const MAXIMUM_INLINE_STORAGE_SUMMARY_BYTES: usize = 60 * 1024;
 
 #[derive(Debug)]
@@ -236,6 +238,7 @@ struct ExecutionPackage {
 #[derive(Default)]
 struct RecordedRun {
     events: Vec<v1::EventEnvelope>,
+    episode: Option<v1::WorkflowCaseEpisodeStarted>,
     token: Option<v1::WorkflowRunTokenCreated>,
     execution_tokens: BTreeMap<String, RecordedExecutionToken>,
     joins: Vec<RecordedJoin>,
@@ -309,6 +312,14 @@ struct RecordedEdge {
     event_id: String,
     store_position: u64,
     payload: v1::WorkflowEdgeCheckpointed,
+}
+
+struct HistoricalCaseEpisode {
+    event_id: String,
+    store_position: u64,
+    started: v1::WorkflowCaseEpisodeStarted,
+    emissions: BTreeMap<String, (String, v1::WorkflowPortEmitted)>,
+    settled: Option<(String, v1::WorkflowRunSettled)>,
 }
 
 struct NodeExecution {
@@ -442,8 +453,16 @@ fn execute_internal(
     };
     let package = load_execution_package(library, &request)?;
     validate_storage_authority(&package, &request, storage.is_some(), authority)?;
-    journal.admit_command(command)?;
     let token_id = stable_id("token", &[&request.run_id, &command.command_id]);
+    let initial_state = recorded_run(journal, &request.run_id)?;
+    let prepared_episode = if !request.episode_id.is_empty() && initial_state.episode.is_none() {
+        Some(compile_case_episode_event(
+            journal, command, &request, &token_id,
+        )?)
+    } else {
+        None
+    };
+    journal.admit_command(command)?;
     let mut appended = 0;
 
     for _ in 0..MAXIMUM_EXECUTOR_TRANSITIONS {
@@ -466,6 +485,7 @@ fn execute_internal(
             &token_id,
             &state,
             now_unix_millis,
+            prepared_episode.as_ref(),
         ) {
             Ok(events) => events,
             Err(WorkflowExecutionError::WaitingUntil(deadline)) => {
@@ -664,6 +684,16 @@ fn load_execution_package(
         && request.case_id.is_empty()
     {
         return Err(WorkflowExecutionError::InvalidCommand("case_id_required"));
+    }
+    if compiled
+        .nodes
+        .iter()
+        .any(|node| node.node_type == "data.case-context")
+        && request.episode_id.is_empty()
+    {
+        return Err(WorkflowExecutionError::InvalidCommand(
+            "case_episode_required",
+        ));
     }
     let bundle: RuntimeSchemaBundle = serde_json::from_slice(&revision.schema_bundle_source)
         .map_err(|_| WorkflowExecutionError::Unsupported("schema_bundle_contract".into()))?;
@@ -878,6 +908,7 @@ fn validate_compiled_subset(compiled: &CompiledWorkflow) -> Result<()> {
                 node.node_type.as_str(),
                 "trigger.manual"
                     | "data.validate"
+                    | "data.case-context"
                     | "control.match"
                     | "control.parallel"
                     | "control.join"
@@ -916,6 +947,337 @@ fn validate_compiled_subset(compiled: &CompiledWorkflow) -> Result<()> {
     Ok(())
 }
 
+fn compile_case_episode_event(
+    journal: &Journal,
+    command: &v1::CommandEnvelope,
+    request: &v1::RequestWorkflowRun,
+    run_token_id: &str,
+) -> Result<v1::EventEnvelope> {
+    let history = load_case_history(journal, request)?;
+    if history.len() >= MAXIMUM_CASE_EPISODES {
+        return Err(WorkflowExecutionError::Lifecycle(
+            "case_episode_limit".into(),
+        ));
+    }
+    let prior = history.last();
+    match prior {
+        None if request.episode_kind != "initial" || !request.prior_episode_id.is_empty() => {
+            return Err(WorkflowExecutionError::Lifecycle(
+                "case_initial_episode_required".into(),
+            ));
+        }
+        Some(_) if request.episode_kind == "initial" => {
+            return Err(WorkflowExecutionError::Lifecycle(
+                "case_initial_episode_exists".into(),
+            ));
+        }
+        Some(previous) if request.prior_episode_id != previous.started.episode_id => {
+            return Err(WorkflowExecutionError::Lifecycle(
+                "case_prior_episode_mismatch".into(),
+            ));
+        }
+        Some(previous) if previous.settled.is_none() => {
+            return Err(WorkflowExecutionError::Lifecycle(
+                "case_prior_episode_not_settled".into(),
+            ));
+        }
+        _ => {}
+    }
+    if history
+        .iter()
+        .any(|episode| episode.started.episode_id == request.episode_id)
+    {
+        return Err(WorkflowExecutionError::Lifecycle(
+            "case_episode_identity_reused".into(),
+        ));
+    }
+
+    let source_episode_ids = history
+        .iter()
+        .map(|episode| episode.started.episode_id.clone())
+        .collect::<Vec<_>>();
+    let source_event_ids = history
+        .iter()
+        .flat_map(|episode| {
+            let mut ids = vec![episode.event_id.clone()];
+            ids.extend(
+                episode
+                    .emissions
+                    .values()
+                    .map(|(event_id, _)| event_id.clone()),
+            );
+            if let Some((event_id, _)) = &episode.settled {
+                ids.push(event_id.clone());
+            }
+            ids
+        })
+        .collect::<Vec<_>>();
+    let context = json!({
+        "caseId": request.case_id,
+        "installationId": request.installation_id,
+        "workflowId": request.workflow_id,
+        "currentEpisode": {
+            "episodeId": request.episode_id,
+            "kind": request.episode_kind,
+            "ordinal": history.len() + 1,
+            "priorEpisodeId": request.prior_episode_id,
+            "triggerKind": request.trigger_kind,
+            "triggerEventId": request.trigger_event_id,
+            "inputs": context_inputs(&request.inputs)?
+        },
+        "priorEpisodes": history
+            .iter()
+            .map(context_episode)
+            .collect::<Result<Vec<_>>>()?,
+        "sourceEpisodeIds": source_episode_ids,
+        "sourceEventIds": source_event_ids
+    });
+    let compiled_context = value_from_json(
+        &stable_id(
+            "value",
+            &[&request.run_id, &request.episode_id, "case-context"],
+        ),
+        &context,
+    )?;
+    let payload = v1::WorkflowCaseEpisodeStarted {
+        run_id: request.run_id.clone(),
+        run_token_id: run_token_id.to_owned(),
+        installation_id: request.installation_id.clone(),
+        case_id: request.case_id.clone(),
+        episode_id: request.episode_id.clone(),
+        ordinal: (history.len() + 1) as u32,
+        kind: request.episode_kind.clone(),
+        prior_episode_id: request.prior_episode_id.clone(),
+        workflow_id: request.workflow_id.clone(),
+        revision_id: request.revision_id.clone(),
+        package_digest: request.package_digest.clone(),
+        trigger_kind: request.trigger_kind.clone(),
+        trigger_event_id: request.trigger_event_id.clone(),
+        inputs: request.inputs.clone(),
+        compiled_context: Some(compiled_context),
+        source_episode_ids,
+        source_event_ids,
+    };
+    Ok(runtime_event(
+        command.submitted_at_unix_millis,
+        &stable_id(
+            "event",
+            &[&request.run_id, "case-episode", &request.episode_id],
+        ),
+        workflow_runtime::WORKFLOW_CASE_EPISODE_STARTED_KIND,
+        workflow_runtime::WORKFLOW_CASE_EPISODE_STARTED_TYPE,
+        payload,
+        &command.command_id,
+        &request.run_id,
+    ))
+}
+
+fn load_case_history(
+    journal: &Journal,
+    request: &v1::RequestWorkflowRun,
+) -> Result<Vec<HistoricalCaseEpisode>> {
+    let mut by_run = BTreeMap::<String, HistoricalCaseEpisode>::new();
+    let mut after = 0;
+    loop {
+        let page = journal.event_page_after(after, CASE_HISTORY_PAGE)?;
+        for envelope in page.events {
+            match workflow_runtime::decode_workflow_event(&envelope) {
+                Ok(WorkflowRuntimeEvent::CaseEpisodeStarted(payload))
+                    if payload.installation_id == request.installation_id
+                        && payload.case_id == request.case_id =>
+                {
+                    if payload.workflow_id != request.workflow_id {
+                        return Err(WorkflowExecutionError::Integrity(
+                            "case_workflow_mismatch".into(),
+                        ));
+                    }
+                    if by_run
+                        .insert(
+                            payload.run_id.clone(),
+                            HistoricalCaseEpisode {
+                                event_id: envelope.event_id,
+                                store_position: envelope.store_position,
+                                started: payload,
+                                emissions: BTreeMap::new(),
+                                settled: None,
+                            },
+                        )
+                        .is_some()
+                    {
+                        return Err(WorkflowExecutionError::Integrity(
+                            "case_episode_run_duplicate".into(),
+                        ));
+                    }
+                }
+                Ok(WorkflowRuntimeEvent::PortEmitted(payload)) => {
+                    if let Some(episode) = by_run.get_mut(&payload.run_id) {
+                        episode
+                            .emissions
+                            .insert(payload.emission_id.clone(), (envelope.event_id, payload));
+                    }
+                }
+                Ok(WorkflowRuntimeEvent::RunSettled(payload)) => {
+                    if let Some(episode) = by_run.get_mut(&payload.run_id)
+                        && episode
+                            .settled
+                            .replace((envelope.event_id, payload))
+                            .is_some()
+                    {
+                        return Err(WorkflowExecutionError::Integrity(
+                            "case_episode_settled_twice".into(),
+                        ));
+                    }
+                }
+                Ok(_) | Err(workflow_runtime::WorkflowRuntimeContractError::UnsupportedKind) => {}
+                Err(_) => {
+                    return Err(WorkflowExecutionError::Integrity(
+                        "case_history_event_contract".into(),
+                    ));
+                }
+            }
+        }
+        after = page.next_store_position;
+        if !page.has_more {
+            break;
+        }
+    }
+    let mut history = by_run.into_values().collect::<Vec<_>>();
+    history.sort_by_key(|episode| (episode.started.ordinal, episode.store_position));
+    if history.len() > MAXIMUM_CASE_EPISODES {
+        return Err(WorkflowExecutionError::Lifecycle(
+            "case_episode_limit".into(),
+        ));
+    }
+    for (index, episode) in history.iter().enumerate() {
+        if episode.started.ordinal != (index + 1) as u32
+            || (index == 0
+                && (episode.started.kind != "initial"
+                    || !episode.started.prior_episode_id.is_empty()))
+            || (index > 0
+                && episode.started.prior_episode_id != history[index - 1].started.episode_id)
+        {
+            return Err(WorkflowExecutionError::Integrity(
+                "case_episode_chain".into(),
+            ));
+        }
+    }
+    Ok(history)
+}
+
+fn context_inputs(inputs: &[v1::WorkflowInputBinding]) -> Result<Vec<Value>> {
+    inputs
+        .iter()
+        .map(|input| {
+            Ok(json!({
+                "portId": input.port_id,
+                "value": context_value(input.value.as_ref().ok_or_else(|| {
+                    WorkflowExecutionError::Integrity("case_input_value_missing".into())
+                })?)?
+            }))
+        })
+        .collect()
+}
+
+fn context_episode(episode: &HistoricalCaseEpisode) -> Result<Value> {
+    let (settled_event_id, settled) = episode.settled.as_ref().ok_or_else(|| {
+        WorkflowExecutionError::Lifecycle("case_prior_episode_not_settled".into())
+    })?;
+    let outputs = episode
+        .emissions
+        .values()
+        .map(|(_, emission)| {
+            Ok(json!({
+                "emissionId": emission.emission_id,
+                "nodeId": emission.node_id,
+                "portId": emission.port_id,
+                "value": context_value(emission.value.as_ref().ok_or_else(|| {
+                    WorkflowExecutionError::Integrity("case_output_value_missing".into())
+                })?)?
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(json!({
+        "episodeId": episode.started.episode_id,
+        "ordinal": episode.started.ordinal,
+        "kind": episode.started.kind,
+        "priorEpisodeId": episode.started.prior_episode_id,
+        "runId": episode.started.run_id,
+        "workflowId": episode.started.workflow_id,
+        "revisionId": episode.started.revision_id,
+        "packageDigest": episode.started.package_digest,
+        "triggerKind": episode.started.trigger_kind,
+        "triggerEventId": episode.started.trigger_event_id,
+        "inputs": context_inputs(&episode.started.inputs)?,
+        "outcome": run_outcome_name(settled.outcome)?,
+        "finalEmissionIds": settled.final_emission_ids,
+        "outputs": outputs,
+        "source": {
+            "episodeEventId": episode.event_id,
+            "settledEventId": settled_event_id,
+            "startedStorePosition": episode.store_position
+        }
+    }))
+}
+
+fn context_value(value: &v1::WorkflowValueReference) -> Result<Value> {
+    let inline = if value.inline_canonical_json.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&value.inline_canonical_json)
+            .map_err(|_| WorkflowExecutionError::Integrity("case_context_inline_json".into()))?
+    };
+    let storage = value.storage.as_ref().map(|metadata| {
+        json!({
+            "handleId": metadata.handle_id,
+            "scope": metadata.scope,
+            "logicalKey": metadata.logical_key,
+            "versionId": metadata.version_id,
+            "revision": metadata.revision,
+            "previousVersionId": metadata.previous_version_id,
+            "sourceVersionId": metadata.source_version_id,
+            "result": metadata.result
+        })
+    });
+    Ok(json!({
+        "valueId": value.value_id,
+        "contentType": value.content_type,
+        "byteCount": value.byte_count,
+        "sha256": value.sha256,
+        "inline": inline,
+        "storageReferenceId": value.storage_reference_id,
+        "storage": storage
+    }))
+}
+
+fn validate_recorded_episode(
+    request: &v1::RequestWorkflowRun,
+    run_token_id: &str,
+    episode: &v1::WorkflowCaseEpisodeStarted,
+) -> Result<()> {
+    if request.episode_id.is_empty()
+        || episode.run_id != request.run_id
+        || episode.run_token_id != run_token_id
+        || episode.installation_id != request.installation_id
+        || episode.case_id != request.case_id
+        || episode.episode_id != request.episode_id
+        || episode.kind != request.episode_kind
+        || episode.prior_episode_id != request.prior_episode_id
+        || episode.workflow_id != request.workflow_id
+        || episode.revision_id != request.revision_id
+        || episode.package_digest != request.package_digest
+        || episode.trigger_kind != request.trigger_kind
+        || episode.trigger_event_id != request.trigger_event_id
+        || episode.inputs != request.inputs
+        || episode.compiled_context.is_none()
+    {
+        return Err(WorkflowExecutionError::Integrity(
+            "recorded_episode_pin_mismatch".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn next_events(
     package: &ExecutionPackage,
     storage: Option<&mut WorkflowScopedStorage>,
@@ -924,6 +1286,7 @@ fn next_events(
     token_id: &str,
     state: &RecordedRun,
     now_unix_millis: i64,
+    prepared_episode: Option<&v1::EventEnvelope>,
 ) -> Result<Vec<v1::EventEnvelope>> {
     if state.token.is_none() {
         return Ok(vec![runtime_event(
@@ -942,6 +1305,15 @@ fn next_events(
             &command.command_id,
             &request.run_id,
         )]);
+    }
+    if !request.episode_id.is_empty() && state.episode.is_none() {
+        return prepared_episode
+            .cloned()
+            .map(|event| vec![event])
+            .ok_or_else(|| WorkflowExecutionError::Integrity("prepared_episode_missing".into()));
+    }
+    if let Some(episode) = state.episode.as_ref() {
+        validate_recorded_episode(request, token_id, episode)?;
     }
     let token = state.token.as_ref().unwrap();
     if token.run_token_id != token_id
@@ -1238,6 +1610,7 @@ fn node_event_sequence(
                 package,
                 storage,
                 request,
+                state.episode.as_ref(),
                 node,
                 &attempt.started.attempt_id,
                 command.submitted_at_unix_millis,
@@ -2334,10 +2707,12 @@ fn single_outgoing_edge<'a>(
     Ok(edges[0])
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_node(
     package: &ExecutionPackage,
     storage: Option<&mut WorkflowScopedStorage>,
     request: &v1::RequestWorkflowRun,
+    episode: Option<&v1::WorkflowCaseEpisodeStarted>,
     node: &CompiledNode,
     attempt_id: &str,
     occurred_at_unix_millis: i64,
@@ -2345,6 +2720,14 @@ fn execute_node(
 ) -> Result<NodeExecution> {
     match node.node_type.as_str() {
         "trigger.manual" => Ok(success_output("success", input.clone())),
+        "data.case-context" => {
+            let context = episode
+                .and_then(|episode| episode.compiled_context.clone())
+                .ok_or(WorkflowExecutionError::InvalidCommand(
+                    "case_episode_required",
+                ))?;
+            Ok(success_output("success", context))
+        }
         "data.validate" => {
             let instance = inline_json(input)?;
             let schema_ref = node
@@ -4290,6 +4673,13 @@ fn recorded_run(journal: &Journal, run_id: &str) -> Result<RecordedRun> {
             ));
         }
         match event {
+            WorkflowRuntimeEvent::CaseEpisodeStarted(payload) => {
+                if state.episode.replace(payload).is_some() {
+                    return Err(WorkflowExecutionError::Lifecycle(
+                        "duplicate_case_episode".into(),
+                    ));
+                }
+            }
             WorkflowRuntimeEvent::RunTokenCreated(payload) => {
                 if state.token.replace(payload).is_some() {
                     return Err(WorkflowExecutionError::Lifecycle(
@@ -4765,6 +5155,19 @@ fn durable_outcome(value: i32) -> Result<DurableRunOutcome> {
         _ => Err(WorkflowExecutionError::Integrity(
             "run_outcome_invalid".into(),
         )),
+    }
+}
+
+fn run_outcome_name(value: i32) -> Result<&'static str> {
+    match v1::WorkflowRunOutcome::try_from(value)
+        .map_err(|_| WorkflowExecutionError::Integrity("run_outcome".into()))?
+    {
+        v1::WorkflowRunOutcome::Succeeded => Ok("succeeded"),
+        v1::WorkflowRunOutcome::Failed => Ok("failed"),
+        v1::WorkflowRunOutcome::Cancelled => Ok("cancelled"),
+        v1::WorkflowRunOutcome::Unspecified => {
+            Err(WorkflowExecutionError::Integrity("run_outcome".into()))
+        }
     }
 }
 

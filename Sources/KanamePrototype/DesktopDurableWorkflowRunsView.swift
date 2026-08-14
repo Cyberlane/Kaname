@@ -49,6 +49,7 @@ struct DesktopDurableWorkflowRunsView: View {
         case storage = "Storage"
         case tokens = "Tokens"
         case control = "Control flow"
+        case caseContext = "Case context"
         case configuration = "Configuration"
         case matchTrace = "Match trace"
         case timing = "Timing"
@@ -252,7 +253,9 @@ struct DesktopDurableWorkflowRunsView: View {
                             selectedNodeID = node.id
                             inspectorGroup = node.type.hasPrefix("storage.")
                                 ? .storage
+                                : (node.type == "data.case-context" ? .caseContext
                                 : (run.attempt(for: node.id)?.errorCode == nil ? .inputs : .error)
+                                )
                         } label: {
                             VStack(alignment: .leading, spacing: 5) {
                                 HStack {
@@ -424,6 +427,8 @@ struct DesktopDurableWorkflowRunsView: View {
                     }
                 }
             }
+        case .caseContext:
+            caseContextInspector(run.episode)
         case .configuration:
             codeBlock(String(decoding: node.configurationJSON, as: UTF8.self))
         case .matchTrace:
@@ -455,6 +460,40 @@ struct DesktopDurableWorkflowRunsView: View {
                     }
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private func caseContextInspector(_ episode: DesktopWorkflowProjectedCaseEpisode?) -> some View {
+        if let episode {
+            let sourceSummary = "Sources " + String(episode.sourceEpisodeIDs.count)
+                + " episodes · " + String(episode.sourceEventIDs.count) + " journal facts"
+            let detail = [
+                "Case " + episode.caseID,
+                "Episode " + episode.episodeID,
+                "Prior " + (episode.priorEpisodeID ?? "none"),
+                "Trigger " + episode.triggerKind + " · " + (episode.triggerEventID ?? "no native event"),
+                sourceSummary,
+                "Journal " + String(episode.startedStorePosition),
+            ].joined(separator: "\n")
+            VStack(alignment: .leading, spacing: 7) {
+                evidenceCard(
+                    title: "Episode " + String(episode.ordinal) + " · " + episode.kind.capitalized,
+                    detail: detail
+                )
+                ForEach(Array(episode.inputs.enumerated()), id: \.offset) { _, input in
+                    evidenceCard(
+                        title: "Current input · " + input.portID,
+                        detail: valueText(input.value)
+                    )
+                }
+                evidenceCard(
+                    title: "Compiled context · " + String(episode.compiledContext.byteCount) + " bytes",
+                    detail: valueText(episode.compiledContext)
+                )
+            }
+        } else {
+            explainedEmpty("This run is not attached to a durable case episode.")
         }
     }
 

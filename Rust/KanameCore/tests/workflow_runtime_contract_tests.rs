@@ -551,6 +551,9 @@ fn request_command(command_id: &str, idempotency_key: &str) -> CommandEnvelope {
         }],
         installation_id: String::new(),
         case_id: String::new(),
+        episode_id: String::new(),
+        episode_kind: String::new(),
+        prior_episode_id: String::new(),
     };
     command_envelope(
         command_id,

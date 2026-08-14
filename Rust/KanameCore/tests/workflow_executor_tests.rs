@@ -50,6 +50,8 @@ const RETRY_WORKFLOW_ID: &str = "018f5c00-0001-7000-8000-000000000001";
 const RETRY_REVISION_ID: &str = "revision-retry-001";
 const WAIT_WORKFLOW_ID: &str = "018f6000-0001-7000-8000-000000000001";
 const WAIT_REVISION_ID: &str = "revision-wait-001";
+const CASE_WORKFLOW_ID: &str = "018f6300-0001-7000-8000-000000000001";
+const CASE_REVISION_ID: &str = "revision-case-001";
 
 #[test]
 fn bounded_iteration_limits_concurrency_collects_failures_and_is_crash_exact() {
@@ -453,6 +455,288 @@ fn reply_wait_expiry_and_cancellation_are_durable_terminal_decisions() {
             .unwrap();
         assert_eq!(run.waits[0].decision, expected_decision);
         assert_ne!(run.waits[0].resolved_store_position, 0);
+    }
+}
+
+#[test]
+fn related_case_episodes_compile_prior_context_without_mutating_history() {
+    let directory = tempdir().unwrap();
+    let (library, published) = published_case_library(directory.path());
+    let journal_path = directory.path().join("case-runtime.sqlite");
+    let initial = case_run_command(
+        "run-case-initial-001",
+        &published,
+        "episode-initial-001",
+        "initial",
+        "",
+        "email-initial-001",
+        json!({
+            "message": "Create the first attachment",
+            "threadId": "thread-kay-42",
+            "changes": []
+        }),
+    );
+    let initial_context = {
+        let mut journal = Journal::open(&journal_path, &CURSOR_KEY).unwrap();
+        assert_eq!(
+            workflow_executor::execute(&mut journal, &library, &initial)
+                .unwrap()
+                .outcome,
+            DurableRunOutcome::Succeeded
+        );
+        let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+        projection.catch_up(&journal).unwrap();
+        assert_eq!(projection.row_count("cases").unwrap(), 1);
+        assert_eq!(projection.row_count("episodes").unwrap(), 1);
+        let run = projection
+            .inspect_runs(None, Some("run-case-initial-001"), 1)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let episode = run.episode.unwrap();
+        assert_eq!(episode.ordinal, 1);
+        assert_eq!(episode.kind, "initial");
+        assert!(episode.source_episode_ids.is_empty());
+        let context = episode.compiled_context.unwrap().inline_canonical_json;
+        let decoded: Value = serde_json::from_slice(&context).unwrap();
+        assert_eq!(decoded["priorEpisodes"], json!([]));
+        context
+    };
+
+    let correction = case_run_command(
+        "run-case-correction-001",
+        &published,
+        "episode-correction-001",
+        "correction",
+        "episode-initial-001",
+        "email-correction-001",
+        json!({
+            "message": "Use DOCX rather than PDF",
+            "threadId": "thread-kay-42",
+            "changes": [{"path": "/format", "from": "PDF", "to": "DOCX"}]
+        }),
+    );
+    let mut journal = Journal::open(&journal_path, &CURSOR_KEY).unwrap();
+    assert_eq!(
+        workflow_executor::execute(&mut journal, &library, &correction)
+            .unwrap()
+            .outcome,
+        DurableRunOutcome::Succeeded
+    );
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    projection.catch_up(&journal).unwrap();
+    assert_eq!(projection.row_count("cases").unwrap(), 1);
+    assert_eq!(projection.row_count("episodes").unwrap(), 2);
+    let original = projection
+        .inspect_runs(None, Some("run-case-initial-001"), 1)
+        .unwrap()
+        .pop()
+        .unwrap()
+        .episode
+        .unwrap();
+    assert_eq!(
+        original.compiled_context.unwrap().inline_canonical_json,
+        initial_context
+    );
+    let related = projection
+        .inspect_runs(None, Some("run-case-correction-001"), 1)
+        .unwrap()
+        .pop()
+        .unwrap()
+        .episode
+        .unwrap();
+    assert_eq!(related.ordinal, 2);
+    assert_eq!(related.prior_episode_id, "episode-initial-001");
+    assert_eq!(related.source_episode_ids, ["episode-initial-001"]);
+    let context: Value =
+        serde_json::from_slice(&related.compiled_context.unwrap().inline_canonical_json).unwrap();
+    assert_eq!(
+        context["priorEpisodes"][0]["inputs"][0]["value"]["inline"]["message"],
+        "Create the first attachment"
+    );
+    assert_eq!(context["priorEpisodes"][0]["revisionId"], CASE_REVISION_ID);
+    assert_eq!(
+        context["currentEpisode"]["inputs"][0]["value"]["inline"]["changes"][0]["to"],
+        "DOCX"
+    );
+    assert!(
+        !context["priorEpisodes"][0]["outputs"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    let stale = case_run_command(
+        "run-case-stale-001",
+        &published,
+        "episode-stale-001",
+        "correction",
+        "episode-initial-001",
+        "email-stale-001",
+        json!({"message": "stale correction"}),
+    );
+    assert!(matches!(
+        workflow_executor::execute(&mut journal, &library, &stale),
+        Err(WorkflowExecutionError::Lifecycle(code)) if code == "case_prior_episode_mismatch"
+    ));
+    assert!(run_wires(&journal, "run-case-stale-001").is_empty());
+}
+
+#[test]
+fn synthetic_email_reply_wait_starts_a_correction_run_with_prior_attachment_context() {
+    let directory = tempdir().unwrap();
+    let (library, published) = published_wait_library(directory.path(), "reply");
+    let journal_path = directory.path().join("feedback-case.sqlite");
+    let initial = case_wait_run_command(
+        "run-feedback-initial",
+        &published,
+        "episode-feedback-initial",
+        "initial",
+        "",
+        "email-feedback-initial",
+        json!({
+            "caseId": "case-feedback-42",
+            "intent": "initial",
+            "message": "Create the monthly attachment"
+        }),
+    );
+    let mut journal = Journal::open(&journal_path, &CURSOR_KEY).unwrap();
+    assert_eq!(
+        workflow_executor::execute_at_unix_millis(
+            &mut journal,
+            &library,
+            &initial,
+            initial.submitted_at_unix_millis,
+        )
+        .unwrap()
+        .outcome,
+        DurableRunOutcome::Waiting
+    );
+    drop(journal);
+
+    let mut journal = Journal::open(&journal_path, &CURSOR_KEY).unwrap();
+    let delivery = case_wait_signal_command(
+        "run-feedback-initial",
+        "signal-feedback-delivery",
+        "case-feedback-42",
+        json!({
+            "caseId": "case-feedback-42",
+            "message": "Delivered result",
+            "attachment": {"name": "report-v1.docx", "sha256": "a"}
+        }),
+        initial.submitted_at_unix_millis + 100,
+    );
+    workflow_executor::record_wait_signal(&mut journal, &delivery).unwrap();
+    assert_eq!(
+        workflow_executor::execute_at_unix_millis(
+            &mut journal,
+            &library,
+            &initial,
+            initial.submitted_at_unix_millis + 100,
+        )
+        .unwrap()
+        .outcome,
+        DurableRunOutcome::Succeeded
+    );
+
+    let correction = case_wait_run_command(
+        "run-feedback-correction",
+        &published,
+        "episode-feedback-correction",
+        "correction",
+        "episode-feedback-initial",
+        "email-feedback-correction",
+        json!({
+            "caseId": "case-feedback-42",
+            "intent": "correction",
+            "message": "Change the chart colour to blue"
+        }),
+    );
+    assert_eq!(
+        workflow_executor::execute_at_unix_millis(
+            &mut journal,
+            &library,
+            &correction,
+            correction.submitted_at_unix_millis,
+        )
+        .unwrap()
+        .outcome,
+        DurableRunOutcome::Waiting
+    );
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    projection.catch_up(&journal).unwrap();
+    let episode = projection
+        .inspect_runs(None, Some("run-feedback-correction"), 1)
+        .unwrap()
+        .pop()
+        .unwrap()
+        .episode
+        .unwrap();
+    let context: Value =
+        serde_json::from_slice(&episode.compiled_context.unwrap().inline_canonical_json).unwrap();
+    let outputs = context["priorEpisodes"][0]["outputs"].as_array().unwrap();
+    assert!(
+        outputs
+            .iter()
+            .any(|output| { output["value"]["inline"]["attachment"]["name"] == "report-v1.docx" })
+    );
+    assert_eq!(
+        context["currentEpisode"]["inputs"][0]["value"]["inline"]["message"],
+        "Change the chart colour to blue"
+    );
+    assert_eq!(episode.source_episode_ids, ["episode-feedback-initial"]);
+}
+
+#[test]
+fn correction_episode_resumes_at_every_new_journal_boundary_with_identical_context() {
+    let directory = tempdir().unwrap();
+    let (library, published) = published_case_library(directory.path());
+    let initial = case_run_command(
+        "run-case-boundary-initial",
+        &published,
+        "episode-case-boundary-initial",
+        "initial",
+        "",
+        "email-case-boundary-initial",
+        json!({"message": "Initial request"}),
+    );
+    let correction = case_run_command(
+        "run-case-boundary-correction",
+        &published,
+        "episode-case-boundary-correction",
+        "correction",
+        "episode-case-boundary-initial",
+        "email-case-boundary-correction",
+        json!({"message": "Corrected request"}),
+    );
+    let expected = {
+        let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+        workflow_executor::execute(&mut journal, &library, &initial).unwrap();
+        workflow_executor::execute(&mut journal, &library, &correction).unwrap();
+        run_wires(&journal, "run-case-boundary-correction")
+    };
+    for boundary in 1..=expected.len() {
+        let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+        workflow_executor::execute(&mut journal, &library, &initial).unwrap();
+        assert!(matches!(
+            workflow_executor::execute_with_fault_for_test(
+                &mut journal,
+                &library,
+                &correction,
+                WorkflowExecutionFault::AfterNewEvent(boundary),
+            ),
+            Err(WorkflowExecutionError::InjectedInterruption)
+        ));
+        assert_eq!(
+            workflow_executor::execute(&mut journal, &library, &correction)
+                .unwrap()
+                .outcome,
+            DurableRunOutcome::Succeeded
+        );
+        assert_eq!(
+            run_wires(&journal, "run-case-boundary-correction"),
+            expected
+        );
     }
 }
 
@@ -1189,6 +1473,22 @@ fn published_wait_library(
     )
 }
 
+fn published_case_library(
+    application_support: &std::path::Path,
+) -> (
+    kaname_core::workflow_library::WorkflowLibraryStore,
+    PublishedWorkflowRevision,
+) {
+    publish_control_library(
+        application_support,
+        CASE_WORKFLOW_ID,
+        CASE_REVISION_ID,
+        "dev.kaname.case-runtime",
+        case_workflow_source(),
+        json!({"bundleVersion": 1, "schemas": []}),
+    )
+}
+
 fn publish_control_library(
     application_support: &std::path::Path,
     workflow_id: &str,
@@ -1411,6 +1711,28 @@ fn wait_workflow_source(kind: &str) -> Value {
             ((0, "success"), (1, "input")),
             ((1, "resumed"), (2, "input")),
             ((1, "expired"), (3, "input")),
+        ],
+    )
+}
+
+fn case_workflow_source() -> Value {
+    let ids = [
+        "018f6300-0002-7000-8000-000000000002",
+        "018f6300-0003-7000-8000-000000000003",
+        "018f6300-0004-7000-8000-000000000004",
+    ];
+    control_graph_source(
+        CASE_WORKFLOW_ID,
+        "dev.kaname.case-runtime",
+        &ids,
+        vec![
+            ("manual", "trigger.manual", json!({})),
+            ("compile-case-context", "data.case-context", json!({})),
+            ("complete", "terminal.complete", json!({})),
+        ],
+        vec![
+            ((0, "success"), (1, "input")),
+            ((1, "success"), (2, "input")),
         ],
     )
 }
@@ -1676,6 +1998,56 @@ fn control_run_command(
     envelope
 }
 
+#[allow(clippy::too_many_arguments)]
+fn case_run_command(
+    run_id: &str,
+    published: &PublishedWorkflowRevision,
+    episode_id: &str,
+    episode_kind: &str,
+    prior_episode_id: &str,
+    trigger_event_id: &str,
+    input: Value,
+) -> CommandEnvelope {
+    let mut envelope =
+        control_run_command(run_id, published, CASE_WORKFLOW_ID, CASE_REVISION_ID, input);
+    let mut request =
+        RequestWorkflowRun::decode(envelope.payload.as_ref().unwrap().value.as_slice()).unwrap();
+    request.installation_id = "installation-kay-001".into();
+    request.case_id = "case-kay-42".into();
+    request.episode_id = episode_id.into();
+    request.episode_kind = episode_kind.into();
+    request.prior_episode_id = prior_episode_id.into();
+    request.trigger_kind = "email.received".into();
+    request.trigger_event_id = trigger_event_id.into();
+    envelope.payload.as_mut().unwrap().value = request.encode_to_vec();
+    envelope
+}
+
+#[allow(clippy::too_many_arguments)]
+fn case_wait_run_command(
+    run_id: &str,
+    published: &PublishedWorkflowRevision,
+    episode_id: &str,
+    episode_kind: &str,
+    prior_episode_id: &str,
+    trigger_event_id: &str,
+    input: Value,
+) -> CommandEnvelope {
+    let mut envelope =
+        control_run_command(run_id, published, WAIT_WORKFLOW_ID, WAIT_REVISION_ID, input);
+    let mut request =
+        RequestWorkflowRun::decode(envelope.payload.as_ref().unwrap().value.as_slice()).unwrap();
+    request.installation_id = "installation-feedback-001".into();
+    request.case_id = "case-feedback-42".into();
+    request.episode_id = episode_id.into();
+    request.episode_kind = episode_kind.into();
+    request.prior_episode_id = prior_episode_id.into();
+    request.trigger_kind = "email.received".into();
+    request.trigger_event_id = trigger_event_id.into();
+    envelope.payload.as_mut().unwrap().value = request.encode_to_vec();
+    envelope
+}
+
 fn storage_run_command(
     run_id: &str,
     published: &PublishedWorkflowRevision,
@@ -1794,6 +2166,9 @@ fn run_command(
             }],
             installation_id: String::new(),
             case_id: String::new(),
+            episode_id: String::new(),
+            episode_kind: String::new(),
+            prior_episode_id: String::new(),
         },
         1_786_220_100_000,
     )
@@ -1844,6 +2219,29 @@ fn wait_signal_command(
         },
         submitted_at_unix_millis,
     )
+}
+
+fn case_wait_signal_command(
+    run_id: &str,
+    signal_id: &str,
+    case_id: &str,
+    value: Value,
+    submitted_at_unix_millis: i64,
+) -> CommandEnvelope {
+    let mut envelope = wait_signal_command(
+        run_id,
+        signal_id,
+        "reply",
+        case_id,
+        submitted_at_unix_millis,
+    );
+    let mut signal =
+        SignalWorkflowWait::decode(envelope.payload.as_ref().unwrap().value.as_slice()).unwrap();
+    signal.owner_kind = "case".into();
+    signal.owner_id = case_id.into();
+    signal.value = Some(inline_value(&format!("value-{signal_id}"), value));
+    envelope.payload.as_mut().unwrap().value = signal.encode_to_vec();
+    envelope
 }
 
 fn command<M: Message>(

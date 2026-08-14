@@ -22,6 +22,7 @@
   "data.validate": {
     "schemaRef": "dev.kaname.schema/input/v1"
   },
+  "data.case-context": {},
   "data.register-artifact": {
     "role": "result",
     "mediaTypes": [

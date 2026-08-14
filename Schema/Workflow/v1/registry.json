@@ -40,6 +40,11 @@
       "executable": false
     },
     {
+      "type": "data.case-context",
+      "typeVersion": 1,
+      "executable": false
+    },
+    {
       "type": "data.register-artifact",
       "typeVersion": 1,
       "executable": false

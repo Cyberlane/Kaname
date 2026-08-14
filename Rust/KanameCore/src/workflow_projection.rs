@@ -23,7 +23,7 @@ use std::{
     time::Duration,
 };
 
-const PROJECTION_SCHEMA_VERSION: i64 = 6;
+const PROJECTION_SCHEMA_VERSION: i64 = 7;
 const DEFAULT_BATCH_SIZE: u32 = 250;
 
 const INITIAL_SCHEMA: &str = r#"
@@ -311,6 +311,54 @@ CREATE TABLE workflow_waits (
 ) STRICT;
 CREATE INDEX workflow_waits_run_position
     ON workflow_waits(run_id, subscribed_store_position, subscription_id);
+
+CREATE TABLE workflow_cases (
+    installation_id TEXT NOT NULL,
+    case_id TEXT NOT NULL,
+    workflow_id TEXT NOT NULL,
+    first_episode_id TEXT NOT NULL,
+    last_episode_id TEXT NOT NULL,
+    episode_count INTEGER NOT NULL CHECK (episode_count > 0),
+    created_at_unix_millis INTEGER NOT NULL CHECK (created_at_unix_millis >= 0),
+    updated_at_unix_millis INTEGER NOT NULL CHECK (updated_at_unix_millis >= created_at_unix_millis),
+    first_store_position INTEGER NOT NULL UNIQUE CHECK (first_store_position > 0),
+    last_store_position INTEGER NOT NULL CHECK (last_store_position >= first_store_position),
+    PRIMARY KEY(installation_id, case_id)
+) STRICT;
+
+CREATE TABLE workflow_episodes (
+    episode_id TEXT PRIMARY KEY,
+    installation_id TEXT NOT NULL,
+    case_id TEXT NOT NULL,
+    run_id TEXT NOT NULL UNIQUE REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+    run_token_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL CHECK (ordinal > 0),
+    kind TEXT NOT NULL CHECK (kind IN ('initial', 'delivery', 'correction', 'redelivery')),
+    prior_episode_id TEXT,
+    workflow_id TEXT NOT NULL,
+    revision_id TEXT NOT NULL,
+    package_digest TEXT NOT NULL CHECK (length(package_digest) = 64),
+    trigger_kind TEXT NOT NULL,
+    trigger_event_id TEXT,
+    compiled_context_value_id TEXT NOT NULL REFERENCES workflow_values(value_id) ON DELETE RESTRICT,
+    source_episode_ids_json TEXT NOT NULL,
+    source_event_ids_json TEXT NOT NULL,
+    started_at_unix_millis INTEGER NOT NULL CHECK (started_at_unix_millis >= 0),
+    started_store_position INTEGER NOT NULL UNIQUE CHECK (started_store_position > 0),
+    UNIQUE(installation_id, case_id, ordinal),
+    FOREIGN KEY(installation_id, case_id) REFERENCES workflow_cases(installation_id, case_id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX workflow_episodes_case_ordinal
+    ON workflow_episodes(installation_id, case_id, ordinal, episode_id);
+
+CREATE TABLE workflow_episode_inputs (
+    episode_id TEXT NOT NULL REFERENCES workflow_episodes(episode_id) ON DELETE CASCADE,
+    port_id TEXT NOT NULL,
+    value_id TEXT NOT NULL REFERENCES workflow_values(value_id) ON DELETE RESTRICT,
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+    PRIMARY KEY(episode_id, port_id),
+    UNIQUE(episode_id, ordinal)
+) STRICT;
 
 CREATE TABLE workflow_projected_events (
     event_id TEXT PRIMARY KEY,
@@ -644,6 +692,54 @@ CREATE INDEX IF NOT EXISTS workflow_waits_run_position
     ON workflow_waits(run_id, subscribed_store_position, subscription_id);
 "#;
 
+const PROJECTION_MIGRATION_7: &str = r#"
+CREATE TABLE IF NOT EXISTS workflow_cases (
+    installation_id TEXT NOT NULL,
+    case_id TEXT NOT NULL,
+    workflow_id TEXT NOT NULL,
+    first_episode_id TEXT NOT NULL,
+    last_episode_id TEXT NOT NULL,
+    episode_count INTEGER NOT NULL CHECK (episode_count > 0),
+    created_at_unix_millis INTEGER NOT NULL CHECK (created_at_unix_millis >= 0),
+    updated_at_unix_millis INTEGER NOT NULL CHECK (updated_at_unix_millis >= created_at_unix_millis),
+    first_store_position INTEGER NOT NULL UNIQUE CHECK (first_store_position > 0),
+    last_store_position INTEGER NOT NULL CHECK (last_store_position >= first_store_position),
+    PRIMARY KEY(installation_id, case_id)
+) STRICT;
+CREATE TABLE IF NOT EXISTS workflow_episodes (
+    episode_id TEXT PRIMARY KEY,
+    installation_id TEXT NOT NULL,
+    case_id TEXT NOT NULL,
+    run_id TEXT NOT NULL UNIQUE REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+    run_token_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL CHECK (ordinal > 0),
+    kind TEXT NOT NULL CHECK (kind IN ('initial', 'delivery', 'correction', 'redelivery')),
+    prior_episode_id TEXT,
+    workflow_id TEXT NOT NULL,
+    revision_id TEXT NOT NULL,
+    package_digest TEXT NOT NULL CHECK (length(package_digest) = 64),
+    trigger_kind TEXT NOT NULL,
+    trigger_event_id TEXT,
+    compiled_context_value_id TEXT NOT NULL REFERENCES workflow_values(value_id) ON DELETE RESTRICT,
+    source_episode_ids_json TEXT NOT NULL,
+    source_event_ids_json TEXT NOT NULL,
+    started_at_unix_millis INTEGER NOT NULL CHECK (started_at_unix_millis >= 0),
+    started_store_position INTEGER NOT NULL UNIQUE CHECK (started_store_position > 0),
+    UNIQUE(installation_id, case_id, ordinal),
+    FOREIGN KEY(installation_id, case_id) REFERENCES workflow_cases(installation_id, case_id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX IF NOT EXISTS workflow_episodes_case_ordinal
+    ON workflow_episodes(installation_id, case_id, ordinal, episode_id);
+CREATE TABLE IF NOT EXISTS workflow_episode_inputs (
+    episode_id TEXT NOT NULL REFERENCES workflow_episodes(episode_id) ON DELETE CASCADE,
+    port_id TEXT NOT NULL,
+    value_id TEXT NOT NULL REFERENCES workflow_values(value_id) ON DELETE RESTRICT,
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+    PRIMARY KEY(episode_id, port_id),
+    UNIQUE(episode_id, ordinal)
+) STRICT;
+"#;
+
 #[derive(Debug)]
 pub enum WorkflowProjectionError {
     Database(rusqlite::Error),
@@ -837,6 +933,16 @@ impl WorkflowRunProjection {
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             transaction.execute_batch(PROJECTION_MIGRATION_6)?;
+            transaction.execute_batch(PROJECTION_MIGRATION_7)?;
+            transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
+            refresh_state_digest(&transaction)?;
+            transaction.commit()?;
+        }
+        let found: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if found == 6 {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(PROJECTION_MIGRATION_7)?;
             transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
             refresh_state_digest(&transaction)?;
             transaction.commit()?;
@@ -901,6 +1007,40 @@ impl WorkflowRunProjection {
         if incomplete_settled_token_graph.is_some() {
             return Err(WorkflowProjectionError::Integrity(
                 "settled_execution_token_graph_incomplete".into(),
+            ));
+        }
+        let invalid_case_chain = self
+            .connection
+            .query_row(
+                "SELECT 1 FROM workflow_cases c
+                 WHERE c.episode_count != (
+                     SELECT COUNT(*) FROM workflow_episodes e
+                     WHERE e.installation_id = c.installation_id AND e.case_id = c.case_id)
+                    OR c.first_episode_id != (
+                     SELECT e.episode_id FROM workflow_episodes e
+                     WHERE e.installation_id = c.installation_id AND e.case_id = c.case_id
+                     ORDER BY e.ordinal LIMIT 1)
+                    OR c.last_episode_id != (
+                     SELECT e.episode_id FROM workflow_episodes e
+                     WHERE e.installation_id = c.installation_id AND e.case_id = c.case_id
+                     ORDER BY e.ordinal DESC LIMIT 1)
+                    OR EXISTS (
+                     SELECT 1 FROM workflow_episodes e
+                     WHERE e.installation_id = c.installation_id AND e.case_id = c.case_id
+                       AND ((e.ordinal = 1 AND (e.kind != 'initial' OR e.prior_episode_id IS NOT NULL))
+                         OR (e.ordinal > 1 AND e.prior_episode_id != (
+                           SELECT p.episode_id FROM workflow_episodes p
+                           WHERE p.installation_id = e.installation_id AND p.case_id = e.case_id
+                             AND p.ordinal = e.ordinal - 1)))
+                    )
+                 LIMIT 1",
+                [],
+                |_| Ok(()),
+            )
+            .optional()?;
+        if invalid_case_chain.is_some() {
+            return Err(WorkflowProjectionError::Integrity(
+                "case_episode_chain_invalid".into(),
             ));
         }
         let stored: String = self.connection.query_row(
@@ -1029,6 +1169,9 @@ impl WorkflowRunProjection {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute_batch(
             "DELETE FROM workflow_projected_events;
+             DELETE FROM workflow_episode_inputs;
+             DELETE FROM workflow_episodes;
+             DELETE FROM workflow_cases;
              DELETE FROM workflow_waits;
              DELETE FROM workflow_wait_signals;
              DELETE FROM workflow_retry_evaluations;
@@ -1063,6 +1206,9 @@ impl WorkflowRunProjection {
             "retries" => "SELECT COUNT(*) FROM workflow_retry_evaluations",
             "waits" => "SELECT COUNT(*) FROM workflow_waits",
             "wait_signals" => "SELECT COUNT(*) FROM workflow_wait_signals",
+            "cases" => "SELECT COUNT(*) FROM workflow_cases",
+            "episodes" => "SELECT COUNT(*) FROM workflow_episodes",
+            "episode_inputs" => "SELECT COUNT(*) FROM workflow_episode_inputs",
             "events" => "SELECT COUNT(*) FROM workflow_projected_events",
             "values" => "SELECT COUNT(*) FROM workflow_values",
             _ => return Err(WorkflowProjectionError::Integrity("unknown_table".into())),
@@ -1210,6 +1356,7 @@ impl WorkflowRunProjection {
             retries: self.inspect_retries(run_id)?,
             waits: self.inspect_waits(run_id)?,
             wait_signals: self.inspect_wait_signals(run_id)?,
+            episode: self.inspect_episode(run_id)?,
         })
     }
 
@@ -2024,6 +2171,84 @@ impl WorkflowRunProjection {
         })
     }
 
+    fn inspect_episode(&self, run_id: &str) -> Result<Option<v1::WorkflowProjectedCaseEpisode>> {
+        type EpisodeRow = (
+            String,
+            String,
+            String,
+            i64,
+            String,
+            Option<String>,
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+            i64,
+        );
+        let row: Option<EpisodeRow> = self
+            .connection
+            .query_row(
+                "SELECT installation_id, case_id, episode_id, ordinal, kind, prior_episode_id,
+                        trigger_kind, trigger_event_id, compiled_context_value_id,
+                        source_episode_ids_json, source_event_ids_json, started_store_position
+                 FROM workflow_episodes WHERE run_id = ?1",
+                [run_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                        row.get(11)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let mut statement = self.connection.prepare(
+            "SELECT port_id, value_id FROM workflow_episode_inputs
+             WHERE episode_id = ?1 ORDER BY ordinal",
+        )?;
+        let inputs = statement
+            .query_map([&row.2], |input| {
+                Ok((input.get::<_, String>(0)?, input.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|(port_id, value_id)| {
+                Ok(v1::WorkflowProjectedInputBinding {
+                    port_id,
+                    value: Some(self.inspect_value(&value_id)?),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Some(v1::WorkflowProjectedCaseEpisode {
+            installation_id: row.0,
+            case_id: row.1,
+            episode_id: row.2,
+            ordinal: projected_u32(row.3)?,
+            kind: row.4,
+            prior_episode_id: row.5.unwrap_or_default(),
+            trigger_kind: row.6,
+            trigger_event_id: row.7.unwrap_or_default(),
+            inputs,
+            compiled_context: Some(self.inspect_value(&row.8)?),
+            source_episode_ids: decode_string_list(&row.9)?,
+            source_event_ids: decode_string_list(&row.10)?,
+            started_store_position: projected_u64(row.11)?,
+        }))
+    }
+
     #[doc(hidden)]
     pub fn corrupt_first_run_for_test(&self) -> Result<()> {
         self.connection.execute(
@@ -2093,6 +2318,140 @@ fn apply_event(transaction: &Transaction<'_>, event: &v1::EventEnvelope) -> Resu
         .map_err(|_| WorkflowProjectionError::Lifecycle("runtime_event_invalid".into()))?;
     let run_id = runtime.run_id().to_owned();
     match runtime {
+        WorkflowRuntimeEvent::CaseEpisodeStarted(payload) => {
+            require_active_run(transaction, &payload.run_id, &payload.run_token_id)?;
+            let pins: (String, String, String) = transaction.query_row(
+                "SELECT workflow_id, revision_id, package_digest FROM workflow_runs WHERE run_id = ?1",
+                [&payload.run_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            if pins
+                != (
+                    payload.workflow_id.clone(),
+                    payload.revision_id.clone(),
+                    payload.package_digest.clone(),
+                )
+            {
+                return lifecycle("episode_run_pin_mismatch");
+            }
+            let existing_case: Option<(String, String, i64)> = transaction
+                .query_row(
+                    "SELECT workflow_id, last_episode_id, episode_count FROM workflow_cases
+                     WHERE installation_id = ?1 AND case_id = ?2",
+                    params![payload.installation_id, payload.case_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            match existing_case {
+                None => {
+                    if payload.ordinal != 1
+                        || payload.kind != "initial"
+                        || !payload.prior_episode_id.is_empty()
+                        || !payload.source_episode_ids.is_empty()
+                    {
+                        return lifecycle("case_initial_episode_contract");
+                    }
+                    transaction.execute(
+                        "INSERT INTO workflow_cases
+                         (installation_id, case_id, workflow_id, first_episode_id, last_episode_id,
+                          episode_count, created_at_unix_millis, updated_at_unix_millis,
+                          first_store_position, last_store_position)
+                         VALUES (?1, ?2, ?3, ?4, ?4, 1, ?5, ?5, ?6, ?6)",
+                        params![
+                            payload.installation_id,
+                            payload.case_id,
+                            payload.workflow_id,
+                            payload.episode_id,
+                            event.occurred_at_unix_millis,
+                            sql_u64(event.store_position)?,
+                        ],
+                    )?;
+                }
+                Some((workflow_id, last_episode_id, episode_count)) => {
+                    if workflow_id != payload.workflow_id
+                        || payload.ordinal != projected_u32(episode_count)? + 1
+                        || payload.prior_episode_id != last_episode_id
+                    {
+                        return lifecycle("case_episode_chain");
+                    }
+                    let mut statement = transaction.prepare(
+                        "SELECT episode_id FROM workflow_episodes
+                         WHERE installation_id = ?1 AND case_id = ?2 ORDER BY ordinal",
+                    )?;
+                    let sources = statement
+                        .query_map(params![payload.installation_id, payload.case_id], |row| {
+                            row.get::<_, String>(0)
+                        })?
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    if sources != payload.source_episode_ids {
+                        return lifecycle("case_episode_sources");
+                    }
+                    transaction.execute(
+                        "UPDATE workflow_cases SET last_episode_id = ?1, episode_count = ?2,
+                         updated_at_unix_millis = ?3, last_store_position = ?4
+                         WHERE installation_id = ?5 AND case_id = ?6",
+                        params![
+                            payload.episode_id,
+                            i64::from(payload.ordinal),
+                            event.occurred_at_unix_millis,
+                            sql_u64(event.store_position)?,
+                            payload.installation_id,
+                            payload.case_id,
+                        ],
+                    )?;
+                }
+            }
+            let context = payload.compiled_context.as_ref().ok_or_else(|| {
+                WorkflowProjectionError::Lifecycle("episode_context_missing".into())
+            })?;
+            insert_value(transaction, context)?;
+            transaction.execute(
+                "INSERT INTO workflow_episodes
+                 (episode_id, installation_id, case_id, run_id, run_token_id, ordinal, kind,
+                  prior_episode_id, workflow_id, revision_id, package_digest, trigger_kind,
+                  trigger_event_id, compiled_context_value_id, source_episode_ids_json,
+                  source_event_ids_json, started_at_unix_millis, started_store_position)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULLIF(?8, ''), ?9, ?10, ?11, ?12,
+                         NULLIF(?13, ''), ?14, ?15, ?16, ?17, ?18)",
+                params![
+                    payload.episode_id,
+                    payload.installation_id,
+                    payload.case_id,
+                    payload.run_id,
+                    payload.run_token_id,
+                    i64::from(payload.ordinal),
+                    payload.kind,
+                    payload.prior_episode_id,
+                    payload.workflow_id,
+                    payload.revision_id,
+                    payload.package_digest,
+                    payload.trigger_kind,
+                    payload.trigger_event_id,
+                    context.value_id,
+                    string_list_json(&payload.source_episode_ids)?,
+                    string_list_json(&payload.source_event_ids)?,
+                    event.occurred_at_unix_millis,
+                    sql_u64(event.store_position)?,
+                ],
+            )?;
+            for (ordinal, input) in payload.inputs.iter().enumerate() {
+                let value = input.value.as_ref().ok_or_else(|| {
+                    WorkflowProjectionError::Lifecycle("episode_input_missing".into())
+                })?;
+                insert_value(transaction, value)?;
+                transaction.execute(
+                    "INSERT INTO workflow_episode_inputs(episode_id, port_id, value_id, ordinal)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        payload.episode_id,
+                        input.port_id,
+                        value.value_id,
+                        ordinal as i64,
+                    ],
+                )?;
+            }
+            touch_run(transaction, &payload.run_id, event.store_position)?;
+        }
         WorkflowRuntimeEvent::RunTokenCreated(payload) => {
             if run_exists(transaction, &payload.run_id)? {
                 return lifecycle("run_identity_reused");
@@ -3205,6 +3564,24 @@ fn canonical_state_bytes(connection: &Connection) -> Result<Vec<u8>> {
                 "runs",
                 "SELECT run_id, run_token_id, request_command_id, workflow_id, revision_id, package_digest, status, outcome, error_code, error_value_id, final_emission_ids_json, cancellation_command_id, cancellation_reason_code, created_at_unix_millis, settled_at_unix_millis, first_store_position, last_store_position FROM workflow_runs ORDER BY run_id",
                 17,
+            )?,
+            table_rows(
+                connection,
+                "cases",
+                "SELECT installation_id, case_id, workflow_id, first_episode_id, last_episode_id, episode_count, created_at_unix_millis, updated_at_unix_millis, first_store_position, last_store_position FROM workflow_cases ORDER BY installation_id, case_id",
+                10,
+            )?,
+            table_rows(
+                connection,
+                "episodes",
+                "SELECT episode_id, installation_id, case_id, run_id, run_token_id, ordinal, kind, prior_episode_id, workflow_id, revision_id, package_digest, trigger_kind, trigger_event_id, compiled_context_value_id, source_episode_ids_json, source_event_ids_json, started_at_unix_millis, started_store_position FROM workflow_episodes ORDER BY installation_id, case_id, ordinal, episode_id",
+                18,
+            )?,
+            table_rows(
+                connection,
+                "episode_inputs",
+                "SELECT episode_id, port_id, value_id, ordinal FROM workflow_episode_inputs ORDER BY episode_id, ordinal, port_id",
+                4,
             )?,
             table_rows(
                 connection,

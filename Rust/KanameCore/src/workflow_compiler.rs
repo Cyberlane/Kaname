@@ -400,7 +400,7 @@ fn execution_availability(node: &Node) -> &'static str {
         {
             "executable"
         }
-        "data.validate" => "executable",
+        "data.validate" | "data.case-context" => "executable",
         "storage.read" => "executable",
         "storage.promote" => "executable",
         "storage.write"
@@ -898,7 +898,12 @@ fn validate_iteration_and_retry(
 fn retry_safe_node(node: &Node) -> bool {
     matches!(
         node.node_type.as_str(),
-        "data.map" | "data.validate" | "storage.read" | "control.decision" | "control.match"
+        "data.map"
+            | "data.validate"
+            | "data.case-context"
+            | "storage.read"
+            | "control.decision"
+            | "control.match"
     ) || (node.node_type == "effect.connector"
         && string_field(&node.config, "idempotency") == Some("required"))
 }
@@ -1334,6 +1339,7 @@ fn ports_for(node: &Node) -> Result<Vec<PortContract>, &'static str> {
                 ),
                 error(),
             ],
+            "data.case-context" => vec![input(), success()],
             "control.for-each" => vec![
                 input(),
                 port(
@@ -1465,6 +1471,7 @@ fn registered_types() -> BTreeSet<&'static str> {
         "trigger.schedule",
         "data.map",
         "data.validate",
+        "data.case-context",
         "data.register-artifact",
         "storage.read",
         "storage.write",

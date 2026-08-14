@@ -281,6 +281,28 @@ public struct DesktopWorkflowProjectedWaitSignal: Identifiable, Equatable, Senda
     public let storePosition: UInt64
 }
 
+public struct DesktopWorkflowProjectedInputBinding: Equatable, Sendable {
+    public let portID: String
+    public let value: DesktopWorkflowProjectedValue
+}
+
+public struct DesktopWorkflowProjectedCaseEpisode: Identifiable, Equatable, Sendable {
+    public var id: String { episodeID }
+    public let installationID: String
+    public let caseID: String
+    public let episodeID: String
+    public let ordinal: UInt32
+    public let kind: String
+    public let priorEpisodeID: String?
+    public let triggerKind: String
+    public let triggerEventID: String?
+    public let inputs: [DesktopWorkflowProjectedInputBinding]
+    public let compiledContext: DesktopWorkflowProjectedValue
+    public let sourceEpisodeIDs: [String]
+    public let sourceEventIDs: [String]
+    public let startedStorePosition: UInt64
+}
+
 public struct DesktopWorkflowProjectedMatchTrace: Identifiable, Equatable, Sendable {
     public var id: String { eventID }
     public let eventID: String
@@ -330,6 +352,7 @@ public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
     public let retries: [DesktopWorkflowProjectedRetry]
     public let waits: [DesktopWorkflowProjectedWait]
     public let waitSignals: [DesktopWorkflowProjectedWaitSignal]
+    public let episode: DesktopWorkflowProjectedCaseEpisode?
 
     public init(
         runID: String, workflowID: String, revisionID: String, packageDigest: String,
@@ -344,7 +367,8 @@ public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
         iterations: [DesktopWorkflowProjectedIteration] = [],
         retries: [DesktopWorkflowProjectedRetry] = [],
         waits: [DesktopWorkflowProjectedWait] = [],
-        waitSignals: [DesktopWorkflowProjectedWaitSignal] = []
+        waitSignals: [DesktopWorkflowProjectedWaitSignal] = [],
+        episode: DesktopWorkflowProjectedCaseEpisode? = nil
     ) {
         self.runID = runID
         self.workflowID = workflowID
@@ -370,6 +394,7 @@ public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
         self.retries = retries
         self.waits = waits
         self.waitSignals = waitSignals
+        self.episode = episode
     }
 
     public func attempt(for nodeID: String) -> DesktopWorkflowProjectedAttempt? {
@@ -636,7 +661,46 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
             iterations: try run.iterations.map(iteration),
             retries: try run.retries.map(retry),
             waits: try run.waits.map(wait),
-            waitSignals: try run.waitSignals.map(waitSignal)
+            waitSignals: try run.waitSignals.map(waitSignal),
+            episode: try run.hasEpisode ? episode(run.episode) : nil
+        )
+    }
+
+    private static func episode(
+        _ item: Kaname_V1_WorkflowProjectedCaseEpisode
+    ) throws -> DesktopWorkflowProjectedCaseEpisode {
+        guard !item.installationID.isEmpty, !item.caseID.isEmpty,
+              !item.episodeID.isEmpty, item.ordinal > 0,
+              ["initial", "delivery", "correction", "redelivery"].contains(item.kind),
+              !item.triggerKind.isEmpty, !item.inputs.isEmpty,
+              item.hasCompiledContext, item.startedStorePosition > 0,
+              item.sourceEpisodeIds.count + 1 == Int(item.ordinal),
+              (item.ordinal == 1) == item.priorEpisodeID.isEmpty else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        let inputs = try item.inputs.map { binding in
+            guard !binding.portID.isEmpty, binding.hasValue else {
+                throw DesktopWorkflowRunInspectionError.malformedResponse
+            }
+            return DesktopWorkflowProjectedInputBinding(
+                portID: binding.portID,
+                value: try value(binding.value)
+            )
+        }
+        return DesktopWorkflowProjectedCaseEpisode(
+            installationID: item.installationID,
+            caseID: item.caseID,
+            episodeID: item.episodeID,
+            ordinal: item.ordinal,
+            kind: item.kind,
+            priorEpisodeID: item.priorEpisodeID.nilIfEmpty,
+            triggerKind: item.triggerKind,
+            triggerEventID: item.triggerEventID.nilIfEmpty,
+            inputs: inputs,
+            compiledContext: try value(item.compiledContext),
+            sourceEpisodeIDs: item.sourceEpisodeIds,
+            sourceEventIDs: item.sourceEventIds,
+            startedStorePosition: item.startedStorePosition
         )
     }
 

@@ -18,6 +18,9 @@
       "$ref": "nodes/data.validate.schema.json"
     },
     {
+      "$ref": "nodes/data.case-context.schema.json"
+    },
+    {
       "$ref": "nodes/data.register-artifact.schema.json"
     },
     {
