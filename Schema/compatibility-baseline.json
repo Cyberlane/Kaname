@@ -88,6 +88,19 @@
       "1": "WORKFLOW_EDGE_CHECKPOINT_STATE_ADMITTED",
       "2": "WORKFLOW_EDGE_CHECKPOINT_STATE_SKIPPED"
     },
+    "workflow_runtime.WorkflowExecutionTokenOutcome": {
+      "0": "WORKFLOW_EXECUTION_TOKEN_OUTCOME_UNSPECIFIED",
+      "1": "WORKFLOW_EXECUTION_TOKEN_OUTCOME_COMPLETED",
+      "2": "WORKFLOW_EXECUTION_TOKEN_OUTCOME_FAILED",
+      "3": "WORKFLOW_EXECUTION_TOKEN_OUTCOME_CANCELLED",
+      "4": "WORKFLOW_EXECUTION_TOKEN_OUTCOME_FORKED",
+      "5": "WORKFLOW_EXECUTION_TOKEN_OUTCOME_JOINED"
+    },
+    "workflow_runtime.WorkflowJoinDecision": {
+      "0": "WORKFLOW_JOIN_DECISION_UNSPECIFIED",
+      "1": "WORKFLOW_JOIN_DECISION_SUCCEEDED",
+      "2": "WORKFLOW_JOIN_DECISION_FAILED"
+    },
     "workflow_runtime.WorkflowRunOutcome": {
       "0": "WORKFLOW_RUN_OUTCOME_UNSPECIFIED",
       "1": "WORKFLOW_RUN_OUTCOME_SUCCEEDED",
@@ -542,6 +555,7 @@
     },
     "workflow_runtime.WorkflowAttemptSettled": {
       "1": "string run_id",
+      "10": "string execution_token_id",
       "2": "string run_token_id",
       "3": "string attempt_id",
       "4": "string node_id",
@@ -556,7 +570,8 @@
       "2": "string run_token_id",
       "3": "string attempt_id",
       "4": "string node_id",
-      "5": "uint32 attempt_number"
+      "5": "uint32 attempt_number",
+      "6": "string execution_token_id"
     },
     "workflow_runtime.WorkflowEdgeCheckpointed": {
       "1": "string run_id",
@@ -565,14 +580,54 @@
       "4": "string emission_id",
       "5": "string target_node_id",
       "6": "string target_port_id",
-      "7": "WorkflowEdgeCheckpointState state"
+      "7": "WorkflowEdgeCheckpointState state",
+      "8": "string execution_token_id"
+    },
+    "workflow_runtime.WorkflowExecutionTokenCreated": {
+      "1": "string run_id",
+      "2": "string run_token_id",
+      "3": "string execution_token_id",
+      "4": "string parent_execution_token_id",
+      "5": "string fork_node_id",
+      "6": "string branch_id",
+      "7": "string branch_port_id",
+      "8": "string join_node_id",
+      "9": "string source_emission_id"
+    },
+    "workflow_runtime.WorkflowExecutionTokenSettled": {
+      "1": "string run_id",
+      "2": "string run_token_id",
+      "3": "string execution_token_id",
+      "4": "WorkflowExecutionTokenOutcome outcome",
+      "5": "string terminal_node_id",
+      "6": "string join_node_id",
+      "7": "string error_code",
+      "8": "WorkflowValueReference error",
+      "9": "string final_emission_ids"
     },
     "workflow_runtime.WorkflowInputBinding": {
       "1": "string port_id",
       "2": "WorkflowValueReference value"
     },
+    "workflow_runtime.WorkflowJoinEvaluated": {
+      "1": "string run_id",
+      "10": "string arrived_execution_token_ids",
+      "11": "string failed_execution_token_ids",
+      "12": "string pending_execution_token_ids",
+      "13": "bool cancel_remaining",
+      "14": "string error_code",
+      "2": "string run_token_id",
+      "3": "string join_node_id",
+      "4": "string fork_node_id",
+      "5": "string resumed_execution_token_id",
+      "6": "string policy",
+      "7": "uint32 threshold",
+      "8": "WorkflowJoinDecision decision",
+      "9": "string expected_execution_token_ids"
+    },
     "workflow_runtime.WorkflowMatchTraceRecorded": {
       "1": "string run_id",
+      "10": "string execution_token_id",
       "2": "string run_token_id",
       "3": "string attempt_id",
       "4": "string node_id",
@@ -589,13 +644,15 @@
       "4": "string attempt_id",
       "5": "string node_id",
       "6": "string port_id",
-      "7": "WorkflowValueReference value"
+      "7": "WorkflowValueReference value",
+      "8": "string execution_token_id"
     },
     "workflow_runtime.WorkflowProjectedAttempt": {
       "1": "string attempt_id",
       "10": "uint64 started_store_position",
       "11": "uint64 settled_store_position",
       "12": "string emission_ids",
+      "13": "string execution_token_id",
       "2": "string node_id",
       "3": "uint32 attempt_number",
       "4": "string status",
@@ -613,7 +670,8 @@
       "5": "string target_port_id",
       "6": "string state",
       "7": "int64 checkpointed_at_unix_millis",
-      "8": "uint64 store_position"
+      "8": "uint64 store_position",
+      "9": "string execution_token_id"
     },
     "workflow_runtime.WorkflowProjectedEmission": {
       "1": "string emission_id",
@@ -623,7 +681,8 @@
       "5": "WorkflowProjectedValue value",
       "6": "string event_id",
       "7": "int64 emitted_at_unix_millis",
-      "8": "uint64 store_position"
+      "8": "uint64 store_position",
+      "9": "string execution_token_id"
     },
     "workflow_runtime.WorkflowProjectedEventReference": {
       "1": "string event_id",
@@ -631,6 +690,38 @@
       "3": "uint64 store_position",
       "4": "uint64 stream_sequence",
       "5": "int64 occurred_at_unix_millis"
+    },
+    "workflow_runtime.WorkflowProjectedExecutionToken": {
+      "1": "string execution_token_id",
+      "10": "string terminal_node_id",
+      "11": "string error_code",
+      "12": "WorkflowProjectedValue error",
+      "13": "string final_emission_ids",
+      "14": "uint64 created_store_position",
+      "15": "uint64 settled_store_position",
+      "2": "string parent_execution_token_id",
+      "3": "string fork_node_id",
+      "4": "string branch_id",
+      "5": "string branch_port_id",
+      "6": "string join_node_id",
+      "7": "string source_emission_id",
+      "8": "string status",
+      "9": "string outcome"
+    },
+    "workflow_runtime.WorkflowProjectedJoinEvaluation": {
+      "1": "string join_node_id",
+      "10": "string pending_execution_token_ids",
+      "11": "bool cancel_remaining",
+      "12": "string error_code",
+      "13": "uint64 store_position",
+      "2": "string fork_node_id",
+      "3": "string resumed_execution_token_id",
+      "4": "string policy",
+      "5": "uint32 threshold",
+      "6": "string decision",
+      "7": "string expected_execution_token_ids",
+      "8": "string arrived_execution_token_ids",
+      "9": "string failed_execution_token_ids"
     },
     "workflow_runtime.WorkflowProjectedMatchTrace": {
       "1": "string event_id",
@@ -670,6 +761,8 @@
       "21": "WorkflowProjectedEdgeCheckpoint edges",
       "22": "WorkflowProjectedMatchTrace match_traces",
       "23": "WorkflowProjectedEventReference events",
+      "24": "WorkflowProjectedExecutionToken execution_tokens",
+      "25": "WorkflowProjectedJoinEvaluation joins",
       "3": "string request_command_id",
       "4": "string workflow_id",
       "5": "string revision_id",

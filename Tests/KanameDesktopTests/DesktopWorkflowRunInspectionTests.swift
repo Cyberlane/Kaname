@@ -39,6 +39,8 @@ struct DesktopWorkflowRunInspectionTests {
         #expect(run.outputs(for: "trigger").first?.value.storage?.previousVersionID == "storage-version-1")
         #expect(run.outputs(for: "trigger").first?.value.storage?.sourceVersionID == "job-version-source")
         #expect(run.outputs(for: "trigger").first?.value.storage?.result == "read")
+        #expect(run.attempt(for: "trigger")?.executionTokenID == "token-run-v2")
+        #expect(run.executionTokens.first?.status == "completed")
         #expect(run.events.map(\.storePosition) == [11, 12, 13, 14, 15])
     }
 }
@@ -136,6 +138,7 @@ private actor HistoricalRunTransport:
         attempt.startedStorePosition = 12
         attempt.settledStorePosition = 15
         attempt.emissionIds = ["emission-\(id)"]
+        attempt.executionTokenID = "token-\(id)"
         var node = Kaname_V1_WorkflowProjectedNodeState()
         node.nodeID = "trigger"
         node.status = "succeeded"
@@ -153,6 +156,7 @@ private actor HistoricalRunTransport:
         emission.eventID = "event-emission-\(id)"
         emission.emittedAtUnixMillis = 1_020
         emission.storePosition = 13
+        emission.executionTokenID = attempt.executionTokenID
         var edge = Kaname_V1_WorkflowProjectedEdgeCheckpoint()
         edge.eventID = "event-edge-\(id)"
         edge.edgeID = "edge-one"
@@ -162,6 +166,14 @@ private actor HistoricalRunTransport:
         edge.state = "admitted"
         edge.checkpointedAtUnixMillis = 1_030
         edge.storePosition = 14
+        edge.executionTokenID = attempt.executionTokenID
+        var token = Kaname_V1_WorkflowProjectedExecutionToken()
+        token.executionTokenID = attempt.executionTokenID
+        token.status = "completed"
+        token.outcome = "completed"
+        token.terminalNodeID = "complete"
+        token.createdStorePosition = 11
+        token.settledStorePosition = 15
         var trace = Kaname_V1_WorkflowProjectedMatchTrace()
         trace.eventID = "event-trace-\(id)"
         trace.attemptID = attempt.attemptID
@@ -189,6 +201,7 @@ private actor HistoricalRunTransport:
         projected.emissions = [emission]
         projected.edges = [edge]
         projected.matchTraces = [trace]
+        projected.executionTokens = [token]
         projected.events = (11...15).map { position in
             var event = Kaname_V1_WorkflowProjectedEventReference()
             event.eventID = "event-\(id)-\(position)"

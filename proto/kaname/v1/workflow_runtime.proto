@@ -76,6 +76,71 @@ message WorkflowRunTokenCreated {
   reserved 7 to 20;
 }
 
+// One durable path through the graph. The run token pins the immutable run;
+// execution tokens make fan-out, join, and cancellation replayable without
+// relying on worker memory or scheduling order.
+message WorkflowExecutionTokenCreated {
+  string run_id = 1;
+  string run_token_id = 2;
+  string execution_token_id = 3;
+  string parent_execution_token_id = 4;
+  string fork_node_id = 5;
+  string branch_id = 6;
+  string branch_port_id = 7;
+  string join_node_id = 8;
+  string source_emission_id = 9;
+  reserved 10 to 20;
+}
+
+enum WorkflowExecutionTokenOutcome {
+  WORKFLOW_EXECUTION_TOKEN_OUTCOME_UNSPECIFIED = 0;
+  WORKFLOW_EXECUTION_TOKEN_OUTCOME_COMPLETED = 1;
+  WORKFLOW_EXECUTION_TOKEN_OUTCOME_FAILED = 2;
+  WORKFLOW_EXECUTION_TOKEN_OUTCOME_CANCELLED = 3;
+  WORKFLOW_EXECUTION_TOKEN_OUTCOME_FORKED = 4;
+  WORKFLOW_EXECUTION_TOKEN_OUTCOME_JOINED = 5;
+}
+
+message WorkflowExecutionTokenSettled {
+  string run_id = 1;
+  string run_token_id = 2;
+  string execution_token_id = 3;
+  WorkflowExecutionTokenOutcome outcome = 4;
+  string terminal_node_id = 5;
+  string join_node_id = 6;
+  string error_code = 7;
+  WorkflowValueReference error = 8;
+  repeated string final_emission_ids = 9;
+  reserved 10 to 20;
+}
+
+enum WorkflowJoinDecision {
+  WORKFLOW_JOIN_DECISION_UNSPECIFIED = 0;
+  WORKFLOW_JOIN_DECISION_SUCCEEDED = 1;
+  WORKFLOW_JOIN_DECISION_FAILED = 2;
+}
+
+// A single immutable decision for one fork group at one join. The complete
+// token partition makes all/any/quorum behavior independent of delivery and
+// process timing.
+message WorkflowJoinEvaluated {
+  string run_id = 1;
+  string run_token_id = 2;
+  string join_node_id = 3;
+  string fork_node_id = 4;
+  string resumed_execution_token_id = 5;
+  string policy = 6;
+  uint32 threshold = 7;
+  WorkflowJoinDecision decision = 8;
+  repeated string expected_execution_token_ids = 9;
+  repeated string arrived_execution_token_ids = 10;
+  repeated string failed_execution_token_ids = 11;
+  repeated string pending_execution_token_ids = 12;
+  bool cancel_remaining = 13;
+  string error_code = 14;
+  reserved 15 to 25;
+}
+
 // Payload for event kind `workflow.attempt.started`.
 message WorkflowAttemptStarted {
   string run_id = 1;
@@ -83,7 +148,8 @@ message WorkflowAttemptStarted {
   string attempt_id = 3;
   string node_id = 4;
   uint32 attempt_number = 5;
-  reserved 6 to 15;
+  string execution_token_id = 6;
+  reserved 7 to 15;
 }
 
 enum WorkflowAttemptOutcome {
@@ -104,7 +170,8 @@ message WorkflowAttemptSettled {
   string error_code = 7;
   WorkflowValueReference error = 8;
   repeated string emission_ids = 9;
-  reserved 10 to 20;
+  string execution_token_id = 10;
+  reserved 11 to 20;
 }
 
 // Payload for event kind `workflow.port.emitted`.
@@ -116,7 +183,8 @@ message WorkflowPortEmitted {
   string node_id = 5;
   string port_id = 6;
   WorkflowValueReference value = 7;
-  reserved 8 to 20;
+  string execution_token_id = 8;
+  reserved 9 to 20;
 }
 
 enum WorkflowEdgeCheckpointState {
@@ -134,7 +202,8 @@ message WorkflowEdgeCheckpointed {
   string target_node_id = 5;
   string target_port_id = 6;
   WorkflowEdgeCheckpointState state = 7;
-  reserved 8 to 20;
+  string execution_token_id = 8;
+  reserved 9 to 20;
 }
 
 // Payload for event kind `workflow.match.trace-recorded`.
@@ -148,7 +217,8 @@ message WorkflowMatchTraceRecorded {
   repeated string matched_case_ids = 7;
   repeated string emitted_port_ids = 8;
   WorkflowValueReference trace = 9;
-  reserved 10 to 20;
+  string execution_token_id = 10;
+  reserved 11 to 20;
 }
 
 // Payload for event kind `workflow.run.cancellation-requested`.
@@ -215,7 +285,8 @@ message WorkflowProjectedAttempt {
   uint64 started_store_position = 10;
   uint64 settled_store_position = 11;
   repeated string emission_ids = 12;
-  reserved 13 to 20;
+  string execution_token_id = 13;
+  reserved 14 to 20;
 }
 
 message WorkflowProjectedNodeState {
@@ -238,7 +309,8 @@ message WorkflowProjectedEmission {
   string event_id = 6;
   int64 emitted_at_unix_millis = 7;
   uint64 store_position = 8;
-  reserved 9 to 15;
+  string execution_token_id = 9;
+  reserved 10 to 15;
 }
 
 message WorkflowProjectedEdgeCheckpoint {
@@ -250,7 +322,44 @@ message WorkflowProjectedEdgeCheckpoint {
   string state = 6;
   int64 checkpointed_at_unix_millis = 7;
   uint64 store_position = 8;
-  reserved 9 to 15;
+  string execution_token_id = 9;
+  reserved 10 to 15;
+}
+
+message WorkflowProjectedExecutionToken {
+  string execution_token_id = 1;
+  string parent_execution_token_id = 2;
+  string fork_node_id = 3;
+  string branch_id = 4;
+  string branch_port_id = 5;
+  string join_node_id = 6;
+  string source_emission_id = 7;
+  string status = 8;
+  string outcome = 9;
+  string terminal_node_id = 10;
+  string error_code = 11;
+  WorkflowProjectedValue error = 12;
+  repeated string final_emission_ids = 13;
+  uint64 created_store_position = 14;
+  uint64 settled_store_position = 15;
+  reserved 16 to 25;
+}
+
+message WorkflowProjectedJoinEvaluation {
+  string join_node_id = 1;
+  string fork_node_id = 2;
+  string resumed_execution_token_id = 3;
+  string policy = 4;
+  uint32 threshold = 5;
+  string decision = 6;
+  repeated string expected_execution_token_ids = 7;
+  repeated string arrived_execution_token_ids = 8;
+  repeated string failed_execution_token_ids = 9;
+  repeated string pending_execution_token_ids = 10;
+  bool cancel_remaining = 11;
+  string error_code = 12;
+  uint64 store_position = 13;
+  reserved 14 to 25;
 }
 
 message WorkflowProjectedMatchTrace {
@@ -300,7 +409,9 @@ message WorkflowProjectedRun {
   repeated WorkflowProjectedEdgeCheckpoint edges = 21;
   repeated WorkflowProjectedMatchTrace match_traces = 22;
   repeated WorkflowProjectedEventReference events = 23;
-  reserved 24 to 35;
+  repeated WorkflowProjectedExecutionToken execution_tokens = 24;
+  repeated WorkflowProjectedJoinEvaluation joins = 25;
+  reserved 26 to 35;
 }
 
 message WorkflowRunInspectionResponse {

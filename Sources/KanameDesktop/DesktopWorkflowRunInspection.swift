@@ -62,6 +62,29 @@ public struct DesktopWorkflowProjectedAttempt: Identifiable, Equatable, Sendable
     public let settledAtUnixMillis: Int64?
     public let startedStorePosition: UInt64
     public let settledStorePosition: UInt64?
+    public let executionTokenID: String?
+
+    public init(
+        id: String, nodeID: String, number: UInt32, status: String, outcome: String?,
+        errorCode: String?, error: DesktopWorkflowProjectedValue?, emissionIDs: [String],
+        startedAtUnixMillis: Int64, settledAtUnixMillis: Int64?,
+        startedStorePosition: UInt64, settledStorePosition: UInt64?,
+        executionTokenID: String? = nil
+    ) {
+        self.id = id
+        self.nodeID = nodeID
+        self.number = number
+        self.status = status
+        self.outcome = outcome
+        self.errorCode = errorCode
+        self.error = error
+        self.emissionIDs = emissionIDs
+        self.startedAtUnixMillis = startedAtUnixMillis
+        self.settledAtUnixMillis = settledAtUnixMillis
+        self.startedStorePosition = startedStorePosition
+        self.settledStorePosition = settledStorePosition
+        self.executionTokenID = executionTokenID
+    }
 }
 
 public struct DesktopWorkflowProjectedNode: Identifiable, Equatable, Sendable {
@@ -84,6 +107,24 @@ public struct DesktopWorkflowProjectedEmission: Identifiable, Equatable, Sendabl
     public let eventID: String
     public let emittedAtUnixMillis: Int64
     public let storePosition: UInt64
+    public let executionTokenID: String?
+
+    public init(
+        id: String, attemptID: String, nodeID: String, portID: String,
+        value: DesktopWorkflowProjectedValue, eventID: String,
+        emittedAtUnixMillis: Int64, storePosition: UInt64,
+        executionTokenID: String? = nil
+    ) {
+        self.id = id
+        self.attemptID = attemptID
+        self.nodeID = nodeID
+        self.portID = portID
+        self.value = value
+        self.eventID = eventID
+        self.emittedAtUnixMillis = emittedAtUnixMillis
+        self.storePosition = storePosition
+        self.executionTokenID = executionTokenID
+    }
 }
 
 public struct DesktopWorkflowProjectedEdge: Identifiable, Equatable, Sendable {
@@ -95,6 +136,59 @@ public struct DesktopWorkflowProjectedEdge: Identifiable, Equatable, Sendable {
     public let targetPortID: String
     public let state: String
     public let checkpointedAtUnixMillis: Int64
+    public let storePosition: UInt64
+    public let executionTokenID: String?
+
+    public init(
+        eventID: String, edgeID: String, emissionID: String, targetNodeID: String,
+        targetPortID: String, state: String, checkpointedAtUnixMillis: Int64,
+        storePosition: UInt64, executionTokenID: String? = nil
+    ) {
+        self.eventID = eventID
+        self.edgeID = edgeID
+        self.emissionID = emissionID
+        self.targetNodeID = targetNodeID
+        self.targetPortID = targetPortID
+        self.state = state
+        self.checkpointedAtUnixMillis = checkpointedAtUnixMillis
+        self.storePosition = storePosition
+        self.executionTokenID = executionTokenID
+    }
+}
+
+public struct DesktopWorkflowProjectedExecutionToken: Identifiable, Equatable, Sendable {
+    public var id: String { executionTokenID }
+    public let executionTokenID: String
+    public let parentExecutionTokenID: String?
+    public let forkNodeID: String?
+    public let branchID: String?
+    public let branchPortID: String?
+    public let joinNodeID: String?
+    public let sourceEmissionID: String?
+    public let status: String
+    public let outcome: String?
+    public let terminalNodeID: String?
+    public let errorCode: String?
+    public let error: DesktopWorkflowProjectedValue?
+    public let finalEmissionIDs: [String]
+    public let createdStorePosition: UInt64
+    public let settledStorePosition: UInt64?
+}
+
+public struct DesktopWorkflowProjectedJoin: Identifiable, Equatable, Sendable {
+    public var id: String { "\(forkNodeID):\(joinNodeID)" }
+    public let joinNodeID: String
+    public let forkNodeID: String
+    public let resumedExecutionTokenID: String
+    public let policy: String
+    public let threshold: UInt32
+    public let decision: String
+    public let expectedExecutionTokenIDs: [String]
+    public let arrivedExecutionTokenIDs: [String]
+    public let failedExecutionTokenIDs: [String]
+    public let pendingExecutionTokenIDs: [String]
+    public let cancelRemaining: Bool
+    public let errorCode: String?
     public let storePosition: UInt64
 }
 
@@ -141,6 +235,41 @@ public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
     public let edges: [DesktopWorkflowProjectedEdge]
     public let matchTraces: [DesktopWorkflowProjectedMatchTrace]
     public let events: [DesktopWorkflowProjectedEvent]
+    public let executionTokens: [DesktopWorkflowProjectedExecutionToken]
+    public let joins: [DesktopWorkflowProjectedJoin]
+
+    public init(
+        runID: String, workflowID: String, revisionID: String, packageDigest: String,
+        status: String, outcome: String?, errorCode: String?, error: DesktopWorkflowProjectedValue?,
+        createdAtUnixMillis: Int64, settledAtUnixMillis: Int64?, firstStorePosition: UInt64,
+        lastStorePosition: UInt64, attempts: [DesktopWorkflowProjectedAttempt],
+        nodes: [DesktopWorkflowProjectedNode], emissions: [DesktopWorkflowProjectedEmission],
+        edges: [DesktopWorkflowProjectedEdge], matchTraces: [DesktopWorkflowProjectedMatchTrace],
+        events: [DesktopWorkflowProjectedEvent],
+        executionTokens: [DesktopWorkflowProjectedExecutionToken] = [],
+        joins: [DesktopWorkflowProjectedJoin] = []
+    ) {
+        self.runID = runID
+        self.workflowID = workflowID
+        self.revisionID = revisionID
+        self.packageDigest = packageDigest
+        self.status = status
+        self.outcome = outcome
+        self.errorCode = errorCode
+        self.error = error
+        self.createdAtUnixMillis = createdAtUnixMillis
+        self.settledAtUnixMillis = settledAtUnixMillis
+        self.firstStorePosition = firstStorePosition
+        self.lastStorePosition = lastStorePosition
+        self.attempts = attempts
+        self.nodes = nodes
+        self.emissions = emissions
+        self.edges = edges
+        self.matchTraces = matchTraces
+        self.events = events
+        self.executionTokens = executionTokens
+        self.joins = joins
+    }
 
     public func attempt(for nodeID: String) -> DesktopWorkflowProjectedAttempt? {
         attempts.filter { $0.nodeID == nodeID }.max { $0.number < $1.number }
@@ -400,7 +529,9 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
             emissions: try run.emissions.map(emission),
             edges: try run.edges.map(edge),
             matchTraces: try run.matchTraces.map(matchTrace),
-            events: try run.events.map(event)
+            events: try run.events.map(event),
+            executionTokens: try run.executionTokens.map(executionToken),
+            joins: try run.joins.map(join)
         )
     }
 
@@ -460,7 +591,8 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
             emissionIDs: item.emissionIds, startedAtUnixMillis: item.startedAtUnixMillis,
             settledAtUnixMillis: item.settledAtUnixMillis > 0 ? item.settledAtUnixMillis : nil,
             startedStorePosition: item.startedStorePosition,
-            settledStorePosition: item.settledStorePosition > 0 ? item.settledStorePosition : nil
+            settledStorePosition: item.settledStorePosition > 0 ? item.settledStorePosition : nil,
+            executionTokenID: item.executionTokenID.nilIfEmpty
         )
     }
 
@@ -486,7 +618,8 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
         return DesktopWorkflowProjectedEmission(
             id: item.emissionID, attemptID: item.attemptID, nodeID: item.nodeID,
             portID: item.portID, value: try value(item.value), eventID: item.eventID,
-            emittedAtUnixMillis: item.emittedAtUnixMillis, storePosition: item.storePosition
+            emittedAtUnixMillis: item.emittedAtUnixMillis, storePosition: item.storePosition,
+            executionTokenID: item.executionTokenID.nilIfEmpty
         )
     }
 
@@ -500,6 +633,57 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
             eventID: item.eventID, edgeID: item.edgeID, emissionID: item.emissionID,
             targetNodeID: item.targetNodeID, targetPortID: item.targetPortID,
             state: item.state, checkpointedAtUnixMillis: item.checkpointedAtUnixMillis,
+            storePosition: item.storePosition, executionTokenID: item.executionTokenID.nilIfEmpty
+        )
+    }
+
+    private static func executionToken(
+        _ item: Kaname_V1_WorkflowProjectedExecutionToken
+    ) throws -> DesktopWorkflowProjectedExecutionToken {
+        guard !item.executionTokenID.isEmpty, !item.status.isEmpty,
+              item.createdStorePosition > 0 else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        return DesktopWorkflowProjectedExecutionToken(
+            executionTokenID: item.executionTokenID,
+            parentExecutionTokenID: item.parentExecutionTokenID.nilIfEmpty,
+            forkNodeID: item.forkNodeID.nilIfEmpty,
+            branchID: item.branchID.nilIfEmpty,
+            branchPortID: item.branchPortID.nilIfEmpty,
+            joinNodeID: item.joinNodeID.nilIfEmpty,
+            sourceEmissionID: item.sourceEmissionID.nilIfEmpty,
+            status: item.status,
+            outcome: item.outcome.nilIfEmpty,
+            terminalNodeID: item.terminalNodeID.nilIfEmpty,
+            errorCode: item.errorCode.nilIfEmpty,
+            error: try item.hasError ? value(item.error) : nil,
+            finalEmissionIDs: item.finalEmissionIds,
+            createdStorePosition: item.createdStorePosition,
+            settledStorePosition: item.settledStorePosition > 0 ? item.settledStorePosition : nil
+        )
+    }
+
+    private static func join(
+        _ item: Kaname_V1_WorkflowProjectedJoinEvaluation
+    ) throws -> DesktopWorkflowProjectedJoin {
+        guard !item.joinNodeID.isEmpty, !item.forkNodeID.isEmpty,
+              !item.resumedExecutionTokenID.isEmpty, !item.policy.isEmpty,
+              item.threshold > 0, !item.decision.isEmpty, item.storePosition > 0 else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        return DesktopWorkflowProjectedJoin(
+            joinNodeID: item.joinNodeID,
+            forkNodeID: item.forkNodeID,
+            resumedExecutionTokenID: item.resumedExecutionTokenID,
+            policy: item.policy,
+            threshold: item.threshold,
+            decision: item.decision,
+            expectedExecutionTokenIDs: item.expectedExecutionTokenIds,
+            arrivedExecutionTokenIDs: item.arrivedExecutionTokenIds,
+            failedExecutionTokenIDs: item.failedExecutionTokenIds,
+            pendingExecutionTokenIDs: item.pendingExecutionTokenIds,
+            cancelRemaining: item.cancelRemaining,
+            errorCode: item.errorCode.nilIfEmpty,
             storePosition: item.storePosition
         )
     }

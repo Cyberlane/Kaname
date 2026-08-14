@@ -423,6 +423,15 @@ fn execution_availability(node: &Node) -> &'static str {
         {
             "executable"
         }
+        "control.parallel" => "executable",
+        "control.join"
+            if matches!(
+                node.config.get("policy").and_then(Value::as_str),
+                Some("all" | "any" | "quorum")
+            ) =>
+        {
+            "executable"
+        }
         _ => "schema-only",
     }
 }

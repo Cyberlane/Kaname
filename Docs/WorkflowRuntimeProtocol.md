@@ -16,6 +16,9 @@ Both commands require a project-scoped local actor and an idempotency key. Accou
 | Envelope kind | Protobuf payload | Durable fact |
 |---|---|---|
 | `workflow.run.token-created` | `WorkflowRunTokenCreated` | The run is pinned to one revision/package and one execution token. |
+| `workflow.execution-token.created` | `WorkflowExecutionTokenCreated` | A root, branch, or post-join path became durable. |
+| `workflow.execution-token.settled` | `WorkflowExecutionTokenSettled` | One path completed, failed, was cancelled, forked, or was consumed by a join. |
+| `workflow.join.evaluated` | `WorkflowJoinEvaluated` | One all, any, or quorum decision recorded the complete expected/arrived/failed/pending token partition. |
 | `workflow.attempt.started` | `WorkflowAttemptStarted` | A numbered node attempt began. |
 | `workflow.port.emitted` | `WorkflowPortEmitted` | A named output port emitted one immutable value reference. |
 | `workflow.match.trace-recorded` | `WorkflowMatchTraceRecorded` | Match cases evaluated, selected cases, emitted ports, and an inspectable trace were recorded separately. |
@@ -32,6 +35,10 @@ Runtime events must use stream `workflow-run:<run-id>`, correlation ID `<run-id>
 
 The storage reference is only a forward-compatible opaque identifier. WFP-004 does not implement object storage or grant storage access. Content-addressed objects, job/workflow isolation, handles, promotion, and deletion remain WFP-005 work.
 
-## Current stage boundary
+## Durable control-flow boundary
 
-The journal validates these typed contracts before mutation and retains their exact positioned bytes across restart. Unknown runtime kinds, mismatched payload types, malformed Protobuf, reused idempotency keys, non-canonical JSON, contradictory success/error shapes, wrong streams, and live-provider provenance are rejected. There is still no run projection, executor, capability, LLM, connector, account access, effect, or external action in WFP-004A.
+The journal validates these typed contracts before mutation and retains their exact positioned bytes across restart. Unknown runtime kinds, mismatched payload types, malformed Protobuf, reused idempotency keys, non-canonical JSON, contradictory success/error shapes, invalid join partitions, wrong streams, and live-provider provenance are rejected.
+
+The local executor now creates one root execution token, deterministic child tokens for every `control.parallel` branch, and one resumed token after a settled `control.join`. Attempts, emissions, Match traces, and admitted edges name their execution token. `all`, `any`, and `quorum` joins decide from an immutable partition of the fork's expected tokens; a threshold that can no longer be met routes a typed join error. `cancelRemaining` settles pending tokens without starting them. When it is false, an early successful join may continue downstream while remaining branches finish, but the run itself cannot settle until every token is closed. The disposable projection retains token and join records and can rebuild them entirely from the journal.
+
+This stage still grants no capability, LLM, connector, account, provider, effect, or external-action authority. Named joins, bounded iteration, retry, waits, feedback cases, and effects remain later runtime stages.

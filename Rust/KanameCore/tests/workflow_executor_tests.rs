@@ -40,6 +40,158 @@ const OTHERWISE_ID: &str = "018f5000-0010-7000-8000-000000000010";
 const REVISION_ID: &str = "revision-minimal-001";
 const STORAGE_WORKFLOW_ID: &str = "018f5300-0001-7000-8000-000000000001";
 const STORAGE_REVISION_ID: &str = "revision-storage-001";
+const PARALLEL_WORKFLOW_ID: &str = "018f5600-0001-7000-8000-000000000001";
+const PARALLEL_REVISION_ID: &str = "revision-parallel-001";
+
+#[test]
+fn durable_parallel_tokens_apply_all_any_and_quorum_deterministically() {
+    for (policy, quorum, fail_right, cancel_remaining, expected) in [
+        ("all", None, false, false, DurableRunOutcome::Succeeded),
+        ("all", None, true, false, DurableRunOutcome::Failed),
+        ("any", None, true, true, DurableRunOutcome::Succeeded),
+        ("quorum", Some(1), true, true, DurableRunOutcome::Succeeded),
+        ("quorum", Some(2), true, false, DurableRunOutcome::Failed),
+    ] {
+        let directory = tempdir().unwrap();
+        let (library, published) = published_parallel_library(
+            directory.path(),
+            policy,
+            quorum,
+            fail_right,
+            cancel_remaining,
+        );
+        let run_id = format!("run-parallel-{policy}-{}-{fail_right}", quorum.unwrap_or(0));
+        let command = parallel_run_command(&run_id, &published);
+        let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+        let result = workflow_executor::execute(&mut journal, &library, &command).unwrap();
+        assert_eq!(result.outcome, expected, "{policy} {quorum:?} {fail_right}");
+        let wires = run_wires(&journal, &run_id);
+        assert_eq!(
+            workflow_executor::execute(&mut journal, &library, &command)
+                .unwrap()
+                .event_count,
+            wires.len()
+        );
+        assert_eq!(run_wires(&journal, &run_id), wires);
+        let events = journal
+            .replay(&format!("thread:workflow-run:{run_id}"), None, 500)
+            .unwrap()
+            .events;
+        let runtime = events
+            .iter()
+            .map(|event| kaname_core::workflow_runtime::decode_workflow_event(event).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            runtime
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    kaname_core::workflow_runtime::WorkflowRuntimeEvent::JoinEvaluated(_)
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            runtime
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    kaname_core::workflow_runtime::WorkflowRuntimeEvent::ExecutionTokenCreated(_)
+                ))
+                .count(),
+            4
+        );
+        let join = runtime
+            .iter()
+            .find_map(|event| match event {
+                kaname_core::workflow_runtime::WorkflowRuntimeEvent::JoinEvaluated(value) => {
+                    Some(value)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(join.policy, policy);
+        assert_eq!(join.expected_execution_token_ids.len(), 2);
+        let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+        projection.catch_up(&journal).unwrap();
+        assert_eq!(projection.row_count("tokens").unwrap(), 4);
+        assert_eq!(projection.row_count("joins").unwrap(), 1);
+        let inspected = projection
+            .inspect_runs(Some(PARALLEL_WORKFLOW_ID), Some(&run_id), 1)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(inspected.execution_tokens.len(), 4);
+        assert_eq!(inspected.joins.len(), 1);
+        assert!(
+            inspected
+                .attempts
+                .iter()
+                .all(|attempt| !attempt.execution_token_id.is_empty())
+        );
+        assert!(
+            inspected
+                .edges
+                .iter()
+                .all(|edge| !edge.execution_token_id.is_empty())
+        );
+        if fail_right && policy == "all" {
+            assert_eq!(
+                join.decision,
+                kaname_core::v1::WorkflowJoinDecision::Failed as i32
+            );
+            assert_eq!(join.failed_execution_token_ids.len(), 1);
+        }
+        if fail_right
+            && matches!(policy, "any" | "quorum")
+            && expected == DurableRunOutcome::Succeeded
+        {
+            assert_eq!(
+                join.decision,
+                kaname_core::v1::WorkflowJoinDecision::Succeeded as i32
+            );
+            assert_eq!(join.arrived_execution_token_ids.len(), 1);
+            assert_eq!(join.pending_execution_token_ids.len(), 1);
+        }
+    }
+}
+
+#[test]
+fn parallel_run_resumes_at_every_token_fork_and_join_boundary() {
+    let directory = tempdir().unwrap();
+    let (library, published) =
+        published_parallel_library(directory.path(), "quorum", Some(2), false, false);
+    let command = parallel_run_command("run-parallel-crash-001", &published);
+    let expected = {
+        let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+        assert_eq!(
+            workflow_executor::execute(&mut journal, &library, &command)
+                .unwrap()
+                .outcome,
+            DurableRunOutcome::Succeeded
+        );
+        run_wires(&journal, "run-parallel-crash-001")
+    };
+    for boundary in 1..=expected.len() {
+        let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+        assert!(matches!(
+            workflow_executor::execute_with_fault_for_test(
+                &mut journal,
+                &library,
+                &command,
+                WorkflowExecutionFault::AfterNewEvent(boundary),
+            ),
+            Err(WorkflowExecutionError::InjectedInterruption)
+        ));
+        assert_eq!(
+            workflow_executor::execute(&mut journal, &library, &command)
+                .unwrap()
+                .outcome,
+            DurableRunOutcome::Succeeded
+        );
+        assert_eq!(run_wires(&journal, "run-parallel-crash-001"), expected);
+    }
+}
 
 #[test]
 fn immutable_minimal_graph_takes_success_and_validation_failure_paths() {
@@ -54,7 +206,7 @@ fn immutable_minimal_graph_takes_success_and_validation_failure_paths() {
     let success =
         workflow_executor::execute(&mut success_journal, &library, &success_command).unwrap();
     assert_eq!(success.outcome, DurableRunOutcome::Succeeded);
-    assert_eq!(success.event_count, 17);
+    assert_eq!(success.event_count, 19);
     let mut success_projection = WorkflowRunProjection::open_in_memory().unwrap();
     success_projection.catch_up(&success_journal).unwrap();
     assert_eq!(success_projection.row_count("runs").unwrap(), 1);
@@ -82,7 +234,7 @@ fn immutable_minimal_graph_takes_success_and_validation_failure_paths() {
     let failure =
         workflow_executor::execute(&mut failure_journal, &library, &failure_command).unwrap();
     assert_eq!(failure.outcome, DurableRunOutcome::Failed);
-    assert_eq!(failure.event_count, 12);
+    assert_eq!(failure.event_count, 14);
     let mut failure_projection = WorkflowRunProjection::open_in_memory().unwrap();
     failure_projection.catch_up(&failure_journal).unwrap();
     assert_eq!(failure_projection.row_count("attempts").unwrap(), 3);
@@ -107,7 +259,7 @@ fn every_event_boundary_resumes_to_the_exact_same_journal_without_duplicates() {
         assert_eq!(result.outcome, DurableRunOutcome::Succeeded);
         run_wires(&journal, "run-crash-proof-001")
     };
-    assert_eq!(expected.len(), 17);
+    assert_eq!(expected.len(), 19);
 
     for boundary in 1..=expected.len() {
         let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
@@ -128,7 +280,7 @@ fn every_event_boundary_resumes_to_the_exact_same_journal_without_duplicates() {
         projection.catch_up(&journal).unwrap();
         assert_eq!(projection.row_count("attempts").unwrap(), 4);
         assert_eq!(projection.row_count("emissions").unwrap(), 3);
-        assert_eq!(projection.row_count("events").unwrap(), 17);
+        assert_eq!(projection.row_count("events").unwrap(), 19);
     }
 }
 
@@ -143,7 +295,7 @@ fn cancellation_is_idempotent_terminal_and_inspectable_after_restart() {
             &mut journal,
             &library,
             &command,
-            WorkflowExecutionFault::AfterNewEvent(2),
+            WorkflowExecutionFault::AfterNewEvent(3),
         ),
         Err(WorkflowExecutionError::InjectedInterruption)
     ));
@@ -157,7 +309,7 @@ fn cancellation_is_idempotent_terminal_and_inspectable_after_restart() {
     let result = workflow_executor::execute(&mut journal, &library, &command).unwrap();
     assert_eq!(result.outcome, DurableRunOutcome::Cancelled);
     let settled_wires = run_wires(&journal, "run-cancel-001");
-    assert_eq!(settled_wires.len(), 5);
+    assert_eq!(settled_wires.len(), 7);
     assert_eq!(
         workflow_executor::execute(&mut journal, &library, &command)
             .unwrap()
@@ -171,7 +323,7 @@ fn cancellation_is_idempotent_terminal_and_inspectable_after_restart() {
     assert_eq!(projection.row_count("runs").unwrap(), 1);
     assert_eq!(projection.row_count("attempts").unwrap(), 1);
     assert_eq!(projection.row_count("emissions").unwrap(), 0);
-    assert_eq!(projection.row_count("events").unwrap(), 5);
+    assert_eq!(projection.row_count("events").unwrap(), 7);
 }
 
 #[test]
@@ -501,6 +653,63 @@ fn published_library(
     (library, published)
 }
 
+fn published_parallel_library(
+    application_support: &std::path::Path,
+    policy: &str,
+    quorum: Option<u32>,
+    fail_right: bool,
+    cancel_remaining: bool,
+) -> (
+    kaname_core::workflow_library::WorkflowLibraryStore,
+    PublishedWorkflowRevision,
+) {
+    let mut library = open_workflow_library(application_support).unwrap();
+    library
+        .create_draft(CreateWorkflowDraft {
+            workflow_id: PARALLEL_WORKFLOW_ID.into(),
+            package_id: "dev.kaname.parallel-runtime".into(),
+            name: "Durable parallel runtime".into(),
+            summary: "Synthetic fork and join fixture".into(),
+            edit_id: "edit-parallel-001".into(),
+            session_id: "executor-tests".into(),
+            workflow_source: serde_json::to_vec(&parallel_workflow_source(
+                policy,
+                quorum,
+                fail_right,
+                cancel_remaining,
+            ))
+            .unwrap(),
+            layout_source: br#"{"nodes":[]}"#.to_vec(),
+            recorded_at_unix_millis: 50,
+        })
+        .unwrap();
+    let schema_bundle = json!({
+        "bundleVersion": 1,
+        "schemas": [
+            {"id": "dev.kaname.parallel/pass-v1", "schema": {"type": "object"}},
+            {"id": "dev.kaname.parallel/right-v1", "schema": if fail_right {
+                json!({"type": "object", "required": ["right"]})
+            } else {
+                json!({"type": "object"})
+            }}
+        ]
+    });
+    let published = library
+        .publish_revision(PublishWorkflowRevision {
+            workflow_id: PARALLEL_WORKFLOW_ID.into(),
+            expected_draft_sequence: 0,
+            revision_id: PARALLEL_REVISION_ID.into(),
+            registration_id: "registration-parallel-001".into(),
+            release_version: "1.0.0".into(),
+            schema_bundle_json: serde_json::to_vec(&schema_bundle).unwrap(),
+            dependency_lock_json: br#"{"lockVersion":1,"dependencies":[]}"#.to_vec(),
+            configuration_contract_json: br#"{"type":"object"}"#.to_vec(),
+            published_at_unix_millis: 60,
+        })
+        .unwrap();
+    (library, published)
+}
+
 fn published_storage_library(
     application_support: &std::path::Path,
 ) -> (
@@ -658,6 +867,98 @@ fn storage_workflow_source() -> Value {
         },
         "metadata": {}
     })
+}
+
+fn parallel_workflow_source(
+    policy: &str,
+    quorum: Option<u32>,
+    fail_right: bool,
+    cancel_remaining: bool,
+) -> Value {
+    let ids = [
+        "018f5600-0002-7000-8000-000000000002",
+        "018f5600-0003-7000-8000-000000000003",
+        "018f5600-0004-7000-8000-000000000004",
+        "018f5600-0005-7000-8000-000000000005",
+        "018f5600-0006-7000-8000-000000000006",
+        "018f5600-0007-7000-8000-000000000007",
+        "018f5600-0008-7000-8000-000000000008",
+        "018f5600-0009-7000-8000-000000000009",
+        "018f5600-0010-7000-8000-000000000010",
+    ];
+    let left_branch_id = "018f5600-0011-7000-8000-000000000011";
+    let right_branch_id = "018f5600-0012-7000-8000-000000000012";
+    let node = |index: usize, key: &str, node_type: &str, config: Value| {
+        json!({
+            "id": ids[index], "key": key, "name": key,
+            "type": node_type, "typeVersion": 1, "config": config
+        })
+    };
+    let edge = |sequence: u16, from: (usize, String), to: (usize, &str)| {
+        json!({
+            "id": format!("018f5700-{sequence:04}-7000-8000-{sequence:012}"),
+            "from": {"nodeId": ids[from.0], "portId": from.1},
+            "to": {"nodeId": ids[to.0], "portId": to.1},
+            "mappingId": format!("018f5800-{sequence:04}-7000-8000-{sequence:012}"),
+            "mapping": {"whole": true}
+        })
+    };
+    let mut join_config = json!({
+        "policy": policy,
+        "cancelRemaining": cancel_remaining
+    });
+    if let Some(quorum) = quorum {
+        join_config["quorum"] = json!(quorum);
+    }
+    json!({
+        "formatVersion": 1,
+        "workflowId": PARALLEL_WORKFLOW_ID,
+        "packageId": "dev.kaname.parallel-runtime",
+        "name": "Durable parallel runtime",
+        "summary": "Synthetic and effect free",
+        "graph": {
+            "entrypoints": [{
+                "id": "018f5600-0013-7000-8000-000000000013",
+                "nodeId": ids[0]
+            }],
+            "nodes": [
+                node(0, "manual", "trigger.manual", json!({})),
+                node(1, "fork", "control.parallel", json!({"branches": [
+                    {"id": left_branch_id, "key": "left", "label": "Left"},
+                    {"id": right_branch_id, "key": "right", "label": "Right"}
+                ]})),
+                node(2, "left", "data.validate", json!({"schemaRef": "dev.kaname.parallel/pass-v1"})),
+                node(3, "right", "data.validate", json!({"schemaRef": if fail_right { "dev.kaname.parallel/right-v1" } else { "dev.kaname.parallel/pass-v1" }})),
+                node(4, "join", "control.join", join_config),
+                node(5, "complete", "terminal.complete", json!({})),
+                node(6, "fail-left", "terminal.fail", json!({})),
+                node(7, "fail-right", "terminal.fail", json!({})),
+                node(8, "fail-join", "terminal.fail", json!({}))
+            ],
+            "edges": [
+                edge(1, (0, "success".into()), (1, "input")),
+                edge(2, (1, format!("case-{left_branch_id}")), (2, "input")),
+                edge(3, (1, format!("case-{right_branch_id}")), (3, "input")),
+                edge(4, (2, "success".into()), (4, "branches")),
+                edge(5, (2, "error".into()), (6, "input")),
+                edge(6, (3, "success".into()), (4, "branches")),
+                edge(7, (3, "error".into()), (7, "input")),
+                edge(8, (4, "success".into()), (5, "input")),
+                edge(9, (4, "error".into()), (8, "input"))
+            ]
+        },
+        "interfaces": {}, "resources": {}, "policies": {}, "storage": {}, "metadata": {}
+    })
+}
+
+fn parallel_run_command(run_id: &str, published: &PublishedWorkflowRevision) -> CommandEnvelope {
+    let mut envelope = run_command(run_id, published, json!({"value": "synthetic"}));
+    let mut request =
+        RequestWorkflowRun::decode(envelope.payload.as_ref().unwrap().value.as_slice()).unwrap();
+    request.workflow_id = PARALLEL_WORKFLOW_ID.into();
+    request.revision_id = PARALLEL_REVISION_ID.into();
+    envelope.payload.as_mut().unwrap().value = request.encode_to_vec();
+    envelope
 }
 
 fn storage_run_command(

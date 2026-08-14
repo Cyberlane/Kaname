@@ -221,6 +221,8 @@ struct ExecutionPackage {
 struct RecordedRun {
     events: Vec<v1::EventEnvelope>,
     token: Option<v1::WorkflowRunTokenCreated>,
+    execution_tokens: BTreeMap<String, RecordedExecutionToken>,
+    joins: Vec<RecordedJoin>,
     attempts: Vec<RecordedAttempt>,
     emissions: BTreeMap<String, RecordedEmission>,
     edges: Vec<RecordedEdge>,
@@ -228,10 +230,25 @@ struct RecordedRun {
     settled: Option<v1::WorkflowRunSettled>,
 }
 
+struct RecordedExecutionToken {
+    created_event_id: String,
+    created_store_position: u64,
+    created: v1::WorkflowExecutionTokenCreated,
+    settled_event_id: Option<String>,
+    settled: Option<v1::WorkflowExecutionTokenSettled>,
+}
+
+struct RecordedJoin {
+    event_id: String,
+    store_position: u64,
+    payload: v1::WorkflowJoinEvaluated,
+}
+
 struct RecordedAttempt {
     started_event_id: String,
     started_store_position: u64,
     started: v1::WorkflowAttemptStarted,
+    settled_event_id: Option<String>,
     settled: Option<v1::WorkflowAttemptSettled>,
 }
 
@@ -260,6 +277,14 @@ struct MatchTraceOutput {
     matched_case_ids: Vec<String>,
     emitted_port_ids: Vec<String>,
     value: v1::WorkflowValueReference,
+}
+
+struct CompletedRunOutcome {
+    outcome: v1::WorkflowRunOutcome,
+    error_code: String,
+    error: Option<v1::WorkflowValueReference>,
+    final_emission_ids: Vec<String>,
+    causation_id: String,
 }
 
 pub fn execute(
@@ -531,6 +556,28 @@ fn load_execution_package(
                 ));
             }
         }
+        if node.node_type == "control.parallel" {
+            let config: ParallelConfig = serde_json::from_value(node.config.clone())
+                .map_err(|_| WorkflowExecutionError::Integrity("parallel_config".into()))?;
+            if config.branches.len() < 2 || config.branches.len() > 64 {
+                return Err(WorkflowExecutionError::Integrity(
+                    "parallel_branch_count".into(),
+                ));
+            }
+            parallel_join_node(&compiled, node, &config)?;
+        }
+        if node.node_type == "control.join" {
+            let config: JoinConfig = serde_json::from_value(node.config.clone())
+                .map_err(|_| WorkflowExecutionError::Integrity("join_config".into()))?;
+            if !matches!(config.policy.as_str(), "all" | "any" | "quorum")
+                || !config.required_branches.is_empty()
+                || (config.policy == "quorum" && config.quorum.is_none())
+            {
+                return Err(WorkflowExecutionError::Unsupported(
+                    "join_policy_not_executable".into(),
+                ));
+            }
+        }
     }
     for (key, declaration) in &compiled.storage {
         if key != &declaration.key
@@ -629,6 +676,8 @@ fn validate_compiled_subset(compiled: &CompiledWorkflow) -> Result<()> {
                 "trigger.manual"
                     | "data.validate"
                     | "control.match"
+                    | "control.parallel"
+                    | "control.join"
                     | "storage.read"
                     | "storage.write"
                     | "storage.promote"
@@ -698,6 +747,29 @@ fn next_events(
         ));
     }
 
+    if state.execution_tokens.is_empty() {
+        let execution_token_id = stable_id("execution-token", &[&request.run_id, "root"]);
+        return Ok(vec![runtime_event(
+            command.submitted_at_unix_millis,
+            &stable_id("event", &[&request.run_id, "execution-token", "root"]),
+            workflow_runtime::WORKFLOW_EXECUTION_TOKEN_CREATED_KIND,
+            workflow_runtime::WORKFLOW_EXECUTION_TOKEN_CREATED_TYPE,
+            v1::WorkflowExecutionTokenCreated {
+                run_id: request.run_id.clone(),
+                run_token_id: token_id.to_owned(),
+                execution_token_id,
+                parent_execution_token_id: String::new(),
+                fork_node_id: String::new(),
+                branch_id: String::new(),
+                branch_port_id: String::new(),
+                join_node_id: String::new(),
+                source_emission_id: String::new(),
+            },
+            &stable_id("event", &[&request.run_id, "token"]),
+            &request.run_id,
+        )]);
+    }
+
     if let Some(cancellation) = state.cancellation.as_ref() {
         if let Some(active) = active_attempt(state)? {
             let emissions = emissions_for_attempt(state, &active.started.attempt_id);
@@ -727,9 +799,25 @@ fn next_events(
                         .iter()
                         .map(|emission| emission.payload.emission_id.clone())
                         .collect(),
+                    execution_token_id: active.started.execution_token_id.clone(),
                 },
                 &cancellation.cancel_command_id,
                 &request.run_id,
+            )]);
+        }
+        if let Some(execution_token) = active_execution_tokens(state).into_iter().next() {
+            return Ok(vec![execution_token_settled_event(
+                cancellation_time(state, command.submitted_at_unix_millis),
+                request,
+                token_id,
+                &execution_token.created.execution_token_id,
+                v1::WorkflowExecutionTokenOutcome::Cancelled,
+                String::new(),
+                String::new(),
+                cancellation.reason_code.clone(),
+                None,
+                Vec::new(),
+                &cancellation.cancel_command_id,
             )]);
         }
         return Ok(vec![run_settled_event(
@@ -748,45 +836,46 @@ fn next_events(
         return node_event_sequence(package, storage, command, request, token_id, state, active);
     }
 
-    if let Some(last) = state.attempts.last()
-        && let Some(settled) = last.settled.as_ref()
+    if let Some(event) =
+        pending_execution_token_settlement(package, command, request, token_id, state)?
     {
-        let node = compiled_node(&package.compiled, &settled.node_id)?;
-        if node.node_type == "terminal.complete" {
-            let input = node_input(request, state, &node.id)?;
-            let emission_id = input.0.map(|edge| edge.emission_id.clone());
-            return Ok(vec![run_settled_event(
-                command.submitted_at_unix_millis,
-                request,
-                token_id,
-                v1::WorkflowRunOutcome::Succeeded,
-                String::new(),
-                None,
-                emission_id.into_iter().collect(),
-                &stable_id("event", &[&request.run_id, "attempt-settled", &node.id]),
-            )]);
-        }
-        if node.node_type == "terminal.fail" {
-            let (_, value) = node_input(request, state, &node.id)?;
-            let error_code = error_code(&value)?;
-            return Ok(vec![run_settled_event(
-                command.submitted_at_unix_millis,
-                request,
-                token_id,
-                v1::WorkflowRunOutcome::Failed,
-                error_code,
-                Some(value),
-                Vec::new(),
-                &stable_id("event", &[&request.run_id, "attempt-settled", &node.id]),
-            )]);
-        }
+        return Ok(vec![event]);
     }
 
-    let (node_id, causation_id) = next_ready_node(&package.compiled, state)?;
-    let attempt_id = stable_id("attempt", &[&request.run_id, &node_id, "1"]);
+    if let Some(event) = pending_join_lifecycle_event(package, command, request, token_id, state)? {
+        return Ok(vec![event]);
+    }
+
+    if active_execution_tokens(state).is_empty() {
+        let completed = completed_run_outcome(state)?;
+        return Ok(vec![run_settled_event(
+            command.submitted_at_unix_millis,
+            request,
+            token_id,
+            completed.outcome,
+            completed.error_code,
+            completed.error,
+            completed.final_emission_ids,
+            &completed.causation_id,
+        )]);
+    }
+
+    let (node_id, causation_id, execution_token_id) = next_ready_node(&package.compiled, state)?;
+    let attempt_id = stable_id(
+        "attempt",
+        &[&request.run_id, &execution_token_id, &node_id, "1"],
+    );
     Ok(vec![runtime_event(
         command.submitted_at_unix_millis,
-        &stable_id("event", &[&request.run_id, "attempt-started", &node_id]),
+        &stable_id(
+            "event",
+            &[
+                &request.run_id,
+                "attempt-started",
+                &execution_token_id,
+                &node_id,
+            ],
+        ),
         workflow_runtime::WORKFLOW_ATTEMPT_STARTED_KIND,
         workflow_runtime::WORKFLOW_ATTEMPT_STARTED_TYPE,
         v1::WorkflowAttemptStarted {
@@ -795,6 +884,7 @@ fn next_events(
             attempt_id,
             node_id,
             attempt_number: 1,
+            execution_token_id,
         },
         &causation_id,
         &request.run_id,
@@ -811,21 +901,45 @@ fn node_event_sequence(
     attempt: &RecordedAttempt,
 ) -> Result<Vec<v1::EventEnvelope>> {
     let node = compiled_node(&package.compiled, &attempt.started.node_id)?;
-    let (_, input) = node_input(request, state, &node.id)?;
-    let execution = execute_node(
-        package,
-        storage,
+    let inputs = node_inputs(
         request,
-        node,
-        &attempt.started.attempt_id,
-        command.submitted_at_unix_millis,
-        &input,
+        state,
+        &node.id,
+        &attempt.started.execution_token_id,
     )?;
+    let execution = if node.node_type == "control.join" {
+        execute_join_node(
+            request,
+            node,
+            state,
+            &attempt.started.execution_token_id,
+            &inputs,
+        )?
+    } else {
+        let input = inputs
+            .first()
+            .ok_or_else(|| WorkflowExecutionError::Lifecycle("node_input_missing".into()))?
+            .1
+            .clone();
+        execute_node(
+            package,
+            storage,
+            request,
+            node,
+            &attempt.started.attempt_id,
+            command.submitted_at_unix_millis,
+            &input,
+        )?
+    };
     let mut events = Vec::new();
     let mut causation_id = attempt.started_event_id.clone();
+    let execution_token_id = attempt.started.execution_token_id.as_str();
 
     if let Some(trace) = execution.match_trace {
-        let event_id = stable_id("event", &[&request.run_id, "match-trace", &node.id]);
+        let event_id = stable_id(
+            "event",
+            &[&request.run_id, "match-trace", execution_token_id, &node.id],
+        );
         events.push(runtime_event(
             command.submitted_at_unix_millis,
             &event_id,
@@ -841,6 +955,7 @@ fn node_event_sequence(
                 matched_case_ids: trace.matched_case_ids,
                 emitted_port_ids: trace.emitted_port_ids,
                 trace: Some(trace.value),
+                execution_token_id: execution_token_id.to_owned(),
             },
             &causation_id,
             &request.run_id,
@@ -850,8 +965,65 @@ fn node_event_sequence(
 
     let mut emission_ids = Vec::new();
     for (port_id, value) in execution.outputs {
-        let emission_id = stable_id("emission", &[&request.run_id, &node.id, &port_id, "1"]);
-        let emission_event_id = stable_id("event", &[&request.run_id, "port", &node.id, &port_id]);
+        let emission_id = stable_id(
+            "emission",
+            &[&request.run_id, execution_token_id, &node.id, &port_id, "1"],
+        );
+        let edge_execution_token_id = if node.node_type == "control.parallel" {
+            let config: ParallelConfig = serde_json::from_value(node.config.clone())
+                .map_err(|_| WorkflowExecutionError::Integrity("parallel_config".into()))?;
+            let branch = config
+                .branches
+                .iter()
+                .find(|branch| format!("case-{}", branch.id) == port_id)
+                .ok_or_else(|| WorkflowExecutionError::Integrity("parallel_port".into()))?;
+            let child_token_id = stable_id(
+                "execution-token",
+                &[&request.run_id, execution_token_id, &node.id, &branch.id],
+            );
+            let token_event_id = stable_id(
+                "event",
+                &[
+                    &request.run_id,
+                    "execution-token",
+                    &child_token_id,
+                    "created",
+                ],
+            );
+            events.push(runtime_event(
+                command.submitted_at_unix_millis,
+                &token_event_id,
+                workflow_runtime::WORKFLOW_EXECUTION_TOKEN_CREATED_KIND,
+                workflow_runtime::WORKFLOW_EXECUTION_TOKEN_CREATED_TYPE,
+                v1::WorkflowExecutionTokenCreated {
+                    run_id: request.run_id.clone(),
+                    run_token_id: token_id.to_owned(),
+                    execution_token_id: child_token_id.clone(),
+                    parent_execution_token_id: execution_token_id.to_owned(),
+                    fork_node_id: node.id.clone(),
+                    branch_id: branch.id.clone(),
+                    branch_port_id: port_id.clone(),
+                    join_node_id: parallel_join_node(&package.compiled, node, &config)?,
+                    source_emission_id: emission_id.clone(),
+                },
+                &causation_id,
+                &request.run_id,
+            ));
+            causation_id = token_event_id;
+            child_token_id
+        } else {
+            execution_token_id.to_owned()
+        };
+        let emission_event_id = stable_id(
+            "event",
+            &[
+                &request.run_id,
+                "port",
+                execution_token_id,
+                &node.id,
+                &port_id,
+            ],
+        );
         events.push(runtime_event(
             command.submitted_at_unix_millis,
             &emission_event_id,
@@ -865,6 +1037,7 @@ fn node_event_sequence(
                 node_id: node.id.clone(),
                 port_id: port_id.clone(),
                 value: Some(value),
+                execution_token_id: execution_token_id.to_owned(),
             },
             &causation_id,
             &request.run_id,
@@ -885,7 +1058,16 @@ fn node_event_sequence(
             )));
         }
         let edge = outgoing[0];
-        let edge_event_id = stable_id("event", &[&request.run_id, "edge", &edge.id, &emission_id]);
+        let edge_event_id = stable_id(
+            "event",
+            &[
+                &request.run_id,
+                "edge",
+                &edge_execution_token_id,
+                &edge.id,
+                &emission_id,
+            ],
+        );
         events.push(runtime_event(
             command.submitted_at_unix_millis,
             &edge_event_id,
@@ -899,6 +1081,7 @@ fn node_event_sequence(
                 target_node_id: edge.to.node_id.clone(),
                 target_port_id: edge.to.port_id.clone(),
                 state: v1::WorkflowEdgeCheckpointState::Admitted as i32,
+                execution_token_id: edge_execution_token_id,
             },
             &causation_id,
             &request.run_id,
@@ -906,7 +1089,15 @@ fn node_event_sequence(
         causation_id = edge_event_id;
     }
 
-    let settle_event_id = stable_id("event", &[&request.run_id, "attempt-settled", &node.id]);
+    let settle_event_id = stable_id(
+        "event",
+        &[
+            &request.run_id,
+            "attempt-settled",
+            execution_token_id,
+            &node.id,
+        ],
+    );
     events.push(runtime_event(
         command.submitted_at_unix_millis,
         &settle_event_id,
@@ -922,6 +1113,7 @@ fn node_event_sequence(
             error_code: execution.error_code,
             error: execution.error,
             emission_ids,
+            execution_token_id: execution_token_id.to_owned(),
         },
         &causation_id,
         &request.run_id,
@@ -1032,6 +1224,21 @@ fn execute_node(
                 error,
             })
         }
+        "control.parallel" => {
+            let config: ParallelConfig = serde_json::from_value(node.config.clone())
+                .map_err(|_| WorkflowExecutionError::Integrity("parallel_config".into()))?;
+            Ok(NodeExecution {
+                match_trace: None,
+                outputs: config
+                    .branches
+                    .into_iter()
+                    .map(|branch| (format!("case-{}", branch.id), input.clone()))
+                    .collect(),
+                outcome: v1::WorkflowAttemptOutcome::Succeeded,
+                error_code: String::new(),
+                error: None,
+            })
+        }
         "storage.read" | "storage.write" | "storage.promote" => execute_storage_node(
             package,
             storage.ok_or_else(|| {
@@ -1064,6 +1271,74 @@ fn execute_node(
             "node:{}",
             node.node_type
         ))),
+    }
+}
+
+fn execute_join_node(
+    request: &v1::RequestWorkflowRun,
+    node: &CompiledNode,
+    state: &RecordedRun,
+    execution_token_id: &str,
+    inputs: &[(
+        Option<&v1::WorkflowEdgeCheckpointed>,
+        v1::WorkflowValueReference,
+    )],
+) -> Result<NodeExecution> {
+    let config: JoinConfig = serde_json::from_value(node.config.clone())
+        .map_err(|_| WorkflowExecutionError::Integrity("join_config".into()))?;
+    let join = state
+        .joins
+        .iter()
+        .find(|join| join.payload.resumed_execution_token_id == execution_token_id)
+        .ok_or_else(|| WorkflowExecutionError::Lifecycle("join_decision_missing".into()))?;
+    if join.payload.join_node_id != node.id
+        || join.payload.policy != config.policy
+        || join.payload.cancel_remaining != config.cancel_remaining
+    {
+        return Err(WorkflowExecutionError::Integrity(
+            "join_decision_contract".into(),
+        ));
+    }
+    let branches = inputs
+        .iter()
+        .filter_map(|(edge, value)| {
+            edge.map(|edge| {
+                json!({
+                    "executionTokenId": edge.execution_token_id,
+                    "emissionId": edge.emission_id,
+                    "valueId": value.value_id,
+                    "sha256": value.sha256,
+                    "bytes": value.byte_count
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    let summary = json!({
+        "code": join.payload.error_code,
+        "policy": join.payload.policy,
+        "threshold": join.payload.threshold,
+        "decision": if join.payload.decision == v1::WorkflowJoinDecision::Succeeded as i32 { "succeeded" } else { "failed" },
+        "expectedExecutionTokenIds": join.payload.expected_execution_token_ids,
+        "arrivedExecutionTokenIds": join.payload.arrived_execution_token_ids,
+        "failedExecutionTokenIds": join.payload.failed_execution_token_ids,
+        "pendingExecutionTokenIds": join.payload.pending_execution_token_ids,
+        "branches": branches
+    });
+    let value = value_from_json(
+        &stable_id(
+            "value",
+            &[&request.run_id, execution_token_id, &node.id, "join"],
+        ),
+        &summary,
+    )?;
+    match v1::WorkflowJoinDecision::try_from(join.payload.decision) {
+        Ok(v1::WorkflowJoinDecision::Succeeded) => Ok(success_output("success", value)),
+        Ok(v1::WorkflowJoinDecision::Failed) => {
+            Ok(failure_output("error", &join.payload.error_code, value))
+        }
+        _ => Err(WorkflowExecutionError::Integrity(
+            "join_decision_invalid".into(),
+        )),
     }
 }
 
@@ -1108,6 +1383,30 @@ struct StoragePromoteConfig {
 struct StorageValueSelector {
     root: String,
     pointer: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ParallelConfig {
+    branches: Vec<ParallelBranch>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ParallelBranch {
+    id: String,
+    key: String,
+    label: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct JoinConfig {
+    policy: String,
+    quorum: Option<u32>,
+    #[serde(default)]
+    required_branches: Vec<String>,
+    cancel_remaining: bool,
 }
 
 fn default_storage_read_operation() -> String {
@@ -1717,89 +2016,573 @@ fn failure_output(port: &str, code: &str, value: v1::WorkflowValueReference) -> 
     }
 }
 
-fn next_ready_node(compiled: &CompiledWorkflow, state: &RecordedRun) -> Result<(String, String)> {
-    if state.attempts.is_empty() {
-        return Ok((
-            compiled.entrypoints[0].node_id.clone(),
-            stable_id(
-                "event",
-                &[state.token.as_ref().unwrap().run_id.as_str(), "token"],
-            ),
-        ));
+fn active_execution_tokens(state: &RecordedRun) -> Vec<&RecordedExecutionToken> {
+    let mut tokens = state
+        .execution_tokens
+        .values()
+        .filter(|token| token.settled.is_none())
+        .collect::<Vec<_>>();
+    tokens.sort_by_key(|token| token.created_store_position);
+    tokens
+}
+
+fn pending_execution_token_settlement(
+    package: &ExecutionPackage,
+    command: &v1::CommandEnvelope,
+    request: &v1::RequestWorkflowRun,
+    run_token_id: &str,
+    state: &RecordedRun,
+) -> Result<Option<v1::EventEnvelope>> {
+    for token in active_execution_tokens(state) {
+        let Some(attempt) = state.attempts.iter().rev().find(|attempt| {
+            attempt.started.execution_token_id == token.created.execution_token_id
+                && attempt.settled.is_some()
+        }) else {
+            continue;
+        };
+        let node = compiled_node(&package.compiled, &attempt.started.node_id)?;
+        let (outcome, terminal_node_id, error_code, error, final_emission_ids) =
+            match node.node_type.as_str() {
+                "control.parallel" => (
+                    v1::WorkflowExecutionTokenOutcome::Forked,
+                    String::new(),
+                    String::new(),
+                    None,
+                    Vec::new(),
+                ),
+                "terminal.complete" => {
+                    let inputs =
+                        node_inputs(request, state, &node.id, &token.created.execution_token_id)?;
+                    (
+                        v1::WorkflowExecutionTokenOutcome::Completed,
+                        node.id.clone(),
+                        String::new(),
+                        None,
+                        inputs
+                            .iter()
+                            .filter_map(|(edge, _)| edge.map(|edge| edge.emission_id.clone()))
+                            .collect(),
+                    )
+                }
+                "terminal.fail" => {
+                    let settled = attempt.settled.as_ref().unwrap();
+                    (
+                        v1::WorkflowExecutionTokenOutcome::Failed,
+                        node.id.clone(),
+                        settled.error_code.clone(),
+                        settled.error.clone(),
+                        Vec::new(),
+                    )
+                }
+                _ => continue,
+            };
+        return Ok(Some(execution_token_settled_event(
+            command.submitted_at_unix_millis,
+            request,
+            run_token_id,
+            &token.created.execution_token_id,
+            outcome,
+            terminal_node_id,
+            String::new(),
+            error_code,
+            error,
+            final_emission_ids,
+            attempt
+                .settled_event_id
+                .as_deref()
+                .ok_or_else(|| WorkflowExecutionError::Lifecycle("attempt_settle_event".into()))?,
+        )));
     }
+    Ok(None)
+}
+
+fn pending_join_lifecycle_event(
+    package: &ExecutionPackage,
+    command: &v1::CommandEnvelope,
+    request: &v1::RequestWorkflowRun,
+    run_token_id: &str,
+    state: &RecordedRun,
+) -> Result<Option<v1::EventEnvelope>> {
+    let active = active_execution_tokens(state)
+        .into_iter()
+        .map(|token| (token.created.execution_token_id.as_str(), token))
+        .collect::<BTreeMap<_, _>>();
+    for join in &state.joins {
+        if !state
+            .execution_tokens
+            .contains_key(&join.payload.resumed_execution_token_id)
+        {
+            let parent = join
+                .payload
+                .expected_execution_token_ids
+                .iter()
+                .find_map(|token_id| state.execution_tokens.get(token_id))
+                .map(|token| token.created.parent_execution_token_id.clone())
+                .ok_or_else(|| WorkflowExecutionError::Lifecycle("join_parent_missing".into()))?;
+            return Ok(Some(runtime_event(
+                command.submitted_at_unix_millis,
+                &stable_id(
+                    "event",
+                    &[
+                        &request.run_id,
+                        "execution-token",
+                        &join.payload.resumed_execution_token_id,
+                        "created",
+                    ],
+                ),
+                workflow_runtime::WORKFLOW_EXECUTION_TOKEN_CREATED_KIND,
+                workflow_runtime::WORKFLOW_EXECUTION_TOKEN_CREATED_TYPE,
+                v1::WorkflowExecutionTokenCreated {
+                    run_id: request.run_id.clone(),
+                    run_token_id: run_token_id.to_owned(),
+                    execution_token_id: join.payload.resumed_execution_token_id.clone(),
+                    parent_execution_token_id: parent,
+                    fork_node_id: String::new(),
+                    branch_id: String::new(),
+                    branch_port_id: String::new(),
+                    join_node_id: join.payload.join_node_id.clone(),
+                    source_emission_id: String::new(),
+                },
+                &join.event_id,
+                &request.run_id,
+            )));
+        }
+        for token_id in &join.payload.arrived_execution_token_ids {
+            if active.contains_key(token_id.as_str()) {
+                return Ok(Some(execution_token_settled_event(
+                    command.submitted_at_unix_millis,
+                    request,
+                    run_token_id,
+                    token_id,
+                    v1::WorkflowExecutionTokenOutcome::Joined,
+                    String::new(),
+                    join.payload.join_node_id.clone(),
+                    String::new(),
+                    None,
+                    Vec::new(),
+                    &join.event_id,
+                )));
+            }
+        }
+        if join.payload.cancel_remaining
+            || join.payload.decision == v1::WorkflowJoinDecision::Failed as i32
+        {
+            for token_id in &join.payload.pending_execution_token_ids {
+                if active.contains_key(token_id.as_str()) {
+                    return Ok(Some(execution_token_settled_event(
+                        command.submitted_at_unix_millis,
+                        request,
+                        run_token_id,
+                        token_id,
+                        v1::WorkflowExecutionTokenOutcome::Cancelled,
+                        String::new(),
+                        String::new(),
+                        "join.remaining-cancelled".into(),
+                        None,
+                        Vec::new(),
+                        &join.event_id,
+                    )));
+                }
+            }
+        } else {
+            for token_id in &join.payload.pending_execution_token_ids {
+                if active.contains_key(token_id.as_str())
+                    && state.edges.iter().any(|edge| {
+                        edge.payload.execution_token_id == *token_id
+                            && edge.payload.target_node_id == join.payload.join_node_id
+                            && edge.payload.state
+                                == v1::WorkflowEdgeCheckpointState::Admitted as i32
+                    })
+                {
+                    return Ok(Some(execution_token_settled_event(
+                        command.submitted_at_unix_millis,
+                        request,
+                        run_token_id,
+                        token_id,
+                        v1::WorkflowExecutionTokenOutcome::Joined,
+                        String::new(),
+                        join.payload.join_node_id.clone(),
+                        String::new(),
+                        None,
+                        Vec::new(),
+                        &join.event_id,
+                    )));
+                }
+            }
+        }
+    }
+
+    let mut fork_groups = BTreeMap::<(String, String), Vec<&RecordedExecutionToken>>::new();
+    for token in state.execution_tokens.values().filter(|token| {
+        !token.created.fork_node_id.is_empty() && !token.created.join_node_id.is_empty()
+    }) {
+        fork_groups
+            .entry((
+                token.created.fork_node_id.clone(),
+                token.created.join_node_id.clone(),
+            ))
+            .or_default()
+            .push(token);
+    }
+    for ((fork_node_id, join_node_id), mut tokens) in fork_groups {
+        if state
+            .joins
+            .iter()
+            .any(|join| join.payload.fork_node_id == fork_node_id)
+        {
+            continue;
+        }
+        tokens.sort_by_key(|token| token.created_store_position);
+        let expected = tokens
+            .iter()
+            .map(|token| token.created.execution_token_id.clone())
+            .collect::<Vec<_>>();
+        let arrived = tokens
+            .iter()
+            .filter(|token| {
+                state.edges.iter().any(|edge| {
+                    edge.payload.execution_token_id == token.created.execution_token_id
+                        && edge.payload.target_node_id == join_node_id
+                        && edge.payload.state == v1::WorkflowEdgeCheckpointState::Admitted as i32
+                })
+            })
+            .map(|token| token.created.execution_token_id.clone())
+            .collect::<Vec<_>>();
+        let arrived_set = arrived.iter().map(String::as_str).collect::<BTreeSet<_>>();
+        let failed = tokens
+            .iter()
+            .filter(|token| {
+                token.settled.is_some()
+                    && !arrived_set.contains(token.created.execution_token_id.as_str())
+            })
+            .map(|token| token.created.execution_token_id.clone())
+            .collect::<Vec<_>>();
+        let pending = tokens
+            .iter()
+            .filter(|token| {
+                !arrived_set.contains(token.created.execution_token_id.as_str())
+                    && token.settled.is_none()
+            })
+            .map(|token| token.created.execution_token_id.clone())
+            .collect::<Vec<_>>();
+        let node = compiled_node(&package.compiled, &join_node_id)?;
+        let config: JoinConfig = serde_json::from_value(node.config.clone())
+            .map_err(|_| WorkflowExecutionError::Integrity("join_config".into()))?;
+        let threshold = match config.policy.as_str() {
+            "all" => expected.len() as u32,
+            "any" => 1,
+            "quorum" => config
+                .quorum
+                .ok_or_else(|| WorkflowExecutionError::Integrity("join_quorum".into()))?,
+            _ => {
+                return Err(WorkflowExecutionError::Unsupported(
+                    "join_policy_not_executable".into(),
+                ));
+            }
+        };
+        let threshold_usize = threshold as usize;
+        let decision = if arrived.len() >= threshold_usize {
+            Some(v1::WorkflowJoinDecision::Succeeded)
+        } else if arrived.len() + pending.len() < threshold_usize {
+            Some(v1::WorkflowJoinDecision::Failed)
+        } else {
+            None
+        };
+        let Some(decision) = decision else {
+            continue;
+        };
+        let error_code = if decision == v1::WorkflowJoinDecision::Failed {
+            format!("join.{}-unreachable", config.policy)
+        } else {
+            String::new()
+        };
+        let resumed_execution_token_id = stable_id(
+            "execution-token",
+            &[&request.run_id, &fork_node_id, &join_node_id, "resumed"],
+        );
+        let event_id = stable_id(
+            "event",
+            &[&request.run_id, "join", &fork_node_id, &join_node_id],
+        );
+        let causation_id = arrived
+            .last()
+            .and_then(|token_id| {
+                state.edges.iter().rev().find(|edge| {
+                    edge.payload.execution_token_id == *token_id
+                        && edge.payload.target_node_id == join_node_id
+                })
+            })
+            .map(|edge| edge.event_id.as_str())
+            .or_else(|| {
+                failed.last().and_then(|token_id| {
+                    state
+                        .execution_tokens
+                        .get(token_id)
+                        .and_then(|token| token.settled_event_id.as_deref())
+                })
+            })
+            .ok_or_else(|| WorkflowExecutionError::Lifecycle("join_causation_missing".into()))?;
+        return Ok(Some(runtime_event(
+            command.submitted_at_unix_millis,
+            &event_id,
+            workflow_runtime::WORKFLOW_JOIN_EVALUATED_KIND,
+            workflow_runtime::WORKFLOW_JOIN_EVALUATED_TYPE,
+            v1::WorkflowJoinEvaluated {
+                run_id: request.run_id.clone(),
+                run_token_id: run_token_id.to_owned(),
+                join_node_id,
+                fork_node_id,
+                resumed_execution_token_id,
+                policy: config.policy,
+                threshold,
+                decision: decision as i32,
+                expected_execution_token_ids: expected,
+                arrived_execution_token_ids: arrived,
+                failed_execution_token_ids: failed,
+                pending_execution_token_ids: pending,
+                cancel_remaining: config.cancel_remaining,
+                error_code,
+            },
+            causation_id,
+            &request.run_id,
+        )));
+    }
+    Ok(None)
+}
+
+fn completed_run_outcome(state: &RecordedRun) -> Result<CompletedRunOutcome> {
+    let joined_forks = state
+        .joins
+        .iter()
+        .map(|join| join.payload.fork_node_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut terminal = state
+        .execution_tokens
+        .values()
+        .filter(|token| {
+            !joined_forks.contains(token.created.fork_node_id.as_str())
+                && token.settled.as_ref().is_some_and(|settled| {
+                    matches!(
+                        v1::WorkflowExecutionTokenOutcome::try_from(settled.outcome),
+                        Ok(v1::WorkflowExecutionTokenOutcome::Completed)
+                            | Ok(v1::WorkflowExecutionTokenOutcome::Failed)
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
+    terminal.sort_by_key(|token| token.created_store_position);
+    let selected = terminal
+        .iter()
+        .rev()
+        .find(|token| {
+            token.settled.as_ref().is_some_and(|settled| {
+                settled.outcome == v1::WorkflowExecutionTokenOutcome::Failed as i32
+            })
+        })
+        .copied()
+        .or_else(|| terminal.last().copied())
+        .ok_or_else(|| WorkflowExecutionError::Lifecycle("terminal_token_missing".into()))?;
+    let settled = selected.settled.as_ref().unwrap();
+    let event_id = selected
+        .settled_event_id
+        .clone()
+        .ok_or_else(|| WorkflowExecutionError::Lifecycle("token_settle_event_missing".into()))?;
+    if settled.outcome == v1::WorkflowExecutionTokenOutcome::Failed as i32 {
+        Ok(CompletedRunOutcome {
+            outcome: v1::WorkflowRunOutcome::Failed,
+            error_code: settled.error_code.clone(),
+            error: settled.error.clone(),
+            final_emission_ids: Vec::new(),
+            causation_id: event_id,
+        })
+    } else {
+        let final_emission_ids = terminal
+            .iter()
+            .flat_map(|token| token.settled.as_ref().unwrap().final_emission_ids.clone())
+            .collect();
+        Ok(CompletedRunOutcome {
+            outcome: v1::WorkflowRunOutcome::Succeeded,
+            error_code: String::new(),
+            error: None,
+            final_emission_ids,
+            causation_id: event_id,
+        })
+    }
+}
+
+fn next_ready_node(
+    compiled: &CompiledWorkflow,
+    state: &RecordedRun,
+) -> Result<(String, String, String)> {
     let attempted = state
         .attempts
         .iter()
-        .map(|attempt| attempt.started.node_id.as_str())
-        .collect::<BTreeSet<_>>();
-    let mut ready = state
-        .edges
-        .iter()
-        .filter(|edge| {
-            edge.payload.state == v1::WorkflowEdgeCheckpointState::Admitted as i32
-                && !attempted.contains(edge.payload.target_node_id.as_str())
+        .map(|attempt| {
+            (
+                attempt.started.execution_token_id.as_str(),
+                attempt.started.node_id.as_str(),
+            )
         })
-        .collect::<Vec<_>>();
-    ready.sort_by_key(|edge| edge.store_position);
-    if ready.len() != 1 {
-        return Err(WorkflowExecutionError::Unsupported(
-            "minimal_executor_requires_one_ready_node".into(),
-        ));
+        .collect::<BTreeSet<_>>();
+    let mut ready = Vec::<(u8, u64, String, String, String)>::new();
+    for token in active_execution_tokens(state) {
+        let token_id = token.created.execution_token_id.as_str();
+        if !token.created.join_node_id.is_empty()
+            && token.created.fork_node_id.is_empty()
+            && !attempted.contains(&(token_id, token.created.join_node_id.as_str()))
+        {
+            let join = state
+                .joins
+                .iter()
+                .find(|join| join.payload.resumed_execution_token_id == token_id)
+                .ok_or_else(|| WorkflowExecutionError::Lifecycle("join_resume_missing".into()))?;
+            ready.push((
+                0,
+                join.store_position,
+                token.created.join_node_id.clone(),
+                join.event_id.clone(),
+                token_id.to_owned(),
+            ));
+            continue;
+        }
+        if token.created.parent_execution_token_id.is_empty()
+            && !attempted.contains(&(token_id, compiled.entrypoints[0].node_id.as_str()))
+        {
+            ready.push((
+                1,
+                token.created_store_position,
+                compiled.entrypoints[0].node_id.clone(),
+                token.created_event_id.clone(),
+                token_id.to_owned(),
+            ));
+        }
+        for edge in state.edges.iter().filter(|edge| {
+            edge.payload.execution_token_id == token_id
+                && edge.payload.state == v1::WorkflowEdgeCheckpointState::Admitted as i32
+                && !attempted.contains(&(token_id, edge.payload.target_node_id.as_str()))
+        }) {
+            if compiled_node(compiled, &edge.payload.target_node_id)?.node_type == "control.join" {
+                continue;
+            }
+            ready.push((
+                1,
+                edge.store_position,
+                edge.payload.target_node_id.clone(),
+                edge.event_id.clone(),
+                token_id.to_owned(),
+            ));
+        }
     }
-    Ok((
-        ready[0].payload.target_node_id.clone(),
-        ready[0].event_id.clone(),
-    ))
+    ready.sort();
+    ready
+        .into_iter()
+        .next()
+        .map(|(_, _, node_id, causation_id, token_id)| (node_id, causation_id, token_id))
+        .ok_or_else(|| {
+            WorkflowExecutionError::Lifecycle(format!(
+                "no_ready_execution_token:{}",
+                active_execution_tokens(state)
+                    .iter()
+                    .map(|token| {
+                        format!(
+                            "{}[fork={},join={},attempts={}]",
+                            token.created.execution_token_id,
+                            token.created.fork_node_id,
+                            token.created.join_node_id,
+                            state
+                                .attempts
+                                .iter()
+                                .filter(|attempt| attempt.started.execution_token_id
+                                    == token.created.execution_token_id)
+                                .map(|attempt| attempt.started.node_id.as_str())
+                                .collect::<Vec<_>>()
+                                .join("+")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ))
+        })
 }
 
-fn node_input<'a>(
+fn node_inputs<'a>(
     request: &'a v1::RequestWorkflowRun,
     state: &'a RecordedRun,
     node_id: &str,
-) -> Result<(
-    Option<&'a v1::WorkflowEdgeCheckpointed>,
-    v1::WorkflowValueReference,
-)> {
-    if state.attempts.is_empty()
-        || state.attempts[0].started.node_id == node_id
-            && state
-                .edges
-                .iter()
-                .all(|edge| edge.payload.target_node_id != node_id)
+    execution_token_id: &str,
+) -> Result<
+    Vec<(
+        Option<&'a v1::WorkflowEdgeCheckpointed>,
+        v1::WorkflowValueReference,
+    )>,
+> {
+    if state
+        .execution_tokens
+        .get(execution_token_id)
+        .is_some_and(|token| token.created.parent_execution_token_id.is_empty())
+        && state.edges.iter().all(|edge| {
+            edge.payload.execution_token_id != execution_token_id
+                || edge.payload.target_node_id != node_id
+        })
     {
-        return Ok((
+        return Ok(vec![(
             None,
             request.inputs[0]
                 .value
                 .clone()
                 .ok_or_else(|| WorkflowExecutionError::Integrity("manual_input_missing".into()))?,
-        ));
+        )]);
     }
-    let incoming = state
+    let join_tokens = state
+        .joins
+        .iter()
+        .find(|join| {
+            join.payload.resumed_execution_token_id == execution_token_id
+                && join.payload.join_node_id == node_id
+        })
+        .map(|join| {
+            join.payload
+                .arrived_execution_token_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>()
+        });
+    let mut incoming = state
         .edges
         .iter()
         .filter(|edge| {
             edge.payload.target_node_id == node_id
                 && edge.payload.state == v1::WorkflowEdgeCheckpointState::Admitted as i32
+                && match &join_tokens {
+                    Some(tokens) => tokens.contains(edge.payload.execution_token_id.as_str()),
+                    None => edge.payload.execution_token_id == execution_token_id,
+                }
         })
         .collect::<Vec<_>>();
-    if incoming.len() != 1 {
-        return Err(WorkflowExecutionError::Unsupported(
-            "minimal_executor_requires_one_input".into(),
-        ));
+    incoming.sort_by_key(|edge| edge.store_position);
+    if incoming.is_empty() || (join_tokens.is_none() && incoming.len() != 1) {
+        return Err(WorkflowExecutionError::Lifecycle(format!(
+            "node_input_cardinality:{node_id}:{}",
+            incoming.len()
+        )));
     }
-    let emission = state
-        .emissions
-        .get(&incoming[0].payload.emission_id)
-        .ok_or_else(|| WorkflowExecutionError::Lifecycle("input_emission_missing".into()))?;
-    Ok((
-        Some(&incoming[0].payload),
-        emission
-            .payload
-            .value
-            .clone()
-            .ok_or_else(|| WorkflowExecutionError::Lifecycle("input_value_missing".into()))?,
-    ))
+    incoming
+        .into_iter()
+        .map(|edge| {
+            let emission = state
+                .emissions
+                .get(&edge.payload.emission_id)
+                .ok_or_else(|| {
+                    WorkflowExecutionError::Lifecycle("input_emission_missing".into())
+                })?;
+            Ok((
+                Some(&edge.payload),
+                emission.payload.value.clone().ok_or_else(|| {
+                    WorkflowExecutionError::Lifecycle("input_value_missing".into())
+                })?,
+            ))
+        })
+        .collect()
 }
 
 fn recorded_run(journal: &Journal, run_id: &str) -> Result<RecordedRun> {
@@ -1839,6 +2622,55 @@ fn recorded_run(journal: &Journal, run_id: &str) -> Result<RecordedRun> {
                     ));
                 }
             }
+            WorkflowRuntimeEvent::ExecutionTokenCreated(payload) => {
+                if state
+                    .execution_tokens
+                    .insert(
+                        payload.execution_token_id.clone(),
+                        RecordedExecutionToken {
+                            created_event_id: envelope.event_id,
+                            created_store_position: envelope.store_position,
+                            created: payload,
+                            settled_event_id: None,
+                            settled: None,
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(WorkflowExecutionError::Lifecycle(
+                        "duplicate_execution_token".into(),
+                    ));
+                }
+            }
+            WorkflowRuntimeEvent::ExecutionTokenSettled(payload) => {
+                let token = state
+                    .execution_tokens
+                    .get_mut(&payload.execution_token_id)
+                    .ok_or_else(|| {
+                        WorkflowExecutionError::Lifecycle("settled_execution_token_missing".into())
+                    })?;
+                if token.settled.replace(payload).is_some() {
+                    return Err(WorkflowExecutionError::Lifecycle(
+                        "execution_token_settled_twice".into(),
+                    ));
+                }
+                token.settled_event_id = Some(envelope.event_id);
+            }
+            WorkflowRuntimeEvent::JoinEvaluated(payload) => {
+                if state.joins.iter().any(|join| {
+                    join.payload.join_node_id == payload.join_node_id
+                        && join.payload.fork_node_id == payload.fork_node_id
+                }) {
+                    return Err(WorkflowExecutionError::Lifecycle(
+                        "join_evaluated_twice".into(),
+                    ));
+                }
+                state.joins.push(RecordedJoin {
+                    event_id: envelope.event_id,
+                    store_position: envelope.store_position,
+                    payload,
+                });
+            }
             WorkflowRuntimeEvent::AttemptStarted(payload) => {
                 if state
                     .attempts
@@ -1853,6 +2685,7 @@ fn recorded_run(journal: &Journal, run_id: &str) -> Result<RecordedRun> {
                     started_event_id: envelope.event_id,
                     started_store_position: envelope.store_position,
                     started: payload,
+                    settled_event_id: None,
                     settled: None,
                 });
             }
@@ -1869,6 +2702,7 @@ fn recorded_run(journal: &Journal, run_id: &str) -> Result<RecordedRun> {
                         "attempt_settled_twice".into(),
                     ));
                 }
+                attempt.settled_event_id = Some(envelope.event_id);
             }
             WorkflowRuntimeEvent::PortEmitted(payload) => {
                 if state
@@ -1952,6 +2786,69 @@ fn compiled_node<'a>(compiled: &'a CompiledWorkflow, node_id: &str) -> Result<&'
         .ok_or_else(|| WorkflowExecutionError::Integrity("compiled_node_missing".into()))
 }
 
+fn parallel_join_node(
+    compiled: &CompiledWorkflow,
+    node: &CompiledNode,
+    config: &ParallelConfig,
+) -> Result<String> {
+    let mut common: Option<BTreeSet<String>> = None;
+    for branch in &config.branches {
+        if branch.key.is_empty() || branch.label.is_empty() {
+            return Err(WorkflowExecutionError::Integrity(
+                "parallel_branch_contract".into(),
+            ));
+        }
+        let port_id = format!("case-{}", branch.id);
+        let targets = compiled
+            .edges
+            .iter()
+            .filter(|edge| edge.from.node_id == node.id && edge.from.port_id == port_id)
+            .map(|edge| edge.to.node_id.clone())
+            .collect::<Vec<_>>();
+        if targets.len() != 1 {
+            return Err(WorkflowExecutionError::Integrity(
+                "parallel_branch_edge".into(),
+            ));
+        }
+        let mut queue = std::collections::VecDeque::from(targets);
+        let mut visited = BTreeSet::new();
+        let mut joins = BTreeSet::new();
+        while let Some(candidate) = queue.pop_front() {
+            if !visited.insert(candidate.clone()) {
+                continue;
+            }
+            let candidate_node = compiled_node(compiled, &candidate)?;
+            if candidate_node.node_type == "control.join" {
+                joins.insert(candidate);
+                continue;
+            }
+            if candidate_node.node_type.starts_with("terminal.")
+                || candidate_node.node_type == "control.parallel"
+            {
+                continue;
+            }
+            queue.extend(
+                compiled
+                    .edges
+                    .iter()
+                    .filter(|edge| edge.from.node_id == candidate_node.id)
+                    .map(|edge| edge.to.node_id.clone()),
+            );
+        }
+        common = Some(match common {
+            None => joins,
+            Some(existing) => existing.intersection(&joins).cloned().collect(),
+        });
+    }
+    let common = common.unwrap_or_default();
+    if common.len() != 1 {
+        return Err(WorkflowExecutionError::Unsupported(
+            "parallel_requires_one_common_join".into(),
+        ));
+    }
+    Ok(common.into_iter().next().unwrap())
+}
+
 fn inline_json(value: &v1::WorkflowValueReference) -> Result<Value> {
     if value.inline_canonical_json.is_empty() || !value.storage_reference_id.is_empty() {
         return Err(WorkflowExecutionError::Unsupported(
@@ -1990,6 +2887,49 @@ fn error_code(value: &v1::WorkflowValueReference) -> Result<String> {
         .filter(|code| !code.is_empty())
         .map(str::to_owned)
         .ok_or_else(|| WorkflowExecutionError::Integrity("error_code_missing".into()))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execution_token_settled_event(
+    occurred_at_unix_millis: i64,
+    request: &v1::RequestWorkflowRun,
+    run_token_id: &str,
+    execution_token_id: &str,
+    outcome: v1::WorkflowExecutionTokenOutcome,
+    terminal_node_id: String,
+    join_node_id: String,
+    error_code: String,
+    error: Option<v1::WorkflowValueReference>,
+    final_emission_ids: Vec<String>,
+    causation_id: &str,
+) -> v1::EventEnvelope {
+    runtime_event(
+        occurred_at_unix_millis,
+        &stable_id(
+            "event",
+            &[
+                &request.run_id,
+                "execution-token",
+                execution_token_id,
+                "settled",
+            ],
+        ),
+        workflow_runtime::WORKFLOW_EXECUTION_TOKEN_SETTLED_KIND,
+        workflow_runtime::WORKFLOW_EXECUTION_TOKEN_SETTLED_TYPE,
+        v1::WorkflowExecutionTokenSettled {
+            run_id: request.run_id.clone(),
+            run_token_id: run_token_id.to_owned(),
+            execution_token_id: execution_token_id.to_owned(),
+            outcome: outcome as i32,
+            terminal_node_id,
+            join_node_id,
+            error_code,
+            error,
+            final_emission_ids,
+        },
+        causation_id,
+        &request.run_id,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -47,6 +47,7 @@ struct DesktopDurableWorkflowRunsView: View {
         case output = "Output"
         case error = "Error"
         case storage = "Storage"
+        case tokens = "Tokens"
         case configuration = "Configuration"
         case matchTrace = "Match trace"
         case timing = "Timing"
@@ -346,6 +347,33 @@ struct DesktopDurableWorkflowRunsView: View {
                 VStack(alignment: .leading, spacing: 7) {
                     ForEach(Array(values.enumerated()), id: \.offset) { _, item in
                         storageCard(port: item.0, metadata: item.1)
+                    }
+                }
+            }
+        case .tokens:
+            let attemptTokenIDs = Set(run.attempts.filter { $0.nodeID == node.id }.compactMap(\.executionTokenID))
+            let tokens = run.executionTokens.filter {
+                attemptTokenIDs.contains($0.executionTokenID)
+                    || $0.forkNodeID == node.id
+                    || $0.joinNodeID == node.id
+                    || $0.terminalNodeID == node.id
+            }
+            let joins = run.joins.filter { $0.forkNodeID == node.id || $0.joinNodeID == node.id }
+            if tokens.isEmpty, joins.isEmpty {
+                explainedEmpty("This node did not create, consume, resume, or settle an execution token.")
+            } else {
+                VStack(alignment: .leading, spacing: 7) {
+                    ForEach(tokens) { token in
+                        evidenceCard(
+                            title: "\(token.status.capitalized) · \(token.branchPortID ?? "execution path")",
+                            detail: "Token \(token.executionTokenID)\nParent \(token.parentExecutionTokenID ?? "root")\nFork \(token.forkNodeID ?? "—") · Join \(token.joinNodeID ?? "—")\nJournal \(token.createdStorePosition)…\(token.settledStorePosition.map(String.init) ?? "active")"
+                        )
+                    }
+                    ForEach(joins) { join in
+                        evidenceCard(
+                            title: "Join \(join.decision) · \(join.policy) \(join.threshold)/\(join.expectedExecutionTokenIDs.count)",
+                            detail: "Arrived \(join.arrivedExecutionTokenIDs.count) · failed \(join.failedExecutionTokenIDs.count) · pending at decision \(join.pendingExecutionTokenIDs.count)\nResume \(join.resumedExecutionTokenID)\nCancel remaining: \(join.cancelRemaining ? "yes" : "no")"
+                        )
                     }
                 }
             }

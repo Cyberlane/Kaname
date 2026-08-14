@@ -13,6 +13,9 @@ use std::collections::BTreeSet;
 pub const WORKFLOW_RUN_REQUEST_KIND: &str = "workflow.run.request";
 pub const WORKFLOW_RUN_CANCEL_KIND: &str = "workflow.run.cancel";
 pub const WORKFLOW_RUN_TOKEN_CREATED_KIND: &str = "workflow.run.token-created";
+pub const WORKFLOW_EXECUTION_TOKEN_CREATED_KIND: &str = "workflow.execution-token.created";
+pub const WORKFLOW_EXECUTION_TOKEN_SETTLED_KIND: &str = "workflow.execution-token.settled";
+pub const WORKFLOW_JOIN_EVALUATED_KIND: &str = "workflow.join.evaluated";
 pub const WORKFLOW_ATTEMPT_STARTED_KIND: &str = "workflow.attempt.started";
 pub const WORKFLOW_ATTEMPT_SETTLED_KIND: &str = "workflow.attempt.settled";
 pub const WORKFLOW_PORT_EMITTED_KIND: &str = "workflow.port.emitted";
@@ -24,6 +27,11 @@ pub const WORKFLOW_RUN_SETTLED_KIND: &str = "workflow.run.settled";
 pub const WORKFLOW_RUN_REQUEST_TYPE: &str = "kaname.workflow.run-request.v1";
 pub const WORKFLOW_RUN_CANCEL_TYPE: &str = "kaname.workflow.run-cancel.v1";
 pub const WORKFLOW_RUN_TOKEN_CREATED_TYPE: &str = "kaname.workflow.run-token-created.v1";
+pub const WORKFLOW_EXECUTION_TOKEN_CREATED_TYPE: &str =
+    "kaname.workflow.execution-token-created.v1";
+pub const WORKFLOW_EXECUTION_TOKEN_SETTLED_TYPE: &str =
+    "kaname.workflow.execution-token-settled.v1";
+pub const WORKFLOW_JOIN_EVALUATED_TYPE: &str = "kaname.workflow.join-evaluated.v1";
 pub const WORKFLOW_ATTEMPT_STARTED_TYPE: &str = "kaname.workflow.attempt-started.v1";
 pub const WORKFLOW_ATTEMPT_SETTLED_TYPE: &str = "kaname.workflow.attempt-settled.v1";
 pub const WORKFLOW_PORT_EMITTED_TYPE: &str = "kaname.workflow.port-emitted.v1";
@@ -57,6 +65,9 @@ pub enum WorkflowRuntimeCommand {
 #[derive(Debug, Clone, PartialEq)]
 pub enum WorkflowRuntimeEvent {
     RunTokenCreated(v1::WorkflowRunTokenCreated),
+    ExecutionTokenCreated(v1::WorkflowExecutionTokenCreated),
+    ExecutionTokenSettled(v1::WorkflowExecutionTokenSettled),
+    JoinEvaluated(v1::WorkflowJoinEvaluated),
     AttemptStarted(v1::WorkflowAttemptStarted),
     AttemptSettled(v1::WorkflowAttemptSettled),
     PortEmitted(v1::WorkflowPortEmitted),
@@ -70,6 +81,9 @@ impl WorkflowRuntimeEvent {
     pub fn run_id(&self) -> &str {
         match self {
             Self::RunTokenCreated(payload) => &payload.run_id,
+            Self::ExecutionTokenCreated(payload) => &payload.run_id,
+            Self::ExecutionTokenSettled(payload) => &payload.run_id,
+            Self::JoinEvaluated(payload) => &payload.run_id,
             Self::AttemptStarted(payload) => &payload.run_id,
             Self::AttemptSettled(payload) => &payload.run_id,
             Self::PortEmitted(payload) => &payload.run_id,
@@ -88,6 +102,8 @@ pub fn is_workflow_runtime_kind(kind: &str) -> bool {
         "workflow.port.",
         "workflow.edge.",
         "workflow.match.",
+        "workflow.execution-token.",
+        "workflow.join.",
     ]
     .iter()
     .any(|prefix| kind.starts_with(prefix))
@@ -129,6 +145,31 @@ pub fn decode_workflow_event(event: &v1::EventEnvelope) -> Result<WorkflowRuntim
             validate_event_context(event, &payload.run_id)?;
             Ok(WorkflowRuntimeEvent::RunTokenCreated(payload))
         }
+        WORKFLOW_EXECUTION_TOKEN_CREATED_KIND => {
+            let payload: v1::WorkflowExecutionTokenCreated = decode_payload(
+                event.payload.as_ref(),
+                WORKFLOW_EXECUTION_TOKEN_CREATED_TYPE,
+            )?;
+            validate_execution_token_created(&payload)?;
+            validate_event_context(event, &payload.run_id)?;
+            Ok(WorkflowRuntimeEvent::ExecutionTokenCreated(payload))
+        }
+        WORKFLOW_EXECUTION_TOKEN_SETTLED_KIND => {
+            let payload: v1::WorkflowExecutionTokenSettled = decode_payload(
+                event.payload.as_ref(),
+                WORKFLOW_EXECUTION_TOKEN_SETTLED_TYPE,
+            )?;
+            validate_execution_token_settled(&payload)?;
+            validate_event_context(event, &payload.run_id)?;
+            Ok(WorkflowRuntimeEvent::ExecutionTokenSettled(payload))
+        }
+        WORKFLOW_JOIN_EVALUATED_KIND => {
+            let payload: v1::WorkflowJoinEvaluated =
+                decode_payload(event.payload.as_ref(), WORKFLOW_JOIN_EVALUATED_TYPE)?;
+            validate_join_evaluated(&payload)?;
+            validate_event_context(event, &payload.run_id)?;
+            Ok(WorkflowRuntimeEvent::JoinEvaluated(payload))
+        }
         WORKFLOW_ATTEMPT_STARTED_KIND => {
             let payload: v1::WorkflowAttemptStarted =
                 decode_payload(event.payload.as_ref(), WORKFLOW_ATTEMPT_STARTED_TYPE)?;
@@ -139,6 +180,7 @@ pub fn decode_workflow_event(event: &v1::EventEnvelope) -> Result<WorkflowRuntim
                 &payload.node_id,
                 payload.attempt_number,
             )?;
+            validate_optional_execution_token(&payload.execution_token_id)?;
             validate_event_context(event, &payload.run_id)?;
             Ok(WorkflowRuntimeEvent::AttemptStarted(payload))
         }
@@ -257,6 +299,187 @@ fn validate_token_created(payload: &v1::WorkflowRunTokenCreated) -> Result<()> {
     validate_digest(&payload.package_digest, "package_digest")
 }
 
+fn validate_execution_token_created(payload: &v1::WorkflowExecutionTokenCreated) -> Result<()> {
+    validate_run_and_token(&payload.run_id, &payload.run_token_id)?;
+    validate_identifier(&payload.execution_token_id, 128, "execution_token_id")?;
+    if payload.parent_execution_token_id.is_empty() {
+        if !payload.fork_node_id.is_empty()
+            || !payload.branch_id.is_empty()
+            || !payload.branch_port_id.is_empty()
+            || !payload.join_node_id.is_empty()
+            || !payload.source_emission_id.is_empty()
+        {
+            return invalid("root_execution_token_contract");
+        }
+        return Ok(());
+    }
+    validate_identifier(
+        &payload.parent_execution_token_id,
+        128,
+        "parent_execution_token_id",
+    )?;
+    let branch = !payload.fork_node_id.is_empty();
+    let resumed = !payload.join_node_id.is_empty() && !branch;
+    if branch == resumed {
+        return invalid("child_execution_token_contract");
+    }
+    if branch {
+        validate_identifier(&payload.fork_node_id, 128, "fork_node_id")?;
+        validate_identifier(&payload.branch_id, 128, "branch_id")?;
+        validate_identifier(&payload.branch_port_id, 128, "branch_port_id")?;
+        validate_identifier(&payload.join_node_id, 128, "join_node_id")?;
+        validate_identifier(&payload.source_emission_id, 128, "source_emission_id")?;
+    } else {
+        if !payload.branch_id.is_empty()
+            || !payload.branch_port_id.is_empty()
+            || !payload.source_emission_id.is_empty()
+        {
+            return invalid("resumed_execution_token_contract");
+        }
+        validate_identifier(&payload.join_node_id, 128, "join_node_id")?;
+    }
+    Ok(())
+}
+
+fn validate_execution_token_settled(payload: &v1::WorkflowExecutionTokenSettled) -> Result<()> {
+    validate_run_and_token(&payload.run_id, &payload.run_token_id)?;
+    validate_identifier(&payload.execution_token_id, 128, "execution_token_id")?;
+    let outcome = v1::WorkflowExecutionTokenOutcome::try_from(payload.outcome)
+        .map_err(|_| invalid_error("execution_token_outcome"))?;
+    match outcome {
+        v1::WorkflowExecutionTokenOutcome::Completed => {
+            validate_identifier(&payload.terminal_node_id, 128, "terminal_node_id")?;
+            if !payload.join_node_id.is_empty()
+                || !payload.error_code.is_empty()
+                || payload.error.is_some()
+            {
+                return invalid("completed_execution_token_contract");
+            }
+        }
+        v1::WorkflowExecutionTokenOutcome::Failed => {
+            validate_identifier(&payload.terminal_node_id, 128, "terminal_node_id")?;
+            validate_identifier(&payload.error_code, 128, "error_code")?;
+            validate_value(payload.error.as_ref())?;
+            if !payload.join_node_id.is_empty() {
+                return invalid("failed_execution_token_contract");
+            }
+        }
+        v1::WorkflowExecutionTokenOutcome::Cancelled => {
+            validate_identifier(&payload.error_code, 128, "cancellation_code")?;
+            if payload.error.is_some() {
+                validate_value(payload.error.as_ref())?;
+            }
+        }
+        v1::WorkflowExecutionTokenOutcome::Forked => {
+            if !payload.terminal_node_id.is_empty()
+                || !payload.join_node_id.is_empty()
+                || !payload.error_code.is_empty()
+                || payload.error.is_some()
+            {
+                return invalid("forked_execution_token_contract");
+            }
+        }
+        v1::WorkflowExecutionTokenOutcome::Joined => {
+            validate_identifier(&payload.join_node_id, 128, "join_node_id")?;
+            if !payload.terminal_node_id.is_empty()
+                || !payload.error_code.is_empty()
+                || payload.error.is_some()
+            {
+                return invalid("joined_execution_token_contract");
+            }
+        }
+        v1::WorkflowExecutionTokenOutcome::Unspecified => {
+            return invalid("execution_token_outcome");
+        }
+    }
+    validate_identifier_list(
+        &payload.final_emission_ids,
+        MAXIMUM_PORT_BINDINGS,
+        "final_emission_ids",
+    )
+}
+
+fn validate_join_evaluated(payload: &v1::WorkflowJoinEvaluated) -> Result<()> {
+    validate_run_and_token(&payload.run_id, &payload.run_token_id)?;
+    validate_identifier(&payload.join_node_id, 128, "join_node_id")?;
+    validate_identifier(&payload.fork_node_id, 128, "fork_node_id")?;
+    validate_identifier(
+        &payload.resumed_execution_token_id,
+        128,
+        "resumed_execution_token_id",
+    )?;
+    if !matches!(payload.policy.as_str(), "all" | "any" | "quorum") || payload.threshold == 0 {
+        return invalid("join_policy");
+    }
+    let decision = v1::WorkflowJoinDecision::try_from(payload.decision)
+        .map_err(|_| invalid_error("join_decision"))?;
+    if decision == v1::WorkflowJoinDecision::Unspecified {
+        return invalid("join_decision");
+    }
+    for (values, code) in [
+        (
+            &payload.expected_execution_token_ids,
+            "join_expected_tokens",
+        ),
+        (&payload.arrived_execution_token_ids, "join_arrived_tokens"),
+        (&payload.failed_execution_token_ids, "join_failed_tokens"),
+        (&payload.pending_execution_token_ids, "join_pending_tokens"),
+    ] {
+        validate_identifier_list(values, MAXIMUM_PORT_BINDINGS, code)?;
+    }
+    let expected = payload
+        .expected_execution_token_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let arrived = payload
+        .arrived_execution_token_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let failed = payload
+        .failed_execution_token_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let pending = payload
+        .pending_execution_token_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let partition = arrived
+        .iter()
+        .chain(failed.iter())
+        .chain(pending.iter())
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if expected.len() < 2
+        || usize::try_from(payload.threshold).map_or(true, |value| value > expected.len())
+        || arrived.len() + failed.len() + pending.len() != expected.len()
+        || partition != expected
+        || (payload.policy == "all" && payload.threshold as usize != expected.len())
+        || (payload.policy == "any" && payload.threshold != 1)
+    {
+        return invalid("join_token_partition");
+    }
+    let threshold = payload.threshold as usize;
+    if (decision == v1::WorkflowJoinDecision::Succeeded && arrived.len() < threshold)
+        || (decision == v1::WorkflowJoinDecision::Failed
+            && arrived.len() + pending.len() >= threshold)
+    {
+        return invalid("join_decision_math");
+    }
+    match decision {
+        v1::WorkflowJoinDecision::Succeeded if !payload.error_code.is_empty() => {
+            invalid("join_success_error")
+        }
+        v1::WorkflowJoinDecision::Failed => {
+            validate_identifier(&payload.error_code, 128, "join_error_code")
+        }
+        _ => Ok(()),
+    }
+}
+
 fn validate_attempt_identity(
     run_id: &str,
     run_token_id: &str,
@@ -273,6 +496,14 @@ fn validate_attempt_identity(
     Ok(())
 }
 
+fn validate_optional_execution_token(value: &str) -> Result<()> {
+    if value.is_empty() {
+        Ok(())
+    } else {
+        validate_identifier(value, 128, "execution_token_id")
+    }
+}
+
 fn validate_attempt_settled(payload: &v1::WorkflowAttemptSettled) -> Result<()> {
     validate_attempt_identity(
         &payload.run_id,
@@ -281,6 +512,7 @@ fn validate_attempt_settled(payload: &v1::WorkflowAttemptSettled) -> Result<()> 
         &payload.node_id,
         payload.attempt_number,
     )?;
+    validate_optional_execution_token(&payload.execution_token_id)?;
     let outcome = v1::WorkflowAttemptOutcome::try_from(payload.outcome)
         .map_err(|_| invalid_error("attempt_outcome"))?;
     match outcome {
@@ -310,6 +542,7 @@ fn validate_port_emission(payload: &v1::WorkflowPortEmitted) -> Result<()> {
     validate_identifier(&payload.attempt_id, 128, "attempt_id")?;
     validate_identifier(&payload.node_id, 128, "node_id")?;
     validate_identifier(&payload.port_id, 128, "port_id")?;
+    validate_optional_execution_token(&payload.execution_token_id)?;
     validate_value(payload.value.as_ref())
 }
 
@@ -319,6 +552,7 @@ fn validate_edge_checkpoint(payload: &v1::WorkflowEdgeCheckpointed) -> Result<()
     validate_identifier(&payload.emission_id, 128, "emission_id")?;
     validate_identifier(&payload.target_node_id, 128, "target_node_id")?;
     validate_identifier(&payload.target_port_id, 128, "target_port_id")?;
+    validate_optional_execution_token(&payload.execution_token_id)?;
     match v1::WorkflowEdgeCheckpointState::try_from(payload.state) {
         Ok(
             v1::WorkflowEdgeCheckpointState::Admitted | v1::WorkflowEdgeCheckpointState::Skipped,
@@ -332,6 +566,7 @@ fn validate_match_trace(payload: &v1::WorkflowMatchTraceRecorded) -> Result<()> 
     validate_identifier(&payload.attempt_id, 128, "attempt_id")?;
     validate_identifier(&payload.node_id, 128, "node_id")?;
     validate_identifier(&payload.input_value_id, 128, "input_value_id")?;
+    validate_optional_execution_token(&payload.execution_token_id)?;
     validate_identifier_list(
         &payload.evaluated_case_ids,
         MAXIMUM_TRACE_IDENTIFIERS,

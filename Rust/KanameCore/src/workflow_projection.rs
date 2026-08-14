@@ -23,7 +23,7 @@ use std::{
     time::Duration,
 };
 
-const PROJECTION_SCHEMA_VERSION: i64 = 3;
+const PROJECTION_SCHEMA_VERSION: i64 = 4;
 const DEFAULT_BATCH_SIZE: u32 = 250;
 
 const INITIAL_SCHEMA: &str = r#"
@@ -78,6 +78,7 @@ CREATE TABLE workflow_attempts (
     attempt_id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
     run_token_id TEXT NOT NULL,
+    execution_token_id TEXT NOT NULL,
     node_id TEXT NOT NULL,
     attempt_number INTEGER NOT NULL CHECK (attempt_number > 0),
     status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed', 'cancelled')),
@@ -89,7 +90,7 @@ CREATE TABLE workflow_attempts (
     settled_at_unix_millis INTEGER,
     started_store_position INTEGER NOT NULL CHECK (started_store_position > 0),
     settled_store_position INTEGER,
-    UNIQUE(run_id, node_id, attempt_number)
+    UNIQUE(run_id, execution_token_id, node_id, attempt_number)
 ) STRICT;
 
 CREATE INDEX workflow_attempts_run_node
@@ -111,6 +112,7 @@ CREATE TABLE workflow_emissions (
     emission_id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
     attempt_id TEXT NOT NULL REFERENCES workflow_attempts(attempt_id) ON DELETE CASCADE,
+    execution_token_id TEXT NOT NULL,
     node_id TEXT NOT NULL,
     port_id TEXT NOT NULL,
     value_id TEXT NOT NULL REFERENCES workflow_values(value_id) ON DELETE RESTRICT,
@@ -125,6 +127,7 @@ CREATE INDEX workflow_emissions_attempt
 CREATE TABLE workflow_edge_checkpoints (
     event_id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+    execution_token_id TEXT NOT NULL,
     edge_id TEXT NOT NULL,
     emission_id TEXT NOT NULL REFERENCES workflow_emissions(emission_id) ON DELETE CASCADE,
     target_node_id TEXT NOT NULL,
@@ -142,6 +145,7 @@ CREATE TABLE workflow_match_traces (
     event_id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
     attempt_id TEXT NOT NULL REFERENCES workflow_attempts(attempt_id) ON DELETE CASCADE,
+    execution_token_id TEXT NOT NULL,
     node_id TEXT NOT NULL,
     input_value_id TEXT NOT NULL,
     evaluated_case_ids_json TEXT NOT NULL,
@@ -154,6 +158,58 @@ CREATE TABLE workflow_match_traces (
 
 CREATE INDEX workflow_match_traces_attempt
     ON workflow_match_traces(run_id, attempt_id, store_position);
+
+CREATE TABLE workflow_execution_tokens (
+    execution_token_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+    run_token_id TEXT NOT NULL,
+    parent_execution_token_id TEXT,
+    fork_node_id TEXT,
+    branch_id TEXT,
+    branch_port_id TEXT,
+    join_node_id TEXT,
+    source_emission_id TEXT,
+    status TEXT NOT NULL CHECK (status IN ('active', 'completed', 'failed', 'cancelled', 'forked', 'joined')),
+    outcome TEXT,
+    terminal_node_id TEXT,
+    error_code TEXT,
+    error_value_id TEXT REFERENCES workflow_values(value_id) ON DELETE RESTRICT,
+    final_emission_ids_json TEXT NOT NULL DEFAULT '[]',
+    created_event_id TEXT NOT NULL UNIQUE,
+    settled_event_id TEXT UNIQUE,
+    created_at_unix_millis INTEGER NOT NULL CHECK (created_at_unix_millis >= 0),
+    settled_at_unix_millis INTEGER,
+    created_store_position INTEGER NOT NULL UNIQUE CHECK (created_store_position > 0),
+    settled_store_position INTEGER UNIQUE,
+    UNIQUE(run_id, fork_node_id, branch_id)
+) STRICT;
+
+CREATE INDEX workflow_execution_tokens_run_position
+    ON workflow_execution_tokens(run_id, created_store_position, execution_token_id);
+
+CREATE TABLE workflow_join_evaluations (
+    event_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+    join_node_id TEXT NOT NULL,
+    fork_node_id TEXT NOT NULL,
+    resumed_execution_token_id TEXT NOT NULL,
+    policy TEXT NOT NULL CHECK (policy IN ('all', 'any', 'quorum')),
+    threshold INTEGER NOT NULL CHECK (threshold > 0),
+    decision TEXT NOT NULL CHECK (decision IN ('succeeded', 'failed')),
+    expected_execution_token_ids_json TEXT NOT NULL,
+    arrived_execution_token_ids_json TEXT NOT NULL,
+    failed_execution_token_ids_json TEXT NOT NULL,
+    pending_execution_token_ids_json TEXT NOT NULL,
+    cancel_remaining INTEGER NOT NULL CHECK (cancel_remaining IN (0, 1)),
+    error_code TEXT,
+    evaluated_at_unix_millis INTEGER NOT NULL CHECK (evaluated_at_unix_millis >= 0),
+    store_position INTEGER NOT NULL UNIQUE CHECK (store_position > 0),
+    UNIQUE(run_id, fork_node_id, join_node_id),
+    UNIQUE(run_id, resumed_execution_token_id)
+) STRICT;
+
+CREATE INDEX workflow_join_evaluations_run_position
+    ON workflow_join_evaluations(run_id, store_position, event_id);
 
 CREATE TABLE workflow_projected_events (
     event_id TEXT PRIMARY KEY,
@@ -180,6 +236,161 @@ ALTER TABLE workflow_values ADD COLUMN storage_result TEXT;
 
 const PROJECTION_MIGRATION_3: &str = r#"
 ALTER TABLE workflow_values ADD COLUMN storage_source_version_id TEXT;
+"#;
+
+const PROJECTION_MIGRATION_4: &str = r#"
+CREATE TABLE IF NOT EXISTS workflow_execution_tokens (
+    execution_token_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+    run_token_id TEXT NOT NULL,
+    parent_execution_token_id TEXT,
+    fork_node_id TEXT,
+    branch_id TEXT,
+    branch_port_id TEXT,
+    join_node_id TEXT,
+    source_emission_id TEXT,
+    status TEXT NOT NULL CHECK (status IN ('active', 'completed', 'failed', 'cancelled', 'forked', 'joined')),
+    outcome TEXT,
+    terminal_node_id TEXT,
+    error_code TEXT,
+    error_value_id TEXT REFERENCES workflow_values(value_id) ON DELETE RESTRICT,
+    final_emission_ids_json TEXT NOT NULL DEFAULT '[]',
+    created_event_id TEXT NOT NULL UNIQUE,
+    settled_event_id TEXT UNIQUE,
+    created_at_unix_millis INTEGER NOT NULL CHECK (created_at_unix_millis >= 0),
+    settled_at_unix_millis INTEGER,
+    created_store_position INTEGER NOT NULL UNIQUE CHECK (created_store_position > 0),
+    settled_store_position INTEGER UNIQUE,
+    UNIQUE(run_id, fork_node_id, branch_id)
+) STRICT;
+CREATE INDEX IF NOT EXISTS workflow_execution_tokens_run_position
+    ON workflow_execution_tokens(run_id, created_store_position, execution_token_id);
+
+CREATE TABLE IF NOT EXISTS workflow_join_evaluations (
+    event_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+    join_node_id TEXT NOT NULL,
+    fork_node_id TEXT NOT NULL,
+    resumed_execution_token_id TEXT NOT NULL,
+    policy TEXT NOT NULL CHECK (policy IN ('all', 'any', 'quorum')),
+    threshold INTEGER NOT NULL CHECK (threshold > 0),
+    decision TEXT NOT NULL CHECK (decision IN ('succeeded', 'failed')),
+    expected_execution_token_ids_json TEXT NOT NULL,
+    arrived_execution_token_ids_json TEXT NOT NULL,
+    failed_execution_token_ids_json TEXT NOT NULL,
+    pending_execution_token_ids_json TEXT NOT NULL,
+    cancel_remaining INTEGER NOT NULL CHECK (cancel_remaining IN (0, 1)),
+    error_code TEXT,
+    evaluated_at_unix_millis INTEGER NOT NULL CHECK (evaluated_at_unix_millis >= 0),
+    store_position INTEGER NOT NULL UNIQUE CHECK (store_position > 0),
+    UNIQUE(run_id, fork_node_id, join_node_id),
+    UNIQUE(run_id, resumed_execution_token_id)
+) STRICT;
+CREATE INDEX IF NOT EXISTS workflow_join_evaluations_run_position
+    ON workflow_join_evaluations(run_id, store_position, event_id);
+"#;
+
+// Projection v3 constrained attempts by run and node only. Tokenized fan-out
+// permits the same node to execute once per branch token, so an actual v3
+// projection is discarded and replayed from the authoritative journal with
+// the widened key. No journal or retained workflow data is deleted.
+const PROJECTION_MIGRATION_4_RESET: &str = r#"
+DELETE FROM workflow_projected_events;
+DELETE FROM workflow_match_traces;
+DELETE FROM workflow_edge_checkpoints;
+DELETE FROM workflow_emissions;
+DELETE FROM workflow_node_states;
+DELETE FROM workflow_attempts;
+DELETE FROM workflow_runs;
+DELETE FROM workflow_values;
+UPDATE workflow_projection_meta SET high_water_mark = 0 WHERE singleton = 1;
+
+DROP TABLE workflow_match_traces;
+DROP TABLE workflow_edge_checkpoints;
+DROP TABLE workflow_emissions;
+DROP TABLE workflow_node_states;
+DROP TABLE workflow_attempts;
+
+CREATE TABLE workflow_attempts (
+    attempt_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+    run_token_id TEXT NOT NULL,
+    execution_token_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    attempt_number INTEGER NOT NULL CHECK (attempt_number > 0),
+    status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed', 'cancelled')),
+    outcome TEXT,
+    error_code TEXT,
+    error_value_id TEXT REFERENCES workflow_values(value_id) ON DELETE RESTRICT,
+    emission_ids_json TEXT NOT NULL DEFAULT '[]',
+    started_at_unix_millis INTEGER NOT NULL CHECK (started_at_unix_millis >= 0),
+    settled_at_unix_millis INTEGER,
+    started_store_position INTEGER NOT NULL CHECK (started_store_position > 0),
+    settled_store_position INTEGER,
+    UNIQUE(run_id, execution_token_id, node_id, attempt_number)
+) STRICT;
+CREATE INDEX workflow_attempts_run_node
+    ON workflow_attempts(run_id, node_id, attempt_number, attempt_id);
+
+CREATE TABLE workflow_node_states (
+    run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+    node_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed', 'cancelled')),
+    latest_attempt_id TEXT NOT NULL REFERENCES workflow_attempts(attempt_id) ON DELETE CASCADE,
+    latest_attempt_number INTEGER NOT NULL CHECK (latest_attempt_number > 0),
+    started_at_unix_millis INTEGER NOT NULL CHECK (started_at_unix_millis >= 0),
+    settled_at_unix_millis INTEGER,
+    last_store_position INTEGER NOT NULL CHECK (last_store_position > 0),
+    PRIMARY KEY(run_id, node_id)
+) STRICT;
+
+CREATE TABLE workflow_emissions (
+    emission_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+    attempt_id TEXT NOT NULL REFERENCES workflow_attempts(attempt_id) ON DELETE CASCADE,
+    execution_token_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    port_id TEXT NOT NULL,
+    value_id TEXT NOT NULL REFERENCES workflow_values(value_id) ON DELETE RESTRICT,
+    event_id TEXT NOT NULL UNIQUE,
+    emitted_at_unix_millis INTEGER NOT NULL CHECK (emitted_at_unix_millis >= 0),
+    store_position INTEGER NOT NULL UNIQUE CHECK (store_position > 0)
+) STRICT;
+CREATE INDEX workflow_emissions_attempt
+    ON workflow_emissions(run_id, attempt_id, store_position);
+
+CREATE TABLE workflow_edge_checkpoints (
+    event_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+    execution_token_id TEXT NOT NULL,
+    edge_id TEXT NOT NULL,
+    emission_id TEXT NOT NULL REFERENCES workflow_emissions(emission_id) ON DELETE CASCADE,
+    target_node_id TEXT NOT NULL,
+    target_port_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('admitted', 'skipped')),
+    checkpointed_at_unix_millis INTEGER NOT NULL CHECK (checkpointed_at_unix_millis >= 0),
+    store_position INTEGER NOT NULL UNIQUE CHECK (store_position > 0),
+    UNIQUE(run_id, edge_id, emission_id, target_node_id, target_port_id)
+) STRICT;
+CREATE INDEX workflow_edge_checkpoints_run_edge
+    ON workflow_edge_checkpoints(run_id, edge_id, store_position);
+
+CREATE TABLE workflow_match_traces (
+    event_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+    attempt_id TEXT NOT NULL REFERENCES workflow_attempts(attempt_id) ON DELETE CASCADE,
+    execution_token_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    input_value_id TEXT NOT NULL,
+    evaluated_case_ids_json TEXT NOT NULL,
+    matched_case_ids_json TEXT NOT NULL,
+    emitted_port_ids_json TEXT NOT NULL,
+    trace_value_id TEXT NOT NULL REFERENCES workflow_values(value_id) ON DELETE RESTRICT,
+    recorded_at_unix_millis INTEGER NOT NULL CHECK (recorded_at_unix_millis >= 0),
+    store_position INTEGER NOT NULL UNIQUE CHECK (store_position > 0)
+) STRICT;
+CREATE INDEX workflow_match_traces_attempt
+    ON workflow_match_traces(run_id, attempt_id, store_position);
 "#;
 
 #[derive(Debug)]
@@ -333,6 +544,30 @@ impl WorkflowRunProjection {
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             transaction.execute_batch(PROJECTION_MIGRATION_3)?;
+            transaction.pragma_update(None, "user_version", 3)?;
+            refresh_state_digest(&transaction)?;
+            transaction.commit()?;
+        }
+        let found: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if found == 3 {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            if !table_has_column(&transaction, "workflow_attempts", "execution_token_id")? {
+                transaction.execute_batch(PROJECTION_MIGRATION_4_RESET)?;
+            }
+            for table in [
+                "workflow_attempts",
+                "workflow_emissions",
+                "workflow_edge_checkpoints",
+                "workflow_match_traces",
+            ] {
+                if !table_has_column(&transaction, table, "execution_token_id")? {
+                    transaction.execute_batch(&format!(
+                        "ALTER TABLE {table} ADD COLUMN execution_token_id TEXT NOT NULL DEFAULT '';"
+                    ))?;
+                }
+            }
+            transaction.execute_batch(PROJECTION_MIGRATION_4)?;
             transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
             refresh_state_digest(&transaction)?;
             transaction.commit()?;
@@ -365,6 +600,30 @@ impl WorkflowRunProjection {
         if violation.is_some() {
             return Err(WorkflowProjectionError::Integrity(
                 "foreign_key_violation".into(),
+            ));
+        }
+        let incomplete_settled_token_graph = self
+            .connection
+            .query_row(
+                "SELECT 1
+                 FROM workflow_runs r
+                 LEFT JOIN workflow_execution_tokens t ON t.run_id = r.run_id
+                 LEFT JOIN workflow_emissions e ON e.emission_id = t.source_emission_id
+                 LEFT JOIN workflow_join_evaluations j ON j.run_id = r.run_id
+                 LEFT JOIN workflow_execution_tokens resumed
+                   ON resumed.execution_token_id = j.resumed_execution_token_id
+                 WHERE r.status IN ('succeeded', 'failed', 'cancelled')
+                   AND ((t.source_emission_id IS NOT NULL AND e.emission_id IS NULL)
+                     OR (j.event_id IS NOT NULL AND resumed.execution_token_id IS NULL)
+                     OR t.status = 'active')
+                 LIMIT 1",
+                [],
+                |_| Ok(()),
+            )
+            .optional()?;
+        if incomplete_settled_token_graph.is_some() {
+            return Err(WorkflowProjectionError::Integrity(
+                "settled_execution_token_graph_incomplete".into(),
             ));
         }
         let stored: String = self.connection.query_row(
@@ -493,6 +752,8 @@ impl WorkflowRunProjection {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute_batch(
             "DELETE FROM workflow_projected_events;
+             DELETE FROM workflow_join_evaluations;
+             DELETE FROM workflow_execution_tokens;
              DELETE FROM workflow_match_traces;
              DELETE FROM workflow_edge_checkpoints;
              DELETE FROM workflow_emissions;
@@ -515,6 +776,8 @@ impl WorkflowRunProjection {
             "emissions" => "SELECT COUNT(*) FROM workflow_emissions",
             "edges" => "SELECT COUNT(*) FROM workflow_edge_checkpoints",
             "matches" => "SELECT COUNT(*) FROM workflow_match_traces",
+            "tokens" => "SELECT COUNT(*) FROM workflow_execution_tokens",
+            "joins" => "SELECT COUNT(*) FROM workflow_join_evaluations",
             "events" => "SELECT COUNT(*) FROM workflow_projected_events",
             "values" => "SELECT COUNT(*) FROM workflow_values",
             _ => return Err(WorkflowProjectionError::Integrity("unknown_table".into())),
@@ -656,6 +919,8 @@ impl WorkflowRunProjection {
             edges: self.inspect_edges(run_id)?,
             match_traces: self.inspect_match_traces(run_id)?,
             events: self.inspect_events(run_id)?,
+            execution_tokens: self.inspect_execution_tokens(run_id)?,
+            joins: self.inspect_joins(run_id)?,
         })
     }
 
@@ -663,7 +928,8 @@ impl WorkflowRunProjection {
         let mut statement = self.connection.prepare(
             "SELECT attempt_id, node_id, attempt_number, status, outcome, error_code,
                     error_value_id, emission_ids_json, started_at_unix_millis,
-                    settled_at_unix_millis, started_store_position, settled_store_position
+                    settled_at_unix_millis, started_store_position, settled_store_position,
+                    execution_token_id
              FROM workflow_attempts WHERE run_id = ?1
              ORDER BY started_store_position, attempt_id",
         )?;
@@ -680,6 +946,7 @@ impl WorkflowRunProjection {
             Option<i64>,
             i64,
             Option<i64>,
+            String,
         );
         let rows = statement.query_map([run_id], |row| -> rusqlite::Result<AttemptRow> {
             Ok((
@@ -695,6 +962,7 @@ impl WorkflowRunProjection {
                 row.get(9)?,
                 row.get(10)?,
                 row.get(11)?,
+                row.get(12)?,
             ))
         })?;
         let rows = rows.collect::<std::result::Result<Vec<_>, _>>()?;
@@ -717,6 +985,7 @@ impl WorkflowRunProjection {
                         .map(projected_u64)
                         .transpose()?
                         .unwrap_or_default(),
+                    execution_token_id: row.12,
                 })
             })
             .collect()
@@ -759,10 +1028,20 @@ impl WorkflowRunProjection {
     fn inspect_emissions(&self, run_id: &str) -> Result<Vec<v1::WorkflowProjectedEmission>> {
         let mut statement = self.connection.prepare(
             "SELECT emission_id, attempt_id, node_id, port_id, value_id, event_id,
-                    emitted_at_unix_millis, store_position
+                    emitted_at_unix_millis, store_position, execution_token_id
              FROM workflow_emissions WHERE run_id = ?1 ORDER BY store_position, emission_id",
         )?;
-        type EmissionRow = (String, String, String, String, String, String, i64, i64);
+        type EmissionRow = (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            i64,
+            i64,
+            String,
+        );
         let rows = statement.query_map([run_id], |row| -> rusqlite::Result<EmissionRow> {
             Ok((
                 row.get(0)?,
@@ -773,6 +1052,7 @@ impl WorkflowRunProjection {
                 row.get(5)?,
                 row.get(6)?,
                 row.get(7)?,
+                row.get(8)?,
             ))
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()?
@@ -787,6 +1067,7 @@ impl WorkflowRunProjection {
                     event_id: row.5,
                     emitted_at_unix_millis: row.6,
                     store_position: projected_u64(row.7)?,
+                    execution_token_id: row.8,
                 })
             })
             .collect()
@@ -795,10 +1076,20 @@ impl WorkflowRunProjection {
     fn inspect_edges(&self, run_id: &str) -> Result<Vec<v1::WorkflowProjectedEdgeCheckpoint>> {
         let mut statement = self.connection.prepare(
             "SELECT event_id, edge_id, emission_id, target_node_id, target_port_id, state,
-                    checkpointed_at_unix_millis, store_position
+                    checkpointed_at_unix_millis, store_position, execution_token_id
              FROM workflow_edge_checkpoints WHERE run_id = ?1 ORDER BY store_position, event_id",
         )?;
-        type EdgeRow = (String, String, String, String, String, String, i64, i64);
+        type EdgeRow = (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            i64,
+            i64,
+            String,
+        );
         let rows = statement.query_map([run_id], |row| -> rusqlite::Result<EdgeRow> {
             Ok((
                 row.get(0)?,
@@ -809,6 +1100,7 @@ impl WorkflowRunProjection {
                 row.get(5)?,
                 row.get(6)?,
                 row.get(7)?,
+                row.get(8)?,
             ))
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()?
@@ -823,6 +1115,145 @@ impl WorkflowRunProjection {
                     state: row.5,
                     checkpointed_at_unix_millis: row.6,
                     store_position: projected_u64(row.7)?,
+                    execution_token_id: row.8,
+                })
+            })
+            .collect()
+    }
+
+    fn inspect_execution_tokens(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<v1::WorkflowProjectedExecutionToken>> {
+        let mut statement = self.connection.prepare(
+            "SELECT execution_token_id, parent_execution_token_id, fork_node_id, branch_id,
+                    branch_port_id, join_node_id, source_emission_id, status, outcome,
+                    terminal_node_id, error_code, error_value_id, final_emission_ids_json,
+                    created_store_position, settled_store_position
+             FROM workflow_execution_tokens WHERE run_id = ?1
+             ORDER BY created_store_position, execution_token_id",
+        )?;
+        type TokenRow = (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            String,
+            i64,
+            Option<i64>,
+        );
+        let rows = statement.query_map([run_id], |row| -> rusqlite::Result<TokenRow> {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+                row.get(9)?,
+                row.get(10)?,
+                row.get(11)?,
+                row.get(12)?,
+                row.get(13)?,
+                row.get(14)?,
+            ))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|row| {
+                Ok(v1::WorkflowProjectedExecutionToken {
+                    execution_token_id: row.0,
+                    parent_execution_token_id: row.1.unwrap_or_default(),
+                    fork_node_id: row.2.unwrap_or_default(),
+                    branch_id: row.3.unwrap_or_default(),
+                    branch_port_id: row.4.unwrap_or_default(),
+                    join_node_id: row.5.unwrap_or_default(),
+                    source_emission_id: row.6.unwrap_or_default(),
+                    status: row.7,
+                    outcome: row.8.unwrap_or_default(),
+                    terminal_node_id: row.9.unwrap_or_default(),
+                    error_code: row.10.unwrap_or_default(),
+                    error: self.inspect_optional_value(row.11.as_deref())?,
+                    final_emission_ids: decode_string_list(&row.12)?,
+                    created_store_position: projected_u64(row.13)?,
+                    settled_store_position: row
+                        .14
+                        .map(projected_u64)
+                        .transpose()?
+                        .unwrap_or_default(),
+                })
+            })
+            .collect()
+    }
+
+    fn inspect_joins(&self, run_id: &str) -> Result<Vec<v1::WorkflowProjectedJoinEvaluation>> {
+        let mut statement = self.connection.prepare(
+            "SELECT join_node_id, fork_node_id, resumed_execution_token_id, policy, threshold,
+                    decision, expected_execution_token_ids_json, arrived_execution_token_ids_json,
+                    failed_execution_token_ids_json, pending_execution_token_ids_json,
+                    cancel_remaining, error_code, store_position
+             FROM workflow_join_evaluations WHERE run_id = ?1 ORDER BY store_position, event_id",
+        )?;
+        type JoinRow = (
+            String,
+            String,
+            String,
+            String,
+            i64,
+            String,
+            String,
+            String,
+            String,
+            String,
+            bool,
+            Option<String>,
+            i64,
+        );
+        let rows = statement.query_map([run_id], |row| -> rusqlite::Result<JoinRow> {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+                row.get(9)?,
+                row.get(10)?,
+                row.get(11)?,
+                row.get(12)?,
+            ))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|row| {
+                Ok(v1::WorkflowProjectedJoinEvaluation {
+                    join_node_id: row.0,
+                    fork_node_id: row.1,
+                    resumed_execution_token_id: row.2,
+                    policy: row.3,
+                    threshold: projected_u32(row.4)?,
+                    decision: row.5,
+                    expected_execution_token_ids: decode_string_list(&row.6)?,
+                    arrived_execution_token_ids: decode_string_list(&row.7)?,
+                    failed_execution_token_ids: decode_string_list(&row.8)?,
+                    pending_execution_token_ids: decode_string_list(&row.9)?,
+                    cancel_remaining: row.10,
+                    error_code: row.11.unwrap_or_default(),
+                    store_position: projected_u64(row.12)?,
                 })
             })
             .collect()
@@ -1076,8 +1507,161 @@ fn apply_event(transaction: &Transaction<'_>, event: &v1::EventEnvelope) -> Resu
                 ],
             )?;
         }
+        WorkflowRuntimeEvent::ExecutionTokenCreated(payload) => {
+            require_active_run(transaction, &payload.run_id, &payload.run_token_id)?;
+            if !payload.parent_execution_token_id.is_empty() {
+                let parent_run: Option<String> = transaction
+                    .query_row(
+                        "SELECT run_id FROM workflow_execution_tokens WHERE execution_token_id = ?1",
+                        [&payload.parent_execution_token_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if parent_run.as_deref() != Some(payload.run_id.as_str()) {
+                    return lifecycle("execution_token_parent_missing");
+                }
+            }
+            transaction.execute(
+                "INSERT INTO workflow_execution_tokens
+                 (execution_token_id, run_id, run_token_id, parent_execution_token_id,
+                  fork_node_id, branch_id, branch_port_id, join_node_id, source_emission_id,
+                  status, created_event_id, created_at_unix_millis, created_store_position)
+                 VALUES (?1, ?2, ?3, NULLIF(?4, ''), NULLIF(?5, ''), NULLIF(?6, ''),
+                         NULLIF(?7, ''), NULLIF(?8, ''), NULLIF(?9, ''), 'active', ?10, ?11, ?12)",
+                params![
+                    payload.execution_token_id,
+                    payload.run_id,
+                    payload.run_token_id,
+                    payload.parent_execution_token_id,
+                    payload.fork_node_id,
+                    payload.branch_id,
+                    payload.branch_port_id,
+                    payload.join_node_id,
+                    payload.source_emission_id,
+                    event.event_id,
+                    event.occurred_at_unix_millis,
+                    sql_u64(event.store_position)?,
+                ],
+            )?;
+            touch_run(transaction, &payload.run_id, event.store_position)?;
+        }
+        WorkflowRuntimeEvent::ExecutionTokenSettled(payload) => {
+            require_active_run(transaction, &payload.run_id, &payload.run_token_id)?;
+            let status: Option<String> = transaction
+                .query_row(
+                    "SELECT status FROM workflow_execution_tokens
+                     WHERE execution_token_id = ?1 AND run_id = ?2 AND run_token_id = ?3",
+                    params![
+                        payload.execution_token_id,
+                        payload.run_id,
+                        payload.run_token_id
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if status.as_deref() != Some("active") {
+                return lifecycle("execution_token_not_active");
+            }
+            let outcome = v1::WorkflowExecutionTokenOutcome::try_from(payload.outcome)
+                .map_err(|_| WorkflowProjectionError::Lifecycle("token_outcome_invalid".into()))?;
+            let status = match outcome {
+                v1::WorkflowExecutionTokenOutcome::Completed => "completed",
+                v1::WorkflowExecutionTokenOutcome::Failed => "failed",
+                v1::WorkflowExecutionTokenOutcome::Cancelled => "cancelled",
+                v1::WorkflowExecutionTokenOutcome::Forked => "forked",
+                v1::WorkflowExecutionTokenOutcome::Joined => "joined",
+                v1::WorkflowExecutionTokenOutcome::Unspecified => {
+                    return lifecycle("token_outcome_invalid");
+                }
+            };
+            let error_value_id = insert_optional_value(transaction, payload.error.as_ref())?;
+            transaction.execute(
+                "UPDATE workflow_execution_tokens SET status = ?1, outcome = ?1,
+                   terminal_node_id = NULLIF(?2, ''), join_node_id = COALESCE(NULLIF(?3, ''), join_node_id),
+                   error_code = NULLIF(?4, ''), error_value_id = ?5, final_emission_ids_json = ?6,
+                   settled_event_id = ?7, settled_at_unix_millis = ?8, settled_store_position = ?9
+                 WHERE execution_token_id = ?10",
+                params![
+                    status,
+                    payload.terminal_node_id,
+                    payload.join_node_id,
+                    payload.error_code,
+                    error_value_id,
+                    string_list_json(&payload.final_emission_ids)?,
+                    event.event_id,
+                    event.occurred_at_unix_millis,
+                    sql_u64(event.store_position)?,
+                    payload.execution_token_id,
+                ],
+            )?;
+            touch_run(transaction, &payload.run_id, event.store_position)?;
+        }
+        WorkflowRuntimeEvent::JoinEvaluated(payload) => {
+            require_active_run(transaction, &payload.run_id, &payload.run_token_id)?;
+            for token_id in &payload.expected_execution_token_ids {
+                let token: Option<(String, Option<String>, Option<String>)> = transaction
+                    .query_row(
+                        "SELECT run_id, fork_node_id, join_node_id FROM workflow_execution_tokens
+                         WHERE execution_token_id = ?1",
+                        [token_id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .optional()?;
+                if token
+                    .as_ref()
+                    .is_none_or(|(run_id, fork_node_id, join_node_id)| {
+                        run_id != &payload.run_id
+                            || fork_node_id.as_deref() != Some(payload.fork_node_id.as_str())
+                            || join_node_id.as_deref() != Some(payload.join_node_id.as_str())
+                    })
+                {
+                    return lifecycle("join_expected_token_mismatch");
+                }
+            }
+            let decision = match v1::WorkflowJoinDecision::try_from(payload.decision) {
+                Ok(v1::WorkflowJoinDecision::Succeeded) => "succeeded",
+                Ok(v1::WorkflowJoinDecision::Failed) => "failed",
+                _ => return lifecycle("join_decision_invalid"),
+            };
+            transaction.execute(
+                "INSERT INTO workflow_join_evaluations
+                 (event_id, run_id, join_node_id, fork_node_id, resumed_execution_token_id,
+                  policy, threshold, decision, expected_execution_token_ids_json,
+                  arrived_execution_token_ids_json, failed_execution_token_ids_json,
+                  pending_execution_token_ids_json, cancel_remaining, error_code,
+                  evaluated_at_unix_millis, store_position)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                         NULLIF(?14, ''), ?15, ?16)",
+                params![
+                    event.event_id,
+                    payload.run_id,
+                    payload.join_node_id,
+                    payload.fork_node_id,
+                    payload.resumed_execution_token_id,
+                    payload.policy,
+                    payload.threshold,
+                    decision,
+                    string_list_json(&payload.expected_execution_token_ids)?,
+                    string_list_json(&payload.arrived_execution_token_ids)?,
+                    string_list_json(&payload.failed_execution_token_ids)?,
+                    string_list_json(&payload.pending_execution_token_ids)?,
+                    payload.cancel_remaining,
+                    payload.error_code,
+                    event.occurred_at_unix_millis,
+                    sql_u64(event.store_position)?,
+                ],
+            )?;
+            touch_run(transaction, &payload.run_id, event.store_position)?;
+        }
         WorkflowRuntimeEvent::AttemptStarted(payload) => {
             require_active_run(transaction, &payload.run_id, &payload.run_token_id)?;
+            require_execution_token(
+                transaction,
+                &payload.run_id,
+                &payload.run_token_id,
+                &payload.execution_token_id,
+                true,
+            )?;
             let running_node: Option<String> = transaction
                 .query_row(
                     "SELECT status FROM workflow_node_states WHERE run_id = ?1 AND node_id = ?2",
@@ -1090,13 +1674,14 @@ fn apply_event(transaction: &Transaction<'_>, event: &v1::EventEnvelope) -> Resu
             }
             transaction.execute(
                 "INSERT INTO workflow_attempts
-                 (attempt_id, run_id, run_token_id, node_id, attempt_number, status,
+                 (attempt_id, run_id, run_token_id, execution_token_id, node_id, attempt_number, status,
                   started_at_unix_millis, started_store_position)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', ?7, ?8)",
                 params![
                     payload.attempt_id,
                     payload.run_id,
                     payload.run_token_id,
+                    payload.execution_token_id,
                     payload.node_id,
                     payload.attempt_number,
                     event.occurred_at_unix_millis,
@@ -1132,6 +1717,7 @@ fn apply_event(transaction: &Transaction<'_>, event: &v1::EventEnvelope) -> Resu
                 &payload.attempt_id,
                 &payload.node_id,
                 None,
+                Some(&payload.execution_token_id),
             )?;
             let value = payload.value.as_ref().ok_or_else(|| {
                 WorkflowProjectionError::Lifecycle("emission_value_missing".into())
@@ -1139,13 +1725,14 @@ fn apply_event(transaction: &Transaction<'_>, event: &v1::EventEnvelope) -> Resu
             insert_value(transaction, value)?;
             transaction.execute(
                 "INSERT INTO workflow_emissions
-                 (emission_id, run_id, attempt_id, node_id, port_id, value_id, event_id,
+                 (emission_id, run_id, attempt_id, execution_token_id, node_id, port_id, value_id, event_id,
                   emitted_at_unix_millis, store_position)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     payload.emission_id,
                     payload.run_id,
                     payload.attempt_id,
+                    payload.execution_token_id,
                     payload.node_id,
                     payload.port_id,
                     value.value_id,
@@ -1158,6 +1745,13 @@ fn apply_event(transaction: &Transaction<'_>, event: &v1::EventEnvelope) -> Resu
         }
         WorkflowRuntimeEvent::EdgeCheckpointed(payload) => {
             require_active_run(transaction, &payload.run_id, &payload.run_token_id)?;
+            require_execution_token(
+                transaction,
+                &payload.run_id,
+                &payload.run_token_id,
+                &payload.execution_token_id,
+                true,
+            )?;
             let emission_run: Option<String> = transaction
                 .query_row(
                     "SELECT run_id FROM workflow_emissions WHERE emission_id = ?1",
@@ -1175,12 +1769,13 @@ fn apply_event(transaction: &Transaction<'_>, event: &v1::EventEnvelope) -> Resu
             };
             transaction.execute(
                 "INSERT INTO workflow_edge_checkpoints
-                 (event_id, run_id, edge_id, emission_id, target_node_id, target_port_id,
+                 (event_id, run_id, execution_token_id, edge_id, emission_id, target_node_id, target_port_id,
                   state, checkpointed_at_unix_millis, store_position)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     event.event_id,
                     payload.run_id,
+                    payload.execution_token_id,
                     payload.edge_id,
                     payload.emission_id,
                     payload.target_node_id,
@@ -1200,6 +1795,7 @@ fn apply_event(transaction: &Transaction<'_>, event: &v1::EventEnvelope) -> Resu
                 &payload.attempt_id,
                 &payload.node_id,
                 None,
+                Some(&payload.execution_token_id),
             )?;
             let trace = payload
                 .trace
@@ -1208,14 +1804,15 @@ fn apply_event(transaction: &Transaction<'_>, event: &v1::EventEnvelope) -> Resu
             insert_value(transaction, trace)?;
             transaction.execute(
                 "INSERT INTO workflow_match_traces
-                 (event_id, run_id, attempt_id, node_id, input_value_id,
+                 (event_id, run_id, attempt_id, execution_token_id, node_id, input_value_id,
                   evaluated_case_ids_json, matched_case_ids_json, emitted_port_ids_json,
                   trace_value_id, recorded_at_unix_millis, store_position)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     event.event_id,
                     payload.run_id,
                     payload.attempt_id,
+                    payload.execution_token_id,
                     payload.node_id,
                     payload.input_value_id,
                     string_list_json(&payload.evaluated_case_ids)?,
@@ -1236,6 +1833,7 @@ fn apply_event(transaction: &Transaction<'_>, event: &v1::EventEnvelope) -> Resu
                 &payload.attempt_id,
                 &payload.node_id,
                 Some(payload.attempt_number),
+                Some(&payload.execution_token_id),
             )?;
             let actual_emissions = emission_ids_for_attempt(transaction, &payload.attempt_id)?;
             if actual_emissions != payload.emission_ids {
@@ -1296,6 +1894,20 @@ fn apply_event(transaction: &Transaction<'_>, event: &v1::EventEnvelope) -> Resu
             )?;
             if running_attempts != 0 {
                 return lifecycle("run_has_active_attempts");
+            }
+            let token_count: i64 = transaction.query_row(
+                "SELECT COUNT(*) FROM workflow_execution_tokens WHERE run_id = ?1",
+                [&payload.run_id],
+                |row| row.get(0),
+            )?;
+            let active_tokens: i64 = transaction.query_row(
+                "SELECT COUNT(*) FROM workflow_execution_tokens
+                 WHERE run_id = ?1 AND status = 'active'",
+                [&payload.run_id],
+                |row| row.get(0),
+            )?;
+            if token_count != 0 && active_tokens != 0 {
+                return lifecycle("run_has_active_execution_tokens");
             }
             for emission_id in &payload.final_emission_ids {
                 let emission_run: Option<String> = transaction
@@ -1375,6 +1987,46 @@ fn require_active_run(transaction: &Transaction<'_>, run_id: &str, token_id: &st
     }
 }
 
+fn require_execution_token(
+    transaction: &Transaction<'_>,
+    run_id: &str,
+    run_token_id: &str,
+    execution_token_id: &str,
+    require_active: bool,
+) -> Result<()> {
+    if execution_token_id.is_empty() {
+        let token_count: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM workflow_execution_tokens WHERE run_id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )?;
+        return if token_count == 0 {
+            Ok(())
+        } else {
+            lifecycle("execution_token_missing")
+        };
+    }
+    let row: Option<(String, String, String)> = transaction
+        .query_row(
+            "SELECT run_id, run_token_id, status FROM workflow_execution_tokens
+             WHERE execution_token_id = ?1",
+            [execution_token_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    match row {
+        Some((stored_run, stored_run_token, status))
+            if stored_run == run_id
+                && stored_run_token == run_token_id
+                && (!require_active || status == "active") =>
+        {
+            Ok(())
+        }
+        Some(_) => lifecycle("execution_token_mismatch"),
+        None => lifecycle("execution_token_missing"),
+    }
+}
+
 fn require_active_attempt(
     transaction: &Transaction<'_>,
     run_id: &str,
@@ -1382,11 +2034,12 @@ fn require_active_attempt(
     attempt_id: &str,
     node_id: &str,
     attempt_number: Option<u32>,
+    execution_token_id: Option<&str>,
 ) -> Result<()> {
     require_active_run(transaction, run_id, token_id)?;
-    let row: Option<(String, String, String, i64, String)> = transaction
+    let row: Option<(String, String, String, i64, String, String)> = transaction
         .query_row(
-            "SELECT run_id, run_token_id, node_id, attempt_number, status
+            "SELECT run_id, run_token_id, node_id, attempt_number, status, execution_token_id
              FROM workflow_attempts WHERE attempt_id = ?1",
             [attempt_id],
             |row| {
@@ -1396,14 +2049,27 @@ fn require_active_attempt(
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
                 ))
             },
         )
         .optional()?;
-    let Some((stored_run, stored_token, stored_node, stored_number, status)) = row else {
+    let Some((
+        stored_run,
+        stored_token,
+        stored_node,
+        stored_number,
+        status,
+        stored_execution_token,
+    )) = row
+    else {
         return lifecycle("attempt_missing");
     };
-    if stored_run != run_id || stored_token != token_id || stored_node != node_id {
+    if stored_run != run_id
+        || stored_token != token_id
+        || stored_node != node_id
+        || execution_token_id.is_some_and(|value| value != stored_execution_token)
+    {
         return lifecycle("attempt_identity_mismatch");
     }
     if attempt_number.is_some_and(|number| i64::from(number) != stored_number) {
@@ -1585,6 +2251,17 @@ fn quick_check(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn table_has_column(connection: &Connection, table: &str, expected_column: &str) -> Result<bool> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+    for column in columns {
+        if column? == expected_column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn refresh_state_digest(connection: &Connection) -> Result<()> {
     let bytes = canonical_state_bytes(connection)?;
     let digest = hex::encode(Sha256::digest(bytes));
@@ -1621,8 +2298,8 @@ fn canonical_state_bytes(connection: &Connection) -> Result<Vec<u8>> {
             table_rows(
                 connection,
                 "attempts",
-                "SELECT attempt_id, run_id, run_token_id, node_id, attempt_number, status, outcome, error_code, error_value_id, emission_ids_json, started_at_unix_millis, settled_at_unix_millis, started_store_position, settled_store_position FROM workflow_attempts ORDER BY run_id, node_id, attempt_number, attempt_id",
-                14,
+                "SELECT attempt_id, run_id, run_token_id, execution_token_id, node_id, attempt_number, status, outcome, error_code, error_value_id, emission_ids_json, started_at_unix_millis, settled_at_unix_millis, started_store_position, settled_store_position FROM workflow_attempts ORDER BY run_id, execution_token_id, node_id, attempt_number, attempt_id",
+                15,
             )?,
             table_rows(
                 connection,
@@ -1633,20 +2310,32 @@ fn canonical_state_bytes(connection: &Connection) -> Result<Vec<u8>> {
             table_rows(
                 connection,
                 "emissions",
-                "SELECT emission_id, run_id, attempt_id, node_id, port_id, value_id, event_id, emitted_at_unix_millis, store_position FROM workflow_emissions ORDER BY run_id, store_position, emission_id",
-                9,
+                "SELECT emission_id, run_id, attempt_id, execution_token_id, node_id, port_id, value_id, event_id, emitted_at_unix_millis, store_position FROM workflow_emissions ORDER BY run_id, store_position, emission_id",
+                10,
             )?,
             table_rows(
                 connection,
                 "edges",
-                "SELECT event_id, run_id, edge_id, emission_id, target_node_id, target_port_id, state, checkpointed_at_unix_millis, store_position FROM workflow_edge_checkpoints ORDER BY run_id, store_position, event_id",
-                9,
+                "SELECT event_id, run_id, execution_token_id, edge_id, emission_id, target_node_id, target_port_id, state, checkpointed_at_unix_millis, store_position FROM workflow_edge_checkpoints ORDER BY run_id, store_position, event_id",
+                10,
             )?,
             table_rows(
                 connection,
                 "matches",
-                "SELECT event_id, run_id, attempt_id, node_id, input_value_id, evaluated_case_ids_json, matched_case_ids_json, emitted_port_ids_json, trace_value_id, recorded_at_unix_millis, store_position FROM workflow_match_traces ORDER BY run_id, store_position, event_id",
-                11,
+                "SELECT event_id, run_id, attempt_id, execution_token_id, node_id, input_value_id, evaluated_case_ids_json, matched_case_ids_json, emitted_port_ids_json, trace_value_id, recorded_at_unix_millis, store_position FROM workflow_match_traces ORDER BY run_id, store_position, event_id",
+                12,
+            )?,
+            table_rows(
+                connection,
+                "tokens",
+                "SELECT execution_token_id, run_id, run_token_id, parent_execution_token_id, fork_node_id, branch_id, branch_port_id, join_node_id, source_emission_id, status, outcome, terminal_node_id, error_code, error_value_id, final_emission_ids_json, created_event_id, settled_event_id, created_at_unix_millis, settled_at_unix_millis, created_store_position, settled_store_position FROM workflow_execution_tokens ORDER BY run_id, created_store_position, execution_token_id",
+                21,
+            )?,
+            table_rows(
+                connection,
+                "joins",
+                "SELECT event_id, run_id, join_node_id, fork_node_id, resumed_execution_token_id, policy, threshold, decision, expected_execution_token_ids_json, arrived_execution_token_ids_json, failed_execution_token_ids_json, pending_execution_token_ids_json, cancel_remaining, error_code, evaluated_at_unix_millis, store_position FROM workflow_join_evaluations ORDER BY run_id, store_position, event_id",
+                16,
             )?,
             table_rows(
                 connection,
