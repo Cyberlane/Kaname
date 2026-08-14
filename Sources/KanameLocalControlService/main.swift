@@ -167,10 +167,39 @@ private final class LocalControlService: NSObject, LocalCoreControlService {
         )
     }
 
+    func queryWorkflowLibrary(_ request: Data, reply: @escaping (Data?, String) -> Void) {
+        runWorkflowLibraryOperation("workflow-library-query", request: request, reply: reply)
+    }
+
+    func setWorkflowActivation(_ request: Data, reply: @escaping (Data?, String) -> Void) {
+        runWorkflowLibraryOperation("workflow-library-activate", request: request, reply: reply)
+    }
+
+    private func runWorkflowLibraryOperation(
+        _ operation: String,
+        request: Data,
+        reply: @escaping (Data?, String) -> Void
+    ) {
+        let applicationSupportRoot = journalDirectory
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        runWireOperation(
+            operation,
+            request: request,
+            storageArgument: applicationSupportRoot,
+            permissionTarget: applicationSupportRoot
+                .appendingPathComponent("Workflows", isDirectory: true)
+                .appendingPathComponent("workflow-library.sqlite"),
+            reply: reply
+        )
+    }
+
     private func runWireOperation(
         _ operation: String,
         request: Data,
         extraArguments: [String] = [],
+        storageArgument: URL? = nil,
+        permissionTarget: URL? = nil,
         reply: @escaping (Data?, String) -> Void
     ) {
         guard !request.isEmpty, request.count <= LocalCoreRunner.maximumResponseBytes else {
@@ -183,9 +212,10 @@ private final class LocalControlService: NSObject, LocalCoreControlService {
                 executable: coreExecutable,
                 arguments: [
                     operation,
-                    journal.path,
+                    (storageArgument ?? journal).path,
                 ] + extraArguments,
                 journal: journal,
+                permissionTarget: permissionTarget ?? journal,
                 standardInput: request,
                 timeout: 5
             )
@@ -223,6 +253,7 @@ private final class LocalControlService: NSObject, LocalCoreControlService {
         executable: URL,
         arguments: [String],
         journal: URL,
+        permissionTarget: URL? = nil,
         standardInput: Data?,
         timeout: TimeInterval
     ) throws -> Data {
@@ -275,7 +306,8 @@ private final class LocalControlService: NSObject, LocalCoreControlService {
         guard process.terminationStatus == 0 else {
             throw LocalCoreRunnerError.failed(code: "core_failed")
         }
-        guard chmod(journal.path, 0o600) == 0 else {
+        let permissionTarget = permissionTarget ?? journal
+        guard chmod(permissionTarget.path, 0o600) == 0 else {
             throw LocalCoreRunnerError.failed(code: "journal_permissions")
         }
         return output

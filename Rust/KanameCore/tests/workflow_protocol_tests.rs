@@ -1,5 +1,9 @@
 use kaname_core::{
-    v1::{CompileWorkflowRequest, SchemaVersion, ValidateWorkflowRequest},
+    v1::{
+        CompileWorkflowRequest, SchemaVersion, SetWorkflowActivationRequest,
+        ValidateWorkflowRequest, WorkflowLibraryQueryRequest, WorkflowPortfolioQuery,
+        workflow_library_query_request,
+    },
     workflow_protocol::{self, WorkflowProtocolError},
 };
 use prost::Message;
@@ -41,6 +45,44 @@ fn validate_and_compile_requests_decode_with_explicit_bounds() {
     assert_eq!(
         workflow_protocol::decode_compile_request(&compile.encode_to_vec()).unwrap(),
         compile
+    );
+}
+
+#[test]
+fn library_queries_and_activation_decode_without_accepting_storage_paths() {
+    let query = WorkflowLibraryQueryRequest {
+        schema_version: version(),
+        request_id: "library:portfolio-001".into(),
+        query: Some(workflow_library_query_request::Query::Portfolio(
+            WorkflowPortfolioQuery {
+                alias_key: "active".into(),
+            },
+        )),
+    };
+    assert_eq!(
+        workflow_protocol::decode_library_query_request(&query.encode_to_vec()).unwrap(),
+        query
+    );
+    let activation = SetWorkflowActivationRequest {
+        schema_version: version(),
+        request_id: "library:activate-001".into(),
+        alias_id: "primary-alias".into(),
+        workflow_id: "workflow-one".into(),
+        alias_key: "active".into(),
+        revision_id: "revision-one".into(),
+        expected_generation: 2,
+        updated_at_unix_millis: 50,
+    };
+    assert_eq!(
+        workflow_protocol::decode_activation_request(&activation.encode_to_vec()).unwrap(),
+        activation
+    );
+
+    let mut missing = query;
+    missing.query = None;
+    assert_eq!(
+        workflow_protocol::decode_library_query_request(&missing.encode_to_vec()),
+        Err(WorkflowProtocolError::MissingOperation)
     );
 }
 

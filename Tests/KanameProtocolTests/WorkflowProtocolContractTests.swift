@@ -67,6 +67,41 @@ struct WorkflowProtocolContractTests {
     }
 
     @Test
+    func workflowLibraryQueriesAndActivationRoundTripWithoutStorageAuthority() throws {
+        var portfolio = Kaname_V1_WorkflowPortfolioQuery()
+        portfolio.aliasKey = "active"
+        var query = Kaname_V1_WorkflowLibraryQueryRequest()
+        query.schemaVersion = schemaVersion()
+        query.requestID = "library:portfolio-001"
+        query.query = .portfolio(portfolio)
+
+        let decodedQuery = try Kaname_V1_WorkflowLibraryQueryRequest(
+            serializedBytes: query.serializedData()
+        )
+        #expect(decodedQuery == query)
+        #expect(decodedQuery.portfolio.aliasKey == "active")
+
+        var activation = Kaname_V1_SetWorkflowActivationRequest()
+        activation.schemaVersion = schemaVersion()
+        activation.requestID = "library:activate-001"
+        activation.aliasID = "primary-alias"
+        activation.workflowID = "workflow-one"
+        activation.aliasKey = "active"
+        activation.revisionID = "revision-six"
+        activation.expectedGeneration = 5
+        activation.updatedAtUnixMillis = 1_786_685_000_000
+        var futureWire = try activation.serializedData()
+        futureWire.append(contentsOf: [0xa0, 0x06, 0x01])
+
+        let decodedActivation = try Kaname_V1_SetWorkflowActivationRequest(
+            serializedBytes: futureWire
+        )
+        #expect(decodedActivation.revisionID == "revision-six")
+        #expect(decodedActivation.expectedGeneration == 5)
+        #expect(try decodedActivation.serializedData() == futureWire)
+    }
+
+    @Test
     func malformedWireFailsWithoutProducingAPartialRequest() {
         #expect(throws: (any Error).self) {
             _ = try Kaname_V1_CompileWorkflowRequest(serializedBytes: [0x0a])

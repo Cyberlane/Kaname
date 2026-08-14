@@ -1,6 +1,9 @@
 use crate::{
     SCHEMA_MAJOR,
-    v1::{CompileWorkflowRequest, ValidateWorkflowRequest},
+    v1::{
+        CompileWorkflowRequest, SetWorkflowActivationRequest, ValidateWorkflowRequest,
+        WorkflowLibraryQueryRequest,
+    },
 };
 use prost::Message;
 
@@ -17,6 +20,7 @@ pub enum WorkflowProtocolError {
     InvalidRequestId,
     DocumentOutOfBounds,
     DiagnosticLimitOutOfBounds,
+    MissingOperation,
 }
 
 pub fn decode_validate_request(
@@ -53,6 +57,31 @@ pub fn decode_compile_request(
     Ok(request)
 }
 
+pub fn decode_library_query_request(
+    wire: &[u8],
+) -> Result<WorkflowLibraryQueryRequest, WorkflowProtocolError> {
+    let request: WorkflowLibraryQueryRequest = decode_bounded(wire)?;
+    validate_envelope(
+        request.schema_version.as_ref().map(|version| version.major),
+        &request.request_id,
+    )?;
+    if request.query.is_none() {
+        return Err(WorkflowProtocolError::MissingOperation);
+    }
+    Ok(request)
+}
+
+pub fn decode_activation_request(
+    wire: &[u8],
+) -> Result<SetWorkflowActivationRequest, WorkflowProtocolError> {
+    let request: SetWorkflowActivationRequest = decode_bounded(wire)?;
+    validate_envelope(
+        request.schema_version.as_ref().map(|version| version.major),
+        &request.request_id,
+    )?;
+    Ok(request)
+}
+
 fn decode_bounded<M>(wire: &[u8]) -> Result<M, WorkflowProtocolError>
 where
     M: Message + Default,
@@ -68,6 +97,17 @@ fn validate_common(
     request_id: &str,
     maximum_diagnostics: u32,
 ) -> Result<(), WorkflowProtocolError> {
+    validate_envelope(schema_major, request_id)?;
+    if maximum_diagnostics == 0 || maximum_diagnostics > MAXIMUM_WORKFLOW_DIAGNOSTICS {
+        return Err(WorkflowProtocolError::DiagnosticLimitOutOfBounds);
+    }
+    Ok(())
+}
+
+fn validate_envelope(
+    schema_major: Option<u32>,
+    request_id: &str,
+) -> Result<(), WorkflowProtocolError> {
     if schema_major != Some(SCHEMA_MAJOR) {
         return Err(WorkflowProtocolError::UnsupportedSchemaMajor);
     }
@@ -78,9 +118,6 @@ fn validate_common(
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
     {
         return Err(WorkflowProtocolError::InvalidRequestId);
-    }
-    if maximum_diagnostics == 0 || maximum_diagnostics > MAXIMUM_WORKFLOW_DIAGNOSTICS {
-        return Err(WorkflowProtocolError::DiagnosticLimitOutOfBounds);
     }
     Ok(())
 }

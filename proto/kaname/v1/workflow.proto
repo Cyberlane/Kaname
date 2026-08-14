@@ -100,3 +100,135 @@ message CompileWorkflowResponse {
   WorkflowArtifactDigests digests = 7;
   reserved 8 to 15;
 }
+
+enum WorkflowPortfolioState {
+  WORKFLOW_PORTFOLIO_STATE_UNSPECIFIED = 0;
+  WORKFLOW_PORTFOLIO_STATE_DRAFT = 1;
+  WORKFLOW_PORTFOLIO_STATE_PUBLISHED = 2;
+  WORKFLOW_PORTFOLIO_STATE_ACTIVE = 3;
+  WORKFLOW_PORTFOLIO_STATE_DISABLED = 4;
+}
+
+enum WorkflowExecutionSupport {
+  WORKFLOW_EXECUTION_SUPPORT_UNSPECIFIED = 0;
+  WORKFLOW_EXECUTION_SUPPORT_EXECUTABLE = 1;
+  WORKFLOW_EXECUTION_SUPPORT_UNSUPPORTED = 2;
+}
+
+message WorkflowPortfolioQuery {
+  string alias_key = 1;
+  reserved 2 to 15;
+}
+
+message WorkflowRevisionHistoryQuery {
+  string workflow_id = 1;
+  string alias_key = 2;
+  reserved 3 to 15;
+}
+
+message WorkflowRevisionContentQuery {
+  string revision_id = 1;
+  string alias_key = 2;
+  reserved 3 to 15;
+}
+
+message WorkflowRevisionComparisonQuery {
+  string from_revision_id = 1;
+  string to_revision_id = 2;
+  reserved 3 to 15;
+}
+
+message WorkflowLibraryQueryRequest {
+  SchemaVersion schema_version = 1;
+  string request_id = 2;
+  oneof query {
+    WorkflowPortfolioQuery portfolio = 3;
+    WorkflowRevisionHistoryQuery revision_history = 4;
+    WorkflowRevisionContentQuery revision_content = 5;
+    WorkflowRevisionComparisonQuery revision_comparison = 6;
+  }
+  reserved 7 to 15;
+  reserved "application_support_path", "database_path", "credential";
+}
+
+message WorkflowPortfolioItem {
+  string workflow_id = 1;
+  string package_id = 2;
+  string name = 3;
+  string summary = 4;
+  WorkflowPortfolioState state = 5;
+  bool draft_present = 6;
+  string latest_revision_id = 7;
+  int64 latest_revision_number = 8;
+  string active_revision_id = 9;
+  WorkflowExecutionSupport execution_support = 10;
+  reserved 11 to 20;
+}
+
+message WorkflowRevisionSummary {
+  string workflow_id = 1;
+  string revision_id = 2;
+  int64 revision_number = 3;
+  string release_version = 4;
+  int64 created_at_unix_millis = 5;
+  string package_digest = 6;
+  bool is_active = 7;
+  WorkflowExecutionSupport execution_support = 8;
+  reserved 9 to 20;
+}
+
+message WorkflowRevisionContent {
+  WorkflowRevisionSummary summary = 1;
+  bytes workflow_json = 2;
+  bytes layout_json = 3;
+  bytes configuration_json = 4;
+  bytes compiled_json = 5;
+  reserved 6 to 15;
+}
+
+message WorkflowRevisionComparison {
+  string workflow_id = 1;
+  string from_revision_id = 2;
+  string to_revision_id = 3;
+  repeated string added_node_ids = 4;
+  repeated string removed_node_ids = 5;
+  repeated string changed_definition_pointers = 6;
+  repeated string changed_layout_pointers = 7;
+  repeated string changed_configuration_pointers = 8;
+  bool truncated = 9;
+  reserved 10 to 20;
+}
+
+message WorkflowLibraryQueryResponse {
+  SchemaVersion schema_version = 1;
+  string request_id = 2;
+  repeated WorkflowPortfolioItem portfolio = 3;
+  repeated WorkflowRevisionSummary revision_history = 4;
+  WorkflowRevisionContent revision_content = 5;
+  WorkflowRevisionComparison revision_comparison = 6;
+  reserved 7 to 15;
+}
+
+message SetWorkflowActivationRequest {
+  SchemaVersion schema_version = 1;
+  string request_id = 2;
+  string alias_id = 3;
+  string workflow_id = 4;
+  string alias_key = 5;
+  string revision_id = 6;
+  int64 expected_generation = 7;
+  int64 updated_at_unix_millis = 8;
+  reserved 9 to 20;
+  reserved "enabled", "account_id", "credential";
+}
+
+message SetWorkflowActivationResponse {
+  SchemaVersion schema_version = 1;
+  string request_id = 2;
+  string workflow_id = 3;
+  string alias_key = 4;
+  string revision_id = 5;
+  int64 generation = 6;
+  bool duplicate = 7;
+  reserved 8 to 15;
+}

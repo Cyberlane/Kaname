@@ -2,10 +2,17 @@ use kaname_core::{
     fake_provider::{embedded_scenarios, run_scenario, run_scenario_at_path, scale_fixture},
     journal::{Journal, ReplayBasis as JournalReplayBasis},
     mobile::{EnrollmentAdmission, SyncAdmission},
+    open_workflow_library,
     policy::{ApprovalResolutionResult, LocalPolicyCore, approval_fingerprint},
     v1::{self, EventEnvelope},
     workflow_canonical, workflow_compiler,
     workflow_schema::{self, WorkflowSchemaCheckRequest},
+    workflow_versions::{
+        SetWorkflowActivation, WorkflowExecutionSupport, WorkflowPortfolioState,
+        WorkflowRevisionComparison as StoredWorkflowRevisionComparison,
+        WorkflowRevisionContent as StoredWorkflowRevisionContent,
+        WorkflowRevisionSummary as StoredWorkflowRevisionSummary,
+    },
 };
 use prost::Message;
 use serde::{Deserialize, Serialize};
@@ -55,7 +62,13 @@ fn main() {
         [operation] if operation == "workflow-schema-check" => workflow_schema_check(),
         [operation] if operation == "workflow-canonicalize" => workflow_canonicalize(),
         [operation] if operation == "workflow-compile" => workflow_compile(),
-        _ => Err("usage: kaname-local-core scenario <F-01..F-14> | scenario-store <F-01..F-14> <journal-path> | append-event <journal-path> < event-envelope.bin | authorize-action <journal-path> < approval-command.bin | record-review <journal-path> < command-envelope.bin | replay <journal-path> < replay-request.bin | mobile-propose <journal-path> < enrollment-challenge.bin | mobile-decide <journal-path> < enrollment-decision.bin | mobile-admit <journal-path> <recipient-device-id> <recipient-key-id> < encrypted-envelope.bin | scale <S-01..S-04> | workflow-schema-check < request.json | workflow-canonicalize < value.json | workflow-compile < compile-request.bin".to_owned()),
+        [operation, application_support] if operation == "workflow-library-query" => {
+            workflow_library_query(application_support)
+        }
+        [operation, application_support] if operation == "workflow-library-activate" => {
+            workflow_library_activate(application_support)
+        }
+        _ => Err("usage: kaname-local-core scenario <F-01..F-14> | scenario-store <F-01..F-14> <journal-path> | append-event <journal-path> < event-envelope.bin | authorize-action <journal-path> < approval-command.bin | record-review <journal-path> < command-envelope.bin | replay <journal-path> < replay-request.bin | mobile-propose <journal-path> < enrollment-challenge.bin | mobile-decide <journal-path> < enrollment-decision.bin | mobile-admit <journal-path> <recipient-device-id> <recipient-key-id> < encrypted-envelope.bin | scale <S-01..S-04> | workflow-schema-check < request.json | workflow-canonicalize < value.json | workflow-compile < compile-request.bin | workflow-library-query <application-support-root> < query-request.bin | workflow-library-activate <application-support-root> < activation-request.bin".to_owned()),
     };
     match result {
         Ok(json) => println!("{json}"),
@@ -101,6 +114,170 @@ fn workflow_compile_wire(wire: &[u8]) -> Result<String, String> {
     Ok(hex::encode(
         workflow_compiler::compile(&request).encode_to_vec(),
     ))
+}
+
+fn workflow_library_query(application_support: &str) -> Result<String, String> {
+    let wire = read_standard_input()?;
+    workflow_library_query_wire(application_support, &wire)
+}
+
+fn workflow_library_query_wire(application_support: &str, wire: &[u8]) -> Result<String, String> {
+    let request = kaname_core::workflow_protocol::decode_library_query_request(wire)
+        .map_err(|_| "workflow_library_query_rejected".to_owned())?;
+    let store = open_workflow_library(application_support)
+        .map_err(|_| "workflow_library_unavailable".to_owned())?;
+    let mut response = v1::WorkflowLibraryQueryResponse {
+        schema_version: Some(v1::SchemaVersion {
+            major: kaname_core::SCHEMA_MAJOR,
+            minor: 0,
+        }),
+        request_id: request.request_id,
+        ..Default::default()
+    };
+    use v1::workflow_library_query_request::Query;
+    match request
+        .query
+        .ok_or_else(|| "workflow_library_query_missing".to_owned())?
+    {
+        Query::Portfolio(query) => {
+            response.portfolio = store
+                .workflow_portfolio(&query.alias_key)
+                .map_err(|_| "workflow_library_query_failed".to_owned())?
+                .into_iter()
+                .map(|item| v1::WorkflowPortfolioItem {
+                    workflow_id: item.workflow_id,
+                    package_id: item.package_id,
+                    name: item.name,
+                    summary: item.summary,
+                    state: portfolio_state(item.state),
+                    draft_present: item.has_draft,
+                    latest_revision_id: item.latest_revision_id.unwrap_or_default(),
+                    latest_revision_number: item.latest_revision_number.unwrap_or_default(),
+                    active_revision_id: item.active_revision_id.unwrap_or_default(),
+                    execution_support: item
+                        .execution_support
+                        .map(execution_support)
+                        .unwrap_or_default(),
+                })
+                .collect();
+        }
+        Query::RevisionHistory(query) => {
+            response.revision_history = store
+                .workflow_revision_history(&query.workflow_id, &query.alias_key)
+                .map_err(|_| "workflow_library_query_failed".to_owned())?
+                .into_iter()
+                .map(revision_summary)
+                .collect();
+        }
+        Query::RevisionContent(query) => {
+            let content = store
+                .load_workflow_revision(&query.revision_id, &query.alias_key)
+                .map_err(|_| "workflow_library_query_failed".to_owned())?;
+            response.revision_content = Some(revision_content(content));
+        }
+        Query::RevisionComparison(query) => {
+            let comparison = store
+                .compare_workflow_revisions(&query.from_revision_id, &query.to_revision_id)
+                .map_err(|_| "workflow_library_query_failed".to_owned())?;
+            response.revision_comparison = Some(revision_comparison(comparison));
+        }
+    }
+    Ok(hex::encode(response.encode_to_vec()))
+}
+
+fn workflow_library_activate(application_support: &str) -> Result<String, String> {
+    let wire = read_standard_input()?;
+    workflow_library_activate_wire(application_support, &wire)
+}
+
+fn workflow_library_activate_wire(
+    application_support: &str,
+    wire: &[u8],
+) -> Result<String, String> {
+    let request = kaname_core::workflow_protocol::decode_activation_request(wire)
+        .map_err(|_| "workflow_activation_request_rejected".to_owned())?;
+    let mut store = open_workflow_library(application_support)
+        .map_err(|_| "workflow_library_unavailable".to_owned())?;
+    let outcome = store
+        .set_workflow_activation(SetWorkflowActivation {
+            alias_id: request.alias_id,
+            workflow_id: request.workflow_id,
+            alias_key: request.alias_key,
+            revision_id: (!request.revision_id.is_empty()).then_some(request.revision_id),
+            expected_generation: request.expected_generation,
+            updated_at_unix_millis: request.updated_at_unix_millis,
+        })
+        .map_err(|_| "workflow_activation_failed".to_owned())?;
+    Ok(hex::encode(
+        v1::SetWorkflowActivationResponse {
+            schema_version: Some(v1::SchemaVersion {
+                major: kaname_core::SCHEMA_MAJOR,
+                minor: 0,
+            }),
+            request_id: request.request_id,
+            workflow_id: outcome.workflow_id,
+            alias_key: outcome.alias_key,
+            revision_id: outcome.revision_id.unwrap_or_default(),
+            generation: outcome.generation,
+            duplicate: outcome.duplicate,
+        }
+        .encode_to_vec(),
+    ))
+}
+
+fn portfolio_state(state: WorkflowPortfolioState) -> i32 {
+    match state {
+        WorkflowPortfolioState::Draft => v1::WorkflowPortfolioState::Draft as i32,
+        WorkflowPortfolioState::Published => v1::WorkflowPortfolioState::Published as i32,
+        WorkflowPortfolioState::Active => v1::WorkflowPortfolioState::Active as i32,
+        WorkflowPortfolioState::Disabled => v1::WorkflowPortfolioState::Disabled as i32,
+    }
+}
+
+fn execution_support(support: WorkflowExecutionSupport) -> i32 {
+    match support {
+        WorkflowExecutionSupport::Executable => v1::WorkflowExecutionSupport::Executable as i32,
+        WorkflowExecutionSupport::Unsupported => v1::WorkflowExecutionSupport::Unsupported as i32,
+    }
+}
+
+fn revision_summary(summary: StoredWorkflowRevisionSummary) -> v1::WorkflowRevisionSummary {
+    v1::WorkflowRevisionSummary {
+        workflow_id: summary.workflow_id,
+        revision_id: summary.revision_id,
+        revision_number: summary.revision_number,
+        release_version: summary.release_version,
+        created_at_unix_millis: summary.created_at_unix_millis,
+        package_digest: summary.package_digest,
+        is_active: summary.is_active,
+        execution_support: execution_support(summary.execution_support),
+    }
+}
+
+fn revision_content(content: StoredWorkflowRevisionContent) -> v1::WorkflowRevisionContent {
+    v1::WorkflowRevisionContent {
+        summary: Some(revision_summary(content.summary)),
+        workflow_json: content.workflow_source,
+        layout_json: content.layout_source,
+        configuration_json: content.configuration_source,
+        compiled_json: content.compiled_source,
+    }
+}
+
+fn revision_comparison(
+    comparison: StoredWorkflowRevisionComparison,
+) -> v1::WorkflowRevisionComparison {
+    v1::WorkflowRevisionComparison {
+        workflow_id: comparison.workflow_id,
+        from_revision_id: comparison.from_revision_id,
+        to_revision_id: comparison.to_revision_id,
+        added_node_ids: comparison.added_node_ids,
+        removed_node_ids: comparison.removed_node_ids,
+        changed_definition_pointers: comparison.changed_definition_pointers,
+        changed_layout_pointers: comparison.changed_layout_pointers,
+        changed_configuration_pointers: comparison.changed_configuration_pointers,
+        truncated: comparison.truncated,
+    }
 }
 
 fn read_standard_input() -> Result<Vec<u8>, String> {
@@ -596,7 +773,8 @@ mod tests {
         DeviceEnrollmentChallenge, DeviceEnrollmentDecision, DeviceEnrollmentReceipt,
         DeviceEnrollmentState, DevicePublicIdentity, EncryptedSyncEnvelope, EventProvenance,
         EvidenceRetentionClass, OpaqueTypedPayload, ReplayRequest, ReviewDecision, SchemaVersion,
-        Scope, SyncAuthenticatedHeader, SyncReceipt, SyncReceiptState,
+        Scope, SyncAuthenticatedHeader, SyncReceipt, SyncReceiptState, WorkflowLibraryQueryRequest,
+        WorkflowLibraryQueryResponse, WorkflowPortfolioQuery,
     };
     use tempfile::tempdir;
 
@@ -657,6 +835,42 @@ mod tests {
         assert_eq!(response.outcome, v1::WorkflowCheckOutcome::Invalid as i32);
         assert_eq!(response.diagnostics[0].code, "document.malformed");
         assert!(response.compiled_artifact.is_empty());
+    }
+
+    #[test]
+    fn workflow_library_query_uses_a_versioned_path_free_wire_contract() {
+        let directory = tempdir().unwrap();
+        let request = WorkflowLibraryQueryRequest {
+            schema_version: Some(SchemaVersion { major: 1, minor: 0 }),
+            request_id: "library:portfolio-test".into(),
+            query: Some(v1::workflow_library_query_request::Query::Portfolio(
+                WorkflowPortfolioQuery {
+                    alias_key: "active".into(),
+                },
+            )),
+        };
+        let encoded = workflow_library_query_wire(
+            directory.path().to_str().unwrap(),
+            &request.encode_to_vec(),
+        )
+        .unwrap();
+        let response =
+            WorkflowLibraryQueryResponse::decode(hex::decode(encoded).unwrap().as_slice()).unwrap();
+        assert_eq!(response.request_id, request.request_id);
+        assert!(response.portfolio.is_empty());
+        assert!(response.revision_history.is_empty());
+        assert!(response.revision_content.is_none());
+        assert!(response.revision_comparison.is_none());
+
+        let mut missing_query = request;
+        missing_query.query = None;
+        assert_eq!(
+            workflow_library_query_wire(
+                directory.path().to_str().unwrap(),
+                &missing_query.encode_to_vec(),
+            ),
+            Err("workflow_library_query_rejected".into())
+        );
     }
 
     #[test]

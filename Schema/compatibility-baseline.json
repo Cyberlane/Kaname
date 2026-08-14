@@ -59,6 +59,18 @@
       "1": "WORKFLOW_DIAGNOSTIC_SEVERITY_INFO",
       "2": "WORKFLOW_DIAGNOSTIC_SEVERITY_WARNING",
       "3": "WORKFLOW_DIAGNOSTIC_SEVERITY_ERROR"
+    },
+    "workflow.WorkflowExecutionSupport": {
+      "0": "WORKFLOW_EXECUTION_SUPPORT_UNSPECIFIED",
+      "1": "WORKFLOW_EXECUTION_SUPPORT_EXECUTABLE",
+      "2": "WORKFLOW_EXECUTION_SUPPORT_UNSUPPORTED"
+    },
+    "workflow.WorkflowPortfolioState": {
+      "0": "WORKFLOW_PORTFOLIO_STATE_UNSPECIFIED",
+      "1": "WORKFLOW_PORTFOLIO_STATE_DRAFT",
+      "2": "WORKFLOW_PORTFOLIO_STATE_PUBLISHED",
+      "3": "WORKFLOW_PORTFOLIO_STATE_ACTIVE",
+      "4": "WORKFLOW_PORTFOLIO_STATE_DISABLED"
     }
   },
   "messages": {
@@ -324,6 +336,25 @@
       "6": "bytes compiled_artifact",
       "7": "WorkflowArtifactDigests digests"
     },
+    "workflow.SetWorkflowActivationRequest": {
+      "1": "SchemaVersion schema_version",
+      "2": "string request_id",
+      "3": "string alias_id",
+      "4": "string workflow_id",
+      "5": "string alias_key",
+      "6": "string revision_id",
+      "7": "int64 expected_generation",
+      "8": "int64 updated_at_unix_millis"
+    },
+    "workflow.SetWorkflowActivationResponse": {
+      "1": "SchemaVersion schema_version",
+      "2": "string request_id",
+      "3": "string workflow_id",
+      "4": "string alias_key",
+      "5": "string revision_id",
+      "6": "int64 generation",
+      "7": "bool duplicate"
+    },
     "workflow.ValidateWorkflowRequest": {
       "1": "SchemaVersion schema_version",
       "2": "string request_id",
@@ -355,6 +386,77 @@
       "4": "string instance_pointer",
       "5": "string schema_pointer",
       "6": "WorkflowSourceLocation location"
+    },
+    "workflow.WorkflowLibraryQueryRequest": {
+      "1": "SchemaVersion schema_version",
+      "2": "string request_id",
+      "3": "WorkflowPortfolioQuery portfolio",
+      "4": "WorkflowRevisionHistoryQuery revision_history",
+      "5": "WorkflowRevisionContentQuery revision_content",
+      "6": "WorkflowRevisionComparisonQuery revision_comparison"
+    },
+    "workflow.WorkflowLibraryQueryResponse": {
+      "1": "SchemaVersion schema_version",
+      "2": "string request_id",
+      "3": "WorkflowPortfolioItem portfolio",
+      "4": "WorkflowRevisionSummary revision_history",
+      "5": "WorkflowRevisionContent revision_content",
+      "6": "WorkflowRevisionComparison revision_comparison"
+    },
+    "workflow.WorkflowPortfolioItem": {
+      "1": "string workflow_id",
+      "10": "WorkflowExecutionSupport execution_support",
+      "2": "string package_id",
+      "3": "string name",
+      "4": "string summary",
+      "5": "WorkflowPortfolioState state",
+      "6": "bool draft_present",
+      "7": "string latest_revision_id",
+      "8": "int64 latest_revision_number",
+      "9": "string active_revision_id"
+    },
+    "workflow.WorkflowPortfolioQuery": {
+      "1": "string alias_key"
+    },
+    "workflow.WorkflowRevisionComparison": {
+      "1": "string workflow_id",
+      "2": "string from_revision_id",
+      "3": "string to_revision_id",
+      "4": "string added_node_ids",
+      "5": "string removed_node_ids",
+      "6": "string changed_definition_pointers",
+      "7": "string changed_layout_pointers",
+      "8": "string changed_configuration_pointers",
+      "9": "bool truncated"
+    },
+    "workflow.WorkflowRevisionComparisonQuery": {
+      "1": "string from_revision_id",
+      "2": "string to_revision_id"
+    },
+    "workflow.WorkflowRevisionContent": {
+      "1": "WorkflowRevisionSummary summary",
+      "2": "bytes workflow_json",
+      "3": "bytes layout_json",
+      "4": "bytes configuration_json",
+      "5": "bytes compiled_json"
+    },
+    "workflow.WorkflowRevisionContentQuery": {
+      "1": "string revision_id",
+      "2": "string alias_key"
+    },
+    "workflow.WorkflowRevisionHistoryQuery": {
+      "1": "string workflow_id",
+      "2": "string alias_key"
+    },
+    "workflow.WorkflowRevisionSummary": {
+      "1": "string workflow_id",
+      "2": "string revision_id",
+      "3": "int64 revision_number",
+      "4": "string release_version",
+      "5": "int64 created_at_unix_millis",
+      "6": "string package_digest",
+      "7": "bool is_active",
+      "8": "WorkflowExecutionSupport execution_support"
     },
     "workflow.WorkflowSourceLocation": {
       "1": "string source_id",

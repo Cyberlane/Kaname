@@ -63,12 +63,15 @@ public protocol LocalCoreControlService {
     func proposeMobileDevice(_ request: Data, reply: @escaping (Data?, String) -> Void)
     func decideMobileDevice(_ request: Data, reply: @escaping (Data?, String) -> Void)
     func recordAuthenticatedMobileSync(_ request: Data, reply: @escaping (Data?, String) -> Void)
+    func queryWorkflowLibrary(_ request: Data, reply: @escaping (Data?, String) -> Void)
+    func setWorkflowActivation(_ request: Data, reply: @escaping (Data?, String) -> Void)
 }
 #endif
 
 public struct LocalCoreRunner: Sendable {
     public static let maximumFixtureIDLength = 4
     public static let maximumResponseBytes = 64 * 1024
+    public static let maximumWorkflowLibraryResponseBytes = 3 * 1024 * 1024
 
     public let machService: String
     public let serviceRequirement: String
@@ -93,19 +96,12 @@ public struct LocalCoreRunner: Sendable {
               fixtureID.count == Self.maximumFixtureIDLength else {
             throw LocalCoreRunnerError.invalidFixtureID
         }
-#if os(macOS)
-        let output = try await Task.detached(priority: .userInitiated) {
-            try runBoundedService(
-                machService: machService,
-                requirement: serviceRequirement,
-                request: Data(fixtureID.utf8),
-                timeout: timeout
-            )
-        }.value
-        return try Self.decodeScenarioReport(output)
-#else
-        throw LocalCoreRunnerError.unavailable
-#endif
+        return try await decodedServiceResponse(
+            request: Data(fixtureID.utf8),
+            timeout: timeout,
+            operation: .scenario,
+            decode: Self.decodeScenarioReport
+        )
     }
 
     /// The request is a generated protobuf wire envelope. The local service,
@@ -115,107 +111,59 @@ public struct LocalCoreRunner: Sendable {
         guard !eventWire.isEmpty, eventWire.count <= Self.maximumResponseBytes else {
             throw LocalCoreRunnerError.malformedAppendReport
         }
-#if os(macOS)
-        let output = try await Task.detached(priority: .userInitiated) {
-            try runBoundedService(
-                machService: machService,
-                requirement: serviceRequirement,
-                request: eventWire,
-                timeout: timeout,
-                operation: .appendEvent
-            )
-        }.value
-        return try Self.decodeEventAppendReport(output)
-#else
-        throw LocalCoreRunnerError.unavailable
-#endif
+        return try await decodedServiceResponse(
+            request: eventWire,
+            timeout: timeout,
+            operation: .appendEvent,
+            decode: Self.decodeEventAppendReport
+        )
     }
 
     public func authorizeAction(
         _ command: Kaname_V1_ApprovalCommand,
         timeout: TimeInterval = 5
     ) async throws -> Kaname_V1_ApprovalCommandReceipt {
-#if os(macOS)
-        let output = try await Task.detached(priority: .userInitiated) {
-            try runBoundedService(
-                machService: machService,
-                requirement: serviceRequirement,
-                request: try command.serializedData(),
-                timeout: timeout,
-                operation: .authorizeAction
-            )
-        }.value
-        guard output.count <= Self.maximumResponseBytes,
-              let receipt = try? Kaname_V1_ApprovalCommandReceipt(serializedBytes: output),
-              !receipt.approvalID.isEmpty,
-              !receipt.fingerprint.isEmpty,
-              receipt.storePosition > 0 else {
-            throw LocalCoreRunnerError.malformedAppendReport
-        }
-        return receipt
-#else
-        throw LocalCoreRunnerError.unavailable
-#endif
+        try await decodedServiceResponse(
+            request: command.serializedData(),
+            timeout: timeout,
+            operation: .authorizeAction,
+            decode: Self.decodeApprovalReceipt
+        )
     }
 
     public func recordReview(
         _ command: Kaname_V1_CommandEnvelope,
         timeout: TimeInterval = 5
     ) async throws -> Kaname_V1_CommandOutcome {
-#if os(macOS)
-        let output = try await Task.detached(priority: .userInitiated) {
-            try runBoundedService(
-                machService: machService,
-                requirement: serviceRequirement,
-                request: try command.serializedData(),
-                timeout: timeout,
-                operation: .recordReview
-            )
-        }.value
-        guard output.count <= Self.maximumResponseBytes,
-              let outcome = try? Kaname_V1_CommandOutcome(serializedBytes: output),
-              !outcome.commandID.isEmpty,
-              outcome.storePosition > 0 else {
-            throw LocalCoreRunnerError.malformedAppendReport
-        }
-        return outcome
-#else
-        throw LocalCoreRunnerError.unavailable
-#endif
+        try await decodedServiceResponse(
+            request: command.serializedData(),
+            timeout: timeout,
+            operation: .recordReview,
+            decode: Self.decodeCommandOutcome
+        )
     }
 
     public func replay(
         _ request: Kaname_V1_ReplayRequest,
         timeout: TimeInterval = 5
     ) async throws -> Kaname_V1_ReplayResponse {
-#if os(macOS)
-        let output = try await Task.detached(priority: .userInitiated) {
-            try runBoundedService(
-                machService: machService,
-                requirement: serviceRequirement,
-                request: try request.serializedData(),
-                timeout: timeout,
-                operation: .replay
-            )
-        }.value
-        guard output.count <= Self.maximumResponseBytes,
-              let response = try? Kaname_V1_ReplayResponse(serializedBytes: output) else {
-            throw LocalCoreRunnerError.malformedAppendReport
-        }
-        return response
-#else
-        throw LocalCoreRunnerError.unavailable
-#endif
+        try await decodedServiceResponse(
+            request: request.serializedData(),
+            timeout: timeout,
+            operation: .replay,
+            decode: Self.decodeReplayResponse
+        )
     }
 
     public func proposeMobileDevice(
         _ challenge: Kaname_V1_DeviceEnrollmentChallenge,
         timeout: TimeInterval = 5
     ) async throws -> Kaname_V1_DeviceEnrollmentReceipt {
-        try await mobileEnrollmentOperation(
-            challenge.serializedData(),
+        try await decodedServiceResponse(
+            request: challenge.serializedData(),
+            timeout: timeout,
             operation: .proposeMobileDevice,
-            timeout: timeout
+            decode: Self.decodeEnrollmentReceipt
         )
     }
 
@@ -223,10 +171,11 @@ public struct LocalCoreRunner: Sendable {
         _ decision: Kaname_V1_DeviceEnrollmentDecision,
         timeout: TimeInterval = 5
     ) async throws -> Kaname_V1_DeviceEnrollmentReceipt {
-        try await mobileEnrollmentOperation(
-            decision.serializedData(),
+        try await decodedServiceResponse(
+            request: decision.serializedData(),
+            timeout: timeout,
             operation: .decideMobileDevice,
-            timeout: timeout
+            decode: Self.decodeEnrollmentReceipt
         )
     }
 
@@ -234,29 +183,47 @@ public struct LocalCoreRunner: Sendable {
         _ envelope: Kaname_V1_EncryptedSyncEnvelope,
         timeout: TimeInterval = 5
     ) async throws -> Kaname_V1_SyncReceipt {
-#if os(macOS)
-        let output = try await Task.detached(priority: .userInitiated) {
-            try runBoundedService(
-                machService: machService,
-                requirement: serviceRequirement,
-                request: try envelope.serializedData(),
-                timeout: timeout,
-                operation: .recordAuthenticatedMobileSync
-            )
-        }.value
-        return try Self.decodeSyncReceipt(output)
-#else
-        throw LocalCoreRunnerError.unavailable
-#endif
+        try await decodedServiceResponse(
+            request: envelope.serializedData(),
+            timeout: timeout,
+            operation: .recordAuthenticatedMobileSync,
+            decode: Self.decodeSyncReceipt
+        )
     }
 
-    private func mobileEnrollmentOperation(
-        _ request: Data,
-        operation: LocalCoreServiceOperation,
-        timeout: TimeInterval
-    ) async throws -> Kaname_V1_DeviceEnrollmentReceipt {
+    public func queryWorkflowLibrary(
+        _ request: Kaname_V1_WorkflowLibraryQueryRequest,
+        timeout: TimeInterval = 5
+    ) async throws -> Kaname_V1_WorkflowLibraryQueryResponse {
+        try await workflowLibraryResponse(
+            request: request.serializedData(),
+            requestID: request.requestID,
+            timeout: timeout,
+            operation: .queryWorkflowLibrary,
+            as: Kaname_V1_WorkflowLibraryQueryResponse.self
+        )
+    }
+
+    public func setWorkflowActivation(
+        _ request: Kaname_V1_SetWorkflowActivationRequest,
+        timeout: TimeInterval = 5
+    ) async throws -> Kaname_V1_SetWorkflowActivationResponse {
+        try await workflowLibraryResponse(
+            request: request.serializedData(),
+            requestID: request.requestID,
+            timeout: timeout,
+            operation: .setWorkflowActivation,
+            as: Kaname_V1_SetWorkflowActivationResponse.self
+        )
+    }
+
+    private func serviceResponse(
+        request: Data,
+        timeout: TimeInterval,
+        operation: LocalCoreServiceOperation
+    ) async throws -> Data {
 #if os(macOS)
-        let output = try await Task.detached(priority: .userInitiated) {
+        return try await Task.detached(priority: .userInitiated) {
             try runBoundedService(
                 machService: machService,
                 requirement: serviceRequirement,
@@ -265,10 +232,39 @@ public struct LocalCoreRunner: Sendable {
                 operation: operation
             )
         }.value
-        return try Self.decodeEnrollmentReceipt(output)
 #else
         throw LocalCoreRunnerError.unavailable
 #endif
+    }
+
+    private func decodedServiceResponse<Response>(
+        request: Data,
+        timeout: TimeInterval,
+        operation: LocalCoreServiceOperation,
+        decode: (Data) throws -> Response
+    ) async throws -> Response {
+        try decode(await serviceResponse(request: request, timeout: timeout, operation: operation))
+    }
+
+    private func workflowLibraryResponse<Response: WorkflowLibraryWireResponse>(
+        request: Data,
+        requestID: String,
+        timeout: TimeInterval,
+        operation: LocalCoreServiceOperation,
+        as _: Response.Type
+    ) async throws -> Response {
+        let output = try await serviceResponse(
+            request: request,
+            timeout: timeout,
+            operation: operation
+        )
+        guard output.count <= operation.maximumResponseBytes,
+              let response = try? Response(serializedBytes: output),
+              response.requestID == requestID,
+              response.schemaVersion.major == 1 else {
+            throw LocalCoreRunnerError.malformedReport
+        }
+        return response
     }
 
     public static func decodeScenarioReport(_ data: Data) throws -> LocalCoreScenarioReport {
@@ -291,6 +287,35 @@ public struct LocalCoreRunner: Sendable {
             throw LocalCoreRunnerError.malformedAppendReport
         }
         return report
+    }
+
+    private static func decodeApprovalReceipt(_ data: Data) throws -> Kaname_V1_ApprovalCommandReceipt {
+        guard data.count <= Self.maximumResponseBytes,
+              let receipt = try? Kaname_V1_ApprovalCommandReceipt(serializedBytes: data),
+              !receipt.approvalID.isEmpty,
+              !receipt.fingerprint.isEmpty,
+              receipt.storePosition > 0 else {
+            throw LocalCoreRunnerError.malformedAppendReport
+        }
+        return receipt
+    }
+
+    private static func decodeCommandOutcome(_ data: Data) throws -> Kaname_V1_CommandOutcome {
+        guard data.count <= Self.maximumResponseBytes,
+              let outcome = try? Kaname_V1_CommandOutcome(serializedBytes: data),
+              !outcome.commandID.isEmpty,
+              outcome.storePosition > 0 else {
+            throw LocalCoreRunnerError.malformedAppendReport
+        }
+        return outcome
+    }
+
+    private static func decodeReplayResponse(_ data: Data) throws -> Kaname_V1_ReplayResponse {
+        guard data.count <= Self.maximumResponseBytes,
+              let response = try? Kaname_V1_ReplayResponse(serializedBytes: data) else {
+            throw LocalCoreRunnerError.malformedAppendReport
+        }
+        return response
     }
 
     public static func decodeEnrollmentReceipt(
@@ -319,6 +344,14 @@ public struct LocalCoreRunner: Sendable {
     }
 }
 
+private protocol WorkflowLibraryWireResponse: Message {
+    var schemaVersion: Kaname_V1_SchemaVersion { get }
+    var requestID: String { get }
+}
+
+extension Kaname_V1_WorkflowLibraryQueryResponse: WorkflowLibraryWireResponse {}
+extension Kaname_V1_SetWorkflowActivationResponse: WorkflowLibraryWireResponse {}
+
 #if os(macOS)
 private enum LocalCoreServiceOperation {
     case scenario
@@ -329,6 +362,15 @@ private enum LocalCoreServiceOperation {
     case proposeMobileDevice
     case decideMobileDevice
     case recordAuthenticatedMobileSync
+    case queryWorkflowLibrary
+    case setWorkflowActivation
+
+    var maximumResponseBytes: Int {
+        switch self {
+        case .queryWorkflowLibrary: LocalCoreRunner.maximumWorkflowLibraryResponseBytes
+        default: LocalCoreRunner.maximumResponseBytes
+        }
+    }
 }
 
 private func runBoundedService(
@@ -360,7 +402,7 @@ private func runBoundedService(
         throw LocalCoreRunnerError.unavailable
     }
     let reply: (Data?, String) -> Void = { response, code in
-        if let response, response.count <= LocalCoreRunner.maximumResponseBytes {
+        if let response, response.count <= operation.maximumResponseBytes {
             result.setSuccess(response)
         } else {
             result.setFailure(code.isEmpty ? "malformed_response" : code)
@@ -376,6 +418,8 @@ private func runBoundedService(
     case .proposeMobileDevice: service.proposeMobileDevice(request, reply: reply)
     case .decideMobileDevice: service.decideMobileDevice(request, reply: reply)
     case .recordAuthenticatedMobileSync: service.recordAuthenticatedMobileSync(request, reply: reply)
+    case .queryWorkflowLibrary: service.queryWorkflowLibrary(request, reply: reply)
+    case .setWorkflowActivation: service.setWorkflowActivation(request, reply: reply)
     }
     guard completion.wait(timeout: .now() + timeout) == .success else {
         connection.invalidate()
