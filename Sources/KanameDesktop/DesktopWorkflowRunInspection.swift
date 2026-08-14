@@ -329,6 +329,56 @@ public struct DesktopWorkflowProjectedSubflow: Identifiable, Equatable, Sendable
     public let settledStorePosition: UInt64?
 }
 
+public struct DesktopWorkflowProjectedCapabilityLog: Identifiable, Equatable, Sendable {
+    public var id: UInt32 { sequence }
+    public let sequence: UInt32
+    public let level: String
+    public let message: String
+    public let offsetMilliseconds: UInt64
+}
+
+public struct DesktopWorkflowProjectedCapabilityArtifact: Identifiable, Equatable, Sendable {
+    public var id: String { handleID }
+    public let handleID: String
+    public let role: String
+    public let value: DesktopWorkflowProjectedValue
+}
+
+public struct DesktopWorkflowProjectedCapabilityAttempt: Identifiable, Equatable, Sendable {
+    public var id: String { invocationID }
+    public let invocationID: String
+    public let attemptID: String
+    public let executionTokenID: String
+    public let nodeID: String
+    public let capabilityID: String
+    public let version: String
+    public let packageDigest: String
+    public let configurationContractDigest: String
+    public let inputSchemaDigest: String
+    public let outputSchemaDigest: String
+    public let outputSchemaRef: String
+    public let configuration: DesktopWorkflowProjectedValue
+    public let input: DesktopWorkflowProjectedValue
+    public let artifactInputs: [DesktopWorkflowProjectedCapabilityArtifact]
+    public let status: String
+    public let outcome: String?
+    public let output: DesktopWorkflowProjectedValue?
+    public let artifactOutputs: [DesktopWorkflowProjectedCapabilityArtifact]
+    public let errorCode: String?
+    public let error: DesktopWorkflowProjectedValue?
+    public let logs: [DesktopWorkflowProjectedCapabilityLog]
+    public let timeoutMilliseconds: UInt64
+    public let deadlineUnixMillis: Int64
+    public let elapsedMilliseconds: UInt64?
+    public let receiptID: String?
+    public let providerRunReference: String?
+    public let idempotencyKey: String?
+    public let startedAtUnixMillis: Int64
+    public let settledAtUnixMillis: Int64?
+    public let startedStorePosition: UInt64
+    public let settledStorePosition: UInt64?
+}
+
 public struct DesktopWorkflowProjectedMatchTrace: Identifiable, Equatable, Sendable {
     public var id: String { eventID }
     public let eventID: String
@@ -380,6 +430,7 @@ public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
     public let waitSignals: [DesktopWorkflowProjectedWaitSignal]
     public let episode: DesktopWorkflowProjectedCaseEpisode?
     public let subflows: [DesktopWorkflowProjectedSubflow]
+    public let capabilityAttempts: [DesktopWorkflowProjectedCapabilityAttempt]
 
     public init(
         runID: String, workflowID: String, revisionID: String, packageDigest: String,
@@ -396,7 +447,8 @@ public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
         waits: [DesktopWorkflowProjectedWait] = [],
         waitSignals: [DesktopWorkflowProjectedWaitSignal] = [],
         episode: DesktopWorkflowProjectedCaseEpisode? = nil,
-        subflows: [DesktopWorkflowProjectedSubflow] = []
+        subflows: [DesktopWorkflowProjectedSubflow] = [],
+        capabilityAttempts: [DesktopWorkflowProjectedCapabilityAttempt] = []
     ) {
         self.runID = runID
         self.workflowID = workflowID
@@ -424,6 +476,7 @@ public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
         self.waitSignals = waitSignals
         self.episode = episode
         self.subflows = subflows
+        self.capabilityAttempts = capabilityAttempts
     }
 
     public func attempt(for nodeID: String) -> DesktopWorkflowProjectedAttempt? {
@@ -443,6 +496,10 @@ public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
 
     public func traces(for nodeID: String) -> [DesktopWorkflowProjectedMatchTrace] {
         matchTraces.filter { $0.nodeID == nodeID }
+    }
+
+    public func capabilities(for nodeID: String) -> [DesktopWorkflowProjectedCapabilityAttempt] {
+        capabilityAttempts.filter { $0.nodeID == nodeID }
     }
 }
 
@@ -692,7 +749,107 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
             waits: try run.waits.map(wait),
             waitSignals: try run.waitSignals.map(waitSignal),
             episode: try run.hasEpisode ? episode(run.episode) : nil,
-            subflows: try run.subflows.map(subflow)
+            subflows: try run.subflows.map(subflow),
+            capabilityAttempts: try run.capabilityAttempts.map(capabilityAttempt)
+        )
+    }
+
+    private static func capabilityAttempt(
+        _ item: Kaname_V1_WorkflowProjectedCapabilityAttempt
+    ) throws -> DesktopWorkflowProjectedCapabilityAttempt {
+        guard !item.invocationID.isEmpty, !item.attemptID.isEmpty,
+              !item.executionTokenID.isEmpty, !item.nodeID.isEmpty,
+              !item.capabilityID.isEmpty, !item.version.isEmpty,
+              item.packageDigest.count == 64,
+              item.configurationContractDigest.count == 64,
+              item.inputSchemaDigest.count == 64,
+              item.outputSchemaDigest.count == 64,
+              !item.outputSchemaRef.isEmpty,
+              item.hasConfiguration, item.hasInput,
+              ["running", "settled"].contains(item.status),
+              item.timeoutMilliseconds > 0, item.deadlineUnixMillis >= 0,
+              item.startedAtUnixMillis >= 0, item.startedStorePosition > 0 else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        let settled = item.status == "settled"
+        guard settled == !item.outcome.isEmpty,
+              settled == (item.settledStorePosition > 0),
+              settled == (item.settledAtUnixMillis > 0),
+              !settled || [
+                "succeeded", "input_validation_failed", "output_validation_failed",
+                "timed_out", "cancelled", "malformed_result", "crashed",
+              ].contains(item.outcome),
+              !settled || item.idempotencyKey == item.invocationID else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        if item.outcome == "succeeded" {
+            guard item.hasOutput, item.errorCode.isEmpty, !item.hasError,
+                  !item.receiptID.isEmpty else {
+                throw DesktopWorkflowRunInspectionError.malformedResponse
+            }
+        } else if settled && item.outcome != "cancelled" {
+            guard !item.hasOutput, !item.errorCode.isEmpty, item.hasError else {
+                throw DesktopWorkflowRunInspectionError.malformedResponse
+            }
+        }
+        let logs = try item.logs.enumerated().map { index, log in
+            guard log.sequence == UInt32(index + 1),
+                  ["debug", "info", "warning", "error"].contains(log.level),
+                  !log.message.isEmpty,
+                  log.offsetMilliseconds <= item.elapsedMilliseconds else {
+                throw DesktopWorkflowRunInspectionError.malformedResponse
+            }
+            return DesktopWorkflowProjectedCapabilityLog(
+                sequence: log.sequence, level: log.level, message: log.message,
+                offsetMilliseconds: log.offsetMilliseconds
+            )
+        }
+        return DesktopWorkflowProjectedCapabilityAttempt(
+            invocationID: item.invocationID,
+            attemptID: item.attemptID,
+            executionTokenID: item.executionTokenID,
+            nodeID: item.nodeID,
+            capabilityID: item.capabilityID,
+            version: item.version,
+            packageDigest: item.packageDigest,
+            configurationContractDigest: item.configurationContractDigest,
+            inputSchemaDigest: item.inputSchemaDigest,
+            outputSchemaDigest: item.outputSchemaDigest,
+            outputSchemaRef: item.outputSchemaRef,
+            configuration: try value(item.configuration),
+            input: try value(item.input),
+            artifactInputs: try item.artifactInputs.map(capabilityArtifact),
+            status: item.status,
+            outcome: item.outcome.nilIfEmpty,
+            output: try item.hasOutput ? value(item.output) : nil,
+            artifactOutputs: try item.artifactOutputs.map(capabilityArtifact),
+            errorCode: item.errorCode.nilIfEmpty,
+            error: try item.hasError ? value(item.error) : nil,
+            logs: logs,
+            timeoutMilliseconds: item.timeoutMilliseconds,
+            deadlineUnixMillis: item.deadlineUnixMillis,
+            elapsedMilliseconds: settled ? item.elapsedMilliseconds : nil,
+            receiptID: item.receiptID.nilIfEmpty,
+            providerRunReference: item.providerRunReference.nilIfEmpty,
+            idempotencyKey: item.idempotencyKey.nilIfEmpty,
+            startedAtUnixMillis: item.startedAtUnixMillis,
+            settledAtUnixMillis: item.settledAtUnixMillis > 0 ? item.settledAtUnixMillis : nil,
+            startedStorePosition: item.startedStorePosition,
+            settledStorePosition: item.settledStorePosition > 0 ? item.settledStorePosition : nil
+        )
+    }
+
+    private static func capabilityArtifact(
+        _ item: Kaname_V1_WorkflowProjectedCapabilityArtifactHandle
+    ) throws -> DesktopWorkflowProjectedCapabilityArtifact {
+        guard !item.handleID.isEmpty, !item.role.isEmpty, item.hasValue,
+              item.value.storageReferenceID == item.handleID else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        return DesktopWorkflowProjectedCapabilityArtifact(
+            handleID: item.handleID,
+            role: item.role,
+            value: try value(item.value)
         )
     }
 

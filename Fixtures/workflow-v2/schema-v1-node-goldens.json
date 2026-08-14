@@ -58,6 +58,9 @@
     "input": {
       "whole": true
     },
+    "configuration": {
+      "mode": "strict"
+    },
     "outputSchemaRef": "dev.kaname.schema/result/v1"
   },
   "compute.llm": {

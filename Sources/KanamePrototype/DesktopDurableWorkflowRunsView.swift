@@ -49,6 +49,7 @@ struct DesktopDurableWorkflowRunsView: View {
         case storage = "Storage"
         case tokens = "Tokens"
         case control = "Control flow"
+        case capability = "Capability"
         case subflow = "Child workflow"
         case caseContext = "Case context"
         case configuration = "Configuration"
@@ -432,6 +433,8 @@ struct DesktopDurableWorkflowRunsView: View {
             }
         case .subflow:
             subflowInspector(run.subflows.filter { $0.nodeID == node.id })
+        case .capability:
+            capabilityInspector(run.capabilities(for: node.id))
         case .caseContext:
             caseContextInspector(run.episode)
         case .configuration:
@@ -464,6 +467,66 @@ struct DesktopDurableWorkflowRunsView: View {
                         Text(event.eventID).font(.system(size: 9, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1)
                     }
                 }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func capabilityInspector(
+        _ attempts: [DesktopWorkflowProjectedCapabilityAttempt]
+    ) -> some View {
+        if attempts.isEmpty {
+            explainedEmpty("This node has no registered capability invocation evidence.")
+        } else {
+            VStack(alignment: .leading, spacing: 7) {
+                ForEach(attempts) { attempt in
+                    evidenceCard(
+                        title: "\(attempt.capabilityID) · \(attempt.version)",
+                        detail: "Package \(attempt.packageDigest)\nConfiguration contract \(attempt.configurationContractDigest)\nInput schema \(attempt.inputSchemaDigest)\nOutput \(attempt.outputSchemaRef) · \(attempt.outputSchemaDigest)"
+                    )
+                    evidenceCard(title: "Resolved configuration", detail: valueText(attempt.configuration))
+                    evidenceCard(title: "Typed input", detail: valueText(attempt.input))
+                    capabilityArtifacts(attempt.artifactInputs, title: "Artifact inputs")
+                    if let output = attempt.output {
+                        evidenceCard(title: "Typed output", detail: valueText(output))
+                    }
+                    capabilityArtifacts(attempt.artifactOutputs, title: "Artifact outputs")
+                    if let error = attempt.error {
+                        evidenceCard(
+                            title: attempt.errorCode ?? "Capability error",
+                            detail: valueText(error)
+                        )
+                    }
+                    if attempt.logs.isEmpty {
+                        explainedEmpty("No sanitized capability logs were retained.")
+                    } else {
+                        ForEach(attempt.logs) { log in
+                            evidenceCard(
+                                title: "\(log.level.capitalized) · +\(log.offsetMilliseconds) ms",
+                                detail: log.message
+                            )
+                        }
+                    }
+                    evidenceCard(
+                        title: "\(attempt.status.capitalized) · \(attempt.outcome?.replacingOccurrences(of: "_", with: " ").capitalized ?? "running")",
+                        detail: "Invocation \(attempt.invocationID)\nIdempotency \(attempt.idempotencyKey ?? "not settled")\nReceipt \(attempt.receiptID ?? "none")\nHost run \(attempt.providerRunReference ?? "none")\nDeadline \(attempt.deadlineUnixMillis) · timeout \(attempt.timeoutMilliseconds) ms\nElapsed \(attempt.elapsedMilliseconds.map(String.init) ?? "active") ms\nJournal \(attempt.startedStorePosition)…\(attempt.settledStorePosition.map(String.init) ?? "active")"
+                    )
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func capabilityArtifacts(
+        _ artifacts: [DesktopWorkflowProjectedCapabilityArtifact],
+        title: String
+    ) -> some View {
+        if !artifacts.isEmpty {
+            ForEach(artifacts) { artifact in
+                evidenceCard(
+                    title: "\(title) · \(artifact.role)",
+                    detail: "Opaque handle \(artifact.handleID)\n\(valueText(artifact.value))"
+                )
             }
         }
     }

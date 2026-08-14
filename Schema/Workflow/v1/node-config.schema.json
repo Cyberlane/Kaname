@@ -309,6 +309,9 @@
         "input": {
           "$ref": "mapping.schema.json"
         },
+        "configuration": {
+          "type": "object"
+        },
         "outputSchemaRef": {
           "$ref": "identifiers.schema.json#/$defs/schemaRef"
         }

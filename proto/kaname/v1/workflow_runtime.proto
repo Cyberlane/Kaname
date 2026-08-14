@@ -358,6 +358,77 @@ message WorkflowAttemptStarted {
   reserved 7 to 15;
 }
 
+message WorkflowCapabilityArtifactHandle {
+  string handle_id = 1;
+  string role = 2;
+  WorkflowValueReference value = 3;
+  reserved 4 to 12;
+  reserved "host_path", "raw_path", "mount_path";
+}
+
+message WorkflowCapabilityLogEntry {
+  uint32 sequence = 1;
+  string level = 2;
+  string message = 3;
+  uint64 offset_milliseconds = 4;
+  reserved 5 to 12;
+}
+
+// The immutable contract admitted before a registered capability is invoked.
+// `invocation_id` is also the required host idempotency key.
+message WorkflowCapabilityAttemptStarted {
+  string run_id = 1;
+  string run_token_id = 2;
+  string invocation_id = 3;
+  string attempt_id = 4;
+  string execution_token_id = 5;
+  string node_id = 6;
+  string capability_id = 7;
+  string version = 8;
+  string package_digest = 9;
+  string configuration_contract_digest = 10;
+  string input_schema_digest = 11;
+  string output_schema_digest = 12;
+  string output_schema_ref = 13;
+  WorkflowValueReference configuration = 14;
+  WorkflowValueReference input = 15;
+  repeated WorkflowCapabilityArtifactHandle artifact_inputs = 16;
+  uint64 timeout_milliseconds = 17;
+  int64 deadline_unix_millis = 18;
+  reserved 19 to 30;
+  reserved "credential", "host_path", "secret";
+}
+
+enum WorkflowCapabilityAttemptOutcome {
+  WORKFLOW_CAPABILITY_ATTEMPT_OUTCOME_UNSPECIFIED = 0;
+  WORKFLOW_CAPABILITY_ATTEMPT_OUTCOME_SUCCEEDED = 1;
+  WORKFLOW_CAPABILITY_ATTEMPT_OUTCOME_INPUT_VALIDATION_FAILED = 2;
+  WORKFLOW_CAPABILITY_ATTEMPT_OUTCOME_OUTPUT_VALIDATION_FAILED = 3;
+  WORKFLOW_CAPABILITY_ATTEMPT_OUTCOME_TIMED_OUT = 4;
+  WORKFLOW_CAPABILITY_ATTEMPT_OUTCOME_CANCELLED = 5;
+  WORKFLOW_CAPABILITY_ATTEMPT_OUTCOME_MALFORMED_RESULT = 6;
+  WORKFLOW_CAPABILITY_ATTEMPT_OUTCOME_CRASHED = 7;
+}
+
+message WorkflowCapabilityAttemptSettled {
+  string run_id = 1;
+  string run_token_id = 2;
+  string invocation_id = 3;
+  string attempt_id = 4;
+  WorkflowCapabilityAttemptOutcome outcome = 5;
+  WorkflowValueReference output = 6;
+  repeated WorkflowCapabilityArtifactHandle artifact_outputs = 7;
+  string error_code = 8;
+  WorkflowValueReference error = 9;
+  repeated WorkflowCapabilityLogEntry logs = 10;
+  uint64 elapsed_milliseconds = 11;
+  string receipt_id = 12;
+  string provider_run_reference = 13;
+  string idempotency_key = 14;
+  reserved 15 to 25;
+  reserved "credential", "host_path", "secret";
+}
+
 enum WorkflowAttemptOutcome {
   WORKFLOW_ATTEMPT_OUTCOME_UNSPECIFIED = 0;
   WORKFLOW_ATTEMPT_OUTCOME_SUCCEEDED = 1;
@@ -493,6 +564,48 @@ message WorkflowProjectedAttempt {
   repeated string emission_ids = 12;
   string execution_token_id = 13;
   reserved 14 to 20;
+}
+
+message WorkflowProjectedCapabilityAttempt {
+  string invocation_id = 1;
+  string attempt_id = 2;
+  string execution_token_id = 3;
+  string node_id = 4;
+  string capability_id = 5;
+  string version = 6;
+  string package_digest = 7;
+  string configuration_contract_digest = 8;
+  string input_schema_digest = 9;
+  string output_schema_digest = 10;
+  string output_schema_ref = 11;
+  WorkflowProjectedValue configuration = 12;
+  WorkflowProjectedValue input = 13;
+  repeated WorkflowProjectedCapabilityArtifactHandle artifact_inputs = 14;
+  string status = 15;
+  string outcome = 16;
+  WorkflowProjectedValue output = 17;
+  repeated WorkflowProjectedCapabilityArtifactHandle artifact_outputs = 18;
+  string error_code = 19;
+  WorkflowProjectedValue error = 20;
+  repeated WorkflowCapabilityLogEntry logs = 21;
+  uint64 timeout_milliseconds = 22;
+  int64 deadline_unix_millis = 23;
+  uint64 elapsed_milliseconds = 24;
+  string receipt_id = 25;
+  string provider_run_reference = 26;
+  string idempotency_key = 27;
+  int64 started_at_unix_millis = 28;
+  int64 settled_at_unix_millis = 29;
+  uint64 started_store_position = 30;
+  uint64 settled_store_position = 31;
+  reserved 32 to 40;
+}
+
+message WorkflowProjectedCapabilityArtifactHandle {
+  string handle_id = 1;
+  string role = 2;
+  WorkflowProjectedValue value = 3;
+  reserved 4 to 12;
 }
 
 message WorkflowProjectedNodeState {
@@ -756,7 +869,8 @@ message WorkflowProjectedRun {
   repeated WorkflowProjectedWaitSignal wait_signals = 29;
   WorkflowProjectedCaseEpisode episode = 30;
   repeated WorkflowProjectedSubflow subflows = 31;
-  reserved 32 to 35;
+  repeated WorkflowProjectedCapabilityAttempt capability_attempts = 32;
+  reserved 33 to 40;
 }
 
 message WorkflowRunInspectionResponse {

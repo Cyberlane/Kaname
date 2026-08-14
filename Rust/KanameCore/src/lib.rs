@@ -13,6 +13,7 @@ pub mod mobile;
 pub mod policy;
 pub(crate) mod private_filesystem;
 pub mod workflow_canonical;
+pub mod workflow_capabilities;
 pub mod workflow_compiler;
 pub mod workflow_drafts;
 pub mod workflow_executor;

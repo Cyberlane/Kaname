@@ -83,6 +83,16 @@
       "2": "WORKFLOW_ATTEMPT_OUTCOME_FAILED",
       "3": "WORKFLOW_ATTEMPT_OUTCOME_CANCELLED"
     },
+    "workflow_runtime.WorkflowCapabilityAttemptOutcome": {
+      "0": "WORKFLOW_CAPABILITY_ATTEMPT_OUTCOME_UNSPECIFIED",
+      "1": "WORKFLOW_CAPABILITY_ATTEMPT_OUTCOME_SUCCEEDED",
+      "2": "WORKFLOW_CAPABILITY_ATTEMPT_OUTCOME_INPUT_VALIDATION_FAILED",
+      "3": "WORKFLOW_CAPABILITY_ATTEMPT_OUTCOME_OUTPUT_VALIDATION_FAILED",
+      "4": "WORKFLOW_CAPABILITY_ATTEMPT_OUTCOME_TIMED_OUT",
+      "5": "WORKFLOW_CAPABILITY_ATTEMPT_OUTCOME_CANCELLED",
+      "6": "WORKFLOW_CAPABILITY_ATTEMPT_OUTCOME_MALFORMED_RESULT",
+      "7": "WORKFLOW_CAPABILITY_ATTEMPT_OUTCOME_CRASHED"
+    },
     "workflow_runtime.WorkflowEdgeCheckpointState": {
       "0": "WORKFLOW_EDGE_CHECKPOINT_STATE_UNSPECIFIED",
       "1": "WORKFLOW_EDGE_CHECKPOINT_STATE_ADMITTED",
@@ -604,6 +614,53 @@
       "5": "uint32 attempt_number",
       "6": "string execution_token_id"
     },
+    "workflow_runtime.WorkflowCapabilityArtifactHandle": {
+      "1": "string handle_id",
+      "2": "string role",
+      "3": "WorkflowValueReference value"
+    },
+    "workflow_runtime.WorkflowCapabilityAttemptSettled": {
+      "1": "string run_id",
+      "10": "WorkflowCapabilityLogEntry logs",
+      "11": "uint64 elapsed_milliseconds",
+      "12": "string receipt_id",
+      "13": "string provider_run_reference",
+      "14": "string idempotency_key",
+      "2": "string run_token_id",
+      "3": "string invocation_id",
+      "4": "string attempt_id",
+      "5": "WorkflowCapabilityAttemptOutcome outcome",
+      "6": "WorkflowValueReference output",
+      "7": "WorkflowCapabilityArtifactHandle artifact_outputs",
+      "8": "string error_code",
+      "9": "WorkflowValueReference error"
+    },
+    "workflow_runtime.WorkflowCapabilityAttemptStarted": {
+      "1": "string run_id",
+      "10": "string configuration_contract_digest",
+      "11": "string input_schema_digest",
+      "12": "string output_schema_digest",
+      "13": "string output_schema_ref",
+      "14": "WorkflowValueReference configuration",
+      "15": "WorkflowValueReference input",
+      "16": "WorkflowCapabilityArtifactHandle artifact_inputs",
+      "17": "uint64 timeout_milliseconds",
+      "18": "int64 deadline_unix_millis",
+      "2": "string run_token_id",
+      "3": "string invocation_id",
+      "4": "string attempt_id",
+      "5": "string execution_token_id",
+      "6": "string node_id",
+      "7": "string capability_id",
+      "8": "string version",
+      "9": "string package_digest"
+    },
+    "workflow_runtime.WorkflowCapabilityLogEntry": {
+      "1": "uint32 sequence",
+      "2": "string level",
+      "3": "string message",
+      "4": "uint64 offset_milliseconds"
+    },
     "workflow_runtime.WorkflowCaseEpisodeStarted": {
       "1": "string run_id",
       "10": "string revision_id",
@@ -744,6 +801,44 @@
       "7": "WorkflowProjectedValue error",
       "8": "int64 started_at_unix_millis",
       "9": "int64 settled_at_unix_millis"
+    },
+    "workflow_runtime.WorkflowProjectedCapabilityArtifactHandle": {
+      "1": "string handle_id",
+      "2": "string role",
+      "3": "WorkflowProjectedValue value"
+    },
+    "workflow_runtime.WorkflowProjectedCapabilityAttempt": {
+      "1": "string invocation_id",
+      "10": "string output_schema_digest",
+      "11": "string output_schema_ref",
+      "12": "WorkflowProjectedValue configuration",
+      "13": "WorkflowProjectedValue input",
+      "14": "WorkflowProjectedCapabilityArtifactHandle artifact_inputs",
+      "15": "string status",
+      "16": "string outcome",
+      "17": "WorkflowProjectedValue output",
+      "18": "WorkflowProjectedCapabilityArtifactHandle artifact_outputs",
+      "19": "string error_code",
+      "2": "string attempt_id",
+      "20": "WorkflowProjectedValue error",
+      "21": "WorkflowCapabilityLogEntry logs",
+      "22": "uint64 timeout_milliseconds",
+      "23": "int64 deadline_unix_millis",
+      "24": "uint64 elapsed_milliseconds",
+      "25": "string receipt_id",
+      "26": "string provider_run_reference",
+      "27": "string idempotency_key",
+      "28": "int64 started_at_unix_millis",
+      "29": "int64 settled_at_unix_millis",
+      "3": "string execution_token_id",
+      "30": "uint64 started_store_position",
+      "31": "uint64 settled_store_position",
+      "4": "string node_id",
+      "5": "string capability_id",
+      "6": "string version",
+      "7": "string package_digest",
+      "8": "string configuration_contract_digest",
+      "9": "string input_schema_digest"
     },
     "workflow_runtime.WorkflowProjectedCaseEpisode": {
       "1": "string installation_id",
@@ -914,6 +1009,7 @@
       "3": "string request_command_id",
       "30": "WorkflowProjectedCaseEpisode episode",
       "31": "WorkflowProjectedSubflow subflows",
+      "32": "WorkflowProjectedCapabilityAttempt capability_attempts",
       "4": "string workflow_id",
       "5": "string revision_id",
       "6": "string package_digest",

@@ -64,6 +64,11 @@ struct DesktopWorkflowRunInspectionTests {
         #expect(run.subflows.first?.childCommandID == "command-child-run-v2")
         #expect(run.subflows.first?.outcome == "succeeded")
         #expect(run.subflows.first?.output?.id == "value-run-v2")
+        #expect(run.capabilityAttempts.first?.capabilityID == "dev.kaname.synthetic")
+        #expect(run.capabilityAttempts.first?.outcome == "succeeded")
+        #expect(run.capabilityAttempts.first?.logs.first?.message == "Validated typed output")
+        #expect(run.capabilityAttempts.first?.artifactOutputs.first?.handleID == "job-value-run-v2")
+        #expect(run.capabilityAttempts.first?.receiptID == "receipt-run-v2")
         #expect(run.events.map(\.storePosition) == [11, 12, 13, 14, 15])
     }
 }
@@ -324,6 +329,52 @@ private actor HistoricalRunTransport:
         subflow.calledStorePosition = 12
         projected.subflows = [subflow]
         if id == "run-v2" {
+            var configuration = Kaname_V1_WorkflowProjectedValue()
+            configuration.valueID = "configuration-run-v2"
+            configuration.contentType = "application/json"
+            configuration.availability = "inline"
+            configuration.inlineCanonicalJson = Data(#"{"mode":"strict"}"#.utf8)
+            configuration.byteCount = UInt64(configuration.inlineCanonicalJson.count)
+            configuration.sha256 = String(repeating: "9", count: 64)
+            var artifact = Kaname_V1_WorkflowProjectedCapabilityArtifactHandle()
+            artifact.handleID = value.storageReferenceID
+            artifact.role = "normalized-document"
+            artifact.value = value
+            var log = Kaname_V1_WorkflowCapabilityLogEntry()
+            log.sequence = 1
+            log.level = "info"
+            log.message = "Validated typed output"
+            log.offsetMilliseconds = 4
+            var capability = Kaname_V1_WorkflowProjectedCapabilityAttempt()
+            capability.invocationID = "capability-run-v2"
+            capability.attemptID = attempt.attemptID
+            capability.executionTokenID = token.executionTokenID
+            capability.nodeID = "trigger"
+            capability.capabilityID = "dev.kaname.synthetic"
+            capability.version = "1.0.0"
+            capability.packageDigest = String(repeating: "7", count: 64)
+            capability.configurationContractDigest = String(repeating: "8", count: 64)
+            capability.inputSchemaDigest = String(repeating: "6", count: 64)
+            capability.outputSchemaDigest = String(repeating: "5", count: 64)
+            capability.outputSchemaRef = "dev.kaname.output/v1"
+            capability.configuration = configuration
+            capability.input = value
+            capability.status = "settled"
+            capability.outcome = "succeeded"
+            capability.output = value
+            capability.artifactOutputs = [artifact]
+            capability.logs = [log]
+            capability.timeoutMilliseconds = 1_000
+            capability.deadlineUnixMillis = 2_000
+            capability.elapsedMilliseconds = 4
+            capability.receiptID = "receipt-run-v2"
+            capability.providerRunReference = "provider-run-v2"
+            capability.idempotencyKey = capability.invocationID
+            capability.startedAtUnixMillis = 1_000
+            capability.settledAtUnixMillis = 1_004
+            capability.startedStorePosition = 12
+            capability.settledStorePosition = 13
+            projected.capabilityAttempts = [capability]
             var context = Kaname_V1_WorkflowProjectedValue()
             context.valueID = "context-run-v2"
             context.contentType = "application/json"

@@ -4,7 +4,12 @@ use kaname_core::{
     v1::{
         CancelWorkflowRun, CommandEnvelope, OpaqueTypedPayload, RequestWorkflowRun, SchemaVersion,
         Scope, SignalWorkflowWait, WorkflowInputBinding, WorkflowRunTokenCreated,
-        WorkflowValueReference, WorkflowWaitCorrelation,
+        WorkflowStorageValueMetadata, WorkflowValueReference, WorkflowWaitCorrelation,
+    },
+    workflow_capabilities::{
+        DeterministicCapabilityPlan, DeterministicWorkflowCapabilityHost,
+        WorkflowCapabilityArtifactHandle, WorkflowCapabilityDefinition, WorkflowCapabilityLog,
+        WorkflowCapabilityValue,
     },
     workflow_drafts::{CreateWorkflowDraft, SaveWorkflowDraft},
     workflow_executor::{
@@ -15,9 +20,9 @@ use kaname_core::{
     workflow_projection::WorkflowRunProjection,
     workflow_publication::{PublishWorkflowRevision, PublishedWorkflowRevision},
     workflow_runtime::{
-        WORKFLOW_RUN_CANCEL_KIND, WORKFLOW_RUN_CANCEL_TYPE, WORKFLOW_RUN_REQUEST_KIND,
-        WORKFLOW_RUN_REQUEST_TYPE, WORKFLOW_RUN_TOKEN_CREATED_KIND, WORKFLOW_WAIT_SIGNAL_KIND,
-        WORKFLOW_WAIT_SIGNAL_TYPE,
+        WORKFLOW_CAPABILITY_ATTEMPT_STARTED_KIND, WORKFLOW_RUN_CANCEL_KIND,
+        WORKFLOW_RUN_CANCEL_TYPE, WORKFLOW_RUN_REQUEST_KIND, WORKFLOW_RUN_REQUEST_TYPE,
+        WORKFLOW_RUN_TOKEN_CREATED_KIND, WORKFLOW_WAIT_SIGNAL_KIND, WORKFLOW_WAIT_SIGNAL_TYPE,
     },
     workflow_storage::{
         WorkflowStorageAccessContext, WorkflowStorageNamespace, WorkflowStorageScopeKind,
@@ -56,6 +61,347 @@ const SUBFLOW_CHILD_WORKFLOW_ID: &str = "018f6600-0001-7000-8000-000000000001";
 const SUBFLOW_CHILD_REVISION_ID: &str = "revision-subflow-child-001";
 const SUBFLOW_PARENT_WORKFLOW_ID: &str = "018f6700-0001-7000-8000-000000000001";
 const SUBFLOW_PARENT_REVISION_ID: &str = "revision-subflow-parent-001";
+const CAPABILITY_WORKFLOW_ID: &str = "018f6900-0001-7000-8000-000000000001";
+const CAPABILITY_REVISION_ID: &str = "revision-capability-001";
+const CAPABILITY_NODE_ID: &str = "018f6900-0003-7000-8000-000000000003";
+const CAPABILITY_ID: &str = "dev.kaname.synthetic-capability";
+const CAPABILITY_DIGEST: &str = "7f4a9e4a2bcf75d0f6b3178c30ec24047be25884a662111e77a02b179704cad8";
+
+#[test]
+fn typed_capability_attempt_records_contract_logs_receipt_and_is_crash_exact() {
+    let expected = {
+        let directory = tempdir().unwrap();
+        let (library, published) = published_capability_library(directory.path());
+        let command = control_run_command(
+            "run-capability-success-001",
+            &published,
+            CAPABILITY_WORKFLOW_ID,
+            CAPABILITY_REVISION_ID,
+            json!({"text": "hello"}),
+        );
+        let mut host = capability_host(DeterministicCapabilityPlan::Succeed {
+            output: WorkflowCapabilityValue::Json(json!({"normalized": "HELLO"})),
+            artifacts: vec![synthetic_capability_artifact()],
+            logs: vec![
+                WorkflowCapabilityLog {
+                    level: "info".into(),
+                    message: "Read /Users/example/private-input".into(),
+                    offset_milliseconds: 2,
+                },
+                WorkflowCapabilityLog {
+                    level: "warning".into(),
+                    message: "password=must-not-survive".into(),
+                    offset_milliseconds: 4,
+                },
+            ],
+            elapsed_milliseconds: 5,
+        });
+        let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+        assert_eq!(
+            workflow_executor::execute_with_capabilities(
+                &mut journal,
+                &library,
+                &mut host,
+                &command,
+            )
+            .unwrap()
+            .outcome,
+            DurableRunOutcome::Succeeded
+        );
+        let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+        projection.catch_up(&journal).unwrap();
+        assert_eq!(projection.row_count("capability_attempts").unwrap(), 1);
+        let run = projection
+            .inspect_runs(None, Some("run-capability-success-001"), 1)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let capability = &run.capability_attempts[0];
+        assert_eq!(capability.node_id, CAPABILITY_NODE_ID);
+        assert_eq!(capability.capability_id, CAPABILITY_ID);
+        assert_eq!(capability.version, "1.0.0");
+        assert_eq!(capability.package_digest, CAPABILITY_DIGEST);
+        assert_eq!(capability.status, "settled");
+        assert_eq!(capability.outcome, "succeeded");
+        assert_eq!(capability.elapsed_milliseconds, 5);
+        assert_eq!(capability.idempotency_key, capability.invocation_id);
+        assert!(capability.receipt_id.starts_with("receipt-"));
+        assert_eq!(capability.logs.len(), 2);
+        assert_eq!(capability.artifact_outputs.len(), 1);
+        assert_eq!(capability.artifact_outputs[0].role, "normalized-document");
+        assert_eq!(
+            capability.artifact_outputs[0]
+                .value
+                .as_ref()
+                .unwrap()
+                .storage_reference_id,
+            "handle-capability-output-001"
+        );
+        assert_eq!(capability.logs[0].message, "Read [redacted-path]");
+        assert_eq!(
+            capability.logs[1].message,
+            "[redacted sensitive capability evidence]"
+        );
+        assert_eq!(host.invocation_count(&capability.invocation_id), 1);
+        run_wires(&journal, "run-capability-success-001")
+    };
+
+    for boundary in 1..=expected.len() {
+        let directory = tempdir().unwrap();
+        let (library, published) = published_capability_library(directory.path());
+        let command = control_run_command(
+            "run-capability-success-001",
+            &published,
+            CAPABILITY_WORKFLOW_ID,
+            CAPABILITY_REVISION_ID,
+            json!({"text": "hello"}),
+        );
+        let mut host = capability_host(DeterministicCapabilityPlan::Succeed {
+            output: WorkflowCapabilityValue::Json(json!({"normalized": "HELLO"})),
+            artifacts: vec![synthetic_capability_artifact()],
+            logs: vec![
+                WorkflowCapabilityLog {
+                    level: "info".into(),
+                    message: "Read /Users/example/private-input".into(),
+                    offset_milliseconds: 2,
+                },
+                WorkflowCapabilityLog {
+                    level: "warning".into(),
+                    message: "password=must-not-survive".into(),
+                    offset_milliseconds: 4,
+                },
+            ],
+            elapsed_milliseconds: 5,
+        });
+        let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+        assert!(matches!(
+            workflow_executor::execute_with_capabilities_fault_for_test(
+                &mut journal,
+                &library,
+                &mut host,
+                &command,
+                WorkflowExecutionFault::AfterNewEvent(boundary),
+            ),
+            Err(WorkflowExecutionError::InjectedInterruption)
+        ));
+        assert_eq!(
+            workflow_executor::execute_with_capabilities(
+                &mut journal,
+                &library,
+                &mut host,
+                &command,
+            )
+            .unwrap()
+            .outcome,
+            DurableRunOutcome::Succeeded
+        );
+        assert_eq!(run_wires(&journal, "run-capability-success-001"), expected);
+        let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+        projection.catch_up(&journal).unwrap();
+        let invocation_id = projection
+            .inspect_runs(None, Some("run-capability-success-001"), 1)
+            .unwrap()[0]
+            .capability_attempts[0]
+            .invocation_id
+            .clone();
+        assert_eq!(host.invocation_count(&invocation_id), 1);
+    }
+}
+
+#[test]
+fn capability_validation_timeout_malformed_and_crash_are_typed_failures() {
+    let scenarios = [
+        (
+            "run-capability-timeout-001",
+            DeterministicCapabilityPlan::TimeOut {
+                logs: Vec::new(),
+                elapsed_milliseconds: 100,
+            },
+            "timed_out",
+            "capability.timeout",
+        ),
+        (
+            "run-capability-malformed-001",
+            DeterministicCapabilityPlan::Malformed {
+                summary: "No structured result was returned.".into(),
+                logs: Vec::new(),
+                elapsed_milliseconds: 3,
+            },
+            "malformed_result",
+            "capability.malformed-result",
+        ),
+        (
+            "run-capability-crashed-001",
+            DeterministicCapabilityPlan::Crash {
+                summary: "The isolated worker exited.".into(),
+                logs: Vec::new(),
+                elapsed_milliseconds: 2,
+            },
+            "crashed",
+            "capability.crashed",
+        ),
+        (
+            "run-capability-output-invalid-001",
+            DeterministicCapabilityPlan::Succeed {
+                output: WorkflowCapabilityValue::Json(json!({"wrong": true})),
+                artifacts: Vec::new(),
+                logs: Vec::new(),
+                elapsed_milliseconds: 1,
+            },
+            "output_validation_failed",
+            "capability.output-validation-failed",
+        ),
+    ];
+    for (run_id, plan, expected_outcome, expected_error) in scenarios {
+        let directory = tempdir().unwrap();
+        let (library, published) = published_capability_library(directory.path());
+        let command = control_run_command(
+            run_id,
+            &published,
+            CAPABILITY_WORKFLOW_ID,
+            CAPABILITY_REVISION_ID,
+            json!({"text": "hello"}),
+        );
+        let mut host = capability_host(plan);
+        let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+        assert_eq!(
+            workflow_executor::execute_with_capabilities(
+                &mut journal,
+                &library,
+                &mut host,
+                &command,
+            )
+            .unwrap()
+            .outcome,
+            DurableRunOutcome::Failed
+        );
+        let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+        projection.catch_up(&journal).unwrap();
+        let run = projection
+            .inspect_runs(None, Some(run_id), 1)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(run.capability_attempts[0].outcome, expected_outcome);
+        assert_eq!(run.capability_attempts[0].error_code, expected_error);
+        assert!(run.capability_attempts[0].error.is_some());
+    }
+
+    let directory = tempdir().unwrap();
+    let (library, published) = published_capability_library(directory.path());
+    let command = control_run_command(
+        "run-capability-input-invalid-001",
+        &published,
+        CAPABILITY_WORKFLOW_ID,
+        CAPABILITY_REVISION_ID,
+        json!({"wrong": true}),
+    );
+    let mut host = capability_host(DeterministicCapabilityPlan::Succeed {
+        output: WorkflowCapabilityValue::Json(json!({"normalized": "unused"})),
+        artifacts: Vec::new(),
+        logs: Vec::new(),
+        elapsed_milliseconds: 1,
+    });
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    assert_eq!(
+        workflow_executor::execute_with_capabilities(&mut journal, &library, &mut host, &command)
+            .unwrap()
+            .outcome,
+        DurableRunOutcome::Failed
+    );
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    projection.catch_up(&journal).unwrap();
+    let capability = &projection
+        .inspect_runs(None, Some("run-capability-input-invalid-001"), 1)
+        .unwrap()[0]
+        .capability_attempts[0];
+    assert_eq!(capability.outcome, "input_validation_failed");
+    assert_eq!(capability.error_code, "capability.input-validation-failed");
+    assert_eq!(host.invocation_count(&capability.invocation_id), 0);
+}
+
+#[test]
+fn cancellation_settles_a_started_capability_without_invoking_the_host() {
+    let directory = tempdir().unwrap();
+    let (library, published) = published_capability_library(directory.path());
+    let command = control_run_command(
+        "run-capability-cancel-001",
+        &published,
+        CAPABILITY_WORKFLOW_ID,
+        CAPABILITY_REVISION_ID,
+        json!({"text": "hello"}),
+    );
+    let mut host = capability_host(DeterministicCapabilityPlan::Succeed {
+        output: WorkflowCapabilityValue::Json(json!({"normalized": "unused"})),
+        artifacts: Vec::new(),
+        logs: Vec::new(),
+        elapsed_milliseconds: 1,
+    });
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    loop {
+        assert!(matches!(
+            workflow_executor::execute_with_capabilities_fault_for_test(
+                &mut journal,
+                &library,
+                &mut host,
+                &command,
+                WorkflowExecutionFault::AfterNewEvent(1),
+            ),
+            Err(WorkflowExecutionError::InjectedInterruption)
+        ));
+        let page = journal
+            .replay("thread:workflow-run:run-capability-cancel-001", None, 500)
+            .unwrap();
+        if page
+            .events
+            .iter()
+            .any(|event| event.kind == WORKFLOW_CAPABILITY_ATTEMPT_STARTED_KIND)
+        {
+            break;
+        }
+    }
+    let token = run_token(&journal, "run-capability-cancel-001");
+    workflow_executor::request_cancellation(
+        &mut journal,
+        &cancel_command("run-capability-cancel-001", &token.run_token_id),
+    )
+    .unwrap();
+    assert_eq!(
+        workflow_executor::execute_with_capabilities(&mut journal, &library, &mut host, &command)
+            .unwrap()
+            .outcome,
+        DurableRunOutcome::Cancelled
+    );
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    projection.catch_up(&journal).unwrap();
+    let capability = &projection
+        .inspect_runs(None, Some("run-capability-cancel-001"), 1)
+        .unwrap()[0]
+        .capability_attempts[0];
+    assert_eq!(capability.outcome, "cancelled");
+    assert_eq!(host.invocation_count(&capability.invocation_id), 0);
+}
+
+#[test]
+fn unregistered_capability_is_rejected_before_command_admission() {
+    let directory = tempdir().unwrap();
+    let (library, published) = published_capability_library(directory.path());
+    let command = control_run_command(
+        "run-capability-unregistered-001",
+        &published,
+        CAPABILITY_WORKFLOW_ID,
+        CAPABILITY_REVISION_ID,
+        json!({"text": "hello"}),
+    );
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+
+    assert!(matches!(
+        workflow_executor::execute(&mut journal, &library, &command),
+        Err(WorkflowExecutionError::Unsupported(code))
+            if code == "capability_not_registered"
+    ));
+    assert_eq!(journal.event_page_after(0, 10).unwrap().high_water_mark, 0);
+}
 
 #[test]
 fn bounded_iteration_limits_concurrency_collects_failures_and_is_crash_exact() {
@@ -1919,6 +2265,134 @@ fn published_subflow_storage_library(
     (library, parent)
 }
 
+fn published_capability_library(
+    application_support: &std::path::Path,
+) -> (
+    kaname_core::workflow_library::WorkflowLibraryStore,
+    PublishedWorkflowRevision,
+) {
+    let mut library = open_workflow_library(application_support).unwrap();
+    library
+        .create_draft(CreateWorkflowDraft {
+            workflow_id: CAPABILITY_WORKFLOW_ID.into(),
+            package_id: "dev.kaname.capability-runtime".into(),
+            name: "Typed capability runtime".into(),
+            summary: "Synthetic version-pinned capability fixture".into(),
+            edit_id: "edit-capability-001".into(),
+            session_id: "executor-tests".into(),
+            workflow_source: serde_json::to_vec(&capability_workflow_source()).unwrap(),
+            layout_source: br#"{"nodes":[]}"#.to_vec(),
+            recorded_at_unix_millis: 120,
+        })
+        .unwrap();
+    let published = library
+        .publish_revision(PublishWorkflowRevision {
+            workflow_id: CAPABILITY_WORKFLOW_ID.into(),
+            expected_draft_sequence: 0,
+            revision_id: CAPABILITY_REVISION_ID.into(),
+            registration_id: "registration-capability-001".into(),
+            release_version: "1.0.0".into(),
+            schema_bundle_json: serde_json::to_vec(&json!({
+                "bundleVersion": 1,
+                "schemas": [{
+                    "id": "dev.kaname.capability/output-v1",
+                    "schema": capability_output_schema()
+                }]
+            }))
+            .unwrap(),
+            dependency_lock_json: serde_json::to_vec(&json!({
+                "lockVersion": 1,
+                "dependencies": [{
+                    "kind": "capability",
+                    "id": CAPABILITY_ID,
+                    "version": "1.0.0",
+                    "digest": format!("sha256:{CAPABILITY_DIGEST}")
+                }]
+            }))
+            .unwrap(),
+            configuration_contract_json: br#"{"type":"object"}"#.to_vec(),
+            published_at_unix_millis: 130,
+        })
+        .unwrap();
+    (library, published)
+}
+
+fn capability_host(plan: DeterministicCapabilityPlan) -> DeterministicWorkflowCapabilityHost {
+    let mut host = DeterministicWorkflowCapabilityHost::default();
+    host.register(
+        WorkflowCapabilityDefinition {
+            capability_id: CAPABILITY_ID.into(),
+            version: "1.0.0".into(),
+            package_digest: CAPABILITY_DIGEST.into(),
+            configuration_schema: json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "required": ["mode"],
+                "properties": {"mode": {"const": "strict"}},
+                "additionalProperties": false
+            }),
+            input_schema: json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "required": ["text"],
+                "properties": {"text": {"type": "string"}},
+                "additionalProperties": false
+            }),
+            output_schema: capability_output_schema(),
+            timeout_milliseconds: 100,
+            deterministic: true,
+            idempotent: true,
+        },
+        plan,
+    );
+    host
+}
+
+fn capability_output_schema() -> Value {
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "required": ["normalized"],
+        "properties": {"normalized": {"type": "string"}},
+        "additionalProperties": false
+    })
+}
+
+fn capability_workflow_source() -> Value {
+    let ids = [
+        "018f6900-0002-7000-8000-000000000002",
+        CAPABILITY_NODE_ID,
+        "018f6900-0004-7000-8000-000000000004",
+        "018f6900-0005-7000-8000-000000000005",
+    ];
+    control_graph_source(
+        CAPABILITY_WORKFLOW_ID,
+        "dev.kaname.capability-runtime",
+        &ids,
+        vec![
+            ("manual", "trigger.manual", json!({})),
+            (
+                "normalize",
+                "compute.capability",
+                json!({
+                    "capabilityId": CAPABILITY_ID,
+                    "version": "1.0.0",
+                    "input": {"whole": true},
+                    "configuration": {"mode": "strict"},
+                    "outputSchemaRef": "dev.kaname.capability/output-v1"
+                }),
+            ),
+            ("complete", "terminal.complete", json!({})),
+            ("fail", "terminal.fail", json!({})),
+        ],
+        vec![
+            ((0, "success"), (1, "input")),
+            ((1, "success"), (2, "input")),
+            ((1, "error"), (3, "input")),
+        ],
+    )
+}
+
 fn publish_subflow_pair(
     application_support: &std::path::Path,
     child_source: Value,
@@ -3004,6 +3478,31 @@ fn inline_value(value_id: &str, value: Value) -> WorkflowValueReference {
         inline_canonical_json: bytes,
         storage_reference_id: String::new(),
         storage: None,
+    }
+}
+
+fn synthetic_capability_artifact() -> WorkflowCapabilityArtifactHandle {
+    WorkflowCapabilityArtifactHandle {
+        role: "normalized-document".into(),
+        value: WorkflowValueReference {
+            value_id: "value-capability-artifact-001".into(),
+            content_type: "application/pdf".into(),
+            byte_count: 24,
+            sha256: "b76f7f891e5416c00bb710aa8945a5ca73232a31c8d86b16f148268323c8aef8".into(),
+            inline_canonical_json: Vec::new(),
+            storage_reference_id: "handle-capability-output-001".into(),
+            storage: Some(WorkflowStorageValueMetadata {
+                handle_id: "handle-capability-output-001".into(),
+                scope: "job".into(),
+                logical_key: "outputs/normalized.pdf".into(),
+                version_id: "version-capability-output-001".into(),
+                revision: 1,
+                previous_version_id: String::new(),
+                byte_count: 24,
+                result: "written".into(),
+                source_version_id: String::new(),
+            }),
+        },
     }
 }
 

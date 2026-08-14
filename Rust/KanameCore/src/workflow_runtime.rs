@@ -27,6 +27,8 @@ pub const WORKFLOW_WAIT_SIGNAL_RECORDED_KIND: &str = "workflow.wait.signal-recor
 pub const WORKFLOW_WAIT_SUBSCRIBED_KIND: &str = "workflow.wait.subscribed";
 pub const WORKFLOW_WAIT_RESOLVED_KIND: &str = "workflow.wait.resolved";
 pub const WORKFLOW_ATTEMPT_STARTED_KIND: &str = "workflow.attempt.started";
+pub const WORKFLOW_CAPABILITY_ATTEMPT_STARTED_KIND: &str = "workflow.capability.attempt-started";
+pub const WORKFLOW_CAPABILITY_ATTEMPT_SETTLED_KIND: &str = "workflow.capability.attempt-settled";
 pub const WORKFLOW_ATTEMPT_SETTLED_KIND: &str = "workflow.attempt.settled";
 pub const WORKFLOW_PORT_EMITTED_KIND: &str = "workflow.port.emitted";
 pub const WORKFLOW_EDGE_CHECKPOINTED_KIND: &str = "workflow.edge.checkpointed";
@@ -53,6 +55,10 @@ pub const WORKFLOW_WAIT_SIGNAL_RECORDED_TYPE: &str = "kaname.workflow.wait-signa
 pub const WORKFLOW_WAIT_SUBSCRIBED_TYPE: &str = "kaname.workflow.wait-subscribed.v1";
 pub const WORKFLOW_WAIT_RESOLVED_TYPE: &str = "kaname.workflow.wait-resolved.v1";
 pub const WORKFLOW_ATTEMPT_STARTED_TYPE: &str = "kaname.workflow.attempt-started.v1";
+pub const WORKFLOW_CAPABILITY_ATTEMPT_STARTED_TYPE: &str =
+    "kaname.workflow.capability-attempt-started.v1";
+pub const WORKFLOW_CAPABILITY_ATTEMPT_SETTLED_TYPE: &str =
+    "kaname.workflow.capability-attempt-settled.v1";
 pub const WORKFLOW_ATTEMPT_SETTLED_TYPE: &str = "kaname.workflow.attempt-settled.v1";
 pub const WORKFLOW_PORT_EMITTED_TYPE: &str = "kaname.workflow.port-emitted.v1";
 pub const WORKFLOW_EDGE_CHECKPOINTED_TYPE: &str = "kaname.workflow.edge-checkpointed.v1";
@@ -67,6 +73,7 @@ const MAXIMUM_TYPED_PAYLOAD_BYTES: usize = 48 * 1024;
 const MAXIMUM_INLINE_VALUE_BYTES: usize = 32 * 1024;
 const MAXIMUM_PORT_BINDINGS: usize = 64;
 const MAXIMUM_TRACE_IDENTIFIERS: usize = 256;
+const MAXIMUM_CAPABILITY_LOGS: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkflowRuntimeContractError {
@@ -101,6 +108,8 @@ pub enum WorkflowRuntimeEvent {
     WaitSubscribed(v1::WorkflowWaitSubscribed),
     WaitResolved(v1::WorkflowWaitResolved),
     AttemptStarted(v1::WorkflowAttemptStarted),
+    CapabilityAttemptStarted(v1::WorkflowCapabilityAttemptStarted),
+    CapabilityAttemptSettled(v1::WorkflowCapabilityAttemptSettled),
     AttemptSettled(v1::WorkflowAttemptSettled),
     PortEmitted(v1::WorkflowPortEmitted),
     EdgeCheckpointed(v1::WorkflowEdgeCheckpointed),
@@ -126,6 +135,8 @@ impl WorkflowRuntimeEvent {
             Self::WaitSubscribed(payload) => &payload.run_id,
             Self::WaitResolved(payload) => &payload.run_id,
             Self::AttemptStarted(payload) => &payload.run_id,
+            Self::CapabilityAttemptStarted(payload) => &payload.run_id,
+            Self::CapabilityAttemptSettled(payload) => &payload.run_id,
             Self::AttemptSettled(payload) => &payload.run_id,
             Self::PortEmitted(payload) => &payload.run_id,
             Self::EdgeCheckpointed(payload) => &payload.run_id,
@@ -140,6 +151,7 @@ pub fn is_workflow_runtime_kind(kind: &str) -> bool {
     [
         "workflow.run.",
         "workflow.attempt.",
+        "workflow.capability.",
         "workflow.port.",
         "workflow.edge.",
         "workflow.match.",
@@ -298,6 +310,24 @@ pub fn decode_workflow_event(event: &v1::EventEnvelope) -> Result<WorkflowRuntim
             validate_optional_execution_token(&payload.execution_token_id)?;
             validate_event_context(event, &payload.run_id)?;
             Ok(WorkflowRuntimeEvent::AttemptStarted(payload))
+        }
+        WORKFLOW_CAPABILITY_ATTEMPT_STARTED_KIND => {
+            let payload: v1::WorkflowCapabilityAttemptStarted = decode_payload(
+                event.payload.as_ref(),
+                WORKFLOW_CAPABILITY_ATTEMPT_STARTED_TYPE,
+            )?;
+            validate_capability_attempt_started(&payload)?;
+            validate_event_context(event, &payload.run_id)?;
+            Ok(WorkflowRuntimeEvent::CapabilityAttemptStarted(payload))
+        }
+        WORKFLOW_CAPABILITY_ATTEMPT_SETTLED_KIND => {
+            let payload: v1::WorkflowCapabilityAttemptSettled = decode_payload(
+                event.payload.as_ref(),
+                WORKFLOW_CAPABILITY_ATTEMPT_SETTLED_TYPE,
+            )?;
+            validate_capability_attempt_settled(&payload)?;
+            validate_event_context(event, &payload.run_id)?;
+            Ok(WorkflowRuntimeEvent::CapabilityAttemptSettled(payload))
         }
         WORKFLOW_ATTEMPT_SETTLED_KIND => {
             let payload: v1::WorkflowAttemptSettled =
@@ -1058,6 +1088,153 @@ fn validate_optional_execution_token(value: &str) -> Result<()> {
     } else {
         validate_identifier(value, 128, "execution_token_id")
     }
+}
+
+fn validate_capability_attempt_started(
+    payload: &v1::WorkflowCapabilityAttemptStarted,
+) -> Result<()> {
+    validate_run_and_token(&payload.run_id, &payload.run_token_id)?;
+    validate_identifier(&payload.invocation_id, 128, "capability_invocation_id")?;
+    validate_identifier(&payload.attempt_id, 128, "attempt_id")?;
+    validate_identifier(&payload.execution_token_id, 128, "execution_token_id")?;
+    validate_identifier(&payload.node_id, 128, "node_id")?;
+    validate_identifier(&payload.capability_id, 128, "capability_id")?;
+    validate_identifier(&payload.version, 64, "capability_version")?;
+    validate_digest(&payload.package_digest, "capability_package_digest")?;
+    validate_digest(
+        &payload.configuration_contract_digest,
+        "capability_configuration_contract_digest",
+    )?;
+    validate_digest(
+        &payload.input_schema_digest,
+        "capability_input_schema_digest",
+    )?;
+    validate_digest(
+        &payload.output_schema_digest,
+        "capability_output_schema_digest",
+    )?;
+    validate_text(
+        &payload.output_schema_ref,
+        256,
+        "capability_output_schema_ref",
+    )?;
+    validate_value(payload.configuration.as_ref())?;
+    validate_value(payload.input.as_ref())?;
+    validate_capability_artifacts(&payload.artifact_inputs)?;
+    if payload.timeout_milliseconds == 0
+        || payload.timeout_milliseconds > 86_400_000
+        || payload.deadline_unix_millis < 0
+    {
+        return invalid("capability_timeout");
+    }
+    Ok(())
+}
+
+fn validate_capability_attempt_settled(
+    payload: &v1::WorkflowCapabilityAttemptSettled,
+) -> Result<()> {
+    validate_run_and_token(&payload.run_id, &payload.run_token_id)?;
+    validate_identifier(&payload.invocation_id, 128, "capability_invocation_id")?;
+    validate_identifier(&payload.attempt_id, 128, "attempt_id")?;
+    if payload.idempotency_key != payload.invocation_id {
+        return invalid("capability_idempotency_key");
+    }
+    if payload.elapsed_milliseconds > 86_400_000 {
+        return invalid("capability_elapsed");
+    }
+    validate_capability_logs(&payload.logs, payload.elapsed_milliseconds)?;
+    validate_capability_artifacts(&payload.artifact_outputs)?;
+    let outcome = v1::WorkflowCapabilityAttemptOutcome::try_from(payload.outcome)
+        .map_err(|_| invalid_error("capability_outcome"))?;
+    match outcome {
+        v1::WorkflowCapabilityAttemptOutcome::Succeeded => {
+            validate_value(payload.output.as_ref())?;
+            if !payload.error_code.is_empty() || payload.error.is_some() {
+                return invalid("capability_success_error");
+            }
+            validate_identifier(&payload.receipt_id, 256, "capability_receipt_id")?;
+            if !payload.provider_run_reference.is_empty() {
+                validate_identifier(
+                    &payload.provider_run_reference,
+                    256,
+                    "capability_provider_run_reference",
+                )?;
+            }
+        }
+        v1::WorkflowCapabilityAttemptOutcome::InputValidationFailed
+        | v1::WorkflowCapabilityAttemptOutcome::Cancelled => {
+            validate_identifier(&payload.error_code, 128, "capability_error_code")?;
+            if payload.output.is_some() || !payload.artifact_outputs.is_empty() {
+                return invalid("capability_failure_output");
+            }
+            if payload.error.is_some() {
+                validate_value(payload.error.as_ref())?;
+            }
+            if !payload.receipt_id.is_empty() {
+                validate_identifier(&payload.receipt_id, 256, "capability_receipt_id")?;
+            }
+        }
+        v1::WorkflowCapabilityAttemptOutcome::OutputValidationFailed
+        | v1::WorkflowCapabilityAttemptOutcome::TimedOut
+        | v1::WorkflowCapabilityAttemptOutcome::MalformedResult
+        | v1::WorkflowCapabilityAttemptOutcome::Crashed => {
+            validate_identifier(&payload.error_code, 128, "capability_error_code")?;
+            validate_value(payload.error.as_ref())?;
+            if payload.output.is_some() || !payload.artifact_outputs.is_empty() {
+                return invalid("capability_failure_output");
+            }
+            validate_identifier(&payload.receipt_id, 256, "capability_receipt_id")?;
+        }
+        v1::WorkflowCapabilityAttemptOutcome::Unspecified => {
+            return invalid("capability_outcome");
+        }
+    }
+    Ok(())
+}
+
+fn validate_capability_artifacts(values: &[v1::WorkflowCapabilityArtifactHandle]) -> Result<()> {
+    if values.len() > MAXIMUM_PORT_BINDINGS {
+        return invalid("capability_artifact_count");
+    }
+    let mut handles = BTreeSet::new();
+    for artifact in values {
+        validate_identifier(&artifact.handle_id, 128, "capability_artifact_handle_id")?;
+        validate_identifier(&artifact.role, 128, "capability_artifact_role")?;
+        let value = artifact
+            .value
+            .as_ref()
+            .ok_or_else(|| invalid_error("capability_artifact_value"))?;
+        validate_value(Some(value))?;
+        if value.storage_reference_id.is_empty()
+            || !value.inline_canonical_json.is_empty()
+            || value.storage.as_ref().is_none_or(|metadata| {
+                metadata.handle_id != artifact.handle_id || metadata.handle_id.is_empty()
+            })
+            || !handles.insert(artifact.handle_id.as_str())
+        {
+            return invalid("capability_artifact_handle");
+        }
+    }
+    Ok(())
+}
+
+fn validate_capability_logs(
+    logs: &[v1::WorkflowCapabilityLogEntry],
+    elapsed_milliseconds: u64,
+) -> Result<()> {
+    if logs.len() > MAXIMUM_CAPABILITY_LOGS {
+        return invalid("capability_log_count");
+    }
+    for (index, log) in logs.iter().enumerate() {
+        if log.sequence != (index + 1) as u32
+            || !matches!(log.level.as_str(), "debug" | "info" | "warning" | "error")
+            || log.offset_milliseconds > elapsed_milliseconds
+        {
+            return invalid("capability_log_contract");
+        }
+        validate_text(&log.message, 2_048, "capability_log_message")?;
+    }
+    Ok(())
 }
 
 fn validate_attempt_settled(payload: &v1::WorkflowAttemptSettled) -> Result<()> {

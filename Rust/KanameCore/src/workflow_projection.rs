@@ -14,7 +14,7 @@ use crate::{
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     ffi::OsString,
@@ -23,7 +23,7 @@ use std::{
     time::Duration,
 };
 
-const PROJECTION_SCHEMA_VERSION: i64 = 8;
+const PROJECTION_SCHEMA_VERSION: i64 = 9;
 const DEFAULT_BATCH_SIZE: u32 = 250;
 
 const INITIAL_SCHEMA: &str = r#"
@@ -387,6 +387,43 @@ CREATE TABLE workflow_subflows (
 ) STRICT;
 CREATE INDEX workflow_subflows_run_position
     ON workflow_subflows(run_id, called_store_position, invocation_id);
+
+CREATE TABLE workflow_capability_attempts (
+    invocation_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+    attempt_id TEXT NOT NULL UNIQUE REFERENCES workflow_attempts(attempt_id) ON DELETE CASCADE,
+    execution_token_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    capability_id TEXT NOT NULL,
+    version TEXT NOT NULL,
+    package_digest TEXT NOT NULL CHECK (length(package_digest) = 64),
+    configuration_contract_digest TEXT NOT NULL CHECK (length(configuration_contract_digest) = 64),
+    input_schema_digest TEXT NOT NULL CHECK (length(input_schema_digest) = 64),
+    output_schema_digest TEXT NOT NULL CHECK (length(output_schema_digest) = 64),
+    output_schema_ref TEXT NOT NULL,
+    configuration_value_id TEXT NOT NULL REFERENCES workflow_values(value_id) ON DELETE RESTRICT,
+    input_value_id TEXT NOT NULL REFERENCES workflow_values(value_id) ON DELETE RESTRICT,
+    artifact_inputs_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('running', 'settled')),
+    outcome TEXT,
+    output_value_id TEXT REFERENCES workflow_values(value_id) ON DELETE RESTRICT,
+    artifact_outputs_json TEXT,
+    error_code TEXT,
+    error_value_id TEXT REFERENCES workflow_values(value_id) ON DELETE RESTRICT,
+    logs_json TEXT,
+    timeout_milliseconds INTEGER NOT NULL CHECK (timeout_milliseconds > 0),
+    deadline_unix_millis INTEGER NOT NULL CHECK (deadline_unix_millis >= 0),
+    elapsed_milliseconds INTEGER,
+    receipt_id TEXT,
+    provider_run_reference TEXT,
+    idempotency_key TEXT,
+    started_at_unix_millis INTEGER NOT NULL CHECK (started_at_unix_millis >= 0),
+    settled_at_unix_millis INTEGER,
+    started_store_position INTEGER NOT NULL UNIQUE CHECK (started_store_position > 0),
+    settled_store_position INTEGER UNIQUE
+) STRICT;
+CREATE INDEX workflow_capability_attempts_run_position
+    ON workflow_capability_attempts(run_id, started_store_position, invocation_id);
 
 CREATE TABLE workflow_projected_events (
     event_id TEXT PRIMARY KEY,
@@ -798,6 +835,45 @@ CREATE INDEX IF NOT EXISTS workflow_subflows_run_position
     ON workflow_subflows(run_id, called_store_position, invocation_id);
 "#;
 
+const PROJECTION_MIGRATION_9: &str = r#"
+CREATE TABLE IF NOT EXISTS workflow_capability_attempts (
+    invocation_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+    attempt_id TEXT NOT NULL UNIQUE REFERENCES workflow_attempts(attempt_id) ON DELETE CASCADE,
+    execution_token_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    capability_id TEXT NOT NULL,
+    version TEXT NOT NULL,
+    package_digest TEXT NOT NULL CHECK (length(package_digest) = 64),
+    configuration_contract_digest TEXT NOT NULL CHECK (length(configuration_contract_digest) = 64),
+    input_schema_digest TEXT NOT NULL CHECK (length(input_schema_digest) = 64),
+    output_schema_digest TEXT NOT NULL CHECK (length(output_schema_digest) = 64),
+    output_schema_ref TEXT NOT NULL,
+    configuration_value_id TEXT NOT NULL REFERENCES workflow_values(value_id) ON DELETE RESTRICT,
+    input_value_id TEXT NOT NULL REFERENCES workflow_values(value_id) ON DELETE RESTRICT,
+    artifact_inputs_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('running', 'settled')),
+    outcome TEXT,
+    output_value_id TEXT REFERENCES workflow_values(value_id) ON DELETE RESTRICT,
+    artifact_outputs_json TEXT,
+    error_code TEXT,
+    error_value_id TEXT REFERENCES workflow_values(value_id) ON DELETE RESTRICT,
+    logs_json TEXT,
+    timeout_milliseconds INTEGER NOT NULL CHECK (timeout_milliseconds > 0),
+    deadline_unix_millis INTEGER NOT NULL CHECK (deadline_unix_millis >= 0),
+    elapsed_milliseconds INTEGER,
+    receipt_id TEXT,
+    provider_run_reference TEXT,
+    idempotency_key TEXT,
+    started_at_unix_millis INTEGER NOT NULL CHECK (started_at_unix_millis >= 0),
+    settled_at_unix_millis INTEGER,
+    started_store_position INTEGER NOT NULL UNIQUE CHECK (started_store_position > 0),
+    settled_store_position INTEGER UNIQUE
+) STRICT;
+CREATE INDEX IF NOT EXISTS workflow_capability_attempts_run_position
+    ON workflow_capability_attempts(run_id, started_store_position, invocation_id);
+"#;
+
 #[derive(Debug)]
 pub enum WorkflowProjectionError {
     Database(rusqlite::Error),
@@ -869,6 +945,21 @@ struct CanonicalProjectionState {
 struct CanonicalTable {
     name: &'static str,
     rows: Vec<Vec<Option<String>>>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct CapabilityArtifactRecord {
+    handle_id: String,
+    role: String,
+    value_id: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct CapabilityLogRecord {
+    sequence: u32,
+    level: String,
+    message: String,
+    offset_milliseconds: u64,
 }
 
 pub struct WorkflowRunProjection {
@@ -993,6 +1084,7 @@ impl WorkflowRunProjection {
             transaction.execute_batch(PROJECTION_MIGRATION_6)?;
             transaction.execute_batch(PROJECTION_MIGRATION_7)?;
             transaction.execute_batch(PROJECTION_MIGRATION_8)?;
+            transaction.execute_batch(PROJECTION_MIGRATION_9)?;
             transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
             refresh_state_digest(&transaction)?;
             transaction.commit()?;
@@ -1003,6 +1095,7 @@ impl WorkflowRunProjection {
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             transaction.execute_batch(PROJECTION_MIGRATION_7)?;
             transaction.execute_batch(PROJECTION_MIGRATION_8)?;
+            transaction.execute_batch(PROJECTION_MIGRATION_9)?;
             transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
             refresh_state_digest(&transaction)?;
             transaction.commit()?;
@@ -1012,6 +1105,16 @@ impl WorkflowRunProjection {
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             transaction.execute_batch(PROJECTION_MIGRATION_8)?;
+            transaction.execute_batch(PROJECTION_MIGRATION_9)?;
+            transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
+            refresh_state_digest(&transaction)?;
+            transaction.commit()?;
+        }
+        let found: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if found == 8 {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(PROJECTION_MIGRATION_9)?;
             transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
             refresh_state_digest(&transaction)?;
             transaction.commit()?;
@@ -1135,6 +1238,30 @@ impl WorkflowRunProjection {
         if invalid_subflow.is_some() {
             return Err(WorkflowProjectionError::Integrity(
                 "subflow_projection_invalid".into(),
+            ));
+        }
+        let invalid_capability = self
+            .connection
+            .query_row(
+                "SELECT 1 FROM workflow_capability_attempts c
+                 JOIN workflow_runs r ON r.run_id = c.run_id
+                 JOIN workflow_attempts a ON a.attempt_id = c.attempt_id
+                 WHERE c.node_id != a.node_id
+                    OR c.execution_token_id != a.execution_token_id
+                    OR (c.status = 'running' AND (a.status != 'running' OR r.status != 'running'))
+                    OR (c.status = 'settled' AND (
+                        c.outcome IS NULL
+                        OR c.settled_store_position IS NULL
+                        OR c.elapsed_milliseconds IS NULL
+                        OR c.idempotency_key != c.invocation_id))
+                 LIMIT 1",
+                [],
+                |_| Ok(()),
+            )
+            .optional()?;
+        if invalid_capability.is_some() {
+            return Err(WorkflowProjectionError::Integrity(
+                "capability_projection_invalid".into(),
             ));
         }
         let stored: String = self.connection.query_row(
@@ -1263,6 +1390,7 @@ impl WorkflowRunProjection {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute_batch(
             "DELETE FROM workflow_projected_events;
+             DELETE FROM workflow_capability_attempts;
              DELETE FROM workflow_subflows;
              DELETE FROM workflow_episode_inputs;
              DELETE FROM workflow_episodes;
@@ -1305,6 +1433,7 @@ impl WorkflowRunProjection {
             "episodes" => "SELECT COUNT(*) FROM workflow_episodes",
             "episode_inputs" => "SELECT COUNT(*) FROM workflow_episode_inputs",
             "subflows" => "SELECT COUNT(*) FROM workflow_subflows",
+            "capability_attempts" => "SELECT COUNT(*) FROM workflow_capability_attempts",
             "events" => "SELECT COUNT(*) FROM workflow_projected_events",
             "values" => "SELECT COUNT(*) FROM workflow_values",
             _ => return Err(WorkflowProjectionError::Integrity("unknown_table".into())),
@@ -1454,6 +1583,7 @@ impl WorkflowRunProjection {
             wait_signals: self.inspect_wait_signals(run_id)?,
             episode: self.inspect_episode(run_id)?,
             subflows: self.inspect_subflows(run_id)?,
+            capability_attempts: self.inspect_capability_attempts(run_id)?,
         })
     }
 
@@ -2437,6 +2567,161 @@ impl WorkflowRunProjection {
         .collect()
     }
 
+    fn inspect_capability_attempts(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<v1::WorkflowProjectedCapabilityAttempt>> {
+        struct CapabilityRow {
+            invocation_id: String,
+            attempt_id: String,
+            execution_token_id: String,
+            node_id: String,
+            capability_id: String,
+            version: String,
+            package_digest: String,
+            configuration_contract_digest: String,
+            input_schema_digest: String,
+            output_schema_digest: String,
+            output_schema_ref: String,
+            configuration_value_id: String,
+            input_value_id: String,
+            artifact_inputs_json: String,
+            status: String,
+            outcome: Option<String>,
+            output_value_id: Option<String>,
+            artifact_outputs_json: Option<String>,
+            error_code: Option<String>,
+            error_value_id: Option<String>,
+            logs_json: Option<String>,
+            timeout_milliseconds: i64,
+            deadline_unix_millis: i64,
+            elapsed_milliseconds: Option<i64>,
+            receipt_id: Option<String>,
+            provider_run_reference: Option<String>,
+            idempotency_key: Option<String>,
+            started_at_unix_millis: i64,
+            settled_at_unix_millis: Option<i64>,
+            started_store_position: i64,
+            settled_store_position: Option<i64>,
+        }
+        let mut statement = self.connection.prepare(
+            "SELECT invocation_id, attempt_id, execution_token_id, node_id, capability_id,
+                    version, package_digest, configuration_contract_digest, input_schema_digest,
+                    output_schema_digest, output_schema_ref, configuration_value_id, input_value_id,
+                    artifact_inputs_json, status, outcome, output_value_id, artifact_outputs_json,
+                    error_code, error_value_id, logs_json, timeout_milliseconds,
+                    deadline_unix_millis, elapsed_milliseconds, receipt_id,
+                    provider_run_reference, idempotency_key, started_at_unix_millis,
+                    settled_at_unix_millis, started_store_position, settled_store_position
+             FROM workflow_capability_attempts WHERE run_id = ?1
+             ORDER BY started_store_position, invocation_id",
+        )?;
+        let rows = statement.query_map([run_id], |row| {
+            Ok(CapabilityRow {
+                invocation_id: row.get(0)?,
+                attempt_id: row.get(1)?,
+                execution_token_id: row.get(2)?,
+                node_id: row.get(3)?,
+                capability_id: row.get(4)?,
+                version: row.get(5)?,
+                package_digest: row.get(6)?,
+                configuration_contract_digest: row.get(7)?,
+                input_schema_digest: row.get(8)?,
+                output_schema_digest: row.get(9)?,
+                output_schema_ref: row.get(10)?,
+                configuration_value_id: row.get(11)?,
+                input_value_id: row.get(12)?,
+                artifact_inputs_json: row.get(13)?,
+                status: row.get(14)?,
+                outcome: row.get(15)?,
+                output_value_id: row.get(16)?,
+                artifact_outputs_json: row.get(17)?,
+                error_code: row.get(18)?,
+                error_value_id: row.get(19)?,
+                logs_json: row.get(20)?,
+                timeout_milliseconds: row.get(21)?,
+                deadline_unix_millis: row.get(22)?,
+                elapsed_milliseconds: row.get(23)?,
+                receipt_id: row.get(24)?,
+                provider_run_reference: row.get(25)?,
+                idempotency_key: row.get(26)?,
+                started_at_unix_millis: row.get(27)?,
+                settled_at_unix_millis: row.get(28)?,
+                started_store_position: row.get(29)?,
+                settled_store_position: row.get(30)?,
+            })
+        })?;
+        rows.map(|row| {
+            let row = row?;
+            Ok(v1::WorkflowProjectedCapabilityAttempt {
+                invocation_id: row.invocation_id,
+                attempt_id: row.attempt_id,
+                execution_token_id: row.execution_token_id,
+                node_id: row.node_id,
+                capability_id: row.capability_id,
+                version: row.version,
+                package_digest: row.package_digest,
+                configuration_contract_digest: row.configuration_contract_digest,
+                input_schema_digest: row.input_schema_digest,
+                output_schema_digest: row.output_schema_digest,
+                output_schema_ref: row.output_schema_ref,
+                configuration: Some(self.inspect_value(&row.configuration_value_id)?),
+                input: Some(self.inspect_value(&row.input_value_id)?),
+                artifact_inputs: self.inspect_capability_artifacts(&row.artifact_inputs_json)?,
+                status: row.status,
+                outcome: row.outcome.unwrap_or_default(),
+                output: self.inspect_optional_value(row.output_value_id.as_deref())?,
+                artifact_outputs: row
+                    .artifact_outputs_json
+                    .as_deref()
+                    .map(|value| self.inspect_capability_artifacts(value))
+                    .transpose()?
+                    .unwrap_or_default(),
+                error_code: row.error_code.unwrap_or_default(),
+                error: self.inspect_optional_value(row.error_value_id.as_deref())?,
+                logs: decode_capability_logs(row.logs_json.as_deref())?,
+                timeout_milliseconds: projected_u64(row.timeout_milliseconds)?,
+                deadline_unix_millis: row.deadline_unix_millis,
+                elapsed_milliseconds: row
+                    .elapsed_milliseconds
+                    .map(projected_u64)
+                    .transpose()?
+                    .unwrap_or_default(),
+                receipt_id: row.receipt_id.unwrap_or_default(),
+                provider_run_reference: row.provider_run_reference.unwrap_or_default(),
+                idempotency_key: row.idempotency_key.unwrap_or_default(),
+                started_at_unix_millis: row.started_at_unix_millis,
+                settled_at_unix_millis: row.settled_at_unix_millis.unwrap_or_default(),
+                started_store_position: projected_u64(row.started_store_position)?,
+                settled_store_position: row
+                    .settled_store_position
+                    .map(projected_u64)
+                    .transpose()?
+                    .unwrap_or_default(),
+            })
+        })
+        .collect()
+    }
+
+    fn inspect_capability_artifacts(
+        &self,
+        value: &str,
+    ) -> Result<Vec<v1::WorkflowProjectedCapabilityArtifactHandle>> {
+        let records: Vec<CapabilityArtifactRecord> = serde_json::from_str(value).map_err(|_| {
+            WorkflowProjectionError::Integrity("capability_artifacts_decode".into())
+        })?;
+        records
+            .into_iter()
+            .map(|record| {
+                Ok(v1::WorkflowProjectedCapabilityArtifactHandle {
+                    handle_id: record.handle_id,
+                    role: record.role,
+                    value: Some(self.inspect_value(&record.value_id)?),
+                })
+            })
+            .collect()
+    }
+
     #[doc(hidden)]
     pub fn corrupt_first_run_for_test(&self) -> Result<()> {
         self.connection.execute(
@@ -2472,6 +2757,23 @@ fn decode_optional_string_list(value: Option<&str>) -> Result<Vec<String>> {
         .map(decode_string_list)
         .transpose()
         .map(Option::unwrap_or_default)
+}
+
+fn decode_capability_logs(value: Option<&str>) -> Result<Vec<v1::WorkflowCapabilityLogEntry>> {
+    let records: Vec<CapabilityLogRecord> = value
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|_| WorkflowProjectionError::Integrity("capability_logs_decode".into()))?
+        .unwrap_or_default();
+    Ok(records
+        .into_iter()
+        .map(|record| v1::WorkflowCapabilityLogEntry {
+            sequence: record.sequence,
+            level: record.level,
+            message: record.message,
+            offset_milliseconds: record.offset_milliseconds,
+        })
+        .collect())
 }
 
 fn projected_u64(value: i64) -> Result<u64> {
@@ -3277,6 +3579,106 @@ fn apply_event(transaction: &Transaction<'_>, event: &v1::EventEnvelope) -> Resu
             )?;
             touch_run(transaction, &payload.run_id, event.store_position)?;
         }
+        WorkflowRuntimeEvent::CapabilityAttemptStarted(payload) => {
+            require_active_attempt(
+                transaction,
+                &payload.run_id,
+                &payload.run_token_id,
+                &payload.attempt_id,
+                &payload.node_id,
+                None,
+                Some(&payload.execution_token_id),
+            )?;
+            let configuration = payload.configuration.as_ref().ok_or_else(|| {
+                WorkflowProjectionError::Lifecycle("capability_configuration_value_missing".into())
+            })?;
+            let input = payload.input.as_ref().ok_or_else(|| {
+                WorkflowProjectionError::Lifecycle("capability_input_value_missing".into())
+            })?;
+            insert_value(transaction, configuration)?;
+            insert_value(transaction, input)?;
+            let artifact_inputs = capability_artifacts_json(transaction, &payload.artifact_inputs)?;
+            transaction.execute(
+                "INSERT INTO workflow_capability_attempts
+                 (invocation_id, run_id, attempt_id, execution_token_id, node_id, capability_id,
+                  version, package_digest, configuration_contract_digest, input_schema_digest,
+                  output_schema_digest, output_schema_ref, configuration_value_id, input_value_id,
+                  artifact_inputs_json, status, timeout_milliseconds, deadline_unix_millis,
+                  started_at_unix_millis, started_store_position)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                         ?15, 'running', ?16, ?17, ?18, ?19)",
+                params![
+                    payload.invocation_id,
+                    payload.run_id,
+                    payload.attempt_id,
+                    payload.execution_token_id,
+                    payload.node_id,
+                    payload.capability_id,
+                    payload.version,
+                    payload.package_digest,
+                    payload.configuration_contract_digest,
+                    payload.input_schema_digest,
+                    payload.output_schema_digest,
+                    payload.output_schema_ref,
+                    configuration.value_id,
+                    input.value_id,
+                    artifact_inputs,
+                    sql_u64(payload.timeout_milliseconds)?,
+                    payload.deadline_unix_millis,
+                    event.occurred_at_unix_millis,
+                    sql_u64(event.store_position)?,
+                ],
+            )?;
+            touch_run(transaction, &payload.run_id, event.store_position)?;
+        }
+        WorkflowRuntimeEvent::CapabilityAttemptSettled(payload) => {
+            let current: Option<(String, String, String)> = transaction
+                .query_row(
+                    "SELECT run_id, attempt_id, status FROM workflow_capability_attempts
+                     WHERE invocation_id = ?1",
+                    [&payload.invocation_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            if current.as_ref().is_none_or(|(run_id, attempt_id, status)| {
+                run_id != &payload.run_id
+                    || attempt_id != &payload.attempt_id
+                    || status != "running"
+            }) {
+                return lifecycle("capability_attempt_not_active");
+            }
+            let output_value_id = insert_optional_value(transaction, payload.output.as_ref())?;
+            let error_value_id = insert_optional_value(transaction, payload.error.as_ref())?;
+            let artifact_outputs =
+                capability_artifacts_json(transaction, &payload.artifact_outputs)?;
+            let logs = capability_logs_json(&payload.logs)?;
+            transaction.execute(
+                "UPDATE workflow_capability_attempts SET
+                   status = 'settled', outcome = ?1, output_value_id = ?2,
+                   artifact_outputs_json = ?3, error_code = NULLIF(?4, ''),
+                   error_value_id = ?5, logs_json = ?6, elapsed_milliseconds = ?7,
+                   receipt_id = NULLIF(?8, ''), provider_run_reference = NULLIF(?9, ''),
+                   idempotency_key = ?10, settled_at_unix_millis = ?11,
+                   settled_store_position = ?12
+                 WHERE invocation_id = ?13",
+                params![
+                    capability_outcome_name(payload.outcome)?,
+                    output_value_id,
+                    artifact_outputs,
+                    payload.error_code,
+                    error_value_id,
+                    logs,
+                    sql_u64(payload.elapsed_milliseconds)?,
+                    payload.receipt_id,
+                    payload.provider_run_reference,
+                    payload.idempotency_key,
+                    event.occurred_at_unix_millis,
+                    sql_u64(event.store_position)?,
+                    payload.invocation_id,
+                ],
+            )?;
+            touch_run(transaction, &payload.run_id, event.store_position)?;
+        }
         WorkflowRuntimeEvent::PortEmitted(payload) => {
             require_active_attempt(
                 transaction,
@@ -3768,6 +4170,59 @@ fn insert_optional_value(
         .transpose()
 }
 
+fn capability_artifacts_json(
+    transaction: &Transaction<'_>,
+    values: &[v1::WorkflowCapabilityArtifactHandle],
+) -> Result<String> {
+    let records = values
+        .iter()
+        .map(|artifact| {
+            let value = artifact.value.as_ref().ok_or_else(|| {
+                WorkflowProjectionError::Lifecycle("capability_artifact_value_missing".into())
+            })?;
+            insert_value(transaction, value)?;
+            Ok(CapabilityArtifactRecord {
+                handle_id: artifact.handle_id.clone(),
+                role: artifact.role.clone(),
+                value_id: value.value_id.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    serde_json::to_string(&records)
+        .map_err(|_| WorkflowProjectionError::Integrity("capability_artifacts_encode".into()))
+}
+
+fn capability_logs_json(values: &[v1::WorkflowCapabilityLogEntry]) -> Result<String> {
+    let records = values
+        .iter()
+        .map(|log| CapabilityLogRecord {
+            sequence: log.sequence,
+            level: log.level.clone(),
+            message: log.message.clone(),
+            offset_milliseconds: log.offset_milliseconds,
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_string(&records)
+        .map_err(|_| WorkflowProjectionError::Integrity("capability_logs_encode".into()))
+}
+
+fn capability_outcome_name(value: i32) -> Result<&'static str> {
+    match v1::WorkflowCapabilityAttemptOutcome::try_from(value) {
+        Ok(v1::WorkflowCapabilityAttemptOutcome::Succeeded) => Ok("succeeded"),
+        Ok(v1::WorkflowCapabilityAttemptOutcome::InputValidationFailed) => {
+            Ok("input_validation_failed")
+        }
+        Ok(v1::WorkflowCapabilityAttemptOutcome::OutputValidationFailed) => {
+            Ok("output_validation_failed")
+        }
+        Ok(v1::WorkflowCapabilityAttemptOutcome::TimedOut) => Ok("timed_out"),
+        Ok(v1::WorkflowCapabilityAttemptOutcome::Cancelled) => Ok("cancelled"),
+        Ok(v1::WorkflowCapabilityAttemptOutcome::MalformedResult) => Ok("malformed_result"),
+        Ok(v1::WorkflowCapabilityAttemptOutcome::Crashed) => Ok("crashed"),
+        _ => lifecycle("capability_outcome_invalid"),
+    }
+}
+
 fn emission_ids_for_attempt(
     transaction: &Transaction<'_>,
     attempt_id: &str,
@@ -3906,6 +4361,12 @@ fn canonical_state_bytes(connection: &Connection) -> Result<Vec<u8>> {
                 "subflows",
                 "SELECT invocation_id, run_id, attempt_id, execution_token_id, node_id, child_run_id, child_command_id, child_workflow_id, child_revision_id, child_package_id, child_package_digest, entrypoint, input_value_id, status, outcome, output_value_id, error_code, error_value_id, child_final_emission_ids_json, called_at_unix_millis, settled_at_unix_millis, called_store_position, settled_store_position FROM workflow_subflows ORDER BY run_id, called_store_position, invocation_id",
                 23,
+            )?,
+            table_rows(
+                connection,
+                "capability_attempts",
+                "SELECT invocation_id, run_id, attempt_id, execution_token_id, node_id, capability_id, version, package_digest, configuration_contract_digest, input_schema_digest, output_schema_digest, output_schema_ref, configuration_value_id, input_value_id, artifact_inputs_json, status, outcome, output_value_id, artifact_outputs_json, error_code, error_value_id, logs_json, timeout_milliseconds, deadline_unix_millis, elapsed_milliseconds, receipt_id, provider_run_reference, idempotency_key, started_at_unix_millis, settled_at_unix_millis, started_store_position, settled_store_position FROM workflow_capability_attempts ORDER BY run_id, started_store_position, invocation_id",
+                32,
             )?,
             table_rows(
                 connection,

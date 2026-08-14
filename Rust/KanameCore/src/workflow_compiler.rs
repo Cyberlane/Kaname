@@ -403,6 +403,18 @@ fn execution_availability(node: &Node) -> &'static str {
             "executable"
         }
         "data.validate" | "data.case-context" => "executable",
+        "compute.capability"
+            if string_field(&node.config, "capabilityId").is_some()
+                && string_field(&node.config, "version").is_some()
+                && node.config.get("input") == Some(&serde_json::json!({"whole": true}))
+                && string_field(&node.config, "outputSchemaRef").is_some()
+                && node
+                    .config
+                    .get("configuration")
+                    .is_none_or(Value::is_object) =>
+        {
+            "executable"
+        }
         "control.subflow"
             if string_field(&node.config, "packageId").is_some()
                 && string_field(&node.config, "revisionDigest").is_some()

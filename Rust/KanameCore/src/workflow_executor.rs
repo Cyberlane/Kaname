@@ -3,12 +3,18 @@
 //! The executor consumes only a verified immutable compiled revision and the
 //! typed journal contracts. It advances one deterministic event boundary at a
 //! time, so resubmitting the same request after a process crash can only append
-//! the next missing fact. This bounded slice supports typed scoped storage but
-//! no connector, model, capability, arbitrary mapping, or external effect.
+//! the next missing fact. This bounded slice supports typed scoped storage and
+//! version-pinned idempotent capabilities through an explicitly supplied host,
+//! but no connector, model, arbitrary mapping, or external effect.
 
 use crate::{
     journal::{Journal, JournalError, ReplayBasis},
     v1, workflow_canonical,
+    workflow_capabilities::{
+        UnavailableWorkflowCapabilityHost, WorkflowCapabilityArtifactHandle,
+        WorkflowCapabilityDefinition, WorkflowCapabilityHost, WorkflowCapabilityHostResult,
+        WorkflowCapabilityInvocation, WorkflowCapabilityLog, WorkflowCapabilityValue,
+    },
     workflow_library::{WorkflowLibraryError, WorkflowLibraryStore},
     workflow_match::{self, EvaluationOutcome, MatchConfig, MatchRoots, TraceOutcome},
     workflow_runtime::{self, WorkflowRuntimeCommand, WorkflowRuntimeEvent},
@@ -164,7 +170,7 @@ struct CompiledWorkflow {
     dependencies: Vec<CompiledDependency>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CompiledDependency {
     kind: String,
@@ -252,6 +258,17 @@ struct SubflowConfig {
     input: Value,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CapabilityConfig {
+    capability_id: String,
+    version: String,
+    input: Value,
+    #[serde(default)]
+    configuration: Value,
+    output_schema_ref: String,
+}
+
 struct ExecutionPackage {
     compiled: CompiledWorkflow,
     schemas: BTreeMap<String, Value>,
@@ -271,6 +288,7 @@ struct RecordedRun {
     wait_signals: BTreeMap<String, RecordedWaitSignal>,
     waits: BTreeMap<String, RecordedWait>,
     attempts: Vec<RecordedAttempt>,
+    capability_attempts: BTreeMap<String, RecordedCapabilityAttempt>,
     emissions: BTreeMap<String, RecordedEmission>,
     edges: Vec<RecordedEdge>,
     cancellation: Option<v1::WorkflowRunCancellationRequested>,
@@ -332,6 +350,14 @@ struct RecordedAttempt {
     settled: Option<v1::WorkflowAttemptSettled>,
 }
 
+struct RecordedCapabilityAttempt {
+    started_event_id: String,
+    started_at_unix_millis: i64,
+    started: v1::WorkflowCapabilityAttemptStarted,
+    settled_event_id: Option<String>,
+    settled: Option<v1::WorkflowCapabilityAttemptSettled>,
+}
+
 struct RecordedEmission {
     event_id: String,
     payload: v1::WorkflowPortEmitted,
@@ -380,11 +406,13 @@ pub fn execute(
     library: &WorkflowLibraryStore,
     command: &v1::CommandEnvelope,
 ) -> Result<WorkflowExecutionResult> {
+    let mut capabilities = UnavailableWorkflowCapabilityHost;
     execute_internal(
         journal,
         library,
         None,
         None,
+        &mut capabilities,
         command,
         current_unix_millis(),
         None,
@@ -399,11 +427,13 @@ pub fn execute_at_unix_millis(
     command: &v1::CommandEnvelope,
     now_unix_millis: i64,
 ) -> Result<WorkflowExecutionResult> {
+    let mut capabilities = UnavailableWorkflowCapabilityHost;
     execute_internal(
         journal,
         library,
         None,
         None,
+        &mut capabilities,
         command,
         now_unix_millis,
         None,
@@ -419,11 +449,55 @@ pub fn execute_with_storage(
     authority: &WorkflowStorageExecutionAuthority,
     command: &v1::CommandEnvelope,
 ) -> Result<WorkflowExecutionResult> {
+    let mut capabilities = UnavailableWorkflowCapabilityHost;
     execute_internal(
         journal,
         library,
         Some(storage),
         Some(authority),
+        &mut capabilities,
+        command,
+        current_unix_millis(),
+        None,
+        0,
+        None,
+    )
+}
+
+pub fn execute_with_capabilities(
+    journal: &mut Journal,
+    library: &WorkflowLibraryStore,
+    capabilities: &mut dyn WorkflowCapabilityHost,
+    command: &v1::CommandEnvelope,
+) -> Result<WorkflowExecutionResult> {
+    execute_internal(
+        journal,
+        library,
+        None,
+        None,
+        capabilities,
+        command,
+        current_unix_millis(),
+        None,
+        0,
+        None,
+    )
+}
+
+pub fn execute_with_storage_and_capabilities(
+    journal: &mut Journal,
+    library: &WorkflowLibraryStore,
+    storage: &mut WorkflowScopedStorage,
+    authority: &WorkflowStorageExecutionAuthority,
+    capabilities: &mut dyn WorkflowCapabilityHost,
+    command: &v1::CommandEnvelope,
+) -> Result<WorkflowExecutionResult> {
+    execute_internal(
+        journal,
+        library,
+        Some(storage),
+        Some(authority),
+        capabilities,
         command,
         current_unix_millis(),
         None,
@@ -439,11 +513,13 @@ pub fn execute_with_fault_for_test(
     command: &v1::CommandEnvelope,
     fault: WorkflowExecutionFault,
 ) -> Result<WorkflowExecutionResult> {
+    let mut capabilities = UnavailableWorkflowCapabilityHost;
     execute_internal(
         journal,
         library,
         None,
         None,
+        &mut capabilities,
         command,
         current_unix_millis(),
         Some(fault),
@@ -461,11 +537,35 @@ pub fn execute_with_storage_fault_for_test(
     command: &v1::CommandEnvelope,
     fault: WorkflowExecutionFault,
 ) -> Result<WorkflowExecutionResult> {
+    let mut capabilities = UnavailableWorkflowCapabilityHost;
     execute_internal(
         journal,
         library,
         Some(storage),
         Some(authority),
+        &mut capabilities,
+        command,
+        current_unix_millis(),
+        Some(fault),
+        0,
+        None,
+    )
+}
+
+#[doc(hidden)]
+pub fn execute_with_capabilities_fault_for_test(
+    journal: &mut Journal,
+    library: &WorkflowLibraryStore,
+    capabilities: &mut dyn WorkflowCapabilityHost,
+    command: &v1::CommandEnvelope,
+    fault: WorkflowExecutionFault,
+) -> Result<WorkflowExecutionResult> {
+    execute_internal(
+        journal,
+        library,
+        None,
+        None,
+        capabilities,
         command,
         current_unix_millis(),
         Some(fault),
@@ -480,6 +580,7 @@ fn execute_internal(
     library: &WorkflowLibraryStore,
     mut storage: Option<&mut WorkflowScopedStorage>,
     authority: Option<&WorkflowStorageExecutionAuthority>,
+    capabilities: &mut dyn WorkflowCapabilityHost,
     command: &v1::CommandEnvelope,
     now_unix_millis: i64,
     fault: Option<WorkflowExecutionFault>,
@@ -509,6 +610,7 @@ fn execute_internal(
     let job_run_id = job_run_id.unwrap_or(&request.run_id).to_owned();
     let package = load_execution_package(library, &request)?;
     validate_storage_authority(&package, &request, storage.is_some(), authority)?;
+    validate_capability_host(&package, capabilities)?;
     let token_id = stable_id("token", &[&request.run_id, &command.command_id]);
     let initial_state = recorded_run(journal, &request.run_id)?;
     let prepared_episode = if !request.episode_id.is_empty() && initial_state.episode.is_none() {
@@ -539,6 +641,7 @@ fn execute_internal(
             &package,
             storage.as_deref_mut(),
             authority,
+            capabilities,
             command,
             &request,
             &token_id,
@@ -949,6 +1052,163 @@ fn validate_storage_authority(
     Ok(())
 }
 
+fn validate_capability_host(
+    package: &ExecutionPackage,
+    capabilities: &dyn WorkflowCapabilityHost,
+) -> Result<()> {
+    let capability_nodes = package
+        .compiled
+        .nodes
+        .iter()
+        .filter(|node| node.node_type == "compute.capability")
+        .collect::<Vec<_>>();
+    if capability_nodes.is_empty() {
+        return Ok(());
+    }
+    for node in capability_nodes {
+        let (config, dependency, definition) =
+            resolve_capability_definition(package, capabilities, node)?;
+        if config.input != json!({"whole": true})
+            || !definition.idempotent
+            || definition.timeout_milliseconds == 0
+            || definition.timeout_milliseconds > 86_400_000
+        {
+            return Err(WorkflowExecutionError::Unsupported(
+                "capability_execution_contract".into(),
+            ));
+        }
+        if dependency.version.as_deref() != Some(config.version.as_str()) {
+            return Err(WorkflowExecutionError::Integrity(
+                "capability_dependency_version".into(),
+            ));
+        }
+        let configuration = capability_configuration(&config)?;
+        require_valid_schema(
+            &definition.configuration_schema,
+            "capability_configuration_schema",
+        )?;
+        require_valid_schema(&definition.input_schema, "capability_input_schema")?;
+        require_valid_schema(&definition.output_schema, "capability_output_schema")?;
+        require_schema_match(
+            &definition.configuration_schema,
+            configuration,
+            "capability_configuration_invalid",
+        )?;
+        let bundled_output = package
+            .schemas
+            .get(&config.output_schema_ref)
+            .ok_or_else(|| {
+                WorkflowExecutionError::Unsupported("capability_output_schema_missing".into())
+            })?;
+        if schema_digest(bundled_output)? != schema_digest(&definition.output_schema)? {
+            return Err(WorkflowExecutionError::Integrity(
+                "capability_output_schema_pin".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn resolve_capability_definition(
+    package: &ExecutionPackage,
+    capabilities: &dyn WorkflowCapabilityHost,
+    node: &CompiledNode,
+) -> Result<(
+    CapabilityConfig,
+    CompiledDependency,
+    WorkflowCapabilityDefinition,
+)> {
+    let config: CapabilityConfig = serde_json::from_value(node.config.clone())
+        .map_err(|_| WorkflowExecutionError::Integrity("capability_config".into()))?;
+    let dependencies = package
+        .compiled
+        .dependencies
+        .iter()
+        .filter(|dependency| {
+            dependency.kind == "capability"
+                && dependency.id == config.capability_id
+                && dependency.version.as_deref() == Some(config.version.as_str())
+        })
+        .collect::<Vec<_>>();
+    if dependencies.len() != 1 {
+        return Err(WorkflowExecutionError::Integrity(
+            "capability_dependency_pin".into(),
+        ));
+    }
+    let mut dependency = dependencies[0].clone();
+    dependency.digest = dependency
+        .digest
+        .strip_prefix("sha256:")
+        .unwrap_or(&dependency.digest)
+        .to_owned();
+    if dependency.digest.len() != 64
+        || !dependency
+            .digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(WorkflowExecutionError::Integrity(
+            "capability_dependency_digest".into(),
+        ));
+    }
+    let definition = capabilities
+        .definition(&config.capability_id, &config.version, &dependency.digest)
+        .ok_or_else(|| WorkflowExecutionError::Unsupported("capability_not_registered".into()))?;
+    if definition.capability_id != config.capability_id
+        || definition.version != config.version
+        || definition.package_digest != dependency.digest
+    {
+        return Err(WorkflowExecutionError::Integrity(
+            "capability_registration_pin".into(),
+        ));
+    }
+    Ok((config, dependency, definition))
+}
+
+fn capability_configuration(config: &CapabilityConfig) -> Result<Value> {
+    let configuration = if config.configuration.is_null() {
+        json!({})
+    } else {
+        config.configuration.clone()
+    };
+    if !configuration.is_object() {
+        return Err(WorkflowExecutionError::Integrity(
+            "capability_configuration".into(),
+        ));
+    }
+    Ok(configuration)
+}
+
+fn require_valid_schema(schema: &Value, code: &'static str) -> Result<()> {
+    let report = workflow_schema::check(&WorkflowSchemaCheckRequest {
+        schema: schema.clone(),
+        instance: Value::Null,
+    });
+    if report.outcome == WorkflowSchemaCheckOutcome::InvalidSchema {
+        return Err(WorkflowExecutionError::Unsupported(code.into()));
+    }
+    Ok(())
+}
+
+fn require_schema_match(schema: &Value, instance: Value, code: &'static str) -> Result<()> {
+    let report = workflow_schema::check(&WorkflowSchemaCheckRequest {
+        schema: schema.clone(),
+        instance,
+    });
+    if report.outcome != WorkflowSchemaCheckOutcome::Valid {
+        return Err(WorkflowExecutionError::Unsupported(code.into()));
+    }
+    Ok(())
+}
+
+fn schema_digest(schema: &Value) -> Result<String> {
+    let encoded = serde_json::to_vec(schema)
+        .map_err(|_| WorkflowExecutionError::Encoding("capability_schema"))?;
+    workflow_canonical::canonicalize(&encoded)
+        .map(|report| report.sha256.trim_start_matches("sha256:").to_owned())
+        .map_err(|_| WorkflowExecutionError::Encoding("capability_schema"))
+}
+
 fn compiled_storage_requirements(
     library: &WorkflowLibraryStore,
     compiled: &CompiledWorkflow,
@@ -1032,6 +1292,7 @@ fn validate_compiled_subset(compiled: &CompiledWorkflow) -> Result<()> {
                     | "storage.read"
                     | "storage.write"
                     | "storage.promote"
+                    | "compute.capability"
                     | "terminal.complete"
                     | "terminal.fail"
             )
@@ -1472,6 +1733,7 @@ fn next_events(
     package: &ExecutionPackage,
     mut storage: Option<&mut WorkflowScopedStorage>,
     authority: Option<&WorkflowStorageExecutionAuthority>,
+    capabilities: &mut dyn WorkflowCapabilityHost,
     command: &v1::CommandEnvelope,
     request: &v1::RequestWorkflowRun,
     token_id: &str,
@@ -1567,6 +1829,7 @@ fn next_events(
                     library,
                     storage.as_deref_mut(),
                     authority,
+                    capabilities,
                     command,
                     request,
                     recorded,
@@ -1578,6 +1841,29 @@ fn next_events(
                 return Ok(vec![subflow_settled_event(
                     journal, command, request, token_id, recorded,
                 )?]);
+            }
+            if let Some(recorded) = state.capability_attempts.values().find(|recorded| {
+                recorded.started.attempt_id == active.started.attempt_id
+                    && recorded.settled.is_none()
+            }) {
+                let elapsed = cancellation_time(state, command.submitted_at_unix_millis)
+                    .saturating_sub(recorded.started_at_unix_millis)
+                    .max(0) as u64;
+                return Ok(vec![capability_settled_event(
+                    recorded,
+                    command,
+                    request,
+                    token_id,
+                    v1::WorkflowCapabilityAttemptOutcome::Cancelled,
+                    None,
+                    Vec::new(),
+                    &cancellation.reason_code,
+                    None,
+                    Vec::new(),
+                    elapsed,
+                    String::new(),
+                    String::new(),
+                )]);
             }
             if let Some(wait) = state.waits.values().find(|wait| {
                 wait.subscribed.controller_attempt_id == active.started.attempt_id
@@ -1675,6 +1961,7 @@ fn next_events(
             package,
             storage,
             authority,
+            capabilities,
             command,
             request,
             token_id,
@@ -1769,6 +2056,7 @@ fn node_event_sequence(
     package: &ExecutionPackage,
     mut storage: Option<&mut WorkflowScopedStorage>,
     authority: Option<&WorkflowStorageExecutionAuthority>,
+    capabilities: &mut dyn WorkflowCapabilityHost,
     command: &v1::CommandEnvelope,
     request: &v1::RequestWorkflowRun,
     token_id: &str,
@@ -1792,6 +2080,7 @@ fn node_event_sequence(
             package,
             storage.as_deref_mut(),
             authority,
+            capabilities,
             command,
             request,
             token_id,
@@ -1802,6 +2091,21 @@ fn node_event_sequence(
             now_unix_millis,
             subflow_depth,
             job_run_id,
+        )?
+    {
+        return Ok(events);
+    }
+    if node.node_type == "compute.capability"
+        && let Some(events) = pending_capability_event_sequence(
+            package,
+            capabilities,
+            command,
+            request,
+            token_id,
+            state,
+            attempt,
+            node,
+            &inputs,
         )?
     {
         return Ok(events);
@@ -1843,7 +2147,9 @@ fn node_event_sequence(
             now_unix_millis,
         );
     }
-    let execution = if node.node_type == "control.subflow" {
+    let execution = if node.node_type == "compute.capability" {
+        execute_settled_capability_node(request, state, attempt, node)?
+    } else if node.node_type == "control.subflow" {
         execute_settled_subflow_node(request, state, attempt, node)?
     } else if node.node_type == "control.join" {
         execute_join_node(
@@ -2971,6 +3277,7 @@ fn pending_subflow_event_sequence(
     package: &ExecutionPackage,
     storage: Option<&mut WorkflowScopedStorage>,
     authority: Option<&WorkflowStorageExecutionAuthority>,
+    capabilities: &mut dyn WorkflowCapabilityHost,
     command: &v1::CommandEnvelope,
     request: &v1::RequestWorkflowRun,
     run_token_id: &str,
@@ -3039,6 +3346,7 @@ fn pending_subflow_event_sequence(
         library,
         storage,
         authority,
+        capabilities,
         &child_command,
         now_unix_millis,
         None,
@@ -3158,6 +3466,7 @@ fn cascade_subflow_cancellation(
     library: &WorkflowLibraryStore,
     mut storage: Option<&mut WorkflowScopedStorage>,
     authority: Option<&WorkflowStorageExecutionAuthority>,
+    capabilities: &mut dyn WorkflowCapabilityHost,
     parent_command: &v1::CommandEnvelope,
     parent_request: &v1::RequestWorkflowRun,
     recorded: &RecordedSubflow,
@@ -3174,6 +3483,7 @@ fn cascade_subflow_cancellation(
             library,
             storage.as_deref_mut(),
             authority,
+            capabilities,
             &child_command,
             now_unix_millis,
             None,
@@ -3206,6 +3516,7 @@ fn cascade_subflow_cancellation(
         library,
         storage,
         authority,
+        capabilities,
         &child_command,
         now_unix_millis,
         None,
@@ -3378,6 +3689,663 @@ fn execute_settled_subflow_node(
             Err(WorkflowExecutionError::Integrity("subflow_outcome".into()))
         }
     }
+}
+
+fn pending_capability_event_sequence(
+    package: &ExecutionPackage,
+    capabilities: &mut dyn WorkflowCapabilityHost,
+    command: &v1::CommandEnvelope,
+    request: &v1::RequestWorkflowRun,
+    run_token_id: &str,
+    state: &RecordedRun,
+    attempt: &RecordedAttempt,
+    node: &CompiledNode,
+    inputs: &[(
+        Option<&v1::WorkflowEdgeCheckpointed>,
+        v1::WorkflowValueReference,
+    )],
+) -> Result<Option<Vec<v1::EventEnvelope>>> {
+    let invocation_id = capability_invocation_id(request, attempt, node);
+    let input = inputs
+        .last()
+        .ok_or_else(|| WorkflowExecutionError::Lifecycle("capability_input_missing".into()))?
+        .1
+        .clone();
+    let (config, dependency, definition) =
+        resolve_capability_definition(package, capabilities, node)?;
+    let Some(recorded) = state.capability_attempts.get(&invocation_id) else {
+        let configuration = capability_configuration(&config)?;
+        let configuration_value = value_from_json(
+            &stable_id(
+                "value",
+                &[
+                    &request.run_id,
+                    &attempt.started.attempt_id,
+                    "capability-configuration",
+                ],
+            ),
+            &configuration,
+        )?;
+        let event_id = stable_id(
+            "event",
+            &[&request.run_id, "capability-started", &invocation_id],
+        );
+        let timeout_milliseconds = definition.timeout_milliseconds;
+        let deadline_unix_millis = attempt
+            .started_at_unix_millis
+            .checked_add(timeout_milliseconds as i64)
+            .ok_or_else(|| WorkflowExecutionError::Encoding("capability_deadline"))?;
+        return Ok(Some(vec![runtime_event(
+            attempt.started_at_unix_millis,
+            &event_id,
+            workflow_runtime::WORKFLOW_CAPABILITY_ATTEMPT_STARTED_KIND,
+            workflow_runtime::WORKFLOW_CAPABILITY_ATTEMPT_STARTED_TYPE,
+            v1::WorkflowCapabilityAttemptStarted {
+                run_id: request.run_id.clone(),
+                run_token_id: run_token_id.to_owned(),
+                invocation_id,
+                attempt_id: attempt.started.attempt_id.clone(),
+                execution_token_id: attempt.started.execution_token_id.clone(),
+                node_id: node.id.clone(),
+                capability_id: config.capability_id,
+                version: config.version,
+                package_digest: dependency.digest,
+                configuration_contract_digest: schema_digest(&definition.configuration_schema)?,
+                input_schema_digest: schema_digest(&definition.input_schema)?,
+                output_schema_digest: schema_digest(&definition.output_schema)?,
+                output_schema_ref: config.output_schema_ref,
+                configuration: Some(configuration_value),
+                input: Some(input.clone()),
+                artifact_inputs: artifact_handles_from_value(&input, "input"),
+                timeout_milliseconds,
+                deadline_unix_millis,
+            },
+            &attempt.started_event_id,
+            &request.run_id,
+        )]));
+    };
+    validate_recorded_capability_attempt(
+        request,
+        run_token_id,
+        attempt,
+        node,
+        &input,
+        &config,
+        &dependency,
+        &definition,
+        recorded,
+    )?;
+    if recorded.settled.is_some() {
+        return Ok(None);
+    }
+
+    let input_instance = capability_value_instance(&input)?;
+    let validation = workflow_schema::check(&WorkflowSchemaCheckRequest {
+        schema: definition.input_schema.clone(),
+        instance: input_instance,
+    });
+    if validation.outcome != WorkflowSchemaCheckOutcome::Valid {
+        let error = capability_error_value(
+            request,
+            &invocation_id,
+            "capability.input-validation-failed",
+            "The capability input did not match its registered schema.",
+            Some(json!({
+                "diagnostics": validation.diagnostics,
+                "diagnosticsTruncated": validation.diagnostics_truncated
+            })),
+        )?;
+        return Ok(Some(vec![capability_settled_event(
+            recorded,
+            command,
+            request,
+            run_token_id,
+            v1::WorkflowCapabilityAttemptOutcome::InputValidationFailed,
+            None,
+            Vec::new(),
+            "capability.input-validation-failed",
+            Some(error),
+            Vec::new(),
+            0,
+            String::new(),
+            String::new(),
+        )]));
+    }
+
+    let configuration = capability_configuration(&config)?;
+    let invocation = WorkflowCapabilityInvocation {
+        invocation_id: invocation_id.clone(),
+        run_id: request.run_id.clone(),
+        attempt_id: attempt.started.attempt_id.clone(),
+        node_id: node.id.clone(),
+        capability_id: config.capability_id,
+        version: config.version,
+        package_digest: dependency.digest,
+        configuration,
+        input,
+        artifact_inputs: capability_artifact_inputs(&recorded.started.artifact_inputs),
+        timeout_milliseconds: definition.timeout_milliseconds,
+    };
+    let result = capabilities.invoke(&invocation);
+    Ok(Some(vec![capability_host_result_event(
+        request,
+        run_token_id,
+        command,
+        recorded,
+        &definition,
+        result,
+    )?]))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_recorded_capability_attempt(
+    request: &v1::RequestWorkflowRun,
+    run_token_id: &str,
+    attempt: &RecordedAttempt,
+    node: &CompiledNode,
+    input: &v1::WorkflowValueReference,
+    config: &CapabilityConfig,
+    dependency: &CompiledDependency,
+    definition: &WorkflowCapabilityDefinition,
+    recorded: &RecordedCapabilityAttempt,
+) -> Result<()> {
+    let configuration = capability_configuration(config)?;
+    let configuration_value = value_from_json(
+        &stable_id(
+            "value",
+            &[
+                &request.run_id,
+                &attempt.started.attempt_id,
+                "capability-configuration",
+            ],
+        ),
+        &configuration,
+    )?;
+    if recorded.started.run_id != request.run_id
+        || recorded.started.run_token_id != run_token_id
+        || recorded.started.attempt_id != attempt.started.attempt_id
+        || recorded.started.execution_token_id != attempt.started.execution_token_id
+        || recorded.started.node_id != node.id
+        || recorded.started.capability_id != config.capability_id
+        || recorded.started.version != config.version
+        || recorded.started.package_digest != dependency.digest
+        || recorded.started.configuration_contract_digest
+            != schema_digest(&definition.configuration_schema)?
+        || recorded.started.input_schema_digest != schema_digest(&definition.input_schema)?
+        || recorded.started.output_schema_digest != schema_digest(&definition.output_schema)?
+        || recorded.started.output_schema_ref != config.output_schema_ref
+        || recorded.started.configuration.as_ref() != Some(&configuration_value)
+        || recorded.started.input.as_ref() != Some(input)
+        || recorded.started.timeout_milliseconds != definition.timeout_milliseconds
+        || recorded.started.deadline_unix_millis
+            != recorded
+                .started_at_unix_millis
+                .checked_add(definition.timeout_milliseconds as i64)
+                .ok_or_else(|| WorkflowExecutionError::Encoding("capability_deadline"))?
+    {
+        return Err(WorkflowExecutionError::Integrity(
+            "recorded_capability_pin_mismatch".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn capability_host_result_event(
+    request: &v1::RequestWorkflowRun,
+    run_token_id: &str,
+    command: &v1::CommandEnvelope,
+    recorded: &RecordedCapabilityAttempt,
+    definition: &WorkflowCapabilityDefinition,
+    result: WorkflowCapabilityHostResult,
+) -> Result<v1::EventEnvelope> {
+    let invocation_id = recorded.started.invocation_id.as_str();
+    match result {
+        WorkflowCapabilityHostResult::Succeeded {
+            output,
+            artifacts,
+            logs,
+            elapsed_milliseconds,
+            receipt_id,
+            provider_run_reference,
+        } if elapsed_milliseconds <= definition.timeout_milliseconds => {
+            let output = capability_output_value(request, invocation_id, output)?;
+            let report = workflow_schema::check(&WorkflowSchemaCheckRequest {
+                schema: definition.output_schema.clone(),
+                instance: capability_value_instance(&output)?,
+            });
+            if report.outcome != WorkflowSchemaCheckOutcome::Valid {
+                let error = capability_error_value(
+                    request,
+                    invocation_id,
+                    "capability.output-validation-failed",
+                    "The capability output did not match its registered schema.",
+                    Some(json!({
+                        "diagnostics": report.diagnostics,
+                        "diagnosticsTruncated": report.diagnostics_truncated
+                    })),
+                )?;
+                return Ok(capability_settled_event(
+                    recorded,
+                    command,
+                    request,
+                    run_token_id,
+                    v1::WorkflowCapabilityAttemptOutcome::OutputValidationFailed,
+                    None,
+                    Vec::new(),
+                    "capability.output-validation-failed",
+                    Some(error),
+                    capability_logs(logs, elapsed_milliseconds),
+                    elapsed_milliseconds,
+                    normalized_receipt_id(&receipt_id, invocation_id),
+                    String::new(),
+                ));
+            }
+            let artifacts = capability_artifact_outputs(artifacts)?;
+            Ok(capability_settled_event(
+                recorded,
+                command,
+                request,
+                run_token_id,
+                v1::WorkflowCapabilityAttemptOutcome::Succeeded,
+                Some(output),
+                artifacts,
+                "",
+                None,
+                capability_logs(logs, elapsed_milliseconds),
+                elapsed_milliseconds,
+                normalized_receipt_id(&receipt_id, invocation_id),
+                normalized_optional_identifier(&provider_run_reference, "provider", invocation_id),
+            ))
+        }
+        WorkflowCapabilityHostResult::Succeeded {
+            logs,
+            elapsed_milliseconds,
+            receipt_id,
+            ..
+        }
+        | WorkflowCapabilityHostResult::TimedOut {
+            logs,
+            elapsed_milliseconds,
+            receipt_id,
+        } => {
+            let error = capability_error_value(
+                request,
+                invocation_id,
+                "capability.timeout",
+                "The capability exceeded its registered execution deadline.",
+                None,
+            )?;
+            Ok(capability_settled_event(
+                recorded,
+                command,
+                request,
+                run_token_id,
+                v1::WorkflowCapabilityAttemptOutcome::TimedOut,
+                None,
+                Vec::new(),
+                "capability.timeout",
+                Some(error),
+                capability_logs(logs, elapsed_milliseconds),
+                elapsed_milliseconds.min(86_400_000),
+                normalized_receipt_id(&receipt_id, invocation_id),
+                String::new(),
+            ))
+        }
+        WorkflowCapabilityHostResult::MalformedResult {
+            summary,
+            logs,
+            elapsed_milliseconds,
+            receipt_id,
+        } => capability_failure_result_event(
+            request,
+            run_token_id,
+            command,
+            recorded,
+            v1::WorkflowCapabilityAttemptOutcome::MalformedResult,
+            "capability.malformed-result",
+            &summary,
+            logs,
+            elapsed_milliseconds,
+            receipt_id,
+        ),
+        WorkflowCapabilityHostResult::Crashed {
+            summary,
+            logs,
+            elapsed_milliseconds,
+            receipt_id,
+        } => capability_failure_result_event(
+            request,
+            run_token_id,
+            command,
+            recorded,
+            v1::WorkflowCapabilityAttemptOutcome::Crashed,
+            "capability.crashed",
+            &summary,
+            logs,
+            elapsed_milliseconds,
+            receipt_id,
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capability_failure_result_event(
+    request: &v1::RequestWorkflowRun,
+    run_token_id: &str,
+    command: &v1::CommandEnvelope,
+    recorded: &RecordedCapabilityAttempt,
+    outcome: v1::WorkflowCapabilityAttemptOutcome,
+    error_code: &str,
+    summary: &str,
+    logs: Vec<WorkflowCapabilityLog>,
+    elapsed_milliseconds: u64,
+    receipt_id: String,
+) -> Result<v1::EventEnvelope> {
+    let invocation_id = recorded.started.invocation_id.as_str();
+    let error = capability_error_value(
+        request,
+        invocation_id,
+        error_code,
+        &sanitize_capability_text(summary),
+        None,
+    )?;
+    Ok(capability_settled_event(
+        recorded,
+        command,
+        request,
+        run_token_id,
+        outcome,
+        None,
+        Vec::new(),
+        error_code,
+        Some(error),
+        capability_logs(logs, elapsed_milliseconds),
+        elapsed_milliseconds.min(86_400_000),
+        normalized_receipt_id(&receipt_id, invocation_id),
+        String::new(),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capability_settled_event(
+    recorded: &RecordedCapabilityAttempt,
+    _command: &v1::CommandEnvelope,
+    request: &v1::RequestWorkflowRun,
+    run_token_id: &str,
+    outcome: v1::WorkflowCapabilityAttemptOutcome,
+    output: Option<v1::WorkflowValueReference>,
+    artifact_outputs: Vec<v1::WorkflowCapabilityArtifactHandle>,
+    error_code: &str,
+    error: Option<v1::WorkflowValueReference>,
+    logs: Vec<v1::WorkflowCapabilityLogEntry>,
+    elapsed_milliseconds: u64,
+    receipt_id: String,
+    provider_run_reference: String,
+) -> v1::EventEnvelope {
+    let invocation_id = recorded.started.invocation_id.as_str();
+    runtime_event(
+        recorded
+            .started_at_unix_millis
+            .saturating_add(elapsed_milliseconds.min(i64::MAX as u64) as i64),
+        &stable_id(
+            "event",
+            &[&request.run_id, "capability-settled", invocation_id],
+        ),
+        workflow_runtime::WORKFLOW_CAPABILITY_ATTEMPT_SETTLED_KIND,
+        workflow_runtime::WORKFLOW_CAPABILITY_ATTEMPT_SETTLED_TYPE,
+        v1::WorkflowCapabilityAttemptSettled {
+            run_id: request.run_id.clone(),
+            run_token_id: run_token_id.to_owned(),
+            invocation_id: invocation_id.to_owned(),
+            attempt_id: recorded.started.attempt_id.clone(),
+            outcome: outcome as i32,
+            output,
+            artifact_outputs,
+            error_code: error_code.to_owned(),
+            error,
+            logs,
+            elapsed_milliseconds,
+            receipt_id,
+            provider_run_reference,
+            idempotency_key: invocation_id.to_owned(),
+        },
+        &recorded.started_event_id,
+        &request.run_id,
+    )
+}
+
+fn execute_settled_capability_node(
+    request: &v1::RequestWorkflowRun,
+    state: &RecordedRun,
+    attempt: &RecordedAttempt,
+    node: &CompiledNode,
+) -> Result<NodeExecution> {
+    let invocation_id = capability_invocation_id(request, attempt, node);
+    let settled = state
+        .capability_attempts
+        .get(&invocation_id)
+        .and_then(|recorded| recorded.settled.as_ref())
+        .ok_or_else(|| WorkflowExecutionError::Lifecycle("capability_not_settled".into()))?;
+    match v1::WorkflowCapabilityAttemptOutcome::try_from(settled.outcome)
+        .map_err(|_| WorkflowExecutionError::Integrity("capability_outcome".into()))?
+    {
+        v1::WorkflowCapabilityAttemptOutcome::Succeeded => Ok(success_output(
+            "success",
+            settled
+                .output
+                .clone()
+                .ok_or_else(|| WorkflowExecutionError::Integrity("capability_output".into()))?,
+        )),
+        v1::WorkflowCapabilityAttemptOutcome::InputValidationFailed
+        | v1::WorkflowCapabilityAttemptOutcome::OutputValidationFailed
+        | v1::WorkflowCapabilityAttemptOutcome::TimedOut
+        | v1::WorkflowCapabilityAttemptOutcome::MalformedResult
+        | v1::WorkflowCapabilityAttemptOutcome::Crashed => {
+            let error = settled
+                .error
+                .clone()
+                .ok_or_else(|| WorkflowExecutionError::Integrity("capability_error".into()))?;
+            Ok(failure_output("error", &settled.error_code, error))
+        }
+        v1::WorkflowCapabilityAttemptOutcome::Cancelled => Err(WorkflowExecutionError::Lifecycle(
+            "cancelled_capability_reentered".into(),
+        )),
+        v1::WorkflowCapabilityAttemptOutcome::Unspecified => Err(
+            WorkflowExecutionError::Integrity("capability_outcome".into()),
+        ),
+    }
+}
+
+fn capability_invocation_id(
+    request: &v1::RequestWorkflowRun,
+    attempt: &RecordedAttempt,
+    node: &CompiledNode,
+) -> String {
+    stable_id(
+        "capability",
+        &[&request.run_id, &attempt.started.attempt_id, &node.id],
+    )
+}
+
+fn capability_value_instance(value: &v1::WorkflowValueReference) -> Result<Value> {
+    if !value.inline_canonical_json.is_empty() {
+        return inline_json(value);
+    }
+    context_value(value)
+}
+
+fn capability_output_value(
+    request: &v1::RequestWorkflowRun,
+    invocation_id: &str,
+    output: WorkflowCapabilityValue,
+) -> Result<v1::WorkflowValueReference> {
+    match output {
+        WorkflowCapabilityValue::Json(value) => value_from_json(
+            &stable_id(
+                "value",
+                &[&request.run_id, invocation_id, "capability-output"],
+            ),
+            &value,
+        ),
+        WorkflowCapabilityValue::StorageReference(value)
+            if value.inline_canonical_json.is_empty()
+                && !value.storage_reference_id.is_empty()
+                && value.storage.is_some() =>
+        {
+            Ok(value)
+        }
+        WorkflowCapabilityValue::StorageReference(_) => Err(WorkflowExecutionError::Integrity(
+            "capability_output_handle".into(),
+        )),
+    }
+}
+
+fn artifact_handles_from_value(
+    value: &v1::WorkflowValueReference,
+    role: &str,
+) -> Vec<v1::WorkflowCapabilityArtifactHandle> {
+    value
+        .storage
+        .as_ref()
+        .filter(|metadata| !metadata.handle_id.is_empty())
+        .map(|metadata| {
+            vec![v1::WorkflowCapabilityArtifactHandle {
+                handle_id: metadata.handle_id.clone(),
+                role: role.to_owned(),
+                value: Some(value.clone()),
+            }]
+        })
+        .unwrap_or_default()
+}
+
+fn capability_artifact_inputs(
+    values: &[v1::WorkflowCapabilityArtifactHandle],
+) -> Vec<WorkflowCapabilityArtifactHandle> {
+    values
+        .iter()
+        .filter_map(|artifact| {
+            artifact
+                .value
+                .clone()
+                .map(|value| WorkflowCapabilityArtifactHandle {
+                    value,
+                    role: artifact.role.clone(),
+                })
+        })
+        .collect()
+}
+
+fn capability_artifact_outputs(
+    values: Vec<WorkflowCapabilityArtifactHandle>,
+) -> Result<Vec<v1::WorkflowCapabilityArtifactHandle>> {
+    values
+        .into_iter()
+        .map(|artifact| {
+            let metadata = artifact.value.storage.as_ref().ok_or_else(|| {
+                WorkflowExecutionError::Integrity("capability_artifact_metadata".into())
+            })?;
+            if artifact.value.inline_canonical_json.is_empty()
+                && !artifact.value.storage_reference_id.is_empty()
+                && !metadata.handle_id.is_empty()
+                && !artifact.role.is_empty()
+            {
+                Ok(v1::WorkflowCapabilityArtifactHandle {
+                    handle_id: metadata.handle_id.clone(),
+                    role: artifact.role,
+                    value: Some(artifact.value),
+                })
+            } else {
+                Err(WorkflowExecutionError::Integrity(
+                    "capability_artifact_handle".into(),
+                ))
+            }
+        })
+        .collect()
+}
+
+fn capability_logs(
+    logs: Vec<WorkflowCapabilityLog>,
+    elapsed_milliseconds: u64,
+) -> Vec<v1::WorkflowCapabilityLogEntry> {
+    logs.into_iter()
+        .take(128)
+        .enumerate()
+        .map(|(index, log)| v1::WorkflowCapabilityLogEntry {
+            sequence: (index + 1) as u32,
+            level: match log.level.as_str() {
+                "debug" | "info" | "warning" | "error" => log.level,
+                _ => "info".into(),
+            },
+            message: sanitize_capability_text(&log.message),
+            offset_milliseconds: log.offset_milliseconds.min(elapsed_milliseconds),
+        })
+        .collect()
+}
+
+fn sanitize_capability_text(value: &str) -> String {
+    let lowered = value.to_ascii_lowercase();
+    if ["authorization", "password", "secret", "api_key", "api-key"]
+        .iter()
+        .any(|marker| lowered.contains(marker))
+    {
+        return "[redacted sensitive capability evidence]".into();
+    }
+    let sanitized = value
+        .split_whitespace()
+        .map(|part| {
+            if part.starts_with('/') || part.starts_with("file://") {
+                "[redacted-path]"
+            } else {
+                part
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let bounded = sanitized.chars().take(2_048).collect::<String>();
+    if bounded.is_empty() {
+        "Capability evidence unavailable.".into()
+    } else {
+        bounded
+    }
+}
+
+fn normalized_receipt_id(value: &str, invocation_id: &str) -> String {
+    normalized_optional_identifier(value, "receipt", invocation_id)
+}
+
+fn normalized_optional_identifier(value: &str, prefix: &str, invocation_id: &str) -> String {
+    if !value.is_empty()
+        && value.len() <= 256
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+    {
+        value.to_owned()
+    } else if value.is_empty() {
+        String::new()
+    } else {
+        stable_id(prefix, &[invocation_id, value])
+    }
+}
+
+fn capability_error_value(
+    request: &v1::RequestWorkflowRun,
+    invocation_id: &str,
+    code: &str,
+    summary: &str,
+    details: Option<Value>,
+) -> Result<v1::WorkflowValueReference> {
+    value_from_json(
+        &stable_id(
+            "value",
+            &[&request.run_id, invocation_id, "capability-error", code],
+        ),
+        &json!({
+            "code": code,
+            "summary": summary,
+            "details": details
+        }),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5577,6 +6545,44 @@ fn recorded_run(journal: &Journal, run_id: &str) -> Result<RecordedRun> {
                     settled_event_id: None,
                     settled: None,
                 });
+            }
+            WorkflowRuntimeEvent::CapabilityAttemptStarted(payload) => {
+                if state
+                    .capability_attempts
+                    .insert(
+                        payload.invocation_id.clone(),
+                        RecordedCapabilityAttempt {
+                            started_event_id: envelope.event_id,
+                            started_at_unix_millis: envelope.occurred_at_unix_millis,
+                            started: payload,
+                            settled_event_id: None,
+                            settled: None,
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(WorkflowExecutionError::Lifecycle(
+                        "duplicate_capability_attempt".into(),
+                    ));
+                }
+            }
+            WorkflowRuntimeEvent::CapabilityAttemptSettled(payload) => {
+                let capability = state
+                    .capability_attempts
+                    .get_mut(&payload.invocation_id)
+                    .ok_or_else(|| {
+                        WorkflowExecutionError::Lifecycle(
+                            "capability_attempt_started_missing".into(),
+                        )
+                    })?;
+                if capability.started.attempt_id != payload.attempt_id
+                    || capability.settled.replace(payload).is_some()
+                {
+                    return Err(WorkflowExecutionError::Lifecycle(
+                        "capability_attempt_settled_mismatch".into(),
+                    ));
+                }
+                capability.settled_event_id = Some(envelope.event_id);
             }
             WorkflowRuntimeEvent::AttemptSettled(payload) => {
                 let attempt = state
