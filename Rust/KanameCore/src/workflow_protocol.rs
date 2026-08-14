@@ -2,7 +2,7 @@ use crate::{
     SCHEMA_MAJOR,
     v1::{
         CompileWorkflowRequest, ImportFrozenWorkspaceRequest, SetWorkflowActivationRequest,
-        ValidateWorkflowRequest, WorkflowLibraryQueryRequest,
+        ValidateWorkflowRequest, WorkflowLibraryQueryRequest, WorkflowRunInspectionQuery,
     },
 };
 use prost::Message;
@@ -21,6 +21,7 @@ pub enum WorkflowProtocolError {
     DocumentOutOfBounds,
     DiagnosticLimitOutOfBounds,
     MissingOperation,
+    InspectionLimitOutOfBounds,
 }
 
 pub fn decode_validate_request(
@@ -79,6 +80,22 @@ pub fn decode_frozen_workspace_import_request(
     decode_enveloped(wire)
 }
 
+pub fn decode_run_inspection_query(
+    wire: &[u8],
+) -> Result<WorkflowRunInspectionQuery, WorkflowProtocolError> {
+    let request: WorkflowRunInspectionQuery = decode_enveloped(wire)?;
+    if request.limit == 0 || request.limit > 100 {
+        return Err(WorkflowProtocolError::InspectionLimitOutOfBounds);
+    }
+    if !request.run_id.is_empty() && request.run_id.len() > 128 {
+        return Err(WorkflowProtocolError::RequestOutOfBounds);
+    }
+    if !request.workflow_id.is_empty() && request.workflow_id.len() > 128 {
+        return Err(WorkflowProtocolError::RequestOutOfBounds);
+    }
+    Ok(request)
+}
+
 trait WorkflowEnvelope {
     fn schema_major(&self) -> Option<u32>;
     fn request_id(&self) -> &str;
@@ -101,6 +118,7 @@ macro_rules! workflow_envelope {
 workflow_envelope!(WorkflowLibraryQueryRequest);
 workflow_envelope!(SetWorkflowActivationRequest);
 workflow_envelope!(ImportFrozenWorkspaceRequest);
+workflow_envelope!(WorkflowRunInspectionQuery);
 
 fn decode_enveloped<M>(wire: &[u8]) -> Result<M, WorkflowProtocolError>
 where

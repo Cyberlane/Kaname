@@ -589,11 +589,121 @@
       "6": "string port_id",
       "7": "WorkflowValueReference value"
     },
+    "workflow_runtime.WorkflowProjectedAttempt": {
+      "1": "string attempt_id",
+      "10": "uint64 started_store_position",
+      "11": "uint64 settled_store_position",
+      "12": "string emission_ids",
+      "2": "string node_id",
+      "3": "uint32 attempt_number",
+      "4": "string status",
+      "5": "string outcome",
+      "6": "string error_code",
+      "7": "WorkflowProjectedValue error",
+      "8": "int64 started_at_unix_millis",
+      "9": "int64 settled_at_unix_millis"
+    },
+    "workflow_runtime.WorkflowProjectedEdgeCheckpoint": {
+      "1": "string event_id",
+      "2": "string edge_id",
+      "3": "string emission_id",
+      "4": "string target_node_id",
+      "5": "string target_port_id",
+      "6": "string state",
+      "7": "int64 checkpointed_at_unix_millis",
+      "8": "uint64 store_position"
+    },
+    "workflow_runtime.WorkflowProjectedEmission": {
+      "1": "string emission_id",
+      "2": "string attempt_id",
+      "3": "string node_id",
+      "4": "string port_id",
+      "5": "WorkflowProjectedValue value",
+      "6": "string event_id",
+      "7": "int64 emitted_at_unix_millis",
+      "8": "uint64 store_position"
+    },
+    "workflow_runtime.WorkflowProjectedEventReference": {
+      "1": "string event_id",
+      "2": "string kind",
+      "3": "uint64 store_position",
+      "4": "uint64 stream_sequence",
+      "5": "int64 occurred_at_unix_millis"
+    },
+    "workflow_runtime.WorkflowProjectedMatchTrace": {
+      "1": "string event_id",
+      "10": "uint64 store_position",
+      "2": "string attempt_id",
+      "3": "string node_id",
+      "4": "string input_value_id",
+      "5": "string evaluated_case_ids",
+      "6": "string matched_case_ids",
+      "7": "string emitted_port_ids",
+      "8": "WorkflowProjectedValue trace",
+      "9": "int64 recorded_at_unix_millis"
+    },
+    "workflow_runtime.WorkflowProjectedNodeState": {
+      "1": "string node_id",
+      "2": "string status",
+      "3": "string latest_attempt_id",
+      "4": "uint32 latest_attempt_number",
+      "5": "int64 started_at_unix_millis",
+      "6": "int64 settled_at_unix_millis",
+      "7": "uint64 last_store_position"
+    },
+    "workflow_runtime.WorkflowProjectedRun": {
+      "1": "string run_id",
+      "10": "WorkflowProjectedValue error",
+      "11": "string final_emission_ids",
+      "12": "string cancellation_command_id",
+      "13": "string cancellation_reason_code",
+      "14": "int64 created_at_unix_millis",
+      "15": "int64 settled_at_unix_millis",
+      "16": "uint64 first_store_position",
+      "17": "uint64 last_store_position",
+      "18": "WorkflowProjectedAttempt attempts",
+      "19": "WorkflowProjectedNodeState nodes",
+      "2": "string run_token_id",
+      "20": "WorkflowProjectedEmission emissions",
+      "21": "WorkflowProjectedEdgeCheckpoint edges",
+      "22": "WorkflowProjectedMatchTrace match_traces",
+      "23": "WorkflowProjectedEventReference events",
+      "3": "string request_command_id",
+      "4": "string workflow_id",
+      "5": "string revision_id",
+      "6": "string package_digest",
+      "7": "string status",
+      "8": "string outcome",
+      "9": "string error_code"
+    },
+    "workflow_runtime.WorkflowProjectedValue": {
+      "1": "string value_id",
+      "2": "string content_type",
+      "3": "uint64 byte_count",
+      "4": "string sha256",
+      "5": "bytes inline_canonical_json",
+      "6": "string storage_reference_id",
+      "7": "string availability"
+    },
     "workflow_runtime.WorkflowRunCancellationRequested": {
       "1": "string run_id",
       "2": "string run_token_id",
       "3": "string cancel_command_id",
       "4": "string reason_code"
+    },
+    "workflow_runtime.WorkflowRunInspectionQuery": {
+      "1": "SchemaVersion schema_version",
+      "2": "string request_id",
+      "3": "string workflow_id",
+      "4": "string run_id",
+      "5": "uint32 limit"
+    },
+    "workflow_runtime.WorkflowRunInspectionResponse": {
+      "1": "SchemaVersion schema_version",
+      "2": "string request_id",
+      "3": "uint64 projection_high_water_mark",
+      "4": "WorkflowProjectedRun runs",
+      "5": "string absence_reason"
     },
     "workflow_runtime.WorkflowRunSettled": {
       "1": "string run_id",

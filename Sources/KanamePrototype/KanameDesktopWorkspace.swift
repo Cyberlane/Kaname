@@ -3,6 +3,7 @@ import KanameWorkflowHost
 import KanameConnectivity
 import KanameDomain
 import KanamePrototypeUI
+import KanameLocalCore
 import Foundation
 import SwiftUI
 #if os(macOS)
@@ -9311,6 +9312,19 @@ private struct DesktopAutomationsView: View {
                         ? "Safe mode is on. Schedules remain inspectable, but only local notification rules can execute."
                         : "Kaname never surprise-runs a backlog. A delay under two minutes is grace; older occurrences collapse to one skip receipt or one catch-up approval. New rules stay disabled until context, notifications, and authority are reviewed."
                 )
+
+                SectionHeading(
+                    title: "Workflow runs",
+                    detail: "Exact revision snapshots, durable node evidence, and read-only debugging"
+                )
+                if let runner = LocalCoreRunner.bundled() {
+                    DesktopDurableWorkflowRunsView(runner: runner)
+                } else {
+                    BoundaryCallout(
+                        title: "Durable run history unavailable",
+                        detail: "The signed local core service is not configured in this build. Kaname will not substitute fixture runs or display missing evidence as success."
+                    )
+                }
 
                 HStack {
                     Label(scheduler.ownerState, systemImage: "lock.shield")

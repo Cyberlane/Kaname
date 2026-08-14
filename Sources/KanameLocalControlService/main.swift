@@ -184,6 +184,22 @@ private final class LocalControlService: NSObject, LocalCoreControlService {
         )
     }
 
+    func inspectWorkflowRuns(_ request: Data, reply: @escaping (Data?, String) -> Void) {
+        let applicationSupportRoot = journalDirectory
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let projection = applicationSupportRoot
+            .appendingPathComponent("Workflows", isDirectory: true)
+            .appendingPathComponent("workflow-run-projection.sqlite")
+        runWireOperation(
+            "workflow-run-inspect",
+            request: request,
+            extraArguments: [projection.path],
+            permissionTarget: projection,
+            reply: reply
+        )
+    }
+
     private func runWorkflowLibraryOperation(
         _ operation: String,
         request: Data,

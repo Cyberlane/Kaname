@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package kaname.v1;
 
+import "kaname/v1/common.proto";
+
 // A value recorded directly in the bounded journal or represented by an
 // opaque storage reference. Host paths and secret material are never valid
 // references.
@@ -154,4 +156,137 @@ message WorkflowRunSettled {
   WorkflowValueReference error = 5;
   repeated string final_emission_ids = 6;
   reserved 7 to 20;
+}
+
+// Bounded, read-only query over the disposable run projection. The journal
+// remains authoritative; callers never supply a database or host path.
+message WorkflowRunInspectionQuery {
+  SchemaVersion schema_version = 1;
+  string request_id = 2;
+  string workflow_id = 3;
+  string run_id = 4;
+  uint32 limit = 5;
+  reserved 6 to 15;
+  reserved "database_path", "journal_path", "raw_path";
+}
+
+message WorkflowProjectedValue {
+  string value_id = 1;
+  string content_type = 2;
+  uint64 byte_count = 3;
+  string sha256 = 4;
+  bytes inline_canonical_json = 5;
+  string storage_reference_id = 6;
+  string availability = 7;
+  reserved 8 to 15;
+}
+
+message WorkflowProjectedAttempt {
+  string attempt_id = 1;
+  string node_id = 2;
+  uint32 attempt_number = 3;
+  string status = 4;
+  string outcome = 5;
+  string error_code = 6;
+  WorkflowProjectedValue error = 7;
+  int64 started_at_unix_millis = 8;
+  int64 settled_at_unix_millis = 9;
+  uint64 started_store_position = 10;
+  uint64 settled_store_position = 11;
+  repeated string emission_ids = 12;
+  reserved 13 to 20;
+}
+
+message WorkflowProjectedNodeState {
+  string node_id = 1;
+  string status = 2;
+  string latest_attempt_id = 3;
+  uint32 latest_attempt_number = 4;
+  int64 started_at_unix_millis = 5;
+  int64 settled_at_unix_millis = 6;
+  uint64 last_store_position = 7;
+  reserved 8 to 15;
+}
+
+message WorkflowProjectedEmission {
+  string emission_id = 1;
+  string attempt_id = 2;
+  string node_id = 3;
+  string port_id = 4;
+  WorkflowProjectedValue value = 5;
+  string event_id = 6;
+  int64 emitted_at_unix_millis = 7;
+  uint64 store_position = 8;
+  reserved 9 to 15;
+}
+
+message WorkflowProjectedEdgeCheckpoint {
+  string event_id = 1;
+  string edge_id = 2;
+  string emission_id = 3;
+  string target_node_id = 4;
+  string target_port_id = 5;
+  string state = 6;
+  int64 checkpointed_at_unix_millis = 7;
+  uint64 store_position = 8;
+  reserved 9 to 15;
+}
+
+message WorkflowProjectedMatchTrace {
+  string event_id = 1;
+  string attempt_id = 2;
+  string node_id = 3;
+  string input_value_id = 4;
+  repeated string evaluated_case_ids = 5;
+  repeated string matched_case_ids = 6;
+  repeated string emitted_port_ids = 7;
+  WorkflowProjectedValue trace = 8;
+  int64 recorded_at_unix_millis = 9;
+  uint64 store_position = 10;
+  reserved 11 to 20;
+}
+
+message WorkflowProjectedEventReference {
+  string event_id = 1;
+  string kind = 2;
+  uint64 store_position = 3;
+  uint64 stream_sequence = 4;
+  int64 occurred_at_unix_millis = 5;
+  reserved 6 to 12;
+}
+
+message WorkflowProjectedRun {
+  string run_id = 1;
+  string run_token_id = 2;
+  string request_command_id = 3;
+  string workflow_id = 4;
+  string revision_id = 5;
+  string package_digest = 6;
+  string status = 7;
+  string outcome = 8;
+  string error_code = 9;
+  WorkflowProjectedValue error = 10;
+  repeated string final_emission_ids = 11;
+  string cancellation_command_id = 12;
+  string cancellation_reason_code = 13;
+  int64 created_at_unix_millis = 14;
+  int64 settled_at_unix_millis = 15;
+  uint64 first_store_position = 16;
+  uint64 last_store_position = 17;
+  repeated WorkflowProjectedAttempt attempts = 18;
+  repeated WorkflowProjectedNodeState nodes = 19;
+  repeated WorkflowProjectedEmission emissions = 20;
+  repeated WorkflowProjectedEdgeCheckpoint edges = 21;
+  repeated WorkflowProjectedMatchTrace match_traces = 22;
+  repeated WorkflowProjectedEventReference events = 23;
+  reserved 24 to 35;
+}
+
+message WorkflowRunInspectionResponse {
+  SchemaVersion schema_version = 1;
+  string request_id = 2;
+  uint64 projection_high_water_mark = 3;
+  repeated WorkflowProjectedRun runs = 4;
+  string absence_reason = 5;
+  reserved 6 to 15;
 }

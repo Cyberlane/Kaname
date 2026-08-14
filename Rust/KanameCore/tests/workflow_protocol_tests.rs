@@ -2,7 +2,8 @@ use kaname_core::{
     v1::{
         CompileWorkflowRequest, FrozenWorkflowDraftImport, ImportFrozenWorkspaceRequest,
         SchemaVersion, SetWorkflowActivationRequest, ValidateWorkflowRequest,
-        WorkflowLibraryQueryRequest, WorkflowPortfolioQuery, workflow_library_query_request,
+        WorkflowLibraryQueryRequest, WorkflowPortfolioQuery, WorkflowRunInspectionQuery,
+        workflow_library_query_request,
     },
     workflow_protocol::{self, WorkflowProtocolError},
 };
@@ -104,6 +105,27 @@ fn library_queries_and_activation_decode_without_accepting_storage_paths() {
     assert_eq!(
         workflow_protocol::decode_library_query_request(&missing.encode_to_vec()),
         Err(WorkflowProtocolError::MissingOperation)
+    );
+}
+
+#[test]
+fn run_inspection_queries_are_bounded_and_path_free() {
+    let query = WorkflowRunInspectionQuery {
+        schema_version: version(),
+        request_id: "runs:recent-001".into(),
+        workflow_id: "workflow-one".into(),
+        run_id: String::new(),
+        limit: 30,
+    };
+    assert_eq!(
+        workflow_protocol::decode_run_inspection_query(&query.encode_to_vec()).unwrap(),
+        query
+    );
+    let mut invalid = query;
+    invalid.limit = 101;
+    assert_eq!(
+        workflow_protocol::decode_run_inspection_query(&invalid.encode_to_vec()),
+        Err(WorkflowProtocolError::InspectionLimitOutOfBounds)
     );
 }
 

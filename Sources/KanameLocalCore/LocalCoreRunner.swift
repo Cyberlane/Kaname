@@ -66,6 +66,7 @@ public protocol LocalCoreControlService {
     func queryWorkflowLibrary(_ request: Data, reply: @escaping (Data?, String) -> Void)
     func setWorkflowActivation(_ request: Data, reply: @escaping (Data?, String) -> Void)
     func importFrozenWorkspace(_ request: Data, reply: @escaping (Data?, String) -> Void)
+    func inspectWorkflowRuns(_ request: Data, reply: @escaping (Data?, String) -> Void)
 }
 #endif
 
@@ -236,6 +237,19 @@ public struct LocalCoreRunner: Sendable {
         )
     }
 
+    public func inspectWorkflowRuns(
+        _ request: Kaname_V1_WorkflowRunInspectionQuery,
+        timeout: TimeInterval = 5
+    ) async throws -> Kaname_V1_WorkflowRunInspectionResponse {
+        try await workflowLibraryResponse(
+            request: request.serializedData(),
+            requestID: request.requestID,
+            timeout: timeout,
+            operation: .inspectWorkflowRuns,
+            as: Kaname_V1_WorkflowRunInspectionResponse.self
+        )
+    }
+
     private func serviceResponse(
         request: Data,
         timeout: TimeInterval,
@@ -371,6 +385,7 @@ private protocol WorkflowLibraryWireResponse: Message {
 extension Kaname_V1_WorkflowLibraryQueryResponse: WorkflowLibraryWireResponse {}
 extension Kaname_V1_SetWorkflowActivationResponse: WorkflowLibraryWireResponse {}
 extension Kaname_V1_ImportFrozenWorkspaceResponse: WorkflowLibraryWireResponse {}
+extension Kaname_V1_WorkflowRunInspectionResponse: WorkflowLibraryWireResponse {}
 
 #if os(macOS)
 private enum LocalCoreServiceOperation {
@@ -385,10 +400,11 @@ private enum LocalCoreServiceOperation {
     case queryWorkflowLibrary
     case setWorkflowActivation
     case importFrozenWorkspace
+    case inspectWorkflowRuns
 
     var maximumResponseBytes: Int {
         switch self {
-        case .queryWorkflowLibrary, .importFrozenWorkspace:
+        case .queryWorkflowLibrary, .importFrozenWorkspace, .inspectWorkflowRuns:
             LocalCoreRunner.maximumWorkflowLibraryResponseBytes
         default: LocalCoreRunner.maximumResponseBytes
         }
@@ -443,6 +459,7 @@ private func runBoundedService(
     case .queryWorkflowLibrary: service.queryWorkflowLibrary(request, reply: reply)
     case .setWorkflowActivation: service.setWorkflowActivation(request, reply: reply)
     case .importFrozenWorkspace: service.importFrozenWorkspace(request, reply: reply)
+    case .inspectWorkflowRuns: service.inspectWorkflowRuns(request, reply: reply)
     }
     guard completion.wait(timeout: .now() + timeout) == .success else {
         connection.invalidate()

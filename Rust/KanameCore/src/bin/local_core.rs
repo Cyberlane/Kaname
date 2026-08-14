@@ -7,6 +7,7 @@ use kaname_core::{
     v1::{self, EventEnvelope},
     workflow_canonical, workflow_compiler,
     workflow_import::{ImportFrozenWorkflowDraft, ImportFrozenWorkspace},
+    workflow_projection::WorkflowRunProjection,
     workflow_schema::{self, WorkflowSchemaCheckRequest},
     workflow_versions::{
         SetWorkflowActivation, WorkflowExecutionSupport, WorkflowPortfolioState,
@@ -72,7 +73,10 @@ fn main() {
         [operation, application_support] if operation == "workflow-library-import-frozen" => {
             workflow_library_import_frozen(application_support)
         }
-        _ => Err("usage: kaname-local-core scenario <F-01..F-14> | scenario-store <F-01..F-14> <journal-path> | append-event <journal-path> < event-envelope.bin | authorize-action <journal-path> < approval-command.bin | record-review <journal-path> < command-envelope.bin | replay <journal-path> < replay-request.bin | mobile-propose <journal-path> < enrollment-challenge.bin | mobile-decide <journal-path> < enrollment-decision.bin | mobile-admit <journal-path> <recipient-device-id> <recipient-key-id> < encrypted-envelope.bin | scale <S-01..S-04> | workflow-schema-check < request.json | workflow-canonicalize < value.json | workflow-compile < compile-request.bin | workflow-library-query <application-support-root> < query-request.bin | workflow-library-activate <application-support-root> < activation-request.bin | workflow-library-import-frozen <application-support-root> < import-request.bin".to_owned()),
+        [operation, journal_path, projection_path] if operation == "workflow-run-inspect" => {
+            workflow_run_inspect(journal_path, projection_path)
+        }
+        _ => Err("usage: kaname-local-core scenario <F-01..F-14> | scenario-store <F-01..F-14> <journal-path> | append-event <journal-path> < event-envelope.bin | authorize-action <journal-path> < approval-command.bin | record-review <journal-path> < command-envelope.bin | replay <journal-path> < replay-request.bin | mobile-propose <journal-path> < enrollment-challenge.bin | mobile-decide <journal-path> < enrollment-decision.bin | mobile-admit <journal-path> <recipient-device-id> <recipient-key-id> < encrypted-envelope.bin | scale <S-01..S-04> | workflow-schema-check < request.json | workflow-canonicalize < value.json | workflow-compile < compile-request.bin | workflow-library-query <application-support-root> < query-request.bin | workflow-library-activate <application-support-root> < activation-request.bin | workflow-library-import-frozen <application-support-root> < import-request.bin | workflow-run-inspect <journal-path> <projection-path> < query.bin".to_owned()),
     };
     match result {
         Ok(json) => println!("{json}"),
@@ -81,6 +85,43 @@ fn main() {
             std::process::exit(64);
         }
     }
+}
+
+fn workflow_run_inspect(journal_path: &str, projection_path: &str) -> Result<String, String> {
+    let wire = read_standard_input()?;
+    let query = kaname_core::workflow_protocol::decode_run_inspection_query(&wire)
+        .map_err(|_| "workflow_run_inspection_rejected".to_owned())?;
+    let journal = Journal::open(journal_path, &CURSOR_KEY)
+        .map_err(|_| "workflow_run_journal_unavailable".to_owned())?;
+    let (projection, _) = WorkflowRunProjection::open_or_rebuild(projection_path, &journal)
+        .map_err(|_| "workflow_run_projection_unavailable".to_owned())?;
+    let runs = projection
+        .inspect_runs(
+            (!query.workflow_id.is_empty()).then_some(query.workflow_id.as_str()),
+            (!query.run_id.is_empty()).then_some(query.run_id.as_str()),
+            query.limit,
+        )
+        .map_err(|_| "workflow_run_inspection_failed".to_owned())?;
+    let absence_reason = if !query.run_id.is_empty() && runs.is_empty() {
+        "not_found_or_purged"
+    } else {
+        ""
+    };
+    Ok(hex::encode(
+        v1::WorkflowRunInspectionResponse {
+            schema_version: Some(v1::SchemaVersion {
+                major: kaname_core::SCHEMA_MAJOR,
+                minor: 0,
+            }),
+            request_id: query.request_id,
+            projection_high_water_mark: projection
+                .high_water_mark()
+                .map_err(|_| "workflow_run_projection_unavailable".to_owned())?,
+            runs,
+            absence_reason: absence_reason.into(),
+        }
+        .encode_to_vec(),
+    ))
 }
 
 fn workflow_canonicalize() -> Result<String, String> {

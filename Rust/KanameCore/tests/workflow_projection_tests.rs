@@ -194,6 +194,53 @@ fn invalid_lifecycle_rolls_back_the_entire_projection_batch() {
     projection.integrity_check().unwrap();
 }
 
+#[test]
+fn inspection_returns_revision_pinned_grouped_evidence_and_explains_absence() {
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    append_complete_corpus(&mut journal);
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    projection.catch_up(&journal).unwrap();
+
+    let recent = projection
+        .inspect_runs(Some("workflow-001"), None, 10)
+        .unwrap();
+    assert_eq!(recent.len(), 2);
+    assert_eq!(recent[0].run_id, "run-projection-002");
+    assert_eq!(recent[1].revision_id, "revision-006");
+
+    let run = projection
+        .inspect_runs(None, Some(RUN_ID), 1)
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(run.status, "succeeded");
+    assert_eq!(run.attempts.len(), 2);
+    assert_eq!(run.nodes.len(), 2);
+    assert_eq!(run.emissions.len(), 1);
+    assert_eq!(
+        run.emissions[0]
+            .value
+            .as_ref()
+            .unwrap()
+            .inline_canonical_json,
+        br#"{"route":5}"#
+    );
+    assert_eq!(run.edges[0].target_node_id, "complete");
+    assert_eq!(run.match_traces[0].matched_case_ids, ["case-five"]);
+    assert_eq!(run.events.len(), 9);
+    assert_eq!(run.events[0].kind, WORKFLOW_RUN_TOKEN_CREATED_KIND);
+    assert!(
+        projection
+            .inspect_runs(None, Some("purged-run"), 1)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(matches!(
+        projection.inspect_runs(None, None, 0),
+        Err(WorkflowProjectionError::Integrity(code)) if code == "inspection_limit_out_of_bounds"
+    ));
+}
+
 fn append_complete_corpus(journal: &mut Journal) {
     journal
         .append_event(EventEnvelope {

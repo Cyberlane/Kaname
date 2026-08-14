@@ -486,6 +486,433 @@ impl WorkflowRunProjection {
             .map_err(|_| WorkflowProjectionError::Integrity("negative_row_count".into()))
     }
 
+    /// Returns a bounded, read-only view of durable run evidence. The caller
+    /// selects identities only; storage paths remain owned by the local core.
+    pub fn inspect_runs(
+        &self,
+        workflow_id: Option<&str>,
+        run_id: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<v1::WorkflowProjectedRun>> {
+        self.integrity_check()?;
+        if limit == 0 || limit > 100 {
+            return Err(WorkflowProjectionError::Integrity(
+                "inspection_limit_out_of_bounds".into(),
+            ));
+        }
+        let mut run_ids = Vec::new();
+        match (
+            workflow_id.filter(|value| !value.is_empty()),
+            run_id.filter(|value| !value.is_empty()),
+        ) {
+            (_, Some(run_id)) => {
+                let found = self
+                    .connection
+                    .query_row(
+                        "SELECT run_id FROM workflow_runs WHERE run_id = ?1",
+                        [run_id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?;
+                run_ids.extend(found);
+            }
+            (Some(workflow_id), None) => {
+                let mut statement = self.connection.prepare(
+                    "SELECT run_id FROM workflow_runs WHERE workflow_id = ?1
+                     ORDER BY created_at_unix_millis DESC, first_store_position DESC, run_id
+                     LIMIT ?2",
+                )?;
+                let rows = statement.query_map(params![workflow_id, i64::from(limit)], |row| {
+                    row.get::<_, String>(0)
+                })?;
+                run_ids = rows.collect::<std::result::Result<_, _>>()?;
+            }
+            (None, None) => {
+                let mut statement = self.connection.prepare(
+                    "SELECT run_id FROM workflow_runs
+                     ORDER BY created_at_unix_millis DESC, first_store_position DESC, run_id
+                     LIMIT ?1",
+                )?;
+                let rows =
+                    statement.query_map([i64::from(limit)], |row| row.get::<_, String>(0))?;
+                run_ids = rows.collect::<std::result::Result<_, _>>()?;
+            }
+        }
+        run_ids
+            .iter()
+            .map(|run_id| self.inspect_run(run_id))
+            .collect()
+    }
+
+    fn inspect_run(&self, run_id: &str) -> Result<v1::WorkflowProjectedRun> {
+        type RunRow = (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            String,
+            Option<String>,
+            Option<String>,
+            i64,
+            Option<i64>,
+            i64,
+            i64,
+        );
+        let row: RunRow = self.connection.query_row(
+            "SELECT run_id, run_token_id, request_command_id, workflow_id, revision_id,
+                    package_digest, status, outcome, error_code, error_value_id,
+                    final_emission_ids_json, cancellation_command_id, cancellation_reason_code,
+                    created_at_unix_millis, settled_at_unix_millis,
+                    first_store_position, last_store_position
+             FROM workflow_runs WHERE run_id = ?1",
+            [run_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
+                    row.get(12)?,
+                    row.get(13)?,
+                    row.get(14)?,
+                    row.get(15)?,
+                    row.get(16)?,
+                ))
+            },
+        )?;
+        Ok(v1::WorkflowProjectedRun {
+            run_id: row.0,
+            run_token_id: row.1,
+            request_command_id: row.2,
+            workflow_id: row.3,
+            revision_id: row.4,
+            package_digest: row.5,
+            status: row.6,
+            outcome: row.7.unwrap_or_default(),
+            error_code: row.8.unwrap_or_default(),
+            error: self.inspect_optional_value(row.9.as_deref())?,
+            final_emission_ids: decode_string_list(&row.10)?,
+            cancellation_command_id: row.11.unwrap_or_default(),
+            cancellation_reason_code: row.12.unwrap_or_default(),
+            created_at_unix_millis: row.13,
+            settled_at_unix_millis: row.14.unwrap_or_default(),
+            first_store_position: projected_u64(row.15)?,
+            last_store_position: projected_u64(row.16)?,
+            attempts: self.inspect_attempts(run_id)?,
+            nodes: self.inspect_nodes(run_id)?,
+            emissions: self.inspect_emissions(run_id)?,
+            edges: self.inspect_edges(run_id)?,
+            match_traces: self.inspect_match_traces(run_id)?,
+            events: self.inspect_events(run_id)?,
+        })
+    }
+
+    fn inspect_attempts(&self, run_id: &str) -> Result<Vec<v1::WorkflowProjectedAttempt>> {
+        let mut statement = self.connection.prepare(
+            "SELECT attempt_id, node_id, attempt_number, status, outcome, error_code,
+                    error_value_id, emission_ids_json, started_at_unix_millis,
+                    settled_at_unix_millis, started_store_position, settled_store_position
+             FROM workflow_attempts WHERE run_id = ?1
+             ORDER BY started_store_position, attempt_id",
+        )?;
+        type AttemptRow = (
+            String,
+            String,
+            i64,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            String,
+            i64,
+            Option<i64>,
+            i64,
+            Option<i64>,
+        );
+        let rows = statement.query_map([run_id], |row| -> rusqlite::Result<AttemptRow> {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+                row.get(9)?,
+                row.get(10)?,
+                row.get(11)?,
+            ))
+        })?;
+        let rows = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(v1::WorkflowProjectedAttempt {
+                    attempt_id: row.0,
+                    node_id: row.1,
+                    attempt_number: projected_u32(row.2)?,
+                    status: row.3,
+                    outcome: row.4.unwrap_or_default(),
+                    error_code: row.5.unwrap_or_default(),
+                    error: self.inspect_optional_value(row.6.as_deref())?,
+                    emission_ids: decode_string_list(&row.7)?,
+                    started_at_unix_millis: row.8,
+                    settled_at_unix_millis: row.9.unwrap_or_default(),
+                    started_store_position: projected_u64(row.10)?,
+                    settled_store_position: row
+                        .11
+                        .map(projected_u64)
+                        .transpose()?
+                        .unwrap_or_default(),
+                })
+            })
+            .collect()
+    }
+
+    fn inspect_nodes(&self, run_id: &str) -> Result<Vec<v1::WorkflowProjectedNodeState>> {
+        let mut statement = self.connection.prepare(
+            "SELECT node_id, status, latest_attempt_id, latest_attempt_number,
+                    started_at_unix_millis, settled_at_unix_millis, last_store_position
+             FROM workflow_node_states WHERE run_id = ?1 ORDER BY last_store_position, node_id",
+        )?;
+        type NodeRow = (String, String, String, i64, i64, Option<i64>, i64);
+        let rows = statement.query_map([run_id], |row| -> rusqlite::Result<NodeRow> {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+            ))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|row| {
+                Ok(v1::WorkflowProjectedNodeState {
+                    node_id: row.0,
+                    status: row.1,
+                    latest_attempt_id: row.2,
+                    latest_attempt_number: projected_u32(row.3)?,
+                    started_at_unix_millis: row.4,
+                    settled_at_unix_millis: row.5.unwrap_or_default(),
+                    last_store_position: projected_u64(row.6)?,
+                })
+            })
+            .collect()
+    }
+
+    fn inspect_emissions(&self, run_id: &str) -> Result<Vec<v1::WorkflowProjectedEmission>> {
+        let mut statement = self.connection.prepare(
+            "SELECT emission_id, attempt_id, node_id, port_id, value_id, event_id,
+                    emitted_at_unix_millis, store_position
+             FROM workflow_emissions WHERE run_id = ?1 ORDER BY store_position, emission_id",
+        )?;
+        type EmissionRow = (String, String, String, String, String, String, i64, i64);
+        let rows = statement.query_map([run_id], |row| -> rusqlite::Result<EmissionRow> {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+            ))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|row| {
+                Ok(v1::WorkflowProjectedEmission {
+                    emission_id: row.0,
+                    attempt_id: row.1,
+                    node_id: row.2,
+                    port_id: row.3,
+                    value: Some(self.inspect_value(&row.4)?),
+                    event_id: row.5,
+                    emitted_at_unix_millis: row.6,
+                    store_position: projected_u64(row.7)?,
+                })
+            })
+            .collect()
+    }
+
+    fn inspect_edges(&self, run_id: &str) -> Result<Vec<v1::WorkflowProjectedEdgeCheckpoint>> {
+        let mut statement = self.connection.prepare(
+            "SELECT event_id, edge_id, emission_id, target_node_id, target_port_id, state,
+                    checkpointed_at_unix_millis, store_position
+             FROM workflow_edge_checkpoints WHERE run_id = ?1 ORDER BY store_position, event_id",
+        )?;
+        type EdgeRow = (String, String, String, String, String, String, i64, i64);
+        let rows = statement.query_map([run_id], |row| -> rusqlite::Result<EdgeRow> {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+            ))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|row| {
+                Ok(v1::WorkflowProjectedEdgeCheckpoint {
+                    event_id: row.0,
+                    edge_id: row.1,
+                    emission_id: row.2,
+                    target_node_id: row.3,
+                    target_port_id: row.4,
+                    state: row.5,
+                    checkpointed_at_unix_millis: row.6,
+                    store_position: projected_u64(row.7)?,
+                })
+            })
+            .collect()
+    }
+
+    fn inspect_match_traces(&self, run_id: &str) -> Result<Vec<v1::WorkflowProjectedMatchTrace>> {
+        let mut statement = self.connection.prepare(
+            "SELECT event_id, attempt_id, node_id, input_value_id, evaluated_case_ids_json,
+                    matched_case_ids_json, emitted_port_ids_json, trace_value_id,
+                    recorded_at_unix_millis, store_position
+             FROM workflow_match_traces WHERE run_id = ?1 ORDER BY store_position, event_id",
+        )?;
+        type MatchRow = (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            i64,
+            i64,
+        );
+        let rows = statement.query_map([run_id], |row| -> rusqlite::Result<MatchRow> {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+                row.get(9)?,
+            ))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|row| {
+                Ok(v1::WorkflowProjectedMatchTrace {
+                    event_id: row.0,
+                    attempt_id: row.1,
+                    node_id: row.2,
+                    input_value_id: row.3,
+                    evaluated_case_ids: decode_string_list(&row.4)?,
+                    matched_case_ids: decode_string_list(&row.5)?,
+                    emitted_port_ids: decode_string_list(&row.6)?,
+                    trace: Some(self.inspect_value(&row.7)?),
+                    recorded_at_unix_millis: row.8,
+                    store_position: projected_u64(row.9)?,
+                })
+            })
+            .collect()
+    }
+
+    fn inspect_events(&self, run_id: &str) -> Result<Vec<v1::WorkflowProjectedEventReference>> {
+        let mut statement = self.connection.prepare(
+            "SELECT event_id, kind, store_position, stream_sequence, occurred_at_unix_millis
+             FROM workflow_projected_events WHERE run_id = ?1 ORDER BY store_position, event_id",
+        )?;
+        type EventRow = (String, String, i64, i64, i64);
+        let rows = statement.query_map([run_id], |row| -> rusqlite::Result<EventRow> {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|row| {
+                Ok(v1::WorkflowProjectedEventReference {
+                    event_id: row.0,
+                    kind: row.1,
+                    store_position: projected_u64(row.2)?,
+                    stream_sequence: projected_u64(row.3)?,
+                    occurred_at_unix_millis: row.4,
+                })
+            })
+            .collect()
+    }
+
+    fn inspect_optional_value(
+        &self,
+        value_id: Option<&str>,
+    ) -> Result<Option<v1::WorkflowProjectedValue>> {
+        value_id
+            .map(|value_id| self.inspect_value(value_id))
+            .transpose()
+    }
+
+    fn inspect_value(&self, value_id: &str) -> Result<v1::WorkflowProjectedValue> {
+        type ValueRow = (String, String, i64, String, Option<Vec<u8>>, Option<String>);
+        let row: ValueRow = self.connection.query_row(
+            "SELECT value_id, content_type, byte_count, sha256, inline_canonical_json,
+                    storage_reference_id FROM workflow_values WHERE value_id = ?1",
+            [value_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )?;
+        let availability = if row.4.is_some() {
+            "inline"
+        } else {
+            "storage_unavailable"
+        };
+        Ok(v1::WorkflowProjectedValue {
+            value_id: row.0,
+            content_type: row.1,
+            byte_count: projected_u64(row.2)?,
+            sha256: row.3,
+            inline_canonical_json: row.4.unwrap_or_default(),
+            storage_reference_id: row.5.unwrap_or_default(),
+            availability: availability.into(),
+        })
+    }
+
     #[doc(hidden)]
     pub fn corrupt_first_run_for_test(&self) -> Result<()> {
         self.connection.execute(
@@ -509,6 +936,21 @@ impl WorkflowRunProjection {
         transaction.commit()?;
         Ok(())
     }
+}
+
+fn decode_string_list(value: &str) -> Result<Vec<String>> {
+    serde_json::from_str(value)
+        .map_err(|_| WorkflowProjectionError::Integrity("string_list_decode_failed".into()))
+}
+
+fn projected_u64(value: i64) -> Result<u64> {
+    u64::try_from(value)
+        .map_err(|_| WorkflowProjectionError::Integrity("negative_projection_integer".into()))
+}
+
+fn projected_u32(value: i64) -> Result<u32> {
+    u32::try_from(value)
+        .map_err(|_| WorkflowProjectionError::Integrity("projection_integer_out_of_bounds".into()))
 }
 
 fn apply_event(transaction: &Transaction<'_>, event: &v1::EventEnvelope) -> Result<bool> {
