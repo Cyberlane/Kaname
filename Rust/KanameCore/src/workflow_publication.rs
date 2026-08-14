@@ -302,7 +302,7 @@ impl WorkflowLibraryStore {
         Ok(published)
     }
 
-    fn workflow_root(&self) -> Result<PathBuf> {
+    pub(crate) fn workflow_root(&self) -> Result<PathBuf> {
         self.database_path
             .as_ref()
             .and_then(|path| path.parent())

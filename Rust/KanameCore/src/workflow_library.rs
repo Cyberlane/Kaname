@@ -167,6 +167,9 @@ pub enum WorkflowLibraryError {
     PublicationConflict(String),
     InvalidRevisionBundle(String),
     InjectedPublicationInterruption(&'static str),
+    RevisionHistory(String),
+    ActivationConflict { expected: i64, actual: i64 },
+    InjectedActivationInterruption,
 }
 
 impl fmt::Display for WorkflowLibraryError {
@@ -208,6 +211,14 @@ impl fmt::Display for WorkflowLibraryError {
             }
             Self::InjectedPublicationInterruption(stage) => {
                 write!(formatter, "workflow publication interrupted: {stage}")
+            }
+            Self::RevisionHistory(code) => write!(formatter, "workflow revision history: {code}"),
+            Self::ActivationConflict { expected, actual } => write!(
+                formatter,
+                "workflow activation conflict: expected {expected}, actual {actual}"
+            ),
+            Self::InjectedActivationInterruption => {
+                formatter.write_str("workflow_activation_interrupted")
             }
         }
     }

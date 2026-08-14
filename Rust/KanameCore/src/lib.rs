@@ -19,6 +19,7 @@ pub mod workflow_match;
 pub mod workflow_protocol;
 pub mod workflow_publication;
 pub mod workflow_schema;
+pub mod workflow_versions;
 
 pub const SCHEMA_MAJOR: u32 = 1;
 pub const MAXIMUM_ENVELOPE_BYTES: usize = 64 * 1024;

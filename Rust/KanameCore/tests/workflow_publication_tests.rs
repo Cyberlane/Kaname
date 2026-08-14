@@ -3,6 +3,10 @@ use kaname_core::{
     workflow_drafts::{CreateWorkflowDraft, SaveWorkflowDraft},
     workflow_library::{WorkflowLibraryError, WorkflowLibraryStore},
     workflow_publication::{PublishWorkflowRevision, WorkflowPublicationFault},
+    workflow_versions::{
+        SetWorkflowActivation, WorkflowActivationFault, WorkflowExecutionSupport,
+        WorkflowPortfolioState,
+    },
 };
 use rusqlite::Connection;
 use serde_json::Value;
@@ -240,24 +244,7 @@ fn later_publication_cannot_change_an_earlier_revision() {
         .join(&first.bundle_relative_path);
     let first_snapshot = bundle_snapshot(&first_bundle);
 
-    let mut changed_workflow: Value = serde_json::from_slice(&fixture_workflow()).unwrap();
-    changed_workflow["summary"] = Value::String("Published as revision two".into());
-    store
-        .save_draft(SaveWorkflowDraft {
-            workflow_id: WORKFLOW_ID.into(),
-            expected_head_sequence: 0,
-            edit_id: "second-edit".into(),
-            session_id: "publication-test".into(),
-            workflow_source: serde_json::to_vec(&changed_workflow).unwrap(),
-            layout_source: fixture_layout(),
-            recorded_at_unix_millis: 30,
-        })
-        .unwrap();
-    let mut request = publish_request("revision-two", "registration-two");
-    request.expected_draft_sequence = 1;
-    request.release_version = "1.1.0".into();
-    request.published_at_unix_millis = 40;
-    let second = store.publish_revision(request).unwrap();
+    let second = publish_second_revision(&mut store);
 
     assert_eq!(second.revision_number, 2);
     assert_ne!(first.package_digest, second.package_digest);
@@ -267,6 +254,208 @@ fn later_publication_cannot_change_an_earlier_revision() {
         first
     );
     assert_eq!(table_count(directory.path(), "workflow_revisions"), 2);
+}
+
+#[test]
+fn history_comparison_and_alias_activation_survive_reopen_without_mutating_versions() {
+    let directory = tempdir().unwrap();
+    let mut store = open_workflow_library(directory.path()).unwrap();
+    create_draft(&mut store);
+    let draft_item = store.workflow_portfolio("active").unwrap().remove(0);
+    assert_eq!(draft_item.state, WorkflowPortfolioState::Draft);
+    assert!(draft_item.has_draft);
+    assert_eq!(draft_item.latest_revision_id, None);
+
+    let first = store
+        .publish_revision(publish_request("revision-one", "registration-one"))
+        .unwrap();
+    let second = publish_second_revision(&mut store);
+    let workflows = directory.path().join("Workflows");
+    let first_directory = workflows.join(&first.bundle_relative_path);
+    let second_directory = workflows.join(&second.bundle_relative_path);
+    let first_snapshot = bundle_snapshot(&first_directory);
+    let second_snapshot = bundle_snapshot(&second_directory);
+    drop(store);
+
+    let mut reopened = open_workflow_library(directory.path()).unwrap();
+    let published_item = reopened.workflow_portfolio("active").unwrap().remove(0);
+    assert_eq!(published_item.state, WorkflowPortfolioState::Published);
+    assert_eq!(
+        published_item.execution_support,
+        Some(WorkflowExecutionSupport::Unsupported)
+    );
+    let history = reopened
+        .workflow_revision_history(WORKFLOW_ID, "active")
+        .unwrap();
+    assert_eq!(
+        history
+            .iter()
+            .map(|revision| revision.revision_number)
+            .collect::<Vec<_>>(),
+        vec![2, 1]
+    );
+    assert!(history.iter().all(|revision| {
+        revision.execution_support == WorkflowExecutionSupport::Unsupported && !revision.is_active
+    }));
+    let loaded_first = reopened
+        .load_workflow_revision("revision-one", "active")
+        .unwrap();
+    let loaded_second = reopened
+        .load_workflow_revision("revision-two", "active")
+        .unwrap();
+    assert_eq!(
+        parse_json(&loaded_first.workflow_source)["summary"],
+        parse_json(&fixture_workflow())["summary"]
+    );
+    assert_eq!(
+        parse_json(&loaded_first.layout_source),
+        parse_json(&fixture_layout())
+    );
+    assert_eq!(
+        parse_json(&loaded_second.workflow_source)["summary"],
+        "Published as revision two"
+    );
+    assert_eq!(
+        parse_json(&loaded_second.layout_source)["nodes"][0]["x"],
+        96
+    );
+    assert_eq!(
+        parse_json(&loaded_second.configuration_source)["properties"]["mode"]["type"],
+        "string"
+    );
+
+    let comparison = reopened
+        .compare_workflow_revisions("revision-one", "revision-two")
+        .unwrap();
+    assert!(
+        comparison
+            .changed_definition_pointers
+            .contains(&"/summary".into())
+    );
+    assert!(
+        comparison
+            .changed_layout_pointers
+            .contains(&"/nodes/0/x".into())
+    );
+    assert!(
+        comparison
+            .changed_configuration_pointers
+            .contains(&"/properties".into())
+    );
+    assert!(!comparison.truncated);
+
+    let activation_request = SetWorkflowActivation {
+        alias_id: "primary-activation".into(),
+        workflow_id: WORKFLOW_ID.into(),
+        alias_key: "active".into(),
+        revision_id: Some("revision-one".into()),
+        expected_generation: 0,
+        updated_at_unix_millis: 50,
+    };
+    let activated = reopened
+        .set_workflow_activation(activation_request.clone())
+        .unwrap();
+    assert_eq!(activated.generation, 1);
+    assert!(!activated.duplicate);
+    let duplicate = reopened
+        .set_workflow_activation(activation_request)
+        .unwrap();
+    assert!(duplicate.duplicate);
+    let item = reopened.workflow_portfolio("active").unwrap().remove(0);
+    assert_eq!(item.state, WorkflowPortfolioState::Active);
+    assert_eq!(item.active_revision_id.as_deref(), Some("revision-one"));
+    assert_eq!(item.latest_revision_id.as_deref(), Some("revision-two"));
+    assert_eq!(item.latest_revision_number, Some(2));
+    assert_eq!(
+        item.execution_support,
+        Some(WorkflowExecutionSupport::Unsupported)
+    );
+    assert!(matches!(
+        reopened.set_workflow_activation(SetWorkflowActivation {
+            alias_id: "primary-activation".into(),
+            workflow_id: WORKFLOW_ID.into(),
+            alias_key: "active".into(),
+            revision_id: Some("revision-two".into()),
+            expected_generation: 0,
+            updated_at_unix_millis: 51,
+        }),
+        Err(WorkflowLibraryError::ActivationConflict {
+            expected: 0,
+            actual: 1
+        })
+    ));
+    let active_history = reopened
+        .workflow_revision_history(WORKFLOW_ID, "active")
+        .unwrap();
+    assert!(
+        active_history
+            .iter()
+            .find(|revision| revision.revision_id == "revision-one")
+            .unwrap()
+            .is_active
+    );
+    assert!(
+        !active_history
+            .iter()
+            .find(|revision| revision.revision_id == "revision-two")
+            .unwrap()
+            .is_active
+    );
+
+    let disabled = reopened
+        .set_workflow_activation(SetWorkflowActivation {
+            alias_id: "primary-activation".into(),
+            workflow_id: WORKFLOW_ID.into(),
+            alias_key: "active".into(),
+            revision_id: None,
+            expected_generation: 1,
+            updated_at_unix_millis: 52,
+        })
+        .unwrap();
+    assert_eq!(disabled.generation, 2);
+    assert_eq!(
+        reopened.workflow_portfolio("active").unwrap()[0].state,
+        WorkflowPortfolioState::Disabled
+    );
+    assert_eq!(bundle_snapshot(&first_directory), first_snapshot);
+    assert_eq!(bundle_snapshot(&second_directory), second_snapshot);
+    assert_eq!(table_count(directory.path(), "workflow_revisions"), 2);
+}
+
+#[test]
+fn activation_commit_retry_is_idempotent_after_reopen() {
+    let directory = tempdir().unwrap();
+    let mut store = open_workflow_library(directory.path()).unwrap();
+    create_draft(&mut store);
+    store
+        .publish_revision(publish_request("revision-one", "registration-one"))
+        .unwrap();
+    let request = SetWorkflowActivation {
+        alias_id: "primary-activation".into(),
+        workflow_id: WORKFLOW_ID.into(),
+        alias_key: "active".into(),
+        revision_id: Some("revision-one".into()),
+        expected_generation: 0,
+        updated_at_unix_millis: 50,
+    };
+    assert!(matches!(
+        store.set_workflow_activation_with_fault_for_test(
+            request.clone(),
+            WorkflowActivationFault::AfterCommit,
+        ),
+        Err(WorkflowLibraryError::InjectedActivationInterruption)
+    ));
+    drop(store);
+
+    let mut reopened = open_workflow_library(directory.path()).unwrap();
+    let retry = reopened.set_workflow_activation(request).unwrap();
+    assert!(retry.duplicate);
+    assert_eq!(retry.generation, 1);
+    assert_eq!(retry.revision_id.as_deref(), Some("revision-one"));
+    assert_eq!(
+        reopened.workflow_portfolio("active").unwrap()[0].state,
+        WorkflowPortfolioState::Active
+    );
 }
 
 #[test]
@@ -324,6 +513,37 @@ fn bundle_snapshot(directory: &Path) -> Vec<(String, Vec<u8>)> {
     }
     snapshot.sort_by(|left, right| left.0.cmp(&right.0));
     snapshot
+}
+
+fn publish_second_revision(
+    store: &mut WorkflowLibraryStore,
+) -> kaname_core::workflow_publication::PublishedWorkflowRevision {
+    let mut changed_workflow: Value = parse_json(&fixture_workflow());
+    changed_workflow["summary"] = Value::String("Published as revision two".into());
+    let mut changed_layout = parse_json(&fixture_layout());
+    changed_layout["nodes"][0]["x"] = Value::from(96);
+    store
+        .save_draft(SaveWorkflowDraft {
+            workflow_id: WORKFLOW_ID.into(),
+            expected_head_sequence: 0,
+            edit_id: "second-edit".into(),
+            session_id: "publication-test".into(),
+            workflow_source: serde_json::to_vec(&changed_workflow).unwrap(),
+            layout_source: serde_json::to_vec(&changed_layout).unwrap(),
+            recorded_at_unix_millis: 30,
+        })
+        .unwrap();
+    let mut request = publish_request("revision-two", "registration-two");
+    request.expected_draft_sequence = 1;
+    request.release_version = "1.1.0".into();
+    request.configuration_contract_json =
+        br#"{"properties":{"mode":{"type":"string"}},"type":"object"}"#.to_vec();
+    request.published_at_unix_millis = 40;
+    store.publish_revision(request).unwrap()
+}
+
+fn parse_json(bytes: &[u8]) -> Value {
+    serde_json::from_slice(bytes).unwrap()
 }
 
 fn table_count(application_support: &Path, table: &str) -> usize {
