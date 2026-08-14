@@ -434,5 +434,56 @@
       "compiledFormatVersion": 2,
       "workflowId": "bad"
     }
+  },
+  {
+    "schema": "match-evaluation.schema.json",
+    "valid": {
+      "traceVersion": 1,
+      "outcome": "matched",
+      "hitPolicy": "first",
+      "input": {
+        "source": "input#",
+        "state": "present",
+        "valueType": "object"
+      },
+      "selectedCaseIds": [
+        "018f0000-0001-7000-8000-000000000001"
+      ],
+      "emittedPortIds": [
+        "case-018f0000-0001-7000-8000-000000000001"
+      ],
+      "cases": [
+        {
+          "caseId": "018f0000-0001-7000-8000-000000000001",
+          "key": "ready",
+          "outcome": "matched",
+          "condition": {
+            "expressionId": "/cases/0/when",
+            "kind": "isType",
+            "outcome": "matched",
+            "shortCircuited": false,
+            "operands": [
+              {
+                "source": "value#",
+                "state": "present",
+                "valueType": "object"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "invalid": {
+      "traceVersion": 1,
+      "outcome": "evaluationError",
+      "hitPolicy": "first",
+      "input": {
+        "source": "input#",
+        "state": "present"
+      },
+      "selectedCaseIds": [],
+      "emittedPortIds": [],
+      "cases": []
+    }
   }
 ]

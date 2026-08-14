@@ -196,6 +196,9 @@
         },
         "arrayNone": {
           "$ref": "#/$defs/arrayCondition"
+        },
+        "arrayExactlyOne": {
+          "$ref": "#/$defs/arrayCondition"
         }
       },
       "additionalProperties": false

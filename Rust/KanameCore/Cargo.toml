@@ -24,6 +24,7 @@ path = "src/bin/phase1_measure.rs"
 prost = "=0.14.4"
 hex = "=0.4.3"
 jsonschema = { version = "=0.49.9", default-features = false }
+regex = "=1.13.1"
 rusqlite = { version = "=0.40.1", features = ["backup", "bundled"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"

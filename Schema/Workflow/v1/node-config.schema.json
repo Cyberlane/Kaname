@@ -299,7 +299,8 @@
         "hitPolicy": {
           "enum": [
             "first",
-            "unique"
+            "unique",
+            "all"
           ]
         },
         "cases": {

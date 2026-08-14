@@ -1,0 +1,377 @@
+{
+  "fixtureVersion": 1,
+  "privacyClass": "synthetic-public",
+  "goldens": [
+    {
+      "id": "first-compound-short-circuit",
+      "config": {
+        "value": {"root": "input", "pointer": ""},
+        "hitPolicy": "first",
+        "cases": [
+          {
+            "id": "018f2000-0001-7000-8000-000000000001",
+            "key": "priority",
+            "label": "priority",
+            "when": {
+              "all": [
+                {
+                  "compare": {
+                    "left": {"root": "value", "pointer": "/score"},
+                    "operator": "greaterThan",
+                    "right": {"literal": {"type": "number", "value": 5}}
+                  }
+                },
+                {
+                  "any": [
+                    {
+                      "compare": {
+                        "left": {"root": "value", "pointer": "/region"},
+                        "operator": "equal",
+                        "right": {"literal": {"type": "string", "value": "APAC"}}
+                      }
+                    },
+                    {
+                      "compare": {
+                        "left": {"root": "value", "pointer": "/region"},
+                        "operator": "equal",
+                        "right": {"literal": {"type": "string", "value": "EMEA"}}
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "id": "018f2000-0002-7000-8000-000000000002",
+            "key": "fallback-case",
+            "label": "fallback-case",
+            "when": {"exists": {"root": "value", "pointer": "/score"}}
+          }
+        ],
+        "otherwise": {
+          "id": "018f2000-0004-7000-8000-000000000004",
+          "key": "otherwise",
+          "label": "Otherwise"
+        }
+      },
+      "roots": {
+        "input": {"score": 9, "region": "APAC", "secret": "private-value"}
+      },
+      "expected": {
+        "traceVersion": 1,
+        "outcome": "matched",
+        "hitPolicy": "first",
+        "input": {"source": "input#", "state": "present", "valueType": "object"},
+        "selectedCaseIds": ["018f2000-0001-7000-8000-000000000001"],
+        "emittedPortIds": ["case-018f2000-0001-7000-8000-000000000001"],
+        "cases": [
+          {
+            "caseId": "018f2000-0001-7000-8000-000000000001",
+            "key": "priority",
+            "outcome": "matched",
+            "condition": {
+              "expressionId": "/cases/0/when",
+              "kind": "all",
+              "outcome": "matched",
+              "shortCircuited": false,
+              "children": [
+                {
+                  "expressionId": "/cases/0/when/all/0",
+                  "kind": "compare",
+                  "outcome": "matched",
+                  "shortCircuited": false,
+                  "operator": "greaterThan",
+                  "operands": [
+                    {"source": "value#/score", "state": "present", "valueType": "number"},
+                    {"source": "literal:number", "state": "present", "valueType": "number"}
+                  ]
+                },
+                {
+                  "expressionId": "/cases/0/when/all/1",
+                  "kind": "any",
+                  "outcome": "matched",
+                  "shortCircuited": true,
+                  "children": [
+                    {
+                      "expressionId": "/cases/0/when/all/1/any/0",
+                      "kind": "compare",
+                      "outcome": "matched",
+                      "shortCircuited": false,
+                      "operator": "equal",
+                      "operands": [
+                        {"source": "value#/region", "state": "present", "valueType": "string"},
+                        {"source": "literal:string", "state": "present", "valueType": "string"}
+                      ]
+                    },
+                    {
+                      "expressionId": "/cases/0/when/all/1/any/1",
+                      "kind": "compare",
+                      "outcome": "notEvaluated",
+                      "shortCircuited": true
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "caseId": "018f2000-0002-7000-8000-000000000002",
+            "key": "fallback-case",
+            "outcome": "notEvaluated",
+            "condition": {
+              "expressionId": "/cases/1/when",
+              "kind": "exists",
+              "outcome": "notEvaluated",
+              "shortCircuited": true
+            }
+          }
+        ],
+        "otherwise": {
+          "caseId": "018f2000-0004-7000-8000-000000000004",
+          "key": "otherwise",
+          "selected": false
+        }
+      }
+    },
+    {
+      "id": "absent-selects-otherwise",
+      "config": {
+        "value": {"root": "input", "pointer": ""},
+        "hitPolicy": "first",
+        "cases": [
+          {
+            "id": "018f2000-0001-7000-8000-000000000001",
+            "key": "jp",
+            "label": "jp",
+            "when": {
+              "compare": {
+                "left": {"root": "value", "pointer": "/customer/address/country"},
+                "operator": "equal",
+                "right": {"literal": {"type": "string", "value": "JP"}}
+              }
+            }
+          }
+        ],
+        "otherwise": {
+          "id": "018f2000-0004-7000-8000-000000000004",
+          "key": "otherwise",
+          "label": "Otherwise"
+        }
+      },
+      "roots": {"input": {"customer": {}}},
+      "expected": {
+        "traceVersion": 1,
+        "outcome": "matched",
+        "hitPolicy": "first",
+        "input": {"source": "input#", "state": "present", "valueType": "object"},
+        "selectedCaseIds": ["018f2000-0004-7000-8000-000000000004"],
+        "emittedPortIds": ["case-018f2000-0004-7000-8000-000000000004"],
+        "cases": [
+          {
+            "caseId": "018f2000-0001-7000-8000-000000000001",
+            "key": "jp",
+            "outcome": "notMatched",
+            "condition": {
+              "expressionId": "/cases/0/when",
+              "kind": "compare",
+              "outcome": "notMatched",
+              "shortCircuited": false,
+              "operator": "equal",
+              "operands": [
+                {"source": "value#/customer/address/country", "state": "absent"},
+                {"source": "literal:string", "state": "present", "valueType": "string"}
+              ]
+            }
+          }
+        ],
+        "otherwise": {
+          "caseId": "018f2000-0004-7000-8000-000000000004",
+          "key": "otherwise",
+          "selected": true
+        }
+      }
+    },
+    {
+      "id": "wrong-type-is-error-not-otherwise",
+      "config": {
+        "value": {"root": "input", "pointer": ""},
+        "hitPolicy": "first",
+        "cases": [
+          {
+            "id": "018f2000-0001-7000-8000-000000000001",
+            "key": "jp",
+            "label": "jp",
+            "when": {
+              "compare": {
+                "left": {"root": "value", "pointer": "/customer/address/country"},
+                "operator": "equal",
+                "right": {"literal": {"type": "string", "value": "JP"}}
+              }
+            }
+          }
+        ],
+        "otherwise": {
+          "id": "018f2000-0004-7000-8000-000000000004",
+          "key": "otherwise",
+          "label": "Otherwise"
+        }
+      },
+      "roots": {"input": {"customer": {"address": "not-an-object"}}},
+      "expected": {
+        "traceVersion": 1,
+        "outcome": "evaluationError",
+        "hitPolicy": "first",
+        "input": {"source": "input#", "state": "present", "valueType": "object"},
+        "selectedCaseIds": [],
+        "emittedPortIds": [],
+        "cases": [
+          {
+            "caseId": "018f2000-0001-7000-8000-000000000001",
+            "key": "jp",
+            "outcome": "evaluationError",
+            "condition": {
+              "expressionId": "/cases/0/when",
+              "kind": "compare",
+              "outcome": "evaluationError",
+              "shortCircuited": false,
+              "operator": "equal",
+              "operands": [
+                {
+                  "source": "value#/customer/address/country",
+                  "state": "evaluationError",
+                  "valueType": "string"
+                },
+                {"source": "literal:string", "state": "present", "valueType": "string"}
+              ],
+              "error": {
+                "code": "MATCH_PATH_WRONG_TYPE",
+                "expressionId": "/cases/0/when",
+                "message": "The Match path traverses through a non-container value.",
+                "encounteredType": "string"
+              }
+            }
+          }
+        ],
+        "otherwise": {
+          "caseId": "018f2000-0004-7000-8000-000000000004",
+          "key": "otherwise",
+          "selected": false
+        },
+        "error": {
+          "code": "MATCH_PATH_WRONG_TYPE",
+          "expressionId": "/cases/0/when",
+          "message": "The Match path traverses through a non-container value.",
+          "encounteredType": "string"
+        }
+      }
+    },
+    {
+      "id": "match-all-array-quantifier",
+      "config": {
+        "value": {"root": "input", "pointer": ""},
+        "hitPolicy": "all",
+        "cases": [
+          {
+            "id": "018f2000-0001-7000-8000-000000000001",
+            "key": "has-review",
+            "label": "has-review",
+            "when": {
+              "arrayAny": {
+                "value": {"root": "value", "pointer": "/labels"},
+                "as": "item",
+                "where": {
+                  "compare": {
+                    "left": {"root": "item", "pointer": ""},
+                    "operator": "equal",
+                    "right": {"literal": {"type": "string", "value": "review"}}
+                  }
+                }
+              }
+            }
+          },
+          {
+            "id": "018f2000-0002-7000-8000-000000000002",
+            "key": "safe",
+            "label": "safe",
+            "when": {
+              "compare": {
+                "left": {"root": "value", "pointer": "/safe"},
+                "operator": "equal",
+                "right": {"literal": {"type": "boolean", "value": true}}
+              }
+            }
+          }
+        ]
+      },
+      "roots": {"input": {"labels": ["review", "later"], "safe": true}},
+      "expected": {
+        "traceVersion": 1,
+        "outcome": "matched",
+        "hitPolicy": "all",
+        "input": {"source": "input#", "state": "present", "valueType": "object"},
+        "selectedCaseIds": [
+          "018f2000-0001-7000-8000-000000000001",
+          "018f2000-0002-7000-8000-000000000002"
+        ],
+        "emittedPortIds": [
+          "case-018f2000-0001-7000-8000-000000000001",
+          "case-018f2000-0002-7000-8000-000000000002"
+        ],
+        "cases": [
+          {
+            "caseId": "018f2000-0001-7000-8000-000000000001",
+            "key": "has-review",
+            "outcome": "matched",
+            "condition": {
+              "expressionId": "/cases/0/when",
+              "kind": "arrayAny",
+              "outcome": "matched",
+              "shortCircuited": true,
+              "operands": [
+                {"source": "value#/labels", "state": "present", "valueType": "array"}
+              ],
+              "children": [
+                {
+                  "expressionId": "/cases/0/when/where",
+                  "kind": "compare",
+                  "outcome": "matched",
+                  "shortCircuited": false,
+                  "operator": "equal",
+                  "iterationIndex": 0,
+                  "operands": [
+                    {"source": "item#", "state": "present", "valueType": "string"},
+                    {"source": "literal:string", "state": "present", "valueType": "string"}
+                  ]
+                },
+                {
+                  "expressionId": "/cases/0/when/where",
+                  "kind": "compare",
+                  "outcome": "notEvaluated",
+                  "shortCircuited": true,
+                  "iterationIndex": 1
+                }
+              ]
+            }
+          },
+          {
+            "caseId": "018f2000-0002-7000-8000-000000000002",
+            "key": "safe",
+            "outcome": "matched",
+            "condition": {
+              "expressionId": "/cases/1/when",
+              "kind": "compare",
+              "outcome": "matched",
+              "shortCircuited": false,
+              "operator": "equal",
+              "operands": [
+                {"source": "value#/safe", "state": "present", "valueType": "boolean"},
+                {"source": "literal:boolean", "state": "present", "valueType": "boolean"}
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -120,7 +120,7 @@ fn node(node_type: &str, config: Value) -> Value {
 fn every_schema_is_draft_2020_12_valid_and_resolves_offline() {
     let documents = schema_documents();
     assert!(
-        documents.len() == 52,
+        documents.len() == 53,
         "the registry unexpectedly lost schema contracts"
     );
     let mut ids = std::collections::BTreeSet::new();
@@ -362,6 +362,71 @@ fn compiler_output_validates_against_the_published_compiled_contract() {
     assert!(is_valid(
         &documents["compiled.schema.json"],
         &artifact,
+        &registry
+    ));
+}
+
+#[test]
+fn committed_match_evaluation_traces_validate_against_the_published_contract() {
+    let documents = schema_documents();
+    let registry = prepared_registry(&documents);
+    let corpus: Value =
+        serde_json::from_slice(&fs::read(fixture_root().join("match-evaluator-v1.json")).unwrap())
+            .unwrap();
+    let goldens = corpus["goldens"].as_array().unwrap();
+    assert_eq!(goldens.len(), 4);
+    for golden in goldens {
+        assert!(
+            is_valid(
+                &documents["match-evaluation.schema.json"],
+                &golden["expected"],
+                &registry
+            ),
+            "{}",
+            golden["id"]
+        );
+    }
+}
+
+#[test]
+fn match_all_and_exactly_one_array_conditions_are_closed_schema_contracts() {
+    let documents = schema_documents();
+    let registry = prepared_registry(&documents);
+    let match_node = node(
+        "control.match",
+        json!({
+            "value": {"root": "input", "pointer": ""},
+            "hitPolicy": "all",
+            "cases": [{
+                "id": "018f0000-0002-7000-8000-000000000002",
+                "key": "one-review",
+                "label": "Exactly one review",
+                "when": {
+                    "arrayExactlyOne": {
+                        "value": {"root": "value", "pointer": "/labels"},
+                        "as": "item",
+                        "where": {
+                            "compare": {
+                                "left": {"root": "item", "pointer": ""},
+                                "operator": "equal",
+                                "right": {"literal": {"type": "string", "value": "review"}}
+                            }
+                        }
+                    }
+                }
+            }]
+        }),
+    );
+    assert!(is_valid(
+        &documents["nodes/control.match.schema.json"],
+        &match_node,
+        &registry
+    ));
+    let mut invalid = match_node;
+    invalid["config"]["hitPolicy"] = json!("some");
+    assert!(!is_valid(
+        &documents["nodes/control.match.schema.json"],
+        &invalid,
         &registry
     ));
 }

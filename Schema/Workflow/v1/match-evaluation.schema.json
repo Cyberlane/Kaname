@@ -1,0 +1,310 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.kaname.dev/workflow/v1/match-evaluation.schema.json",
+  "$defs": {
+    "outcome": {
+      "enum": [
+        "matched",
+        "notMatched",
+        "evaluationError",
+        "notEvaluated"
+      ]
+    },
+    "jsonType": {
+      "enum": [
+        "null",
+        "boolean",
+        "number",
+        "string",
+        "array",
+        "object"
+      ]
+    },
+    "error": {
+      "type": "object",
+      "required": [
+        "code",
+        "expressionId",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^MATCH_[A-Z0-9_]+$"
+        },
+        "expressionId": {
+          "$ref": "identifiers.schema.json#/$defs/jsonPointer"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "encounteredType": {
+          "$ref": "#/$defs/jsonType"
+        }
+      },
+      "additionalProperties": false
+    },
+    "operand": {
+      "type": "object",
+      "required": [
+        "source",
+        "state"
+      ],
+      "properties": {
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "state": {
+          "enum": [
+            "present",
+            "absent",
+            "evaluationError"
+          ]
+        },
+        "valueType": {
+          "$ref": "#/$defs/jsonType"
+        }
+      },
+      "additionalProperties": false
+    },
+    "condition": {
+      "type": "object",
+      "required": [
+        "expressionId",
+        "kind",
+        "outcome",
+        "shortCircuited"
+      ],
+      "properties": {
+        "expressionId": {
+          "$ref": "identifiers.schema.json#/$defs/jsonPointer"
+        },
+        "kind": {
+          "enum": [
+            "all",
+            "any",
+            "not",
+            "compare",
+            "exists",
+            "missing",
+            "isNull",
+            "isType",
+            "arrayAny",
+            "arrayAll",
+            "arrayNone",
+            "arrayExactlyOne"
+          ]
+        },
+        "outcome": {
+          "$ref": "#/$defs/outcome"
+        },
+        "shortCircuited": {
+          "type": "boolean"
+        },
+        "operator": {
+          "enum": [
+            "equal",
+            "notEqual",
+            "lessThan",
+            "lessThanOrEqual",
+            "greaterThan",
+            "greaterThanOrEqual",
+            "contains",
+            "startsWith",
+            "endsWith",
+            "matchesSafePattern",
+            "in"
+          ]
+        },
+        "iterationIndex": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4095
+        },
+        "operands": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/operand"
+          },
+          "maxItems": 2
+        },
+        "children": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/condition"
+          },
+          "maxItems": 4096
+        },
+        "error": {
+          "$ref": "#/$defs/error"
+        }
+      },
+      "additionalProperties": false
+    },
+    "case": {
+      "type": "object",
+      "required": [
+        "caseId",
+        "key",
+        "outcome",
+        "condition"
+      ],
+      "properties": {
+        "caseId": {
+          "$ref": "identifiers.schema.json#/$defs/uuidV7"
+        },
+        "key": {
+          "$ref": "identifiers.schema.json#/$defs/key"
+        },
+        "outcome": {
+          "$ref": "#/$defs/outcome"
+        },
+        "condition": {
+          "$ref": "#/$defs/condition"
+        }
+      },
+      "additionalProperties": false
+    },
+    "otherwise": {
+      "type": "object",
+      "required": [
+        "caseId",
+        "key",
+        "selected"
+      ],
+      "properties": {
+        "caseId": {
+          "$ref": "identifiers.schema.json#/$defs/uuidV7"
+        },
+        "key": {
+          "$ref": "identifiers.schema.json#/$defs/key"
+        },
+        "selected": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "type": "object",
+  "required": [
+    "traceVersion",
+    "outcome",
+    "hitPolicy",
+    "input",
+    "selectedCaseIds",
+    "emittedPortIds",
+    "cases"
+  ],
+  "properties": {
+    "traceVersion": {
+      "const": 1
+    },
+    "outcome": {
+      "enum": [
+        "matched",
+        "notMatched",
+        "evaluationError"
+      ]
+    },
+    "hitPolicy": {
+      "enum": [
+        "first",
+        "unique",
+        "all"
+      ]
+    },
+    "input": {
+      "$ref": "#/$defs/operand"
+    },
+    "selectedCaseIds": {
+      "type": "array",
+      "items": {
+        "$ref": "identifiers.schema.json#/$defs/uuidV7"
+      },
+      "uniqueItems": true,
+      "maxItems": 128
+    },
+    "emittedPortIds": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^case-[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+      },
+      "uniqueItems": true,
+      "maxItems": 128
+    },
+    "cases": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/case"
+      },
+      "maxItems": 128
+    },
+    "otherwise": {
+      "$ref": "#/$defs/otherwise"
+    },
+    "error": {
+      "$ref": "#/$defs/error"
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "outcome": {
+          "const": "matched"
+        },
+        "selectedCaseIds": {
+          "minItems": 1
+        },
+        "emittedPortIds": {
+          "minItems": 1
+        }
+      },
+      "not": {
+        "required": [
+          "error"
+        ]
+      }
+    },
+    {
+      "properties": {
+        "outcome": {
+          "const": "notMatched"
+        },
+        "selectedCaseIds": {
+          "maxItems": 0
+        },
+        "emittedPortIds": {
+          "maxItems": 0
+        }
+      },
+      "not": {
+        "required": [
+          "error"
+        ]
+      }
+    },
+    {
+      "required": [
+        "error"
+      ],
+      "properties": {
+        "outcome": {
+          "const": "evaluationError"
+        },
+        "selectedCaseIds": {
+          "maxItems": 0
+        },
+        "emittedPortIds": {
+          "maxItems": 0
+        }
+      }
+    }
+  ],
+  "additionalProperties": false
+}

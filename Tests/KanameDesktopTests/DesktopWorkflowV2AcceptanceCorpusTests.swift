@@ -13,6 +13,8 @@ struct DesktopWorkflowV2AcceptanceCorpusTests {
         let scenarioData = try Data(contentsOf: root.appendingPathComponent(scenarioPath))
         let compilerPath = try #require(manifest["compilerInvariantFile"] as? String)
         let compilerData = try Data(contentsOf: root.appendingPathComponent(compilerPath))
+        let matchEvaluatorPath = try #require(manifest["matchEvaluatorFile"] as? String)
+        let matchEvaluatorData = try Data(contentsOf: root.appendingPathComponent(matchEvaluatorPath))
         let document = try #require(try JSONSerialization.jsonObject(with: scenarioData) as? [String: Any])
         let scenarios = try #require(document["scenarios"] as? [[String: Any]])
 
@@ -22,6 +24,7 @@ struct DesktopWorkflowV2AcceptanceCorpusTests {
         #expect(manifest["scenarioCount"] as? Int == scenarios.count)
         #expect(hexDigest(scenarioData) == manifest["scenarioFileSHA256"] as? String)
         #expect(hexDigest(compilerData) == manifest["compilerInvariantFileSHA256"] as? String)
+        #expect(hexDigest(matchEvaluatorData) == manifest["matchEvaluatorFileSHA256"] as? String)
         let compilerDocument = try #require(
             try JSONSerialization.jsonObject(with: compilerData) as? [String: Any]
         )
@@ -73,6 +76,7 @@ struct DesktopWorkflowV2AcceptanceCorpusTests {
             root.appendingPathComponent("Fixtures/workflow-v2/corpus-manifest.json"),
             root.appendingPathComponent("Fixtures/workflow-v2/scenarios.json"),
             root.appendingPathComponent("Fixtures/workflow-v2/compiler-invariants.json"),
+            root.appendingPathComponent("Fixtures/workflow-v2/match-evaluator-v1.json"),
             root.appendingPathComponent("Fixtures/workflow-v2/visual-manifest.json"),
             root.appendingPathComponent("Scripts/capture-workflow-v2-visual-fixtures.sh"),
         ]
