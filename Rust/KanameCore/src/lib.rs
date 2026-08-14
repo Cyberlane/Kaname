@@ -25,6 +25,7 @@ pub mod workflow_protocol;
 pub mod workflow_publication;
 pub mod workflow_runtime;
 pub mod workflow_schema;
+pub mod workflow_storage;
 pub mod workflow_versions;
 
 pub const SCHEMA_MAJOR: u32 = 1;
@@ -66,4 +67,18 @@ pub fn open_workflow_object_store(
         ));
     }
     workflow_object_store::WorkflowObjectStore::open(root.join("Objects"), quota)
+}
+
+/// Opens scoped workflow storage and its private content-addressed byte layer.
+pub fn open_workflow_scoped_storage(
+    application_support_root: impl AsRef<std::path::Path>,
+    object_quota: workflow_object_store::WorkflowObjectStoreQuota,
+) -> workflow_storage::Result<workflow_storage::WorkflowScopedStorage> {
+    let root = application_support_root.as_ref();
+    if root.as_os_str().is_empty() || root.file_name().is_none() {
+        return Err(workflow_storage::WorkflowStorageError::UnsafePath(
+            "application_support_root_invalid",
+        ));
+    }
+    workflow_storage::WorkflowScopedStorage::open(root.join("Objects"), object_quota)
 }

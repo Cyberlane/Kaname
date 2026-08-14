@@ -16,6 +16,21 @@ pub(crate) enum PrivateFilesystemError {
     Bounds(&'static str),
 }
 
+impl PrivateFilesystemError {
+    pub(crate) fn fold<T>(
+        self,
+        io: impl FnOnce(std::io::Error) -> T,
+        unsafe_path: impl FnOnce(&'static str) -> T,
+        bounds: impl FnOnce(&'static str) -> T,
+    ) -> T {
+        match self {
+            Self::Io(error) => io(error),
+            Self::UnsafePath(code) => unsafe_path(code),
+            Self::Bounds(code) => bounds(code),
+        }
+    }
+}
+
 impl From<std::io::Error> for PrivateFilesystemError {
     fn from(value: std::io::Error) -> Self {
         Self::Io(value)

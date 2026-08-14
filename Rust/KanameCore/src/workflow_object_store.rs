@@ -70,11 +70,7 @@ impl From<std::io::Error> for WorkflowObjectStoreError {
 
 impl From<PrivateFilesystemError> for WorkflowObjectStoreError {
     fn from(value: PrivateFilesystemError) -> Self {
-        match value {
-            PrivateFilesystemError::Io(error) => Self::Io(error),
-            PrivateFilesystemError::UnsafePath(code) => Self::UnsafePath(code),
-            PrivateFilesystemError::Bounds(code) => Self::QuotaExceeded(code),
-        }
+        value.fold(Self::Io, Self::UnsafePath, Self::QuotaExceeded)
     }
 }
 

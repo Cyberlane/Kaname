@@ -532,11 +532,11 @@ pub(crate) fn sync_directory(path: &Path) -> Result<()> {
 }
 
 fn workflow_private_filesystem_error(error: PrivateFilesystemError) -> WorkflowLibraryError {
-    match error {
-        PrivateFilesystemError::Io(error) => WorkflowLibraryError::Io(error),
-        PrivateFilesystemError::UnsafePath(code) => WorkflowLibraryError::UnsafePath(code),
-        PrivateFilesystemError::Bounds(code) => WorkflowLibraryError::Integrity(code.into()),
-    }
+    error.fold(
+        WorkflowLibraryError::Io,
+        WorkflowLibraryError::UnsafePath,
+        |code| WorkflowLibraryError::Integrity(code.into()),
+    )
 }
 
 use rusqlite::OptionalExtension;
