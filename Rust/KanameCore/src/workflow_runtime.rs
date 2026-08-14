@@ -29,6 +29,8 @@ pub const WORKFLOW_WAIT_RESOLVED_KIND: &str = "workflow.wait.resolved";
 pub const WORKFLOW_ATTEMPT_STARTED_KIND: &str = "workflow.attempt.started";
 pub const WORKFLOW_CAPABILITY_ATTEMPT_STARTED_KIND: &str = "workflow.capability.attempt-started";
 pub const WORKFLOW_CAPABILITY_ATTEMPT_SETTLED_KIND: &str = "workflow.capability.attempt-settled";
+pub const WORKFLOW_LLM_ATTEMPT_STARTED_KIND: &str = "workflow.llm.attempt-started";
+pub const WORKFLOW_LLM_ATTEMPT_SETTLED_KIND: &str = "workflow.llm.attempt-settled";
 pub const WORKFLOW_ATTEMPT_SETTLED_KIND: &str = "workflow.attempt.settled";
 pub const WORKFLOW_PORT_EMITTED_KIND: &str = "workflow.port.emitted";
 pub const WORKFLOW_EDGE_CHECKPOINTED_KIND: &str = "workflow.edge.checkpointed";
@@ -59,6 +61,8 @@ pub const WORKFLOW_CAPABILITY_ATTEMPT_STARTED_TYPE: &str =
     "kaname.workflow.capability-attempt-started.v1";
 pub const WORKFLOW_CAPABILITY_ATTEMPT_SETTLED_TYPE: &str =
     "kaname.workflow.capability-attempt-settled.v1";
+pub const WORKFLOW_LLM_ATTEMPT_STARTED_TYPE: &str = "kaname.workflow.llm-attempt-started.v1";
+pub const WORKFLOW_LLM_ATTEMPT_SETTLED_TYPE: &str = "kaname.workflow.llm-attempt-settled.v1";
 pub const WORKFLOW_ATTEMPT_SETTLED_TYPE: &str = "kaname.workflow.attempt-settled.v1";
 pub const WORKFLOW_PORT_EMITTED_TYPE: &str = "kaname.workflow.port-emitted.v1";
 pub const WORKFLOW_EDGE_CHECKPOINTED_TYPE: &str = "kaname.workflow.edge-checkpointed.v1";
@@ -74,6 +78,8 @@ const MAXIMUM_INLINE_VALUE_BYTES: usize = 32 * 1024;
 const MAXIMUM_PORT_BINDINGS: usize = 64;
 const MAXIMUM_TRACE_IDENTIFIERS: usize = 256;
 const MAXIMUM_CAPABILITY_LOGS: usize = 128;
+const MAXIMUM_LLM_CONTEXT_GROUPS: usize = 64;
+const MAXIMUM_LLM_MESSAGES: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkflowRuntimeContractError {
@@ -110,6 +116,8 @@ pub enum WorkflowRuntimeEvent {
     AttemptStarted(v1::WorkflowAttemptStarted),
     CapabilityAttemptStarted(v1::WorkflowCapabilityAttemptStarted),
     CapabilityAttemptSettled(v1::WorkflowCapabilityAttemptSettled),
+    LlmAttemptStarted(v1::WorkflowLlmAttemptStarted),
+    LlmAttemptSettled(v1::WorkflowLlmAttemptSettled),
     AttemptSettled(v1::WorkflowAttemptSettled),
     PortEmitted(v1::WorkflowPortEmitted),
     EdgeCheckpointed(v1::WorkflowEdgeCheckpointed),
@@ -137,6 +145,8 @@ impl WorkflowRuntimeEvent {
             Self::AttemptStarted(payload) => &payload.run_id,
             Self::CapabilityAttemptStarted(payload) => &payload.run_id,
             Self::CapabilityAttemptSettled(payload) => &payload.run_id,
+            Self::LlmAttemptStarted(payload) => &payload.run_id,
+            Self::LlmAttemptSettled(payload) => &payload.run_id,
             Self::AttemptSettled(payload) => &payload.run_id,
             Self::PortEmitted(payload) => &payload.run_id,
             Self::EdgeCheckpointed(payload) => &payload.run_id,
@@ -152,6 +162,7 @@ pub fn is_workflow_runtime_kind(kind: &str) -> bool {
         "workflow.run.",
         "workflow.attempt.",
         "workflow.capability.",
+        "workflow.llm.",
         "workflow.port.",
         "workflow.edge.",
         "workflow.match.",
@@ -328,6 +339,20 @@ pub fn decode_workflow_event(event: &v1::EventEnvelope) -> Result<WorkflowRuntim
             validate_capability_attempt_settled(&payload)?;
             validate_event_context(event, &payload.run_id)?;
             Ok(WorkflowRuntimeEvent::CapabilityAttemptSettled(payload))
+        }
+        WORKFLOW_LLM_ATTEMPT_STARTED_KIND => {
+            let payload: v1::WorkflowLlmAttemptStarted =
+                decode_payload(event.payload.as_ref(), WORKFLOW_LLM_ATTEMPT_STARTED_TYPE)?;
+            validate_llm_attempt_started(&payload)?;
+            validate_event_context(event, &payload.run_id)?;
+            Ok(WorkflowRuntimeEvent::LlmAttemptStarted(payload))
+        }
+        WORKFLOW_LLM_ATTEMPT_SETTLED_KIND => {
+            let payload: v1::WorkflowLlmAttemptSettled =
+                decode_payload(event.payload.as_ref(), WORKFLOW_LLM_ATTEMPT_SETTLED_TYPE)?;
+            validate_llm_attempt_settled(&payload)?;
+            validate_event_context(event, &payload.run_id)?;
+            Ok(WorkflowRuntimeEvent::LlmAttemptSettled(payload))
         }
         WORKFLOW_ATTEMPT_SETTLED_KIND => {
             let payload: v1::WorkflowAttemptSettled =
@@ -1233,6 +1258,275 @@ fn validate_capability_logs(
             return invalid("capability_log_contract");
         }
         validate_text(&log.message, 2_048, "capability_log_message")?;
+    }
+    Ok(())
+}
+
+fn validate_llm_attempt_started(payload: &v1::WorkflowLlmAttemptStarted) -> Result<()> {
+    validate_run_and_token(&payload.run_id, &payload.run_token_id)?;
+    for (value, code) in [
+        (&payload.invocation_id, "llm_invocation_id"),
+        (&payload.attempt_id, "attempt_id"),
+        (&payload.execution_token_id, "execution_token_id"),
+        (&payload.node_id, "node_id"),
+    ] {
+        validate_identifier(value, 128, code)?;
+    }
+    let settings = payload
+        .settings
+        .as_ref()
+        .ok_or_else(|| invalid_error("llm_settings"))?;
+    validate_llm_settings(settings)?;
+    validate_digest(&payload.context_digest, "llm_context_digest")?;
+    validate_text(&payload.output_schema_ref, 256, "llm_output_schema_ref")?;
+    validate_digest(&payload.output_schema_digest, "llm_output_schema_digest")?;
+    validate_value(payload.input.as_ref())?;
+    if payload.timeout_milliseconds == 0
+        || payload.timeout_milliseconds > 86_400_000
+        || payload.deadline_unix_millis < 0
+        || payload.context_groups.is_empty()
+        || payload.context_groups.len() > MAXIMUM_LLM_CONTEXT_GROUPS
+        || payload.messages.is_empty()
+        || payload.messages.len() > MAXIMUM_LLM_MESSAGES
+    {
+        return invalid("llm_started_bounds");
+    }
+
+    let mut group_ids = BTreeSet::new();
+    let mut retained_bytes = 0_u64;
+    let mut original_bytes = 0_u64;
+    let mut redactions = 0_u32;
+    for group in &payload.context_groups {
+        validate_identifier(&group.group_id, 128, "llm_context_group_id")?;
+        validate_identifier(&group.kind, 128, "llm_context_group_kind")?;
+        validate_text(&group.title, 256, "llm_context_group_title")?;
+        validate_text(&group.provenance, 512, "llm_context_group_provenance")?;
+        validate_llm_safe_text(&group.provenance, "llm_context_group_provenance")?;
+        validate_value(group.content.as_ref())?;
+        let content = group
+            .content
+            .as_ref()
+            .ok_or_else(|| invalid_error("llm_context_group_content"))?;
+        if group.retained_byte_count != content.byte_count
+            || group.original_byte_count < group.retained_byte_count
+            || (!group.truncated && group.original_byte_count != group.retained_byte_count)
+            || !group_ids.insert(group.group_id.as_str())
+        {
+            return invalid("llm_context_group_contract");
+        }
+        validate_identifier_list(
+            &group.source_episode_ids,
+            64,
+            "llm_context_source_episode_id",
+        )?;
+        retained_bytes = retained_bytes.saturating_add(group.retained_byte_count);
+        original_bytes = original_bytes.saturating_add(group.original_byte_count);
+        redactions = redactions.saturating_add(group.redaction_count);
+    }
+    if retained_bytes > settings.maximum_context_bytes {
+        return invalid("llm_context_byte_bound");
+    }
+
+    let mut message_ids = BTreeSet::new();
+    for (index, message) in payload.messages.iter().enumerate() {
+        validate_identifier(&message.message_id, 128, "llm_message_id")?;
+        validate_identifier(
+            &message.context_group_id,
+            128,
+            "llm_message_context_group_id",
+        )?;
+        validate_text(&message.summary, 512, "llm_message_summary")?;
+        validate_llm_safe_text(&message.summary, "llm_message_summary")?;
+        validate_identifier(
+            &message.content_value_id,
+            128,
+            "llm_message_content_value_id",
+        )?;
+        let group = payload
+            .context_groups
+            .iter()
+            .find(|group| group.group_id == message.context_group_id)
+            .ok_or_else(|| invalid_error("llm_message_context_group"))?;
+        if message.sequence != (index + 1) as u32
+            || !matches!(
+                message.role.as_str(),
+                "system" | "developer" | "user" | "assistant" | "tool"
+            )
+            || !message_ids.insert(message.message_id.as_str())
+            || group
+                .content
+                .as_ref()
+                .is_none_or(|content| message.content_value_id != content.value_id)
+            || message.redaction_count != group.redaction_count
+            || message.truncated != group.truncated
+        {
+            return invalid("llm_message_contract");
+        }
+    }
+    validate_identifier_list(&payload.prior_episode_ids, 64, "llm_prior_episode_id")?;
+    validate_capability_artifacts(&payload.attachments)?;
+    let report = payload
+        .compilation_report
+        .as_ref()
+        .ok_or_else(|| invalid_error("llm_compilation_report"))?;
+    validate_llm_compilation_report(
+        report,
+        &group_ids,
+        payload.context_groups.len() as u32,
+        retained_bytes,
+        original_bytes,
+        redactions,
+    )
+}
+
+fn validate_llm_settings(settings: &v1::WorkflowLlmModelSettings) -> Result<()> {
+    validate_identifier(&settings.model_class, 128, "llm_model_class")?;
+    validate_identifier(&settings.provider_id, 128, "llm_provider_id")?;
+    validate_text(&settings.model_id, 256, "llm_model_id")?;
+    validate_text(&settings.model_revision, 256, "llm_model_revision")?;
+    if !matches!(
+        settings.reasoning_effort.as_str(),
+        "minimal" | "low" | "medium" | "high"
+    ) || settings.temperature_milli > 2_000
+        || !(256..=49_152).contains(&settings.maximum_context_bytes)
+        || !(1..=65_536).contains(&settings.maximum_output_tokens)
+        || !matches!(settings.conversation_scope.as_str(), "job" | "case")
+    {
+        return invalid("llm_settings_contract");
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_llm_compilation_report(
+    report: &v1::WorkflowLlmCompilationReport,
+    retained_group_ids: &BTreeSet<&str>,
+    retained_group_count: u32,
+    retained_byte_count: u64,
+    retained_original_byte_count: u64,
+    redaction_count: u32,
+) -> Result<()> {
+    if report.original_group_count < retained_group_count
+        || report.retained_group_count != retained_group_count
+        || report.original_byte_count < retained_original_byte_count
+        || report.retained_byte_count != retained_byte_count
+        || report.original_byte_count < report.retained_byte_count
+        || report.redaction_count != redaction_count
+    {
+        return invalid("llm_compilation_report_totals");
+    }
+    validate_identifier_list(
+        &report.truncated_group_ids,
+        MAXIMUM_LLM_CONTEXT_GROUPS,
+        "llm_truncated_group_id",
+    )?;
+    validate_identifier_list(
+        &report.dropped_group_ids,
+        MAXIMUM_LLM_CONTEXT_GROUPS,
+        "llm_dropped_group_id",
+    )?;
+    let truncated = report
+        .truncated_group_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let dropped = report
+        .dropped_group_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if !truncated.is_subset(retained_group_ids)
+        || !truncated.is_disjoint(&dropped)
+        || report.original_group_count
+            != retained_group_count.saturating_add(report.dropped_group_ids.len() as u32)
+    {
+        return invalid("llm_compilation_report_groups");
+    }
+    if report.redaction_reasons.len() > 16 {
+        return invalid("llm_redaction_reason_count");
+    }
+    let mut previous = None;
+    for reason in &report.redaction_reasons {
+        validate_identifier(reason, 64, "llm_redaction_reason")?;
+        if previous.is_some_and(|value: &str| value >= reason.as_str()) {
+            return invalid("llm_redaction_reason_order");
+        }
+        previous = Some(reason.as_str());
+    }
+    Ok(())
+}
+
+fn validate_llm_attempt_settled(payload: &v1::WorkflowLlmAttemptSettled) -> Result<()> {
+    validate_run_and_token(&payload.run_id, &payload.run_token_id)?;
+    validate_identifier(&payload.invocation_id, 128, "llm_invocation_id")?;
+    validate_identifier(&payload.attempt_id, 128, "attempt_id")?;
+    if payload.idempotency_key != payload.invocation_id || payload.elapsed_milliseconds > 86_400_000
+    {
+        return invalid("llm_settled_contract");
+    }
+    let outcome = v1::WorkflowLlmAttemptOutcome::try_from(payload.outcome)
+        .map_err(|_| invalid_error("llm_outcome"))?;
+    match outcome {
+        v1::WorkflowLlmAttemptOutcome::Succeeded => {
+            validate_value(payload.output.as_ref())?;
+            if !payload.error_code.is_empty() || payload.error.is_some() {
+                return invalid("llm_success_contract");
+            }
+            validate_identifier(&payload.receipt_id, 256, "llm_receipt_id")?;
+            if !payload.provider_run_reference.is_empty() {
+                validate_identifier(
+                    &payload.provider_run_reference,
+                    256,
+                    "llm_provider_run_reference",
+                )?;
+            }
+        }
+        v1::WorkflowLlmAttemptOutcome::Cancelled => {
+            validate_identifier(&payload.error_code, 128, "llm_error_code")?;
+            if payload.output.is_some() || payload.error.is_some() {
+                return invalid("llm_cancelled_contract");
+            }
+            if !payload.receipt_id.is_empty() {
+                validate_identifier(&payload.receipt_id, 256, "llm_receipt_id")?;
+            }
+        }
+        v1::WorkflowLlmAttemptOutcome::OutputValidationFailed
+        | v1::WorkflowLlmAttemptOutcome::TimedOut
+        | v1::WorkflowLlmAttemptOutcome::MalformedResult
+        | v1::WorkflowLlmAttemptOutcome::Crashed => {
+            validate_identifier(&payload.error_code, 128, "llm_error_code")?;
+            validate_value(payload.error.as_ref())?;
+            if payload.output.is_some() {
+                return invalid("llm_failure_contract");
+            }
+            validate_identifier(&payload.receipt_id, 256, "llm_receipt_id")?;
+        }
+        v1::WorkflowLlmAttemptOutcome::Unspecified => return invalid("llm_outcome"),
+    }
+    Ok(())
+}
+
+fn validate_llm_safe_text(value: &str, code: &'static str) -> Result<()> {
+    let normalized = value.to_ascii_lowercase().replace(['_', '-'], "");
+    if value.contains("/Users/")
+        || value.contains("file://")
+        || value.contains("/home/")
+        || value.contains("\\Users\\")
+        || [
+            "authorization:",
+            "bearer ",
+            "apikey=",
+            "apikey:",
+            "password=",
+            "password:",
+            "secret=",
+            "secret:",
+            "credential=",
+        ]
+        .iter()
+        .any(|marker| normalized.contains(marker))
+    {
+        return invalid(code);
     }
     Ok(())
 }

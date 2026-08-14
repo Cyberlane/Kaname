@@ -429,6 +429,113 @@ message WorkflowCapabilityAttemptSettled {
   reserved "credential", "host_path", "secret";
 }
 
+message WorkflowLlmModelSettings {
+  string model_class = 1;
+  string provider_id = 2;
+  string model_id = 3;
+  string model_revision = 4;
+  string reasoning_effort = 5;
+  uint32 temperature_milli = 6;
+  uint64 maximum_context_bytes = 7;
+  uint32 maximum_output_tokens = 8;
+  string conversation_scope = 9;
+  reserved 10 to 20;
+  reserved "credential", "api_key", "endpoint";
+}
+
+message WorkflowLlmContextGroup {
+  string group_id = 1;
+  string kind = 2;
+  string title = 3;
+  string provenance = 4;
+  WorkflowValueReference content = 5;
+  uint64 original_byte_count = 6;
+  uint64 retained_byte_count = 7;
+  uint32 redaction_count = 8;
+  bool truncated = 9;
+  repeated string source_episode_ids = 10;
+  reserved 11 to 20;
+  reserved "host_path", "raw_path", "secret";
+}
+
+message WorkflowLlmMessage {
+  string message_id = 1;
+  uint32 sequence = 2;
+  string role = 3;
+  string context_group_id = 4;
+  string summary = 5;
+  string content_value_id = 6;
+  uint64 estimated_tokens = 7;
+  uint32 redaction_count = 8;
+  bool truncated = 9;
+  reserved 10 to 20;
+}
+
+message WorkflowLlmCompilationReport {
+  uint32 original_group_count = 1;
+  uint32 retained_group_count = 2;
+  uint64 original_byte_count = 3;
+  uint64 retained_byte_count = 4;
+  uint32 redaction_count = 5;
+  repeated string truncated_group_ids = 6;
+  repeated string dropped_group_ids = 7;
+  repeated string redaction_reasons = 8;
+  reserved 9 to 20;
+}
+
+enum WorkflowLlmAttemptOutcome {
+  WORKFLOW_LLM_ATTEMPT_OUTCOME_UNSPECIFIED = 0;
+  WORKFLOW_LLM_ATTEMPT_OUTCOME_SUCCEEDED = 1;
+  WORKFLOW_LLM_ATTEMPT_OUTCOME_OUTPUT_VALIDATION_FAILED = 2;
+  WORKFLOW_LLM_ATTEMPT_OUTCOME_TIMED_OUT = 3;
+  WORKFLOW_LLM_ATTEMPT_OUTCOME_CANCELLED = 4;
+  WORKFLOW_LLM_ATTEMPT_OUTCOME_MALFORMED_RESULT = 5;
+  WORKFLOW_LLM_ATTEMPT_OUTCOME_CRASHED = 6;
+}
+
+// The exact bounded context admitted before an idempotent model invocation.
+// Tool definitions and calls are deliberately added by the later tool-trace
+// contract; this message never contains credentials, endpoints, or host paths.
+message WorkflowLlmAttemptStarted {
+  string run_id = 1;
+  string run_token_id = 2;
+  string invocation_id = 3;
+  string attempt_id = 4;
+  string execution_token_id = 5;
+  string node_id = 6;
+  WorkflowLlmModelSettings settings = 7;
+  string context_digest = 8;
+  repeated WorkflowLlmContextGroup context_groups = 9;
+  repeated WorkflowLlmMessage messages = 10;
+  repeated string prior_episode_ids = 11;
+  repeated WorkflowCapabilityArtifactHandle attachments = 12;
+  WorkflowLlmCompilationReport compilation_report = 13;
+  string output_schema_ref = 14;
+  string output_schema_digest = 15;
+  WorkflowValueReference input = 16;
+  uint64 timeout_milliseconds = 17;
+  int64 deadline_unix_millis = 18;
+  reserved 19 to 30;
+  reserved "credential", "api_key", "endpoint", "host_path", "secret";
+}
+
+message WorkflowLlmAttemptSettled {
+  string run_id = 1;
+  string run_token_id = 2;
+  string invocation_id = 3;
+  string attempt_id = 4;
+  WorkflowLlmAttemptOutcome outcome = 5;
+  WorkflowValueReference output = 6;
+  string error_code = 7;
+  WorkflowValueReference error = 8;
+  uint64 elapsed_milliseconds = 9;
+  string receipt_id = 10;
+  string provider_run_reference = 11;
+  string idempotency_key = 12;
+  reserved 13 to 25;
+  reserved "credential", "api_key", "endpoint", "host_path", "secret";
+}
+
 enum WorkflowAttemptOutcome {
   WORKFLOW_ATTEMPT_OUTCOME_UNSPECIFIED = 0;
   WORKFLOW_ATTEMPT_OUTCOME_SUCCEEDED = 1;
@@ -606,6 +713,66 @@ message WorkflowProjectedCapabilityArtifactHandle {
   string role = 2;
   WorkflowProjectedValue value = 3;
   reserved 4 to 12;
+}
+
+message WorkflowProjectedLlmAttempt {
+  string invocation_id = 1;
+  string attempt_id = 2;
+  string execution_token_id = 3;
+  string node_id = 4;
+  WorkflowLlmModelSettings settings = 5;
+  string context_digest = 6;
+  repeated WorkflowProjectedLlmContextGroup context_groups = 7;
+  repeated WorkflowProjectedLlmMessage messages = 8;
+  repeated string prior_episode_ids = 9;
+  repeated WorkflowProjectedCapabilityArtifactHandle attachments = 10;
+  WorkflowLlmCompilationReport compilation_report = 11;
+  string output_schema_ref = 12;
+  string output_schema_digest = 13;
+  WorkflowProjectedValue input = 14;
+  string status = 15;
+  string outcome = 16;
+  WorkflowProjectedValue output = 17;
+  string error_code = 18;
+  WorkflowProjectedValue error = 19;
+  uint64 timeout_milliseconds = 20;
+  int64 deadline_unix_millis = 21;
+  uint64 elapsed_milliseconds = 22;
+  string receipt_id = 23;
+  string provider_run_reference = 24;
+  string idempotency_key = 25;
+  int64 started_at_unix_millis = 26;
+  int64 settled_at_unix_millis = 27;
+  uint64 started_store_position = 28;
+  uint64 settled_store_position = 29;
+  reserved 30 to 40;
+}
+
+message WorkflowProjectedLlmContextGroup {
+  string group_id = 1;
+  string kind = 2;
+  string title = 3;
+  string provenance = 4;
+  WorkflowProjectedValue content = 5;
+  uint64 original_byte_count = 6;
+  uint64 retained_byte_count = 7;
+  uint32 redaction_count = 8;
+  bool truncated = 9;
+  repeated string source_episode_ids = 10;
+  reserved 11 to 20;
+}
+
+message WorkflowProjectedLlmMessage {
+  string message_id = 1;
+  uint32 sequence = 2;
+  string role = 3;
+  string context_group_id = 4;
+  string summary = 5;
+  WorkflowProjectedValue content = 6;
+  uint64 estimated_tokens = 7;
+  uint32 redaction_count = 8;
+  bool truncated = 9;
+  reserved 10 to 20;
 }
 
 message WorkflowProjectedNodeState {
@@ -870,7 +1037,8 @@ message WorkflowProjectedRun {
   WorkflowProjectedCaseEpisode episode = 30;
   repeated WorkflowProjectedSubflow subflows = 31;
   repeated WorkflowProjectedCapabilityAttempt capability_attempts = 32;
-  reserved 33 to 40;
+  repeated WorkflowProjectedLlmAttempt llm_attempts = 33;
+  reserved 34 to 40;
 }
 
 message WorkflowRunInspectionResponse {

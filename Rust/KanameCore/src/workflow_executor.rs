@@ -16,6 +16,10 @@ use crate::{
         WorkflowCapabilityInvocation, WorkflowCapabilityLog, WorkflowCapabilityValue,
     },
     workflow_library::{WorkflowLibraryError, WorkflowLibraryStore},
+    workflow_llm::{
+        UnavailableWorkflowLlmProvider, WorkflowLlmInvocation, WorkflowLlmProvider,
+        WorkflowLlmProviderDefinition, WorkflowLlmProviderResult,
+    },
     workflow_match::{self, EvaluationOutcome, MatchConfig, MatchRoots, TraceOutcome},
     workflow_runtime::{self, WorkflowRuntimeCommand, WorkflowRuntimeEvent},
     workflow_schema::{self, WorkflowSchemaCheckOutcome, WorkflowSchemaCheckRequest},
@@ -269,6 +273,27 @@ struct CapabilityConfig {
     output_schema_ref: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LlmConfig {
+    model_class: String,
+    instructions: String,
+    prompt: Value,
+    context: Vec<Value>,
+    tools: Vec<String>,
+    output_schema_ref: String,
+    #[serde(default = "default_job_conversation_scope")]
+    conversation_scope: String,
+    reasoning_effort: String,
+    temperature_milli: u32,
+    maximum_context_bytes: u64,
+    maximum_output_tokens: u32,
+}
+
+fn default_job_conversation_scope() -> String {
+    "job".into()
+}
+
 struct ExecutionPackage {
     compiled: CompiledWorkflow,
     schemas: BTreeMap<String, Value>,
@@ -289,6 +314,7 @@ struct RecordedRun {
     waits: BTreeMap<String, RecordedWait>,
     attempts: Vec<RecordedAttempt>,
     capability_attempts: BTreeMap<String, RecordedCapabilityAttempt>,
+    llm_attempts: BTreeMap<String, RecordedLlmAttempt>,
     emissions: BTreeMap<String, RecordedEmission>,
     edges: Vec<RecordedEdge>,
     cancellation: Option<v1::WorkflowRunCancellationRequested>,
@@ -358,6 +384,14 @@ struct RecordedCapabilityAttempt {
     settled: Option<v1::WorkflowCapabilityAttemptSettled>,
 }
 
+struct RecordedLlmAttempt {
+    started_event_id: String,
+    started_at_unix_millis: i64,
+    started: v1::WorkflowLlmAttemptStarted,
+    settled_event_id: Option<String>,
+    settled: Option<v1::WorkflowLlmAttemptSettled>,
+}
+
 struct RecordedEmission {
     event_id: String,
     payload: v1::WorkflowPortEmitted,
@@ -407,12 +441,14 @@ pub fn execute(
     command: &v1::CommandEnvelope,
 ) -> Result<WorkflowExecutionResult> {
     let mut capabilities = UnavailableWorkflowCapabilityHost;
+    let mut llm = UnavailableWorkflowLlmProvider;
     execute_internal(
         journal,
         library,
         None,
         None,
         &mut capabilities,
+        &mut llm,
         command,
         current_unix_millis(),
         None,
@@ -428,12 +464,14 @@ pub fn execute_at_unix_millis(
     now_unix_millis: i64,
 ) -> Result<WorkflowExecutionResult> {
     let mut capabilities = UnavailableWorkflowCapabilityHost;
+    let mut llm = UnavailableWorkflowLlmProvider;
     execute_internal(
         journal,
         library,
         None,
         None,
         &mut capabilities,
+        &mut llm,
         command,
         now_unix_millis,
         None,
@@ -450,12 +488,14 @@ pub fn execute_with_storage(
     command: &v1::CommandEnvelope,
 ) -> Result<WorkflowExecutionResult> {
     let mut capabilities = UnavailableWorkflowCapabilityHost;
+    let mut llm = UnavailableWorkflowLlmProvider;
     execute_internal(
         journal,
         library,
         Some(storage),
         Some(authority),
         &mut capabilities,
+        &mut llm,
         command,
         current_unix_millis(),
         None,
@@ -470,12 +510,14 @@ pub fn execute_with_capabilities(
     capabilities: &mut dyn WorkflowCapabilityHost,
     command: &v1::CommandEnvelope,
 ) -> Result<WorkflowExecutionResult> {
+    let mut llm = UnavailableWorkflowLlmProvider;
     execute_internal(
         journal,
         library,
         None,
         None,
         capabilities,
+        &mut llm,
         command,
         current_unix_millis(),
         None,
@@ -492,12 +534,60 @@ pub fn execute_with_storage_and_capabilities(
     capabilities: &mut dyn WorkflowCapabilityHost,
     command: &v1::CommandEnvelope,
 ) -> Result<WorkflowExecutionResult> {
+    let mut llm = UnavailableWorkflowLlmProvider;
     execute_internal(
         journal,
         library,
         Some(storage),
         Some(authority),
         capabilities,
+        &mut llm,
+        command,
+        current_unix_millis(),
+        None,
+        0,
+        None,
+    )
+}
+
+pub fn execute_with_llm(
+    journal: &mut Journal,
+    library: &WorkflowLibraryStore,
+    llm: &mut dyn WorkflowLlmProvider,
+    command: &v1::CommandEnvelope,
+) -> Result<WorkflowExecutionResult> {
+    let mut capabilities = UnavailableWorkflowCapabilityHost;
+    execute_internal(
+        journal,
+        library,
+        None,
+        None,
+        &mut capabilities,
+        llm,
+        command,
+        current_unix_millis(),
+        None,
+        0,
+        None,
+    )
+}
+
+pub fn execute_with_storage_capabilities_and_llm(
+    journal: &mut Journal,
+    library: &WorkflowLibraryStore,
+    storage: &mut WorkflowScopedStorage,
+    authority: &WorkflowStorageExecutionAuthority,
+    capabilities: &mut dyn WorkflowCapabilityHost,
+    llm: &mut dyn WorkflowLlmProvider,
+    command: &v1::CommandEnvelope,
+) -> Result<WorkflowExecutionResult> {
+    execute_internal(
+        journal,
+        library,
+        Some(storage),
+        Some(authority),
+        capabilities,
+        llm,
         command,
         current_unix_millis(),
         None,
@@ -514,12 +604,14 @@ pub fn execute_with_fault_for_test(
     fault: WorkflowExecutionFault,
 ) -> Result<WorkflowExecutionResult> {
     let mut capabilities = UnavailableWorkflowCapabilityHost;
+    let mut llm = UnavailableWorkflowLlmProvider;
     execute_internal(
         journal,
         library,
         None,
         None,
         &mut capabilities,
+        &mut llm,
         command,
         current_unix_millis(),
         Some(fault),
@@ -538,12 +630,14 @@ pub fn execute_with_storage_fault_for_test(
     fault: WorkflowExecutionFault,
 ) -> Result<WorkflowExecutionResult> {
     let mut capabilities = UnavailableWorkflowCapabilityHost;
+    let mut llm = UnavailableWorkflowLlmProvider;
     execute_internal(
         journal,
         library,
         Some(storage),
         Some(authority),
         &mut capabilities,
+        &mut llm,
         command,
         current_unix_millis(),
         Some(fault),
@@ -560,12 +654,38 @@ pub fn execute_with_capabilities_fault_for_test(
     command: &v1::CommandEnvelope,
     fault: WorkflowExecutionFault,
 ) -> Result<WorkflowExecutionResult> {
+    let mut llm = UnavailableWorkflowLlmProvider;
     execute_internal(
         journal,
         library,
         None,
         None,
         capabilities,
+        &mut llm,
+        command,
+        current_unix_millis(),
+        Some(fault),
+        0,
+        None,
+    )
+}
+
+#[doc(hidden)]
+pub fn execute_with_llm_fault_for_test(
+    journal: &mut Journal,
+    library: &WorkflowLibraryStore,
+    llm: &mut dyn WorkflowLlmProvider,
+    command: &v1::CommandEnvelope,
+    fault: WorkflowExecutionFault,
+) -> Result<WorkflowExecutionResult> {
+    let mut capabilities = UnavailableWorkflowCapabilityHost;
+    execute_internal(
+        journal,
+        library,
+        None,
+        None,
+        &mut capabilities,
+        llm,
         command,
         current_unix_millis(),
         Some(fault),
@@ -581,6 +701,7 @@ fn execute_internal(
     mut storage: Option<&mut WorkflowScopedStorage>,
     authority: Option<&WorkflowStorageExecutionAuthority>,
     capabilities: &mut dyn WorkflowCapabilityHost,
+    llm: &mut dyn WorkflowLlmProvider,
     command: &v1::CommandEnvelope,
     now_unix_millis: i64,
     fault: Option<WorkflowExecutionFault>,
@@ -611,6 +732,7 @@ fn execute_internal(
     let package = load_execution_package(library, &request)?;
     validate_storage_authority(&package, &request, storage.is_some(), authority)?;
     validate_capability_host(&package, capabilities)?;
+    validate_llm_provider(&package, llm)?;
     let token_id = stable_id("token", &[&request.run_id, &command.command_id]);
     let initial_state = recorded_run(journal, &request.run_id)?;
     let prepared_episode = if !request.episode_id.is_empty() && initial_state.episode.is_none() {
@@ -642,6 +764,7 @@ fn execute_internal(
             storage.as_deref_mut(),
             authority,
             capabilities,
+            llm,
             command,
             &request,
             &token_id,
@@ -1165,6 +1288,98 @@ fn resolve_capability_definition(
     Ok((config, dependency, definition))
 }
 
+fn validate_llm_provider(
+    package: &ExecutionPackage,
+    provider: &dyn WorkflowLlmProvider,
+) -> Result<()> {
+    for node in package
+        .compiled
+        .nodes
+        .iter()
+        .filter(|node| node.node_type == "compute.llm")
+    {
+        let config = llm_config(node)?;
+        let definition = provider.definition(&config.model_class).ok_or_else(|| {
+            WorkflowExecutionError::Unsupported("llm_provider_not_registered".into())
+        })?;
+        if definition.model_class != config.model_class
+            || definition.provider_id.is_empty()
+            || definition.provider_id.len() > 128
+            || !definition.provider_id.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
+            })
+            || definition.model_id.is_empty()
+            || definition.model_id.len() > 256
+            || definition.model_revision.is_empty()
+            || definition.model_revision.len() > 256
+            || [&definition.model_id, &definition.model_revision]
+                .iter()
+                .any(|value| {
+                    value.chars().any(char::is_control)
+                        || llm_string_contains_host_path(value)
+                        || llm_string_contains_secret(value)
+                })
+            || !definition.idempotent
+            || definition.timeout_milliseconds == 0
+            || definition.timeout_milliseconds > 86_400_000
+            || definition.maximum_context_bytes < config.maximum_context_bytes
+            || config.maximum_context_bytes < 256
+            || config.maximum_context_bytes > 49_152
+            || config.maximum_output_tokens == 0
+            || config.maximum_output_tokens > 65_536
+            || config.temperature_milli > 2_000
+            || !matches!(
+                config.reasoning_effort.as_str(),
+                "minimal" | "low" | "medium" | "high"
+            )
+            || !matches!(config.conversation_scope.as_str(), "job" | "case")
+            || config.prompt != json!({"whole": true})
+            || !config.tools.is_empty()
+            || config.instructions.is_empty()
+        {
+            return Err(WorkflowExecutionError::Unsupported(
+                "llm_execution_contract".into(),
+            ));
+        }
+        let output_schema = package
+            .schemas
+            .get(&config.output_schema_ref)
+            .ok_or_else(|| {
+                WorkflowExecutionError::Unsupported("llm_output_schema_missing".into())
+            })?;
+        require_valid_schema(output_schema, "llm_output_schema")?;
+        validate_llm_context_references(&config.context)?;
+    }
+    Ok(())
+}
+
+fn llm_config(node: &CompiledNode) -> Result<LlmConfig> {
+    serde_json::from_value(node.config.clone())
+        .map_err(|_| WorkflowExecutionError::Integrity("llm_config".into()))
+}
+
+fn validate_llm_context_references(references: &[Value]) -> Result<()> {
+    if references.len() > 64 {
+        return Err(WorkflowExecutionError::Unsupported(
+            "llm_context_reference_limit".into(),
+        ));
+    }
+    for reference in references {
+        let root = reference.get("root").and_then(Value::as_str);
+        let pointer = reference.get("pointer").and_then(Value::as_str);
+        if root != Some("case")
+            || pointer.is_none_or(|pointer| {
+                pointer.len() > 512 || (!pointer.is_empty() && !pointer.starts_with('/'))
+            })
+        {
+            return Err(WorkflowExecutionError::Unsupported(
+                "llm_context_reference_contract".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn capability_configuration(config: &CapabilityConfig) -> Result<Value> {
     let configuration = if config.configuration.is_null() {
         json!({})
@@ -1293,6 +1508,7 @@ fn validate_compiled_subset(compiled: &CompiledWorkflow) -> Result<()> {
                     | "storage.write"
                     | "storage.promote"
                     | "compute.capability"
+                    | "compute.llm"
                     | "terminal.complete"
                     | "terminal.fail"
             )
@@ -1734,6 +1950,7 @@ fn next_events(
     mut storage: Option<&mut WorkflowScopedStorage>,
     authority: Option<&WorkflowStorageExecutionAuthority>,
     capabilities: &mut dyn WorkflowCapabilityHost,
+    llm: &mut dyn WorkflowLlmProvider,
     command: &v1::CommandEnvelope,
     request: &v1::RequestWorkflowRun,
     token_id: &str,
@@ -1830,6 +2047,7 @@ fn next_events(
                     storage.as_deref_mut(),
                     authority,
                     capabilities,
+                    llm,
                     command,
                     request,
                     recorded,
@@ -1860,6 +2078,26 @@ fn next_events(
                     &cancellation.reason_code,
                     None,
                     Vec::new(),
+                    elapsed,
+                    String::new(),
+                    String::new(),
+                )]);
+            }
+            if let Some(recorded) = state.llm_attempts.values().find(|recorded| {
+                recorded.started.attempt_id == active.started.attempt_id
+                    && recorded.settled.is_none()
+            }) {
+                let elapsed = cancellation_time(state, command.submitted_at_unix_millis)
+                    .saturating_sub(recorded.started_at_unix_millis)
+                    .max(0) as u64;
+                return Ok(vec![llm_settled_event(
+                    recorded,
+                    request,
+                    token_id,
+                    v1::WorkflowLlmAttemptOutcome::Cancelled,
+                    None,
+                    &cancellation.reason_code,
+                    None,
                     elapsed,
                     String::new(),
                     String::new(),
@@ -1962,6 +2200,7 @@ fn next_events(
             storage,
             authority,
             capabilities,
+            llm,
             command,
             request,
             token_id,
@@ -2057,6 +2296,7 @@ fn node_event_sequence(
     mut storage: Option<&mut WorkflowScopedStorage>,
     authority: Option<&WorkflowStorageExecutionAuthority>,
     capabilities: &mut dyn WorkflowCapabilityHost,
+    llm: &mut dyn WorkflowLlmProvider,
     command: &v1::CommandEnvelope,
     request: &v1::RequestWorkflowRun,
     token_id: &str,
@@ -2081,6 +2321,7 @@ fn node_event_sequence(
             storage.as_deref_mut(),
             authority,
             capabilities,
+            llm,
             command,
             request,
             token_id,
@@ -2106,6 +2347,13 @@ fn node_event_sequence(
             attempt,
             node,
             &inputs,
+        )?
+    {
+        return Ok(events);
+    }
+    if node.node_type == "compute.llm"
+        && let Some(events) = pending_llm_event_sequence(
+            package, llm, request, token_id, state, attempt, node, &inputs,
         )?
     {
         return Ok(events);
@@ -2149,6 +2397,8 @@ fn node_event_sequence(
     }
     let execution = if node.node_type == "compute.capability" {
         execute_settled_capability_node(request, state, attempt, node)?
+    } else if node.node_type == "compute.llm" {
+        execute_settled_llm_node(request, state, attempt, node)?
     } else if node.node_type == "control.subflow" {
         execute_settled_subflow_node(request, state, attempt, node)?
     } else if node.node_type == "control.join" {
@@ -3278,6 +3528,7 @@ fn pending_subflow_event_sequence(
     storage: Option<&mut WorkflowScopedStorage>,
     authority: Option<&WorkflowStorageExecutionAuthority>,
     capabilities: &mut dyn WorkflowCapabilityHost,
+    llm: &mut dyn WorkflowLlmProvider,
     command: &v1::CommandEnvelope,
     request: &v1::RequestWorkflowRun,
     run_token_id: &str,
@@ -3347,6 +3598,7 @@ fn pending_subflow_event_sequence(
         storage,
         authority,
         capabilities,
+        llm,
         &child_command,
         now_unix_millis,
         None,
@@ -3467,6 +3719,7 @@ fn cascade_subflow_cancellation(
     mut storage: Option<&mut WorkflowScopedStorage>,
     authority: Option<&WorkflowStorageExecutionAuthority>,
     capabilities: &mut dyn WorkflowCapabilityHost,
+    llm: &mut dyn WorkflowLlmProvider,
     parent_command: &v1::CommandEnvelope,
     parent_request: &v1::RequestWorkflowRun,
     recorded: &RecordedSubflow,
@@ -3484,6 +3737,7 @@ fn cascade_subflow_cancellation(
             storage.as_deref_mut(),
             authority,
             capabilities,
+            llm,
             &child_command,
             now_unix_millis,
             None,
@@ -3517,6 +3771,7 @@ fn cascade_subflow_cancellation(
         storage,
         authority,
         capabilities,
+        llm,
         &child_command,
         now_unix_millis,
         None,
@@ -4345,6 +4600,893 @@ fn capability_error_value(
             "summary": summary,
             "details": details
         }),
+    )
+}
+
+struct CompiledLlmContext {
+    settings: v1::WorkflowLlmModelSettings,
+    context_digest: String,
+    groups: Vec<v1::WorkflowLlmContextGroup>,
+    messages: Vec<v1::WorkflowLlmMessage>,
+    prior_episode_ids: Vec<String>,
+    attachments: Vec<v1::WorkflowCapabilityArtifactHandle>,
+    report: v1::WorkflowLlmCompilationReport,
+}
+
+struct PendingLlmGroup {
+    group_id: String,
+    kind: String,
+    title: String,
+    provenance: String,
+    role: Option<String>,
+    summary: String,
+    content: Value,
+    source_episode_ids: Vec<String>,
+    redaction_count: u32,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pending_llm_event_sequence(
+    package: &ExecutionPackage,
+    provider: &mut dyn WorkflowLlmProvider,
+    request: &v1::RequestWorkflowRun,
+    run_token_id: &str,
+    state: &RecordedRun,
+    attempt: &RecordedAttempt,
+    node: &CompiledNode,
+    inputs: &[(
+        Option<&v1::WorkflowEdgeCheckpointed>,
+        v1::WorkflowValueReference,
+    )],
+) -> Result<Option<Vec<v1::EventEnvelope>>> {
+    let invocation_id = llm_invocation_id(request, attempt, node);
+    let input = inputs
+        .last()
+        .ok_or_else(|| WorkflowExecutionError::Lifecycle("llm_input_missing".into()))?
+        .1
+        .clone();
+    let config = llm_config(node)?;
+    let definition = provider
+        .definition(&config.model_class)
+        .ok_or_else(|| WorkflowExecutionError::Unsupported("llm_provider_not_registered".into()))?;
+    let output_schema = package
+        .schemas
+        .get(&config.output_schema_ref)
+        .ok_or_else(|| WorkflowExecutionError::Unsupported("llm_output_schema_missing".into()))?;
+    let compiled = compile_llm_context(
+        request,
+        state.episode.as_ref(),
+        attempt,
+        node,
+        &input,
+        &config,
+        &definition,
+        output_schema,
+    )?;
+    let Some(recorded) = state.llm_attempts.get(&invocation_id) else {
+        let deadline_unix_millis = attempt
+            .started_at_unix_millis
+            .checked_add(definition.timeout_milliseconds as i64)
+            .ok_or_else(|| WorkflowExecutionError::Encoding("llm_deadline"))?;
+        return Ok(Some(vec![runtime_event(
+            attempt.started_at_unix_millis,
+            &stable_id("event", &[&request.run_id, "llm-started", &invocation_id]),
+            workflow_runtime::WORKFLOW_LLM_ATTEMPT_STARTED_KIND,
+            workflow_runtime::WORKFLOW_LLM_ATTEMPT_STARTED_TYPE,
+            v1::WorkflowLlmAttemptStarted {
+                run_id: request.run_id.clone(),
+                run_token_id: run_token_id.to_owned(),
+                invocation_id,
+                attempt_id: attempt.started.attempt_id.clone(),
+                execution_token_id: attempt.started.execution_token_id.clone(),
+                node_id: node.id.clone(),
+                settings: Some(compiled.settings),
+                context_digest: compiled.context_digest,
+                context_groups: compiled.groups,
+                messages: compiled.messages,
+                prior_episode_ids: compiled.prior_episode_ids,
+                attachments: compiled.attachments,
+                compilation_report: Some(compiled.report),
+                output_schema_ref: config.output_schema_ref,
+                output_schema_digest: schema_digest(output_schema)?,
+                input: Some(input),
+                timeout_milliseconds: definition.timeout_milliseconds,
+                deadline_unix_millis,
+            },
+            &attempt.started_event_id,
+            &request.run_id,
+        )]));
+    };
+    validate_recorded_llm_attempt(
+        request,
+        run_token_id,
+        attempt,
+        node,
+        &input,
+        &config,
+        &definition,
+        output_schema,
+        &compiled,
+        recorded,
+    )?;
+    if recorded.settled.is_some() {
+        return Ok(None);
+    }
+
+    let invocation = WorkflowLlmInvocation {
+        invocation_id: invocation_id.clone(),
+        run_id: request.run_id.clone(),
+        attempt_id: attempt.started.attempt_id.clone(),
+        node_id: node.id.clone(),
+        settings: compiled.settings,
+        context_digest: compiled.context_digest,
+        context_groups: compiled.groups,
+        messages: compiled.messages,
+        prior_episode_ids: compiled.prior_episode_ids,
+        attachments: compiled.attachments,
+        output_schema: output_schema.clone(),
+        timeout_milliseconds: definition.timeout_milliseconds,
+    };
+    let result = provider.invoke(&invocation);
+    Ok(Some(vec![llm_provider_result_event(
+        request,
+        run_token_id,
+        recorded,
+        output_schema,
+        &definition,
+        result,
+    )?]))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_recorded_llm_attempt(
+    request: &v1::RequestWorkflowRun,
+    run_token_id: &str,
+    attempt: &RecordedAttempt,
+    node: &CompiledNode,
+    input: &v1::WorkflowValueReference,
+    config: &LlmConfig,
+    definition: &WorkflowLlmProviderDefinition,
+    output_schema: &Value,
+    compiled: &CompiledLlmContext,
+    recorded: &RecordedLlmAttempt,
+) -> Result<()> {
+    let started = &recorded.started;
+    if started.run_id != request.run_id
+        || started.run_token_id != run_token_id
+        || started.attempt_id != attempt.started.attempt_id
+        || started.execution_token_id != attempt.started.execution_token_id
+        || started.node_id != node.id
+        || started.settings.as_ref() != Some(&compiled.settings)
+        || started.context_digest != compiled.context_digest
+        || started.context_groups != compiled.groups
+        || started.messages != compiled.messages
+        || started.prior_episode_ids != compiled.prior_episode_ids
+        || started.attachments != compiled.attachments
+        || started.compilation_report.as_ref() != Some(&compiled.report)
+        || started.output_schema_ref != config.output_schema_ref
+        || started.output_schema_digest != schema_digest(output_schema)?
+        || started.input.as_ref() != Some(input)
+        || started.timeout_milliseconds != definition.timeout_milliseconds
+        || started.deadline_unix_millis
+            != recorded
+                .started_at_unix_millis
+                .checked_add(definition.timeout_milliseconds as i64)
+                .ok_or_else(|| WorkflowExecutionError::Encoding("llm_deadline"))?
+    {
+        return Err(WorkflowExecutionError::Integrity(
+            "recorded_llm_pin_mismatch".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_llm_context(
+    request: &v1::RequestWorkflowRun,
+    episode: Option<&v1::WorkflowCaseEpisodeStarted>,
+    attempt: &RecordedAttempt,
+    node: &CompiledNode,
+    input: &v1::WorkflowValueReference,
+    config: &LlmConfig,
+    definition: &WorkflowLlmProviderDefinition,
+    output_schema: &Value,
+) -> Result<CompiledLlmContext> {
+    let settings = v1::WorkflowLlmModelSettings {
+        model_class: config.model_class.clone(),
+        provider_id: definition.provider_id.clone(),
+        model_id: definition.model_id.clone(),
+        model_revision: definition.model_revision.clone(),
+        reasoning_effort: config.reasoning_effort.clone(),
+        temperature_milli: config.temperature_milli,
+        maximum_context_bytes: config.maximum_context_bytes,
+        maximum_output_tokens: config.maximum_output_tokens,
+        conversation_scope: config.conversation_scope.clone(),
+    };
+    let mut reasons = BTreeSet::new();
+    let mut pending = Vec::new();
+    pending.push(llm_group(
+        "system-policy",
+        "system_policy",
+        "System policy",
+        "Kaname host policy",
+        Some("system"),
+        "Bounded workflow policy and output contract",
+        json!({
+            "policy": "Use only the recorded workflow context. Do not reveal hidden reasoning or request credentials, host paths, or undeclared external effects.",
+            "outputSchemaDigest": schema_digest(output_schema)?,
+        }),
+        Vec::new(),
+        &mut reasons,
+    ));
+    pending.push(llm_group(
+        "workflow-instructions",
+        "workflow_instructions",
+        "Workflow instructions",
+        &format!("Workflow revision {}", request.revision_id),
+        Some("developer"),
+        "Version-pinned workflow instructions",
+        json!({"instructions": config.instructions}),
+        Vec::new(),
+        &mut reasons,
+    ));
+    pending.push(llm_group(
+        "current-input",
+        "current_input",
+        "Current input",
+        &format!("Node {} attempt {}", node.id, attempt.started.attempt_id),
+        Some("user"),
+        "Current typed workflow input",
+        capability_value_instance(input)?,
+        Vec::new(),
+        &mut reasons,
+    ));
+
+    let mut prior_episode_ids = Vec::new();
+    if !config.context.is_empty() || config.conversation_scope == "case" {
+        let episode = episode.ok_or(WorkflowExecutionError::InvalidCommand(
+            "case_episode_required",
+        ))?;
+        let root =
+            inline_json(episode.compiled_context.as_ref().ok_or_else(|| {
+                WorkflowExecutionError::Integrity("case_context_missing".into())
+            })?)?;
+        prior_episode_ids = episode.source_episode_ids.clone();
+        for (index, reference) in config.context.iter().enumerate() {
+            let pointer = reference
+                .get("pointer")
+                .and_then(Value::as_str)
+                .ok_or_else(|| WorkflowExecutionError::Integrity("llm_context_pointer".into()))?;
+            let selected = if pointer.is_empty() {
+                root.clone()
+            } else {
+                root.pointer(pointer).cloned().ok_or_else(|| {
+                    WorkflowExecutionError::InvalidCommand("llm_context_pointer_missing")
+                })?
+            };
+            pending.push(llm_group(
+                &format!("case-context-{index:02}"),
+                "prior_case_episodes",
+                "Prior case episodes",
+                &format!("Case {} · pointer {}", episode.case_id, pointer),
+                None,
+                "Immutable prior case context",
+                selected,
+                episode.source_episode_ids.clone(),
+                &mut reasons,
+            ));
+        }
+    }
+
+    let attachments = llm_attachment_handles(input, episode);
+    if !attachments.is_empty() {
+        let attachment_summary = attachments
+            .iter()
+            .map(|attachment| {
+                json!({
+                    "handleId": attachment.handle_id,
+                    "role": attachment.role,
+                    "valueId": attachment.value.as_ref().map(|value| value.value_id.clone()).unwrap_or_default(),
+                    "sha256": attachment.value.as_ref().map(|value| value.sha256.clone()).unwrap_or_default(),
+                    "byteCount": attachment.value.as_ref().map(|value| value.byte_count).unwrap_or_default(),
+                })
+            })
+            .collect::<Vec<_>>();
+        pending.push(llm_group(
+            "attachments",
+            "attachments",
+            "Attachments and sources",
+            "Opaque workflow storage handles",
+            None,
+            "Opaque attachment metadata",
+            Value::Array(attachment_summary),
+            prior_episode_ids.clone(),
+            &mut reasons,
+        ));
+    }
+
+    let original_group_count = pending.len() as u32;
+    let original_byte_count = pending.iter().try_fold(0_u64, |total, group| {
+        canonical_json_bytes(&group.content).map(|bytes| total.saturating_add(bytes.len() as u64))
+    })?;
+    let mut retained_total = 0_u64;
+    let mut groups = Vec::new();
+    let mut messages = Vec::new();
+    let mut truncated_group_ids = Vec::new();
+    let mut dropped_group_ids = Vec::new();
+    let mut total_redactions = 0_u32;
+    for group in pending {
+        total_redactions = total_redactions.saturating_add(group.redaction_count);
+        let original = canonical_json_bytes(&group.content)?;
+        let (content, truncated) = if retained_total.saturating_add(original.len() as u64)
+            <= config.maximum_context_bytes
+        {
+            (group.content, false)
+        } else {
+            let replacement = json!({
+                "truncated": true,
+                "originalByteCount": original.len(),
+                "sha256": canonical_sha256(&group.content)?,
+            });
+            let replacement_bytes = canonical_json_bytes(&replacement)?;
+            if retained_total.saturating_add(replacement_bytes.len() as u64)
+                > config.maximum_context_bytes
+            {
+                dropped_group_ids.push(group.group_id);
+                continue;
+            }
+            truncated_group_ids.push(group.group_id.clone());
+            (replacement, true)
+        };
+        let retained = canonical_json_bytes(&content)?;
+        retained_total = retained_total.saturating_add(retained.len() as u64);
+        let content_value = value_from_json(
+            &stable_id(
+                "value",
+                &[
+                    &request.run_id,
+                    &attempt.started.attempt_id,
+                    &group.group_id,
+                ],
+            ),
+            &content,
+        )?;
+        if let Some(role) = group.role {
+            messages.push(v1::WorkflowLlmMessage {
+                message_id: stable_id(
+                    "llm-message",
+                    &[
+                        &request.run_id,
+                        &attempt.started.attempt_id,
+                        &group.group_id,
+                    ],
+                ),
+                sequence: (messages.len() + 1) as u32,
+                role,
+                context_group_id: group.group_id.clone(),
+                summary: group.summary,
+                content_value_id: content_value.value_id.clone(),
+                estimated_tokens: (retained.len() as u64).div_ceil(4),
+                redaction_count: group.redaction_count,
+                truncated,
+            });
+        }
+        groups.push(v1::WorkflowLlmContextGroup {
+            group_id: group.group_id,
+            kind: group.kind,
+            title: group.title,
+            provenance: group.provenance,
+            content: Some(content_value),
+            original_byte_count: original.len() as u64,
+            retained_byte_count: retained.len() as u64,
+            redaction_count: group.redaction_count,
+            truncated,
+            source_episode_ids: group.source_episode_ids,
+        });
+    }
+    let report = v1::WorkflowLlmCompilationReport {
+        original_group_count,
+        retained_group_count: groups.len() as u32,
+        original_byte_count,
+        retained_byte_count: retained_total,
+        redaction_count: total_redactions,
+        truncated_group_ids,
+        dropped_group_ids,
+        redaction_reasons: reasons.into_iter().collect(),
+    };
+    let context_digest = llm_context_digest(
+        &settings,
+        &groups,
+        &messages,
+        &prior_episode_ids,
+        &attachments,
+        &report,
+        &schema_digest(output_schema)?,
+    )?;
+    Ok(CompiledLlmContext {
+        settings,
+        context_digest,
+        groups,
+        messages,
+        prior_episode_ids,
+        attachments,
+        report,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn llm_group(
+    group_id: &str,
+    kind: &str,
+    title: &str,
+    provenance: &str,
+    role: Option<&str>,
+    summary: &str,
+    content: Value,
+    source_episode_ids: Vec<String>,
+    reasons: &mut BTreeSet<String>,
+) -> PendingLlmGroup {
+    let mut redaction_count = 0;
+    let content = redact_llm_value(content, &mut redaction_count, reasons);
+    PendingLlmGroup {
+        group_id: group_id.into(),
+        kind: kind.into(),
+        title: title.into(),
+        provenance: sanitize_llm_label(provenance),
+        role: role.map(str::to_owned),
+        summary: summary.into(),
+        content,
+        source_episode_ids,
+        redaction_count,
+    }
+}
+
+fn redact_llm_value(
+    value: Value,
+    redaction_count: &mut u32,
+    reasons: &mut BTreeSet<String>,
+) -> Value {
+    match value {
+        Value::Object(values) => Value::Object(
+            values
+                .into_iter()
+                .map(|(key, value)| {
+                    let normalized = key.to_ascii_lowercase().replace(['_', '-'], "");
+                    let value = if [
+                        "authorization",
+                        "apikey",
+                        "accesstoken",
+                        "refreshtoken",
+                        "password",
+                        "secret",
+                        "credential",
+                    ]
+                    .iter()
+                    .any(|sensitive| normalized.contains(sensitive))
+                    {
+                        *redaction_count = redaction_count.saturating_add(1);
+                        reasons.insert("sensitive-field".into());
+                        Value::String("[redacted]".into())
+                    } else {
+                        redact_llm_value(value, redaction_count, reasons)
+                    };
+                    (key, value)
+                })
+                .collect(),
+        ),
+        Value::Array(values) => Value::Array(
+            values
+                .into_iter()
+                .map(|value| redact_llm_value(value, redaction_count, reasons))
+                .collect(),
+        ),
+        Value::String(value) if llm_string_contains_host_path(&value) => {
+            *redaction_count = redaction_count.saturating_add(1);
+            reasons.insert("host-path".into());
+            Value::String("[redacted host path]".into())
+        }
+        Value::String(value) if llm_string_contains_secret(&value) => {
+            *redaction_count = redaction_count.saturating_add(1);
+            reasons.insert("secret-marker".into());
+            Value::String("[redacted secret]".into())
+        }
+        other => other,
+    }
+}
+
+fn llm_string_contains_host_path(value: &str) -> bool {
+    value.contains("/Users/")
+        || value.contains("file://")
+        || value.contains("/home/")
+        || value.contains("\\Users\\")
+}
+
+fn llm_string_contains_secret(value: &str) -> bool {
+    let normalized = value.to_ascii_lowercase().replace(['_', '-'], "");
+    [
+        "authorization:",
+        "bearer ",
+        "apikey=",
+        "apikey:",
+        "password=",
+        "password:",
+        "secret=",
+        "secret:",
+        "credential=",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
+}
+
+fn sanitize_llm_label(value: &str) -> String {
+    if llm_string_contains_host_path(value) || llm_string_contains_secret(value) {
+        "Redacted provenance".into()
+    } else {
+        value.chars().take(512).collect()
+    }
+}
+
+fn llm_attachment_handles(
+    input: &v1::WorkflowValueReference,
+    episode: Option<&v1::WorkflowCaseEpisodeStarted>,
+) -> Vec<v1::WorkflowCapabilityArtifactHandle> {
+    let mut values = artifact_handles_from_value(input, "current-input");
+    if let Some(episode) = episode {
+        for binding in &episode.inputs {
+            if let Some(value) = binding.value.as_ref() {
+                values.extend(artifact_handles_from_value(value, "case-input"));
+            }
+        }
+    }
+    values.sort_by(|left, right| left.handle_id.cmp(&right.handle_id));
+    values.dedup_by(|left, right| left.handle_id == right.handle_id);
+    values.truncate(64);
+    values
+}
+
+fn llm_context_digest(
+    settings: &v1::WorkflowLlmModelSettings,
+    groups: &[v1::WorkflowLlmContextGroup],
+    messages: &[v1::WorkflowLlmMessage],
+    prior_episode_ids: &[String],
+    attachments: &[v1::WorkflowCapabilityArtifactHandle],
+    report: &v1::WorkflowLlmCompilationReport,
+    output_schema_digest: &str,
+) -> Result<String> {
+    let value = json!({
+        "settings": {
+            "modelClass": settings.model_class,
+            "providerId": settings.provider_id,
+            "modelId": settings.model_id,
+            "modelRevision": settings.model_revision,
+            "reasoningEffort": settings.reasoning_effort,
+            "temperatureMilli": settings.temperature_milli,
+            "maximumContextBytes": settings.maximum_context_bytes,
+            "maximumOutputTokens": settings.maximum_output_tokens,
+            "conversationScope": settings.conversation_scope,
+        },
+        "groups": groups.iter().map(|group| json!({
+            "id": group.group_id,
+            "kind": group.kind,
+            "contentSha256": group.content.as_ref().map(|value| value.sha256.clone()).unwrap_or_default(),
+            "truncated": group.truncated,
+            "redactionCount": group.redaction_count,
+            "sourceEpisodeIds": group.source_episode_ids,
+        })).collect::<Vec<_>>(),
+        "messages": messages.iter().map(|message| json!({
+            "id": message.message_id,
+            "sequence": message.sequence,
+            "role": message.role,
+            "groupId": message.context_group_id,
+            "contentValueId": message.content_value_id,
+        })).collect::<Vec<_>>(),
+        "priorEpisodeIds": prior_episode_ids,
+        "attachments": attachments.iter().map(|attachment| json!({
+            "handleId": attachment.handle_id,
+            "role": attachment.role,
+            "sha256": attachment.value.as_ref().map(|value| value.sha256.clone()).unwrap_or_default(),
+        })).collect::<Vec<_>>(),
+        "report": {
+            "originalGroupCount": report.original_group_count,
+            "retainedGroupCount": report.retained_group_count,
+            "originalByteCount": report.original_byte_count,
+            "retainedByteCount": report.retained_byte_count,
+            "redactionCount": report.redaction_count,
+            "truncatedGroupIds": report.truncated_group_ids,
+            "droppedGroupIds": report.dropped_group_ids,
+            "redactionReasons": report.redaction_reasons,
+        },
+        "outputSchemaDigest": output_schema_digest,
+    });
+    canonical_sha256(&value)
+}
+
+fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>> {
+    let encoded =
+        serde_json::to_vec(value).map_err(|_| WorkflowExecutionError::Encoding("llm_context"))?;
+    workflow_canonical::canonicalize(&encoded)
+        .map(|report| report.canonical_bytes)
+        .map_err(|_| WorkflowExecutionError::Encoding("llm_context"))
+}
+
+fn canonical_sha256(value: &Value) -> Result<String> {
+    let encoded =
+        serde_json::to_vec(value).map_err(|_| WorkflowExecutionError::Encoding("llm_context"))?;
+    workflow_canonical::canonicalize(&encoded)
+        .map(|report| report.sha256.trim_start_matches("sha256:").to_owned())
+        .map_err(|_| WorkflowExecutionError::Encoding("llm_context"))
+}
+
+fn llm_provider_result_event(
+    request: &v1::RequestWorkflowRun,
+    run_token_id: &str,
+    recorded: &RecordedLlmAttempt,
+    output_schema: &Value,
+    definition: &WorkflowLlmProviderDefinition,
+    result: WorkflowLlmProviderResult,
+) -> Result<v1::EventEnvelope> {
+    let invocation_id = recorded.started.invocation_id.as_str();
+    match result {
+        WorkflowLlmProviderResult::Succeeded {
+            output,
+            elapsed_milliseconds,
+            receipt_id,
+            provider_run_reference,
+        } if elapsed_milliseconds <= definition.timeout_milliseconds => {
+            if llm_value_contains_private_marker(&output) {
+                return llm_failure_result_event(
+                    request,
+                    run_token_id,
+                    recorded,
+                    v1::WorkflowLlmAttemptOutcome::MalformedResult,
+                    "llm.private-output-rejected",
+                    "The model returned content that cannot enter durable workflow evidence.",
+                    elapsed_milliseconds,
+                    receipt_id,
+                );
+            }
+            let output = value_from_json(
+                &stable_id("value", &[&request.run_id, invocation_id, "llm-output"]),
+                &output,
+            )?;
+            let validation = workflow_schema::check(&WorkflowSchemaCheckRequest {
+                schema: output_schema.clone(),
+                instance: inline_json(&output)?,
+            });
+            if validation.outcome != WorkflowSchemaCheckOutcome::Valid {
+                let error = capability_error_value(
+                    request,
+                    invocation_id,
+                    "llm.output-validation-failed",
+                    "The model output did not match the registered schema.",
+                    Some(json!({
+                        "diagnostics": validation.diagnostics,
+                        "diagnosticsTruncated": validation.diagnostics_truncated,
+                    })),
+                )?;
+                return Ok(llm_settled_event(
+                    recorded,
+                    request,
+                    run_token_id,
+                    v1::WorkflowLlmAttemptOutcome::OutputValidationFailed,
+                    None,
+                    "llm.output-validation-failed",
+                    Some(error),
+                    elapsed_milliseconds,
+                    normalized_receipt_id(&receipt_id, invocation_id),
+                    String::new(),
+                ));
+            }
+            Ok(llm_settled_event(
+                recorded,
+                request,
+                run_token_id,
+                v1::WorkflowLlmAttemptOutcome::Succeeded,
+                Some(output),
+                "",
+                None,
+                elapsed_milliseconds,
+                normalized_receipt_id(&receipt_id, invocation_id),
+                normalized_optional_identifier(&provider_run_reference, "provider", invocation_id),
+            ))
+        }
+        WorkflowLlmProviderResult::Succeeded {
+            elapsed_milliseconds,
+            receipt_id,
+            ..
+        }
+        | WorkflowLlmProviderResult::TimedOut {
+            elapsed_milliseconds,
+            receipt_id,
+        } => llm_failure_result_event(
+            request,
+            run_token_id,
+            recorded,
+            v1::WorkflowLlmAttemptOutcome::TimedOut,
+            "llm.timeout",
+            "The model exceeded its registered execution deadline.",
+            elapsed_milliseconds,
+            receipt_id,
+        ),
+        WorkflowLlmProviderResult::MalformedResult {
+            summary,
+            elapsed_milliseconds,
+            receipt_id,
+        } => llm_failure_result_event(
+            request,
+            run_token_id,
+            recorded,
+            v1::WorkflowLlmAttemptOutcome::MalformedResult,
+            "llm.malformed-result",
+            &summary,
+            elapsed_milliseconds,
+            receipt_id,
+        ),
+        WorkflowLlmProviderResult::Crashed {
+            summary,
+            elapsed_milliseconds,
+            receipt_id,
+        } => llm_failure_result_event(
+            request,
+            run_token_id,
+            recorded,
+            v1::WorkflowLlmAttemptOutcome::Crashed,
+            "llm.crashed",
+            &summary,
+            elapsed_milliseconds,
+            receipt_id,
+        ),
+    }
+}
+
+fn llm_value_contains_private_marker(value: &Value) -> bool {
+    match value {
+        Value::Object(values) => values.iter().any(|(key, value)| {
+            let normalized = key.to_ascii_lowercase().replace(['_', '-'], "");
+            [
+                "authorization",
+                "apikey",
+                "accesstoken",
+                "refreshtoken",
+                "password",
+                "secret",
+                "credential",
+            ]
+            .iter()
+            .any(|sensitive| normalized.contains(sensitive))
+                || llm_value_contains_private_marker(value)
+        }),
+        Value::Array(values) => values.iter().any(llm_value_contains_private_marker),
+        Value::String(value) => {
+            llm_string_contains_host_path(value) || llm_string_contains_secret(value)
+        }
+        _ => false,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn llm_failure_result_event(
+    request: &v1::RequestWorkflowRun,
+    run_token_id: &str,
+    recorded: &RecordedLlmAttempt,
+    outcome: v1::WorkflowLlmAttemptOutcome,
+    error_code: &str,
+    summary: &str,
+    elapsed_milliseconds: u64,
+    receipt_id: String,
+) -> Result<v1::EventEnvelope> {
+    let invocation_id = recorded.started.invocation_id.as_str();
+    let error = capability_error_value(
+        request,
+        invocation_id,
+        error_code,
+        &sanitize_capability_text(summary),
+        None,
+    )?;
+    Ok(llm_settled_event(
+        recorded,
+        request,
+        run_token_id,
+        outcome,
+        None,
+        error_code,
+        Some(error),
+        elapsed_milliseconds.min(86_400_000),
+        normalized_receipt_id(&receipt_id, invocation_id),
+        String::new(),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn llm_settled_event(
+    recorded: &RecordedLlmAttempt,
+    request: &v1::RequestWorkflowRun,
+    run_token_id: &str,
+    outcome: v1::WorkflowLlmAttemptOutcome,
+    output: Option<v1::WorkflowValueReference>,
+    error_code: &str,
+    error: Option<v1::WorkflowValueReference>,
+    elapsed_milliseconds: u64,
+    receipt_id: String,
+    provider_run_reference: String,
+) -> v1::EventEnvelope {
+    let invocation_id = recorded.started.invocation_id.as_str();
+    runtime_event(
+        recorded
+            .started_at_unix_millis
+            .saturating_add(elapsed_milliseconds.min(i64::MAX as u64) as i64),
+        &stable_id("event", &[&request.run_id, "llm-settled", invocation_id]),
+        workflow_runtime::WORKFLOW_LLM_ATTEMPT_SETTLED_KIND,
+        workflow_runtime::WORKFLOW_LLM_ATTEMPT_SETTLED_TYPE,
+        v1::WorkflowLlmAttemptSettled {
+            run_id: request.run_id.clone(),
+            run_token_id: run_token_id.to_owned(),
+            invocation_id: invocation_id.to_owned(),
+            attempt_id: recorded.started.attempt_id.clone(),
+            outcome: outcome as i32,
+            output,
+            error_code: error_code.to_owned(),
+            error,
+            elapsed_milliseconds,
+            receipt_id,
+            provider_run_reference,
+            idempotency_key: invocation_id.to_owned(),
+        },
+        &recorded.started_event_id,
+        &request.run_id,
+    )
+}
+
+fn execute_settled_llm_node(
+    request: &v1::RequestWorkflowRun,
+    state: &RecordedRun,
+    attempt: &RecordedAttempt,
+    node: &CompiledNode,
+) -> Result<NodeExecution> {
+    let invocation_id = llm_invocation_id(request, attempt, node);
+    let settled = state
+        .llm_attempts
+        .get(&invocation_id)
+        .and_then(|recorded| recorded.settled.as_ref())
+        .ok_or_else(|| WorkflowExecutionError::Lifecycle("llm_not_settled".into()))?;
+    match v1::WorkflowLlmAttemptOutcome::try_from(settled.outcome)
+        .map_err(|_| WorkflowExecutionError::Integrity("llm_outcome".into()))?
+    {
+        v1::WorkflowLlmAttemptOutcome::Succeeded => Ok(success_output(
+            "success",
+            settled
+                .output
+                .clone()
+                .ok_or_else(|| WorkflowExecutionError::Integrity("llm_output".into()))?,
+        )),
+        v1::WorkflowLlmAttemptOutcome::OutputValidationFailed
+        | v1::WorkflowLlmAttemptOutcome::TimedOut
+        | v1::WorkflowLlmAttemptOutcome::MalformedResult
+        | v1::WorkflowLlmAttemptOutcome::Crashed => Ok(failure_output(
+            "error",
+            &settled.error_code,
+            settled
+                .error
+                .clone()
+                .ok_or_else(|| WorkflowExecutionError::Integrity("llm_error".into()))?,
+        )),
+        v1::WorkflowLlmAttemptOutcome::Cancelled => Err(WorkflowExecutionError::Lifecycle(
+            "cancelled_llm_reentered".into(),
+        )),
+        v1::WorkflowLlmAttemptOutcome::Unspecified => {
+            Err(WorkflowExecutionError::Integrity("llm_outcome".into()))
+        }
+    }
+}
+
+fn llm_invocation_id(
+    request: &v1::RequestWorkflowRun,
+    attempt: &RecordedAttempt,
+    node: &CompiledNode,
+) -> String {
+    stable_id(
+        "llm",
+        &[&request.run_id, &attempt.started.attempt_id, &node.id],
     )
 }
 
@@ -6583,6 +7725,42 @@ fn recorded_run(journal: &Journal, run_id: &str) -> Result<RecordedRun> {
                     ));
                 }
                 capability.settled_event_id = Some(envelope.event_id);
+            }
+            WorkflowRuntimeEvent::LlmAttemptStarted(payload) => {
+                if state
+                    .llm_attempts
+                    .insert(
+                        payload.invocation_id.clone(),
+                        RecordedLlmAttempt {
+                            started_event_id: envelope.event_id,
+                            started_at_unix_millis: envelope.occurred_at_unix_millis,
+                            started: payload,
+                            settled_event_id: None,
+                            settled: None,
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(WorkflowExecutionError::Lifecycle(
+                        "duplicate_llm_attempt".into(),
+                    ));
+                }
+            }
+            WorkflowRuntimeEvent::LlmAttemptSettled(payload) => {
+                let llm = state
+                    .llm_attempts
+                    .get_mut(&payload.invocation_id)
+                    .ok_or_else(|| {
+                        WorkflowExecutionError::Lifecycle("llm_attempt_started_missing".into())
+                    })?;
+                if llm.started.attempt_id != payload.attempt_id
+                    || llm.settled.replace(payload).is_some()
+                {
+                    return Err(WorkflowExecutionError::Lifecycle(
+                        "llm_attempt_settled_mismatch".into(),
+                    ));
+                }
+                llm.settled_event_id = Some(envelope.event_id);
             }
             WorkflowRuntimeEvent::AttemptSettled(payload) => {
                 let attempt = state

@@ -65,6 +65,7 @@
   },
   "compute.llm": {
     "modelClass": "reasoning",
+    "instructions": "Summarize only the declared projection and return the registered schema.",
     "prompt": {
       "whole": true
     },
@@ -78,7 +79,11 @@
       "dev.kaname.document.check"
     ],
     "outputSchemaRef": "dev.kaname.schema/result/v1",
-    "conversationScope": "case"
+    "conversationScope": "case",
+    "reasoningEffort": "medium",
+    "temperatureMilli": 200,
+    "maximumContextBytes": 32768,
+    "maximumOutputTokens": 4096
   },
   "control.decision": {
     "when": {

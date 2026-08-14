@@ -69,6 +69,10 @@ struct DesktopWorkflowRunInspectionTests {
         #expect(run.capabilityAttempts.first?.logs.first?.message == "Validated typed output")
         #expect(run.capabilityAttempts.first?.artifactOutputs.first?.handleID == "job-value-run-v2")
         #expect(run.capabilityAttempts.first?.receiptID == "receipt-run-v2")
+        #expect(run.llmAttempts.first?.settings.modelID == "synthetic-model")
+        #expect(run.llmAttempts.first?.messages.map(\.role) == ["system", "developer", "user"])
+        #expect(run.llmAttempts.first?.compilationReport.redactionCount == 2)
+        #expect(run.llmAttempts.first?.output?.id == "llm-output-run-v2")
         #expect(run.events.map(\.storePosition) == [11, 12, 13, 14, 15])
     }
 }
@@ -375,6 +379,95 @@ private actor HistoricalRunTransport:
             capability.startedStorePosition = 12
             capability.settledStorePosition = 13
             projected.capabilityAttempts = [capability]
+            var llmContent = Kaname_V1_WorkflowProjectedValue()
+            llmContent.valueID = "llm-context-run-v2"
+            llmContent.contentType = "application/json"
+            llmContent.availability = "inline"
+            llmContent.inlineCanonicalJson = Data(#"{"text":"[redacted]"}"#.utf8)
+            llmContent.byteCount = UInt64(llmContent.inlineCanonicalJson.count)
+            llmContent.sha256 = String(repeating: "4", count: 64)
+            let groupSpecifications = [
+                ("system-policy", "system_policy", "System policy", "system"),
+                ("workflow-instructions", "workflow_instructions", "Workflow instructions", "developer"),
+                ("current-input", "current_input", "Current input", "user"),
+            ]
+            var groups: [Kaname_V1_WorkflowProjectedLlmContextGroup] = []
+            var messages: [Kaname_V1_WorkflowProjectedLlmMessage] = []
+            for (index, specification) in groupSpecifications.enumerated() {
+                var group = Kaname_V1_WorkflowProjectedLlmContextGroup()
+                group.groupID = specification.0
+                group.kind = specification.1
+                group.title = specification.2
+                group.provenance = "Recorded workflow context"
+                group.content = llmContent
+                group.originalByteCount = llmContent.byteCount
+                group.retainedByteCount = llmContent.byteCount
+                group.redactionCount = index == 2 ? 2 : 0
+                groups.append(group)
+                var message = Kaname_V1_WorkflowProjectedLlmMessage()
+                message.messageID = "llm-message-\(index + 1)"
+                message.sequence = UInt32(index + 1)
+                message.role = specification.3
+                message.contextGroupID = specification.0
+                message.summary = specification.2
+                message.content = llmContent
+                message.estimatedTokens = 8
+                message.redactionCount = group.redactionCount
+                messages.append(message)
+            }
+            var settings = Kaname_V1_WorkflowLlmModelSettings()
+            settings.modelClass = "reasoning"
+            settings.providerID = "synthetic-provider"
+            settings.modelID = "synthetic-model"
+            settings.modelRevision = "revision-2026-08-15"
+            settings.reasoningEffort = "medium"
+            settings.temperatureMilli = 200
+            settings.maximumContextBytes = 32_768
+            settings.maximumOutputTokens = 512
+            settings.conversationScope = "case"
+            var report = Kaname_V1_WorkflowLlmCompilationReport()
+            report.originalGroupCount = UInt32(groups.count)
+            report.retainedGroupCount = UInt32(groups.count)
+            report.originalByteCount = UInt64(groups.count) * llmContent.byteCount
+            report.retainedByteCount = report.originalByteCount
+            report.redactionCount = 2
+            report.redactionReasons = ["sensitive-field"]
+            var llmOutput = Kaname_V1_WorkflowProjectedValue()
+            llmOutput.valueID = "llm-output-run-v2"
+            llmOutput.contentType = "application/json"
+            llmOutput.availability = "inline"
+            llmOutput.inlineCanonicalJson = Data(#"{"summary":"Safe result"}"#.utf8)
+            llmOutput.byteCount = UInt64(llmOutput.inlineCanonicalJson.count)
+            llmOutput.sha256 = String(repeating: "3", count: 64)
+            var llm = Kaname_V1_WorkflowProjectedLlmAttempt()
+            llm.invocationID = "llm-run-v2"
+            llm.attemptID = attempt.attemptID
+            llm.executionTokenID = token.executionTokenID
+            llm.nodeID = "trigger"
+            llm.settings = settings
+            llm.contextDigest = String(repeating: "2", count: 64)
+            llm.contextGroups = groups
+            llm.messages = messages
+            llm.priorEpisodeIds = ["episode-run-v1"]
+            llm.attachments = [artifact]
+            llm.compilationReport = report
+            llm.outputSchemaRef = "dev.kaname.llm/output-v1"
+            llm.outputSchemaDigest = String(repeating: "1", count: 64)
+            llm.input = value
+            llm.status = "settled"
+            llm.outcome = "succeeded"
+            llm.output = llmOutput
+            llm.timeoutMilliseconds = 1_000
+            llm.deadlineUnixMillis = 2_000
+            llm.elapsedMilliseconds = 7
+            llm.receiptID = "receipt-llm-run-v2"
+            llm.providerRunReference = "provider-llm-run-v2"
+            llm.idempotencyKey = llm.invocationID
+            llm.startedAtUnixMillis = 1_000
+            llm.settledAtUnixMillis = 1_007
+            llm.startedStorePosition = 14
+            llm.settledStorePosition = 15
+            projected.llmAttempts = [llm]
             var context = Kaname_V1_WorkflowProjectedValue()
             context.valueID = "context-run-v2"
             context.contentType = "application/json"

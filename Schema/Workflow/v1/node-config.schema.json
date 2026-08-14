@@ -322,10 +322,15 @@
       "type": "object",
       "required": [
         "modelClass",
+        "instructions",
         "prompt",
         "context",
         "tools",
-        "outputSchemaRef"
+        "outputSchemaRef",
+        "reasoningEffort",
+        "temperatureMilli",
+        "maximumContextBytes",
+        "maximumOutputTokens"
       ],
       "properties": {
         "modelClass": {
@@ -334,6 +339,11 @@
             "balanced",
             "reasoning"
           ]
+        },
+        "instructions": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
         },
         "prompt": {
           "$ref": "mapping.schema.json"
@@ -361,6 +371,29 @@
             "job",
             "case"
           ]
+        },
+        "reasoningEffort": {
+          "enum": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        "temperatureMilli": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2000
+        },
+        "maximumContextBytes": {
+          "type": "integer",
+          "minimum": 256,
+          "maximum": 49152
+        },
+        "maximumOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
         }
       },
       "additionalProperties": false

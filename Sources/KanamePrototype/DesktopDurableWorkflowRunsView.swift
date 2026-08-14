@@ -50,6 +50,7 @@ struct DesktopDurableWorkflowRunsView: View {
         case tokens = "Tokens"
         case control = "Control flow"
         case capability = "Capability"
+        case llm = "LLM"
         case subflow = "Child workflow"
         case caseContext = "Case context"
         case configuration = "Configuration"
@@ -435,6 +436,8 @@ struct DesktopDurableWorkflowRunsView: View {
             subflowInspector(run.subflows.filter { $0.nodeID == node.id })
         case .capability:
             capabilityInspector(run.capabilities(for: node.id))
+        case .llm:
+            llmInspector(run.llmAttempts(for: node.id))
         case .caseContext:
             caseContextInspector(run.episode)
         case .configuration:
@@ -510,6 +513,57 @@ struct DesktopDurableWorkflowRunsView: View {
                     evidenceCard(
                         title: "\(attempt.status.capitalized) · \(attempt.outcome?.replacingOccurrences(of: "_", with: " ").capitalized ?? "running")",
                         detail: "Invocation \(attempt.invocationID)\nIdempotency \(attempt.idempotencyKey ?? "not settled")\nReceipt \(attempt.receiptID ?? "none")\nHost run \(attempt.providerRunReference ?? "none")\nDeadline \(attempt.deadlineUnixMillis) · timeout \(attempt.timeoutMilliseconds) ms\nElapsed \(attempt.elapsedMilliseconds.map(String.init) ?? "active") ms\nJournal \(attempt.startedStorePosition)…\(attempt.settledStorePosition.map(String.init) ?? "active")"
+                    )
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func llmInspector(_ attempts: [DesktopWorkflowProjectedLlmAttempt]) -> some View {
+        if attempts.isEmpty {
+            explainedEmpty("This node has no recorded LLM invocation evidence.")
+        } else {
+            VStack(alignment: .leading, spacing: 7) {
+                ForEach(attempts) { attempt in
+                    evidenceCard(
+                        title: "Model settings",
+                        detail: "Class \(attempt.settings.modelClass)\nProvider \(attempt.settings.providerID)\nModel \(attempt.settings.modelID) · \(attempt.settings.modelRevision)\nReasoning \(attempt.settings.reasoningEffort) · temperature \(attempt.settings.temperatureMilli)‰\nContext limit \(attempt.settings.maximumContextBytes) bytes · output limit \(attempt.settings.maximumOutputTokens) tokens\nConversation scope \(attempt.settings.conversationScope)\nOutput \(attempt.outputSchemaRef) · \(attempt.outputSchemaDigest)"
+                    )
+                    let report = attempt.compilationReport
+                    evidenceCard(
+                        title: "Context compilation",
+                        detail: "Digest \(attempt.contextDigest)\nGroups \(report.retainedGroupCount)/\(report.originalGroupCount) · bytes \(report.retainedByteCount)/\(report.originalByteCount)\nRedactions \(report.redactionCount) · \(report.redactionReasons.joined(separator: ", ").nilIfBlank ?? "none")\nTruncated \(report.truncatedGroupIDs.joined(separator: ", ").nilIfBlank ?? "none")\nDropped \(report.droppedGroupIDs.joined(separator: ", ").nilIfBlank ?? "none")"
+                    )
+                    ForEach(attempt.contextGroups) { group in
+                        evidenceCard(
+                            title: "Context · \(group.title)",
+                            detail: "\(group.kind) · \(group.provenance)\nBytes \(group.retainedByteCount)/\(group.originalByteCount) · redactions \(group.redactionCount)\(group.truncated ? " · truncated" : "")\nPrior episodes \(group.sourceEpisodeIDs.joined(separator: ", ").nilIfBlank ?? "none")\n\(valueText(group.content))"
+                        )
+                    }
+                    ForEach(attempt.messages) { message in
+                        evidenceCard(
+                            title: "Message \(message.sequence) · \(message.role.capitalized)",
+                            detail: "\(message.summary)\nContext group \(message.contextGroupID) · about \(message.estimatedTokens) tokens\(message.truncated ? " · truncated" : "")\n\(valueText(message.content))"
+                        )
+                    }
+                    if !attempt.priorEpisodeIDs.isEmpty {
+                        evidenceCard(
+                            title: "Prior case episodes",
+                            detail: attempt.priorEpisodeIDs.joined(separator: "\n")
+                        )
+                    }
+                    capabilityArtifacts(attempt.attachments, title: "Attachment")
+                    evidenceCard(title: "Typed input", detail: valueText(attempt.input))
+                    if let output = attempt.output {
+                        evidenceCard(title: "Validated model output", detail: valueText(output))
+                    }
+                    if let error = attempt.error {
+                        evidenceCard(title: attempt.errorCode ?? "LLM error", detail: valueText(error))
+                    }
+                    evidenceCard(
+                        title: "\(attempt.status.capitalized) · \(attempt.outcome?.replacingOccurrences(of: "_", with: " ").capitalized ?? "running")",
+                        detail: "Invocation \(attempt.invocationID)\nIdempotency \(attempt.idempotencyKey ?? "not settled")\nReceipt \(attempt.receiptID ?? "none")\nProvider run \(attempt.providerRunReference ?? "none")\nDeadline \(attempt.deadlineUnixMillis) · timeout \(attempt.timeoutMilliseconds) ms\nElapsed \(attempt.elapsedMilliseconds.map(String.init) ?? "active") ms\nJournal \(attempt.startedStorePosition)…\(attempt.settledStorePosition.map(String.init) ?? "active")"
                     )
                 }
             }

@@ -415,6 +415,31 @@ fn execution_availability(node: &Node) -> &'static str {
         {
             "executable"
         }
+        "compute.llm"
+            if string_field(&node.config, "modelClass").is_some()
+                && string_field(&node.config, "instructions").is_some()
+                && node.config.get("prompt") == Some(&serde_json::json!({"whole": true}))
+                && array_field(&node.config, "tools").is_some_and(Vec::is_empty)
+                && string_field(&node.config, "outputSchemaRef").is_some()
+                && string_field(&node.config, "reasoningEffort").is_some()
+                && node
+                    .config
+                    .get("temperatureMilli")
+                    .and_then(Value::as_u64)
+                    .is_some()
+                && node
+                    .config
+                    .get("maximumContextBytes")
+                    .and_then(Value::as_u64)
+                    .is_some()
+                && node
+                    .config
+                    .get("maximumOutputTokens")
+                    .and_then(Value::as_u64)
+                    .is_some() =>
+        {
+            "executable"
+        }
         "control.subflow"
             if string_field(&node.config, "packageId").is_some()
                 && string_field(&node.config, "revisionDigest").is_some()

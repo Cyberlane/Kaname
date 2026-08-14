@@ -16,13 +16,17 @@ use kaname_core::{
         self, DurableRunOutcome, WorkflowExecutionError, WorkflowExecutionFault,
         WorkflowStorageExecutionAuthority,
     },
+    workflow_llm::{
+        DeterministicLlmPlan, DeterministicWorkflowLlmProvider, WorkflowLlmProviderDefinition,
+    },
     workflow_object_store::WorkflowObjectStoreQuota,
     workflow_projection::WorkflowRunProjection,
     workflow_publication::{PublishWorkflowRevision, PublishedWorkflowRevision},
     workflow_runtime::{
-        WORKFLOW_CAPABILITY_ATTEMPT_STARTED_KIND, WORKFLOW_RUN_CANCEL_KIND,
-        WORKFLOW_RUN_CANCEL_TYPE, WORKFLOW_RUN_REQUEST_KIND, WORKFLOW_RUN_REQUEST_TYPE,
-        WORKFLOW_RUN_TOKEN_CREATED_KIND, WORKFLOW_WAIT_SIGNAL_KIND, WORKFLOW_WAIT_SIGNAL_TYPE,
+        WORKFLOW_CAPABILITY_ATTEMPT_STARTED_KIND, WORKFLOW_LLM_ATTEMPT_STARTED_KIND,
+        WORKFLOW_RUN_CANCEL_KIND, WORKFLOW_RUN_CANCEL_TYPE, WORKFLOW_RUN_REQUEST_KIND,
+        WORKFLOW_RUN_REQUEST_TYPE, WORKFLOW_RUN_TOKEN_CREATED_KIND, WORKFLOW_WAIT_SIGNAL_KIND,
+        WORKFLOW_WAIT_SIGNAL_TYPE,
     },
     workflow_storage::{
         WorkflowStorageAccessContext, WorkflowStorageNamespace, WorkflowStorageScopeKind,
@@ -66,6 +70,9 @@ const CAPABILITY_REVISION_ID: &str = "revision-capability-001";
 const CAPABILITY_NODE_ID: &str = "018f6900-0003-7000-8000-000000000003";
 const CAPABILITY_ID: &str = "dev.kaname.synthetic-capability";
 const CAPABILITY_DIGEST: &str = "7f4a9e4a2bcf75d0f6b3178c30ec24047be25884a662111e77a02b179704cad8";
+const LLM_WORKFLOW_ID: &str = "018f6b00-0001-7000-8000-000000000001";
+const LLM_REVISION_ID: &str = "revision-llm-001";
+const LLM_NODE_ID: &str = "018f6b00-0003-7000-8000-000000000003";
 
 #[test]
 fn typed_capability_attempt_records_contract_logs_receipt_and_is_crash_exact() {
@@ -401,6 +408,319 @@ fn unregistered_capability_is_rejected_before_command_admission() {
             if code == "capability_not_registered"
     ));
     assert_eq!(journal.event_page_after(0, 10).unwrap().high_water_mark, 0);
+}
+
+#[test]
+fn inspectable_llm_context_is_redacted_bounded_and_crash_exact() {
+    let expected = {
+        let directory = tempdir().unwrap();
+        let (library, published) = published_llm_library(directory.path(), "job", 32_768);
+        let command = control_run_command(
+            "run-llm-success-001",
+            &published,
+            LLM_WORKFLOW_ID,
+            LLM_REVISION_ID,
+            json!({
+                "request": "Summarize /Users/example/private/source.docx",
+                "password": "must-not-survive",
+                "authorization": "Bearer must-not-survive"
+            }),
+        );
+        let mut provider = llm_provider(DeterministicLlmPlan::Succeed {
+            output: json!({"summary": "Safe result"}),
+            elapsed_milliseconds: 7,
+        });
+        let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+        assert_eq!(
+            workflow_executor::execute_with_llm(&mut journal, &library, &mut provider, &command,)
+                .unwrap()
+                .outcome,
+            DurableRunOutcome::Succeeded
+        );
+        let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+        projection.catch_up(&journal).unwrap();
+        assert_eq!(projection.row_count("llm_attempts").unwrap(), 1);
+        let run = projection
+            .inspect_runs(None, Some("run-llm-success-001"), 1)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let llm = &run.llm_attempts[0];
+        assert_eq!(llm.node_id, LLM_NODE_ID);
+        assert_eq!(llm.status, "settled");
+        assert_eq!(llm.outcome, "succeeded");
+        assert_eq!(llm.settings.as_ref().unwrap().model_id, "synthetic-model");
+        assert_eq!(llm.messages.len(), 3);
+        assert_eq!(llm.messages[0].role, "system");
+        assert_eq!(llm.messages[1].role, "developer");
+        assert_eq!(llm.messages[2].role, "user");
+        assert!(llm.compilation_report.as_ref().unwrap().redaction_count >= 3);
+        assert_eq!(llm.idempotency_key, llm.invocation_id);
+        assert!(llm.receipt_id.starts_with("receipt-"));
+        for content in llm
+            .context_groups
+            .iter()
+            .filter_map(|group| group.content.as_ref())
+            .map(|value| String::from_utf8_lossy(&value.inline_canonical_json))
+        {
+            assert!(!content.contains("/Users/"));
+            assert!(!content.contains("must-not-survive"));
+        }
+        assert_eq!(provider.invocation_count(&llm.invocation_id), 1);
+        (
+            run_wires(&journal, "run-llm-success-001"),
+            llm.context_digest.clone(),
+        )
+    };
+
+    for boundary in 1..=expected.0.len() {
+        let directory = tempdir().unwrap();
+        let (library, published) = published_llm_library(directory.path(), "job", 32_768);
+        let command = control_run_command(
+            "run-llm-success-001",
+            &published,
+            LLM_WORKFLOW_ID,
+            LLM_REVISION_ID,
+            json!({
+                "request": "Summarize /Users/example/private/source.docx",
+                "password": "must-not-survive",
+                "authorization": "Bearer must-not-survive"
+            }),
+        );
+        let mut provider = llm_provider(DeterministicLlmPlan::Succeed {
+            output: json!({"summary": "Safe result"}),
+            elapsed_milliseconds: 7,
+        });
+        let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+        assert!(matches!(
+            workflow_executor::execute_with_llm_fault_for_test(
+                &mut journal,
+                &library,
+                &mut provider,
+                &command,
+                WorkflowExecutionFault::AfterNewEvent(boundary),
+            ),
+            Err(WorkflowExecutionError::InjectedInterruption)
+        ));
+        assert_eq!(
+            workflow_executor::execute_with_llm(&mut journal, &library, &mut provider, &command,)
+                .unwrap()
+                .outcome,
+            DurableRunOutcome::Succeeded
+        );
+        assert_eq!(run_wires(&journal, "run-llm-success-001"), expected.0);
+        let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+        projection.catch_up(&journal).unwrap();
+        let llm = &projection
+            .inspect_runs(None, Some("run-llm-success-001"), 1)
+            .unwrap()[0]
+            .llm_attempts[0];
+        assert_eq!(llm.context_digest, expected.1);
+        assert_eq!(provider.invocation_count(&llm.invocation_id), 1);
+    }
+}
+
+#[test]
+fn llm_case_context_retains_prior_episode_identity_and_reports_truncation() {
+    let directory = tempdir().unwrap();
+    let (library, published) = published_llm_library(directory.path(), "case", 1_200);
+    let initial = llm_case_run_command(
+        "run-llm-case-initial",
+        &published,
+        "episode-llm-initial",
+        "initial",
+        "",
+        "email-llm-initial",
+        json!({"request": "x".repeat(5_000)}),
+    );
+    let correction = llm_case_run_command(
+        "run-llm-case-correction",
+        &published,
+        "episode-llm-correction",
+        "correction",
+        "episode-llm-initial",
+        "email-llm-correction",
+        json!({"request": "Please make the requested correction"}),
+    );
+    let mut provider = llm_provider(DeterministicLlmPlan::Succeed {
+        output: json!({"summary": "Revised result"}),
+        elapsed_milliseconds: 3,
+    });
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    workflow_executor::execute_with_llm(&mut journal, &library, &mut provider, &initial).unwrap();
+    assert_eq!(
+        workflow_executor::execute_with_llm(&mut journal, &library, &mut provider, &correction,)
+            .unwrap()
+            .outcome,
+        DurableRunOutcome::Succeeded
+    );
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    projection.catch_up(&journal).unwrap();
+    let correction = projection
+        .inspect_runs(None, Some("run-llm-case-correction"), 1)
+        .unwrap()
+        .pop()
+        .unwrap();
+    let llm = &correction.llm_attempts[0];
+    assert_eq!(llm.prior_episode_ids, ["episode-llm-initial"]);
+    assert!(
+        llm.context_groups
+            .iter()
+            .any(|group| group.kind == "prior_case_episodes"
+                && group.source_episode_ids == ["episode-llm-initial"])
+    );
+    let report = llm.compilation_report.as_ref().unwrap();
+    assert!(report.retained_byte_count <= 1_200);
+    assert!(!report.truncated_group_ids.is_empty() || !report.dropped_group_ids.is_empty());
+}
+
+#[test]
+fn llm_failures_are_typed_and_an_unregistered_provider_admits_nothing() {
+    for (run_id, plan, expected_outcome, expected_error) in [
+        (
+            "run-llm-timeout",
+            DeterministicLlmPlan::TimeOut {
+                elapsed_milliseconds: 100,
+            },
+            "timed_out",
+            "llm.timeout",
+        ),
+        (
+            "run-llm-malformed",
+            DeterministicLlmPlan::Malformed {
+                summary: "No structured result was returned.".into(),
+                elapsed_milliseconds: 2,
+            },
+            "malformed_result",
+            "llm.malformed-result",
+        ),
+        (
+            "run-llm-crashed",
+            DeterministicLlmPlan::Crash {
+                summary: "The isolated model worker exited.".into(),
+                elapsed_milliseconds: 1,
+            },
+            "crashed",
+            "llm.crashed",
+        ),
+        (
+            "run-llm-output-invalid",
+            DeterministicLlmPlan::Succeed {
+                output: json!({"wrong": true}),
+                elapsed_milliseconds: 1,
+            },
+            "output_validation_failed",
+            "llm.output-validation-failed",
+        ),
+        (
+            "run-llm-private-output",
+            DeterministicLlmPlan::Succeed {
+                output: json!({"summary": "Read /Users/example/private/source.docx"}),
+                elapsed_milliseconds: 1,
+            },
+            "malformed_result",
+            "llm.private-output-rejected",
+        ),
+    ] {
+        let directory = tempdir().unwrap();
+        let (library, published) = published_llm_library(directory.path(), "job", 32_768);
+        let command = control_run_command(
+            run_id,
+            &published,
+            LLM_WORKFLOW_ID,
+            LLM_REVISION_ID,
+            json!({"request": "Summarize"}),
+        );
+        let mut provider = llm_provider(plan);
+        let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+        assert_eq!(
+            workflow_executor::execute_with_llm(&mut journal, &library, &mut provider, &command,)
+                .unwrap()
+                .outcome,
+            DurableRunOutcome::Failed
+        );
+        let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+        projection.catch_up(&journal).unwrap();
+        let llm = &projection.inspect_runs(None, Some(run_id), 1).unwrap()[0].llm_attempts[0];
+        assert_eq!(llm.outcome, expected_outcome);
+        assert_eq!(llm.error_code, expected_error);
+        assert!(llm.error.is_some());
+    }
+
+    let directory = tempdir().unwrap();
+    let (library, published) = published_llm_library(directory.path(), "job", 32_768);
+    let command = control_run_command(
+        "run-llm-unregistered",
+        &published,
+        LLM_WORKFLOW_ID,
+        LLM_REVISION_ID,
+        json!({"request": "Summarize"}),
+    );
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    assert!(matches!(
+        workflow_executor::execute(&mut journal, &library, &command),
+        Err(WorkflowExecutionError::Unsupported(code)) if code == "llm_provider_not_registered"
+    ));
+    assert_eq!(journal.event_page_after(0, 10).unwrap().high_water_mark, 0);
+}
+
+#[test]
+fn cancellation_settles_compiled_llm_context_without_invoking_the_provider() {
+    let directory = tempdir().unwrap();
+    let (library, published) = published_llm_library(directory.path(), "job", 32_768);
+    let command = control_run_command(
+        "run-llm-cancel",
+        &published,
+        LLM_WORKFLOW_ID,
+        LLM_REVISION_ID,
+        json!({"request": "Summarize"}),
+    );
+    let mut provider = llm_provider(DeterministicLlmPlan::Succeed {
+        output: json!({"summary": "unused"}),
+        elapsed_milliseconds: 1,
+    });
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    loop {
+        assert!(matches!(
+            workflow_executor::execute_with_llm_fault_for_test(
+                &mut journal,
+                &library,
+                &mut provider,
+                &command,
+                WorkflowExecutionFault::AfterNewEvent(1),
+            ),
+            Err(WorkflowExecutionError::InjectedInterruption)
+        ));
+        if journal
+            .replay("thread:workflow-run:run-llm-cancel", None, 500)
+            .unwrap()
+            .events
+            .iter()
+            .any(|event| event.kind == WORKFLOW_LLM_ATTEMPT_STARTED_KIND)
+        {
+            break;
+        }
+    }
+    let token = run_token(&journal, "run-llm-cancel");
+    workflow_executor::request_cancellation(
+        &mut journal,
+        &cancel_command("run-llm-cancel", &token.run_token_id),
+    )
+    .unwrap();
+    assert_eq!(
+        workflow_executor::execute_with_llm(&mut journal, &library, &mut provider, &command,)
+            .unwrap()
+            .outcome,
+        DurableRunOutcome::Cancelled
+    );
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    projection.catch_up(&journal).unwrap();
+    let llm = &projection
+        .inspect_runs(None, Some("run-llm-cancel"), 1)
+        .unwrap()[0]
+        .llm_attempts[0];
+    assert_eq!(llm.outcome, "cancelled");
+    assert_eq!(provider.invocation_count(&llm.invocation_id), 0);
 }
 
 #[test]
@@ -2393,6 +2713,124 @@ fn capability_workflow_source() -> Value {
     )
 }
 
+fn published_llm_library(
+    application_support: &std::path::Path,
+    conversation_scope: &str,
+    maximum_context_bytes: u64,
+) -> (
+    kaname_core::workflow_library::WorkflowLibraryStore,
+    PublishedWorkflowRevision,
+) {
+    let mut library = open_workflow_library(application_support).unwrap();
+    library
+        .create_draft(CreateWorkflowDraft {
+            workflow_id: LLM_WORKFLOW_ID.into(),
+            package_id: "dev.kaname.llm-runtime".into(),
+            name: "Inspectable LLM runtime".into(),
+            summary: "Synthetic bounded and redacted LLM context fixture".into(),
+            edit_id: "edit-llm-001".into(),
+            session_id: "executor-tests".into(),
+            workflow_source: serde_json::to_vec(&llm_workflow_source(
+                conversation_scope,
+                maximum_context_bytes,
+            ))
+            .unwrap(),
+            layout_source: br#"{"nodes":[]}"#.to_vec(),
+            recorded_at_unix_millis: 140,
+        })
+        .unwrap();
+    let published = library
+        .publish_revision(PublishWorkflowRevision {
+            workflow_id: LLM_WORKFLOW_ID.into(),
+            expected_draft_sequence: 0,
+            revision_id: LLM_REVISION_ID.into(),
+            registration_id: "registration-llm-001".into(),
+            release_version: "1.0.0".into(),
+            schema_bundle_json: serde_json::to_vec(&json!({
+                "bundleVersion": 1,
+                "schemas": [{
+                    "id": "dev.kaname.llm/output-v1",
+                    "schema": {
+                        "$schema": "https://json-schema.org/draft/2020-12/schema",
+                        "type": "object",
+                        "required": ["summary"],
+                        "properties": {"summary": {"type": "string"}},
+                        "additionalProperties": false
+                    }
+                }]
+            }))
+            .unwrap(),
+            dependency_lock_json: br#"{"lockVersion":1,"dependencies":[]}"#.to_vec(),
+            configuration_contract_json: br#"{"type":"object"}"#.to_vec(),
+            published_at_unix_millis: 150,
+        })
+        .unwrap();
+    (library, published)
+}
+
+fn llm_provider(plan: DeterministicLlmPlan) -> DeterministicWorkflowLlmProvider {
+    let mut provider = DeterministicWorkflowLlmProvider::default();
+    provider.register(
+        WorkflowLlmProviderDefinition {
+            provider_id: "synthetic-provider".into(),
+            model_id: "synthetic-model".into(),
+            model_revision: "revision-2026-08-15".into(),
+            model_class: "reasoning".into(),
+            timeout_milliseconds: 100,
+            maximum_context_bytes: 49_152,
+            idempotent: true,
+        },
+        plan,
+    );
+    provider
+}
+
+fn llm_workflow_source(conversation_scope: &str, maximum_context_bytes: u64) -> Value {
+    let ids = [
+        "018f6b00-0002-7000-8000-000000000002",
+        LLM_NODE_ID,
+        "018f6b00-0004-7000-8000-000000000004",
+        "018f6b00-0005-7000-8000-000000000005",
+    ];
+    let context = if conversation_scope == "case" {
+        json!([{"root": "case", "pointer": ""}])
+    } else {
+        json!([])
+    };
+    control_graph_source(
+        LLM_WORKFLOW_ID,
+        "dev.kaname.llm-runtime",
+        &ids,
+        vec![
+            ("manual", "trigger.manual", json!({})),
+            (
+                "summarize",
+                "compute.llm",
+                json!({
+                    "modelClass": "reasoning",
+                    "instructions": "Return a concise summary using only the recorded context.",
+                    "prompt": {"whole": true},
+                    "context": context,
+                    "tools": [],
+                    "outputSchemaRef": "dev.kaname.llm/output-v1",
+                    "conversationScope": conversation_scope,
+                    "reasoningEffort": "medium",
+                    "temperatureMilli": 200,
+                    "maximumContextBytes": maximum_context_bytes,
+                    "maximumOutputTokens": 512
+                }),
+            ),
+            ("complete", "terminal.complete", json!({})),
+            ("fail", "terminal.fail", json!({})),
+        ],
+        vec![
+            ((0, "success"), (1, "input")),
+            ((1, "success"), (2, "input")),
+            ((1, "error"), (3, "input")),
+        ],
+    )
+}
+
 fn publish_subflow_pair(
     application_support: &std::path::Path,
     child_source: Value,
@@ -3205,6 +3643,31 @@ fn case_run_command(
         RequestWorkflowRun::decode(envelope.payload.as_ref().unwrap().value.as_slice()).unwrap();
     request.installation_id = "installation-kay-001".into();
     request.case_id = "case-kay-42".into();
+    request.episode_id = episode_id.into();
+    request.episode_kind = episode_kind.into();
+    request.prior_episode_id = prior_episode_id.into();
+    request.trigger_kind = "email.received".into();
+    request.trigger_event_id = trigger_event_id.into();
+    envelope.payload.as_mut().unwrap().value = request.encode_to_vec();
+    envelope
+}
+
+#[allow(clippy::too_many_arguments)]
+fn llm_case_run_command(
+    run_id: &str,
+    published: &PublishedWorkflowRevision,
+    episode_id: &str,
+    episode_kind: &str,
+    prior_episode_id: &str,
+    trigger_event_id: &str,
+    input: Value,
+) -> CommandEnvelope {
+    let mut envelope =
+        control_run_command(run_id, published, LLM_WORKFLOW_ID, LLM_REVISION_ID, input);
+    let mut request =
+        RequestWorkflowRun::decode(envelope.payload.as_ref().unwrap().value.as_slice()).unwrap();
+    request.installation_id = "installation-llm-kay-001".into();
+    request.case_id = "case-llm-kay-42".into();
     request.episode_id = episode_id.into();
     request.episode_kind = episode_kind.into();
     request.prior_episode_id = prior_episode_id.into();

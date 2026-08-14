@@ -11,6 +11,7 @@ use crate::{
     workflow_library::{PrivatePathKind, prepare_database_path, protect_private_path},
     workflow_runtime::{self, WorkflowRuntimeEvent},
 };
+use prost::Message;
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
@@ -23,7 +24,7 @@ use std::{
     time::Duration,
 };
 
-const PROJECTION_SCHEMA_VERSION: i64 = 9;
+const PROJECTION_SCHEMA_VERSION: i64 = 10;
 const DEFAULT_BATCH_SIZE: u32 = 250;
 
 const INITIAL_SCHEMA: &str = r#"
@@ -424,6 +425,41 @@ CREATE TABLE workflow_capability_attempts (
 ) STRICT;
 CREATE INDEX workflow_capability_attempts_run_position
     ON workflow_capability_attempts(run_id, started_store_position, invocation_id);
+
+CREATE TABLE workflow_llm_attempts (
+    invocation_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+    attempt_id TEXT NOT NULL UNIQUE REFERENCES workflow_attempts(attempt_id) ON DELETE CASCADE,
+    execution_token_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    settings_wire BLOB NOT NULL,
+    context_digest TEXT NOT NULL CHECK (length(context_digest) = 64),
+    context_groups_json TEXT NOT NULL,
+    messages_json TEXT NOT NULL,
+    prior_episode_ids_json TEXT NOT NULL,
+    attachments_json TEXT NOT NULL,
+    compilation_report_wire BLOB NOT NULL,
+    output_schema_ref TEXT NOT NULL,
+    output_schema_digest TEXT NOT NULL CHECK (length(output_schema_digest) = 64),
+    input_value_id TEXT NOT NULL REFERENCES workflow_values(value_id) ON DELETE RESTRICT,
+    status TEXT NOT NULL CHECK (status IN ('running', 'settled')),
+    outcome TEXT,
+    output_value_id TEXT REFERENCES workflow_values(value_id) ON DELETE RESTRICT,
+    error_code TEXT,
+    error_value_id TEXT REFERENCES workflow_values(value_id) ON DELETE RESTRICT,
+    timeout_milliseconds INTEGER NOT NULL CHECK (timeout_milliseconds > 0),
+    deadline_unix_millis INTEGER NOT NULL CHECK (deadline_unix_millis >= 0),
+    elapsed_milliseconds INTEGER,
+    receipt_id TEXT,
+    provider_run_reference TEXT,
+    idempotency_key TEXT,
+    started_at_unix_millis INTEGER NOT NULL CHECK (started_at_unix_millis >= 0),
+    settled_at_unix_millis INTEGER,
+    started_store_position INTEGER NOT NULL UNIQUE CHECK (started_store_position > 0),
+    settled_store_position INTEGER UNIQUE
+) STRICT;
+CREATE INDEX workflow_llm_attempts_run_position
+    ON workflow_llm_attempts(run_id, started_store_position, invocation_id);
 
 CREATE TABLE workflow_projected_events (
     event_id TEXT PRIMARY KEY,
@@ -874,6 +910,43 @@ CREATE INDEX IF NOT EXISTS workflow_capability_attempts_run_position
     ON workflow_capability_attempts(run_id, started_store_position, invocation_id);
 "#;
 
+const PROJECTION_MIGRATION_10: &str = r#"
+CREATE TABLE IF NOT EXISTS workflow_llm_attempts (
+    invocation_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+    attempt_id TEXT NOT NULL UNIQUE REFERENCES workflow_attempts(attempt_id) ON DELETE CASCADE,
+    execution_token_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    settings_wire BLOB NOT NULL,
+    context_digest TEXT NOT NULL CHECK (length(context_digest) = 64),
+    context_groups_json TEXT NOT NULL,
+    messages_json TEXT NOT NULL,
+    prior_episode_ids_json TEXT NOT NULL,
+    attachments_json TEXT NOT NULL,
+    compilation_report_wire BLOB NOT NULL,
+    output_schema_ref TEXT NOT NULL,
+    output_schema_digest TEXT NOT NULL CHECK (length(output_schema_digest) = 64),
+    input_value_id TEXT NOT NULL REFERENCES workflow_values(value_id) ON DELETE RESTRICT,
+    status TEXT NOT NULL CHECK (status IN ('running', 'settled')),
+    outcome TEXT,
+    output_value_id TEXT REFERENCES workflow_values(value_id) ON DELETE RESTRICT,
+    error_code TEXT,
+    error_value_id TEXT REFERENCES workflow_values(value_id) ON DELETE RESTRICT,
+    timeout_milliseconds INTEGER NOT NULL CHECK (timeout_milliseconds > 0),
+    deadline_unix_millis INTEGER NOT NULL CHECK (deadline_unix_millis >= 0),
+    elapsed_milliseconds INTEGER,
+    receipt_id TEXT,
+    provider_run_reference TEXT,
+    idempotency_key TEXT,
+    started_at_unix_millis INTEGER NOT NULL CHECK (started_at_unix_millis >= 0),
+    settled_at_unix_millis INTEGER,
+    started_store_position INTEGER NOT NULL UNIQUE CHECK (started_store_position > 0),
+    settled_store_position INTEGER UNIQUE
+) STRICT;
+CREATE INDEX IF NOT EXISTS workflow_llm_attempts_run_position
+    ON workflow_llm_attempts(run_id, started_store_position, invocation_id);
+"#;
+
 #[derive(Debug)]
 pub enum WorkflowProjectionError {
     Database(rusqlite::Error),
@@ -960,6 +1033,33 @@ struct CapabilityLogRecord {
     level: String,
     message: String,
     offset_milliseconds: u64,
+}
+
+#[derive(Deserialize, Serialize)]
+struct LlmContextGroupRecord {
+    group_id: String,
+    kind: String,
+    title: String,
+    provenance: String,
+    content_value_id: String,
+    original_byte_count: u64,
+    retained_byte_count: u64,
+    redaction_count: u32,
+    truncated: bool,
+    source_episode_ids: Vec<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct LlmMessageRecord {
+    message_id: String,
+    sequence: u32,
+    role: String,
+    context_group_id: String,
+    summary: String,
+    content_value_id: String,
+    estimated_tokens: u64,
+    redaction_count: u32,
+    truncated: bool,
 }
 
 pub struct WorkflowRunProjection {
@@ -1085,6 +1185,7 @@ impl WorkflowRunProjection {
             transaction.execute_batch(PROJECTION_MIGRATION_7)?;
             transaction.execute_batch(PROJECTION_MIGRATION_8)?;
             transaction.execute_batch(PROJECTION_MIGRATION_9)?;
+            transaction.execute_batch(PROJECTION_MIGRATION_10)?;
             transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
             refresh_state_digest(&transaction)?;
             transaction.commit()?;
@@ -1096,6 +1197,7 @@ impl WorkflowRunProjection {
             transaction.execute_batch(PROJECTION_MIGRATION_7)?;
             transaction.execute_batch(PROJECTION_MIGRATION_8)?;
             transaction.execute_batch(PROJECTION_MIGRATION_9)?;
+            transaction.execute_batch(PROJECTION_MIGRATION_10)?;
             transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
             refresh_state_digest(&transaction)?;
             transaction.commit()?;
@@ -1106,6 +1208,7 @@ impl WorkflowRunProjection {
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             transaction.execute_batch(PROJECTION_MIGRATION_8)?;
             transaction.execute_batch(PROJECTION_MIGRATION_9)?;
+            transaction.execute_batch(PROJECTION_MIGRATION_10)?;
             transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
             refresh_state_digest(&transaction)?;
             transaction.commit()?;
@@ -1115,6 +1218,16 @@ impl WorkflowRunProjection {
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             transaction.execute_batch(PROJECTION_MIGRATION_9)?;
+            transaction.execute_batch(PROJECTION_MIGRATION_10)?;
+            transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
+            refresh_state_digest(&transaction)?;
+            transaction.commit()?;
+        }
+        let found: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if found == 9 {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(PROJECTION_MIGRATION_10)?;
             transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
             refresh_state_digest(&transaction)?;
             transaction.commit()?;
@@ -1264,6 +1377,30 @@ impl WorkflowRunProjection {
                 "capability_projection_invalid".into(),
             ));
         }
+        let invalid_llm = self
+            .connection
+            .query_row(
+                "SELECT 1 FROM workflow_llm_attempts l
+                 JOIN workflow_runs r ON r.run_id = l.run_id
+                 JOIN workflow_attempts a ON a.attempt_id = l.attempt_id
+                 WHERE l.node_id != a.node_id
+                    OR l.execution_token_id != a.execution_token_id
+                    OR (l.status = 'running' AND (a.status != 'running' OR r.status != 'running'))
+                    OR (l.status = 'settled' AND (
+                        l.outcome IS NULL
+                        OR l.settled_store_position IS NULL
+                        OR l.elapsed_milliseconds IS NULL
+                        OR l.idempotency_key != l.invocation_id))
+                 LIMIT 1",
+                [],
+                |_| Ok(()),
+            )
+            .optional()?;
+        if invalid_llm.is_some() {
+            return Err(WorkflowProjectionError::Integrity(
+                "llm_projection_invalid".into(),
+            ));
+        }
         let stored: String = self.connection.query_row(
             "SELECT state_digest FROM workflow_projection_meta WHERE singleton = 1",
             [],
@@ -1390,6 +1527,7 @@ impl WorkflowRunProjection {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute_batch(
             "DELETE FROM workflow_projected_events;
+             DELETE FROM workflow_llm_attempts;
              DELETE FROM workflow_capability_attempts;
              DELETE FROM workflow_subflows;
              DELETE FROM workflow_episode_inputs;
@@ -1434,6 +1572,7 @@ impl WorkflowRunProjection {
             "episode_inputs" => "SELECT COUNT(*) FROM workflow_episode_inputs",
             "subflows" => "SELECT COUNT(*) FROM workflow_subflows",
             "capability_attempts" => "SELECT COUNT(*) FROM workflow_capability_attempts",
+            "llm_attempts" => "SELECT COUNT(*) FROM workflow_llm_attempts",
             "events" => "SELECT COUNT(*) FROM workflow_projected_events",
             "values" => "SELECT COUNT(*) FROM workflow_values",
             _ => return Err(WorkflowProjectionError::Integrity("unknown_table".into())),
@@ -1584,6 +1723,7 @@ impl WorkflowRunProjection {
             episode: self.inspect_episode(run_id)?,
             subflows: self.inspect_subflows(run_id)?,
             capability_attempts: self.inspect_capability_attempts(run_id)?,
+            llm_attempts: self.inspect_llm_attempts(run_id)?,
         })
     }
 
@@ -2722,6 +2862,172 @@ impl WorkflowRunProjection {
             .collect()
     }
 
+    fn inspect_llm_attempts(&self, run_id: &str) -> Result<Vec<v1::WorkflowProjectedLlmAttempt>> {
+        type LlmRow = (
+            String,
+            String,
+            String,
+            String,
+            Vec<u8>,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Vec<u8>,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            i64,
+            i64,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            i64,
+            Option<i64>,
+            i64,
+            Option<i64>,
+        );
+        let mut statement = self.connection.prepare(
+            "SELECT invocation_id, attempt_id, execution_token_id, node_id, settings_wire,
+                    context_digest, context_groups_json, messages_json, prior_episode_ids_json,
+                    attachments_json, compilation_report_wire, output_schema_ref,
+                    output_schema_digest, input_value_id, status, outcome, output_value_id,
+                    error_code, error_value_id, timeout_milliseconds, deadline_unix_millis,
+                    elapsed_milliseconds, receipt_id, provider_run_reference, idempotency_key,
+                    started_at_unix_millis, settled_at_unix_millis, started_store_position,
+                    settled_store_position
+             FROM workflow_llm_attempts WHERE run_id = ?1
+             ORDER BY started_store_position, invocation_id",
+        )?;
+        let rows = statement.query_map([run_id], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+                row.get(9)?,
+                row.get(10)?,
+                row.get(11)?,
+                row.get(12)?,
+                row.get(13)?,
+                row.get(14)?,
+                row.get(15)?,
+                row.get(16)?,
+                row.get(17)?,
+                row.get(18)?,
+                row.get(19)?,
+                row.get(20)?,
+                row.get(21)?,
+                row.get(22)?,
+                row.get(23)?,
+                row.get(24)?,
+                row.get(25)?,
+                row.get(26)?,
+                row.get(27)?,
+                row.get(28)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let row: LlmRow = row?;
+            let settings = v1::WorkflowLlmModelSettings::decode(row.4.as_slice())
+                .map_err(|_| WorkflowProjectionError::Integrity("llm_settings_decode".into()))?;
+            let report =
+                v1::WorkflowLlmCompilationReport::decode(row.10.as_slice()).map_err(|_| {
+                    WorkflowProjectionError::Integrity("llm_compilation_report_decode".into())
+                })?;
+            Ok(v1::WorkflowProjectedLlmAttempt {
+                invocation_id: row.0,
+                attempt_id: row.1,
+                execution_token_id: row.2,
+                node_id: row.3,
+                settings: Some(settings),
+                context_digest: row.5,
+                context_groups: self.inspect_llm_context_groups(&row.6)?,
+                messages: self.inspect_llm_messages(&row.7)?,
+                prior_episode_ids: decode_string_list(&row.8)?,
+                attachments: self.inspect_capability_artifacts(&row.9)?,
+                compilation_report: Some(report),
+                output_schema_ref: row.11,
+                output_schema_digest: row.12,
+                input: Some(self.inspect_value(&row.13)?),
+                status: row.14,
+                outcome: row.15.unwrap_or_default(),
+                output: self.inspect_optional_value(row.16.as_deref())?,
+                error_code: row.17.unwrap_or_default(),
+                error: self.inspect_optional_value(row.18.as_deref())?,
+                timeout_milliseconds: projected_u64(row.19)?,
+                deadline_unix_millis: row.20,
+                elapsed_milliseconds: row.21.map(projected_u64).transpose()?.unwrap_or_default(),
+                receipt_id: row.22.unwrap_or_default(),
+                provider_run_reference: row.23.unwrap_or_default(),
+                idempotency_key: row.24.unwrap_or_default(),
+                started_at_unix_millis: row.25,
+                settled_at_unix_millis: row.26.unwrap_or_default(),
+                started_store_position: projected_u64(row.27)?,
+                settled_store_position: row.28.map(projected_u64).transpose()?.unwrap_or_default(),
+            })
+        })
+        .collect()
+    }
+
+    fn inspect_llm_context_groups(
+        &self,
+        value: &str,
+    ) -> Result<Vec<v1::WorkflowProjectedLlmContextGroup>> {
+        let records: Vec<LlmContextGroupRecord> = serde_json::from_str(value)
+            .map_err(|_| WorkflowProjectionError::Integrity("llm_context_groups_decode".into()))?;
+        records
+            .into_iter()
+            .map(|record| {
+                Ok(v1::WorkflowProjectedLlmContextGroup {
+                    group_id: record.group_id,
+                    kind: record.kind,
+                    title: record.title,
+                    provenance: record.provenance,
+                    content: Some(self.inspect_value(&record.content_value_id)?),
+                    original_byte_count: record.original_byte_count,
+                    retained_byte_count: record.retained_byte_count,
+                    redaction_count: record.redaction_count,
+                    truncated: record.truncated,
+                    source_episode_ids: record.source_episode_ids,
+                })
+            })
+            .collect()
+    }
+
+    fn inspect_llm_messages(&self, value: &str) -> Result<Vec<v1::WorkflowProjectedLlmMessage>> {
+        let records: Vec<LlmMessageRecord> = serde_json::from_str(value)
+            .map_err(|_| WorkflowProjectionError::Integrity("llm_messages_decode".into()))?;
+        records
+            .into_iter()
+            .map(|record| {
+                Ok(v1::WorkflowProjectedLlmMessage {
+                    message_id: record.message_id,
+                    sequence: record.sequence,
+                    role: record.role,
+                    context_group_id: record.context_group_id,
+                    summary: record.summary,
+                    content: Some(self.inspect_value(&record.content_value_id)?),
+                    estimated_tokens: record.estimated_tokens,
+                    redaction_count: record.redaction_count,
+                    truncated: record.truncated,
+                })
+            })
+            .collect()
+    }
+
     #[doc(hidden)]
     pub fn corrupt_first_run_for_test(&self) -> Result<()> {
         self.connection.execute(
@@ -3679,6 +3985,105 @@ fn apply_event(transaction: &Transaction<'_>, event: &v1::EventEnvelope) -> Resu
             )?;
             touch_run(transaction, &payload.run_id, event.store_position)?;
         }
+        WorkflowRuntimeEvent::LlmAttemptStarted(payload) => {
+            require_active_attempt(
+                transaction,
+                &payload.run_id,
+                &payload.run_token_id,
+                &payload.attempt_id,
+                &payload.node_id,
+                None,
+                Some(&payload.execution_token_id),
+            )?;
+            let settings = payload
+                .settings
+                .as_ref()
+                .ok_or_else(|| WorkflowProjectionError::Lifecycle("llm_settings_missing".into()))?;
+            let report = payload.compilation_report.as_ref().ok_or_else(|| {
+                WorkflowProjectionError::Lifecycle("llm_compilation_report_missing".into())
+            })?;
+            let input = payload.input.as_ref().ok_or_else(|| {
+                WorkflowProjectionError::Lifecycle("llm_input_value_missing".into())
+            })?;
+            insert_value(transaction, input)?;
+            let context_groups = llm_context_groups_json(transaction, &payload.context_groups)?;
+            let messages = llm_messages_json(transaction, &payload.messages)?;
+            let attachments = capability_artifacts_json(transaction, &payload.attachments)?;
+            transaction.execute(
+                "INSERT INTO workflow_llm_attempts
+                 (invocation_id, run_id, attempt_id, execution_token_id, node_id, settings_wire,
+                  context_digest, context_groups_json, messages_json, prior_episode_ids_json,
+                  attachments_json, compilation_report_wire, output_schema_ref,
+                  output_schema_digest, input_value_id, status, timeout_milliseconds,
+                  deadline_unix_millis, started_at_unix_millis, started_store_position)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                         ?14, ?15, 'running', ?16, ?17, ?18, ?19)",
+                params![
+                    payload.invocation_id,
+                    payload.run_id,
+                    payload.attempt_id,
+                    payload.execution_token_id,
+                    payload.node_id,
+                    settings.encode_to_vec(),
+                    payload.context_digest,
+                    context_groups,
+                    messages,
+                    string_list_json(&payload.prior_episode_ids)?,
+                    attachments,
+                    report.encode_to_vec(),
+                    payload.output_schema_ref,
+                    payload.output_schema_digest,
+                    input.value_id,
+                    sql_u64(payload.timeout_milliseconds)?,
+                    payload.deadline_unix_millis,
+                    event.occurred_at_unix_millis,
+                    sql_u64(event.store_position)?,
+                ],
+            )?;
+            touch_run(transaction, &payload.run_id, event.store_position)?;
+        }
+        WorkflowRuntimeEvent::LlmAttemptSettled(payload) => {
+            let current: Option<(String, String, String)> = transaction
+                .query_row(
+                    "SELECT run_id, attempt_id, status FROM workflow_llm_attempts
+                     WHERE invocation_id = ?1",
+                    [&payload.invocation_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            if current.as_ref().is_none_or(|(run_id, attempt_id, status)| {
+                run_id != &payload.run_id
+                    || attempt_id != &payload.attempt_id
+                    || status != "running"
+            }) {
+                return lifecycle("llm_attempt_not_active");
+            }
+            let output_value_id = insert_optional_value(transaction, payload.output.as_ref())?;
+            let error_value_id = insert_optional_value(transaction, payload.error.as_ref())?;
+            transaction.execute(
+                "UPDATE workflow_llm_attempts SET
+                   status = 'settled', outcome = ?1, output_value_id = ?2,
+                   error_code = NULLIF(?3, ''), error_value_id = ?4,
+                   elapsed_milliseconds = ?5, receipt_id = NULLIF(?6, ''),
+                   provider_run_reference = NULLIF(?7, ''), idempotency_key = ?8,
+                   settled_at_unix_millis = ?9, settled_store_position = ?10
+                 WHERE invocation_id = ?11",
+                params![
+                    llm_outcome_name(payload.outcome)?,
+                    output_value_id,
+                    payload.error_code,
+                    error_value_id,
+                    sql_u64(payload.elapsed_milliseconds)?,
+                    payload.receipt_id,
+                    payload.provider_run_reference,
+                    payload.idempotency_key,
+                    event.occurred_at_unix_millis,
+                    sql_u64(event.store_position)?,
+                    payload.invocation_id,
+                ],
+            )?;
+            touch_run(transaction, &payload.run_id, event.store_position)?;
+        }
         WorkflowRuntimeEvent::PortEmitted(payload) => {
             require_active_attempt(
                 transaction,
@@ -4206,6 +4611,71 @@ fn capability_logs_json(values: &[v1::WorkflowCapabilityLogEntry]) -> Result<Str
         .map_err(|_| WorkflowProjectionError::Integrity("capability_logs_encode".into()))
 }
 
+fn llm_context_groups_json(
+    transaction: &Transaction<'_>,
+    values: &[v1::WorkflowLlmContextGroup],
+) -> Result<String> {
+    let records = values
+        .iter()
+        .map(|group| {
+            let content = group.content.as_ref().ok_or_else(|| {
+                WorkflowProjectionError::Lifecycle("llm_context_value_missing".into())
+            })?;
+            insert_value(transaction, content)?;
+            Ok(LlmContextGroupRecord {
+                group_id: group.group_id.clone(),
+                kind: group.kind.clone(),
+                title: group.title.clone(),
+                provenance: group.provenance.clone(),
+                content_value_id: content.value_id.clone(),
+                original_byte_count: group.original_byte_count,
+                retained_byte_count: group.retained_byte_count,
+                redaction_count: group.redaction_count,
+                truncated: group.truncated,
+                source_episode_ids: group.source_episode_ids.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    serde_json::to_string(&records)
+        .map_err(|_| WorkflowProjectionError::Integrity("llm_context_groups_encode".into()))
+}
+
+fn llm_messages_json(
+    _transaction: &Transaction<'_>,
+    values: &[v1::WorkflowLlmMessage],
+) -> Result<String> {
+    let records = values
+        .iter()
+        .map(|message| {
+            Ok(LlmMessageRecord {
+                message_id: message.message_id.clone(),
+                sequence: message.sequence,
+                role: message.role.clone(),
+                context_group_id: message.context_group_id.clone(),
+                summary: message.summary.clone(),
+                content_value_id: message.content_value_id.clone(),
+                estimated_tokens: message.estimated_tokens,
+                redaction_count: message.redaction_count,
+                truncated: message.truncated,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    serde_json::to_string(&records)
+        .map_err(|_| WorkflowProjectionError::Integrity("llm_messages_encode".into()))
+}
+
+fn llm_outcome_name(value: i32) -> Result<&'static str> {
+    match v1::WorkflowLlmAttemptOutcome::try_from(value) {
+        Ok(v1::WorkflowLlmAttemptOutcome::Succeeded) => Ok("succeeded"),
+        Ok(v1::WorkflowLlmAttemptOutcome::OutputValidationFailed) => Ok("output_validation_failed"),
+        Ok(v1::WorkflowLlmAttemptOutcome::TimedOut) => Ok("timed_out"),
+        Ok(v1::WorkflowLlmAttemptOutcome::Cancelled) => Ok("cancelled"),
+        Ok(v1::WorkflowLlmAttemptOutcome::MalformedResult) => Ok("malformed_result"),
+        Ok(v1::WorkflowLlmAttemptOutcome::Crashed) => Ok("crashed"),
+        _ => lifecycle("llm_outcome_invalid"),
+    }
+}
+
 fn capability_outcome_name(value: i32) -> Result<&'static str> {
     match v1::WorkflowCapabilityAttemptOutcome::try_from(value) {
         Ok(v1::WorkflowCapabilityAttemptOutcome::Succeeded) => Ok("succeeded"),
@@ -4367,6 +4837,12 @@ fn canonical_state_bytes(connection: &Connection) -> Result<Vec<u8>> {
                 "capability_attempts",
                 "SELECT invocation_id, run_id, attempt_id, execution_token_id, node_id, capability_id, version, package_digest, configuration_contract_digest, input_schema_digest, output_schema_digest, output_schema_ref, configuration_value_id, input_value_id, artifact_inputs_json, status, outcome, output_value_id, artifact_outputs_json, error_code, error_value_id, logs_json, timeout_milliseconds, deadline_unix_millis, elapsed_milliseconds, receipt_id, provider_run_reference, idempotency_key, started_at_unix_millis, settled_at_unix_millis, started_store_position, settled_store_position FROM workflow_capability_attempts ORDER BY run_id, started_store_position, invocation_id",
                 32,
+            )?,
+            table_rows(
+                connection,
+                "llm_attempts",
+                "SELECT invocation_id, run_id, attempt_id, execution_token_id, node_id, settings_wire, context_digest, context_groups_json, messages_json, prior_episode_ids_json, attachments_json, compilation_report_wire, output_schema_ref, output_schema_digest, input_value_id, status, outcome, output_value_id, error_code, error_value_id, timeout_milliseconds, deadline_unix_millis, elapsed_milliseconds, receipt_id, provider_run_reference, idempotency_key, started_at_unix_millis, settled_at_unix_millis, started_store_position, settled_store_position FROM workflow_llm_attempts ORDER BY run_id, started_store_position, invocation_id",
+                30,
             )?,
             table_rows(
                 connection,

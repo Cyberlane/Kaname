@@ -379,6 +379,89 @@ public struct DesktopWorkflowProjectedCapabilityAttempt: Identifiable, Equatable
     public let settledStorePosition: UInt64?
 }
 
+public struct DesktopWorkflowProjectedLlmSettings: Equatable, Sendable {
+    public let modelClass: String
+    public let providerID: String
+    public let modelID: String
+    public let modelRevision: String
+    public let reasoningEffort: String
+    public let temperatureMilli: UInt32
+    public let maximumContextBytes: UInt64
+    public let maximumOutputTokens: UInt32
+    public let conversationScope: String
+}
+
+public struct DesktopWorkflowProjectedLlmContextGroup: Identifiable, Equatable, Sendable {
+    public var id: String { groupID }
+    public let groupID: String
+    public let kind: String
+    public let title: String
+    public let provenance: String
+    public let content: DesktopWorkflowProjectedValue
+    public let originalByteCount: UInt64
+    public let retainedByteCount: UInt64
+    public let redactionCount: UInt32
+    public let truncated: Bool
+    public let sourceEpisodeIDs: [String]
+}
+
+public struct DesktopWorkflowProjectedLlmMessage: Identifiable, Equatable, Sendable {
+    public var id: String { messageID }
+    public let messageID: String
+    public let sequence: UInt32
+    public let role: String
+    public let contextGroupID: String
+    public let summary: String
+    public let content: DesktopWorkflowProjectedValue
+    public let estimatedTokens: UInt64
+    public let redactionCount: UInt32
+    public let truncated: Bool
+}
+
+public struct DesktopWorkflowProjectedLlmCompilationReport: Equatable, Sendable {
+    public let originalGroupCount: UInt32
+    public let retainedGroupCount: UInt32
+    public let originalByteCount: UInt64
+    public let retainedByteCount: UInt64
+    public let redactionCount: UInt32
+    public let truncatedGroupIDs: [String]
+    public let droppedGroupIDs: [String]
+    public let redactionReasons: [String]
+}
+
+public struct DesktopWorkflowProjectedLlmAttempt: Identifiable, Equatable, Sendable {
+    public var id: String { invocationID }
+    public let invocationID: String
+    public let attemptID: String
+    public let executionTokenID: String
+    public let nodeID: String
+    public let settings: DesktopWorkflowProjectedLlmSettings
+    public let contextDigest: String
+    public let contextGroups: [DesktopWorkflowProjectedLlmContextGroup]
+    public let messages: [DesktopWorkflowProjectedLlmMessage]
+    public let priorEpisodeIDs: [String]
+    public let attachments: [DesktopWorkflowProjectedCapabilityArtifact]
+    public let compilationReport: DesktopWorkflowProjectedLlmCompilationReport
+    public let outputSchemaRef: String
+    public let outputSchemaDigest: String
+    public let input: DesktopWorkflowProjectedValue
+    public let status: String
+    public let outcome: String?
+    public let output: DesktopWorkflowProjectedValue?
+    public let errorCode: String?
+    public let error: DesktopWorkflowProjectedValue?
+    public let timeoutMilliseconds: UInt64
+    public let deadlineUnixMillis: Int64
+    public let elapsedMilliseconds: UInt64?
+    public let receiptID: String?
+    public let providerRunReference: String?
+    public let idempotencyKey: String?
+    public let startedAtUnixMillis: Int64
+    public let settledAtUnixMillis: Int64?
+    public let startedStorePosition: UInt64
+    public let settledStorePosition: UInt64?
+}
+
 public struct DesktopWorkflowProjectedMatchTrace: Identifiable, Equatable, Sendable {
     public var id: String { eventID }
     public let eventID: String
@@ -431,6 +514,7 @@ public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
     public let episode: DesktopWorkflowProjectedCaseEpisode?
     public let subflows: [DesktopWorkflowProjectedSubflow]
     public let capabilityAttempts: [DesktopWorkflowProjectedCapabilityAttempt]
+    public let llmAttempts: [DesktopWorkflowProjectedLlmAttempt]
 
     public init(
         runID: String, workflowID: String, revisionID: String, packageDigest: String,
@@ -448,7 +532,8 @@ public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
         waitSignals: [DesktopWorkflowProjectedWaitSignal] = [],
         episode: DesktopWorkflowProjectedCaseEpisode? = nil,
         subflows: [DesktopWorkflowProjectedSubflow] = [],
-        capabilityAttempts: [DesktopWorkflowProjectedCapabilityAttempt] = []
+        capabilityAttempts: [DesktopWorkflowProjectedCapabilityAttempt] = [],
+        llmAttempts: [DesktopWorkflowProjectedLlmAttempt] = []
     ) {
         self.runID = runID
         self.workflowID = workflowID
@@ -477,6 +562,7 @@ public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
         self.episode = episode
         self.subflows = subflows
         self.capabilityAttempts = capabilityAttempts
+        self.llmAttempts = llmAttempts
     }
 
     public func attempt(for nodeID: String) -> DesktopWorkflowProjectedAttempt? {
@@ -500,6 +586,10 @@ public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
 
     public func capabilities(for nodeID: String) -> [DesktopWorkflowProjectedCapabilityAttempt] {
         capabilityAttempts.filter { $0.nodeID == nodeID }
+    }
+
+    public func llmAttempts(for nodeID: String) -> [DesktopWorkflowProjectedLlmAttempt] {
+        llmAttempts.filter { $0.nodeID == nodeID }
     }
 }
 
@@ -750,7 +840,137 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
             waitSignals: try run.waitSignals.map(waitSignal),
             episode: try run.hasEpisode ? episode(run.episode) : nil,
             subflows: try run.subflows.map(subflow),
-            capabilityAttempts: try run.capabilityAttempts.map(capabilityAttempt)
+            capabilityAttempts: try run.capabilityAttempts.map(capabilityAttempt),
+            llmAttempts: try run.llmAttempts.map(llmAttempt)
+        )
+    }
+
+    private static func llmAttempt(
+        _ item: Kaname_V1_WorkflowProjectedLlmAttempt
+    ) throws -> DesktopWorkflowProjectedLlmAttempt {
+        guard !item.invocationID.isEmpty, !item.attemptID.isEmpty,
+              !item.executionTokenID.isEmpty, !item.nodeID.isEmpty,
+              item.hasSettings, item.contextDigest.count == 64,
+              !item.contextGroups.isEmpty, !item.messages.isEmpty,
+              item.hasCompilationReport, !item.outputSchemaRef.isEmpty,
+              item.outputSchemaDigest.count == 64, item.hasInput,
+              ["running", "settled"].contains(item.status),
+              item.timeoutMilliseconds > 0, item.deadlineUnixMillis >= 0,
+              item.startedAtUnixMillis >= 0, item.startedStorePosition > 0 else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        let settings = item.settings
+        guard !settings.modelClass.isEmpty, !settings.providerID.isEmpty,
+              !settings.modelID.isEmpty, !settings.modelRevision.isEmpty,
+              ["minimal", "low", "medium", "high"].contains(settings.reasoningEffort),
+              settings.temperatureMilli <= 2_000,
+              (256...49_152).contains(settings.maximumContextBytes),
+              (1...65_536).contains(settings.maximumOutputTokens),
+              ["job", "case"].contains(settings.conversationScope) else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        let settled = item.status == "settled"
+        guard settled == !item.outcome.isEmpty,
+              settled == (item.settledStorePosition > 0),
+              settled == (item.settledAtUnixMillis > 0),
+              !settled || [
+                "succeeded", "output_validation_failed", "timed_out", "cancelled",
+                "malformed_result", "crashed",
+              ].contains(item.outcome),
+              !settled || item.idempotencyKey == item.invocationID else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        if item.outcome == "succeeded" {
+            guard item.hasOutput, item.errorCode.isEmpty, !item.hasError,
+                  !item.receiptID.isEmpty else {
+                throw DesktopWorkflowRunInspectionError.malformedResponse
+            }
+        } else if settled && item.outcome != "cancelled" {
+            guard !item.hasOutput, !item.errorCode.isEmpty, item.hasError,
+                  !item.receiptID.isEmpty else {
+                throw DesktopWorkflowRunInspectionError.malformedResponse
+            }
+        }
+        let groups = try item.contextGroups.map { group in
+            guard !group.groupID.isEmpty, !group.kind.isEmpty, !group.title.isEmpty,
+                  !group.provenance.isEmpty, group.hasContent,
+                  group.originalByteCount >= group.retainedByteCount,
+                  group.content.byteCount == group.retainedByteCount else {
+                throw DesktopWorkflowRunInspectionError.malformedResponse
+            }
+            return DesktopWorkflowProjectedLlmContextGroup(
+                groupID: group.groupID, kind: group.kind, title: group.title,
+                provenance: group.provenance, content: try value(group.content),
+                originalByteCount: group.originalByteCount,
+                retainedByteCount: group.retainedByteCount,
+                redactionCount: group.redactionCount, truncated: group.truncated,
+                sourceEpisodeIDs: group.sourceEpisodeIds
+            )
+        }
+        let groupIDs = Set(groups.map(\.groupID))
+        let messages = try item.messages.enumerated().map { index, message in
+            guard !message.messageID.isEmpty,
+                  message.sequence == UInt32(index + 1),
+                  ["system", "developer", "user", "assistant", "tool"].contains(message.role),
+                  groupIDs.contains(message.contextGroupID), !message.summary.isEmpty,
+                  message.hasContent else {
+                throw DesktopWorkflowRunInspectionError.malformedResponse
+            }
+            return DesktopWorkflowProjectedLlmMessage(
+                messageID: message.messageID, sequence: message.sequence, role: message.role,
+                contextGroupID: message.contextGroupID, summary: message.summary,
+                content: try value(message.content), estimatedTokens: message.estimatedTokens,
+                redactionCount: message.redactionCount, truncated: message.truncated
+            )
+        }
+        let report = item.compilationReport
+        guard report.retainedGroupCount == UInt32(groups.count),
+              report.originalGroupCount >= report.retainedGroupCount,
+              report.originalByteCount >= report.retainedByteCount,
+              report.retainedByteCount <= settings.maximumContextBytes else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        return DesktopWorkflowProjectedLlmAttempt(
+            invocationID: item.invocationID, attemptID: item.attemptID,
+            executionTokenID: item.executionTokenID, nodeID: item.nodeID,
+            settings: DesktopWorkflowProjectedLlmSettings(
+                modelClass: settings.modelClass, providerID: settings.providerID,
+                modelID: settings.modelID, modelRevision: settings.modelRevision,
+                reasoningEffort: settings.reasoningEffort,
+                temperatureMilli: settings.temperatureMilli,
+                maximumContextBytes: settings.maximumContextBytes,
+                maximumOutputTokens: settings.maximumOutputTokens,
+                conversationScope: settings.conversationScope
+            ),
+            contextDigest: item.contextDigest, contextGroups: groups, messages: messages,
+            priorEpisodeIDs: item.priorEpisodeIds,
+            attachments: try item.attachments.map(capabilityArtifact),
+            compilationReport: DesktopWorkflowProjectedLlmCompilationReport(
+                originalGroupCount: report.originalGroupCount,
+                retainedGroupCount: report.retainedGroupCount,
+                originalByteCount: report.originalByteCount,
+                retainedByteCount: report.retainedByteCount,
+                redactionCount: report.redactionCount,
+                truncatedGroupIDs: report.truncatedGroupIds,
+                droppedGroupIDs: report.droppedGroupIds,
+                redactionReasons: report.redactionReasons
+            ),
+            outputSchemaRef: item.outputSchemaRef,
+            outputSchemaDigest: item.outputSchemaDigest, input: try value(item.input),
+            status: item.status, outcome: item.outcome.nilIfEmpty,
+            output: try item.hasOutput ? value(item.output) : nil,
+            errorCode: item.errorCode.nilIfEmpty,
+            error: try item.hasError ? value(item.error) : nil,
+            timeoutMilliseconds: item.timeoutMilliseconds,
+            deadlineUnixMillis: item.deadlineUnixMillis,
+            elapsedMilliseconds: settled ? item.elapsedMilliseconds : nil,
+            receiptID: item.receiptID.nilIfEmpty,
+            providerRunReference: item.providerRunReference.nilIfEmpty,
+            idempotencyKey: item.idempotencyKey.nilIfEmpty,
+            startedAtUnixMillis: item.startedAtUnixMillis,
+            settledAtUnixMillis: item.settledAtUnixMillis > 0 ? item.settledAtUnixMillis : nil,
+            startedStorePosition: item.startedStorePosition,
+            settledStorePosition: item.settledStorePosition > 0 ? item.settledStorePosition : nil
         )
     }
 
