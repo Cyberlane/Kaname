@@ -6,14 +6,14 @@
 //! corrupt tails are quarantined and the last verified source remains usable.
 
 use crate::workflow_library::{
-    PrivatePathKind, Result, WorkflowLibraryError, WorkflowLibraryStore, protect_private_path,
+    Result, WorkflowLibraryError, WorkflowLibraryStore, ensure_private_directory,
+    read_bounded_private_file, sync_directory, write_new_private_file,
 };
 use rusqlite::{ErrorCode, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    fs::{self, File, OpenOptions},
-    io::Write,
+    fs,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -118,9 +118,9 @@ impl WorkflowLibraryStore {
             return Err(WorkflowLibraryError::DraftAlreadyExists);
         }
         let root = self.draft_root(&request.workflow_id)?;
-        prepare_private_directory(&root)?;
-        prepare_private_directory(&root.join("Checkpoints"))?;
-        prepare_private_directory(&root.join("Changes"))?;
+        ensure_private_directory(&root)?;
+        ensure_private_directory(&root.join("Checkpoints"))?;
+        ensure_private_directory(&root.join("Changes"))?;
 
         let workflow_digest = sha256_hex(&request.workflow_source);
         let layout_digest = sha256_hex(&request.layout_source);
@@ -663,7 +663,7 @@ fn install_checkpoint(
     layout_source: &[u8],
 ) -> Result<()> {
     let checkpoints = root.join("Checkpoints");
-    prepare_private_directory(&checkpoints)?;
+    ensure_private_directory(&checkpoints)?;
     let target = checkpoint_path(root, sequence);
     if target.exists() {
         let existing = read_checkpoint(root, workflow_id, sequence)?;
@@ -678,9 +678,9 @@ fn install_checkpoint(
     if staging.exists() {
         fs::remove_dir_all(&staging)?;
     }
-    prepare_private_directory(&staging)?;
-    write_private_file(&staging.join("workflow.json"), workflow_source)?;
-    write_private_file(&staging.join("layout.json"), layout_source)?;
+    ensure_private_directory(&staging)?;
+    write_new_private_file(&staging.join("workflow.json"), workflow_source)?;
+    write_new_private_file(&staging.join("layout.json"), layout_source)?;
     let manifest = DraftCheckpointManifest {
         format_version: 1,
         workflow_id: workflow_id.to_owned(),
@@ -688,7 +688,7 @@ fn install_checkpoint(
         workflow_digest: sha256_hex(workflow_source),
         layout_digest: sha256_hex(layout_source),
     };
-    write_private_file(
+    write_new_private_file(
         &staging.join("manifest.json"),
         &serde_json::to_vec(&manifest)
             .map_err(|_| WorkflowLibraryError::InvalidDraft("checkpoint_manifest"))?,
@@ -700,12 +700,15 @@ fn install_checkpoint(
 
 fn read_checkpoint(root: &Path, workflow_id: &str, sequence: i64) -> Result<(Vec<u8>, Vec<u8>)> {
     let directory = checkpoint_path(root, sequence);
-    let manifest: DraftCheckpointManifest =
-        serde_json::from_slice(&read_bounded(&directory.join("manifest.json"), 16 * 1024)?)
-            .map_err(|_| WorkflowLibraryError::CorruptDraft("checkpoint_manifest".into()))?;
+    let manifest: DraftCheckpointManifest = serde_json::from_slice(&read_bounded_private_file(
+        &directory.join("manifest.json"),
+        16 * 1024,
+    )?)
+    .map_err(|_| WorkflowLibraryError::CorruptDraft("checkpoint_manifest".into()))?;
     let workflow_source =
-        read_bounded(&directory.join("workflow.json"), MAXIMUM_DRAFT_SOURCE_BYTES)?;
-    let layout_source = read_bounded(&directory.join("layout.json"), MAXIMUM_DRAFT_SOURCE_BYTES)?;
+        read_bounded_private_file(&directory.join("workflow.json"), MAXIMUM_DRAFT_SOURCE_BYTES)?;
+    let layout_source =
+        read_bounded_private_file(&directory.join("layout.json"), MAXIMUM_DRAFT_SOURCE_BYTES)?;
     if manifest.format_version != 1
         || manifest.workflow_id != workflow_id
         || manifest.sequence != sequence
@@ -722,7 +725,7 @@ fn read_checkpoint(root: &Path, workflow_id: &str, sequence: i64) -> Result<(Vec
 
 fn install_change(root: &Path, record: &DraftChangeRecord) -> Result<()> {
     let changes = root.join("Changes");
-    prepare_private_directory(&changes)?;
+    ensure_private_directory(&changes)?;
     let target = change_path(root, record.sequence);
     let bytes = serde_json::to_vec(record)
         .map_err(|_| WorkflowLibraryError::InvalidDraft("change_encoding"))?;
@@ -741,7 +744,10 @@ fn install_change(root: &Path, record: &DraftChangeRecord) -> Result<()> {
         sequence_name(record.sequence),
         record.edit_id
     ));
-    write_private_file_create_new(&temporary, &bytes)?;
+    if temporary.exists() {
+        fs::remove_file(&temporary)?;
+    }
+    write_new_private_file(&temporary, &bytes)?;
     match fs::hard_link(&temporary, &target) {
         Ok(()) => {}
         Err(_error) if target.exists() => {
@@ -767,7 +773,7 @@ fn read_change(root: &Path, sequence: i64) -> Result<DraftChangeRecord> {
 
 fn read_change_file(path: &Path) -> Result<DraftChangeRecord> {
     let maximum = MAXIMUM_DRAFT_SOURCE_BYTES * 2 + 64 * 1024;
-    serde_json::from_slice(&read_bounded(path, maximum)?)
+    serde_json::from_slice(&read_bounded_private_file(path, maximum)?)
         .map_err(|_| WorkflowLibraryError::CorruptDraft("change_encoding".into()))
 }
 
@@ -783,7 +789,7 @@ fn quarantine_change_range(root: &Path, first: i64, last: i64) -> Result<()> {
                 .ok_or(WorkflowLibraryError::InvalidDraft("workflow_root"))?,
         )
         .join(format!("{}-{first}", unix_millis()));
-    prepare_private_directory(&recovery)?;
+    ensure_private_directory(&recovery)?;
     for sequence in first..=last {
         let source = change_path(root, sequence);
         if source.exists() {
@@ -882,43 +888,6 @@ fn corrupt_sequence(code: &str) -> Option<i64> {
 
 fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
-}
-
-fn prepare_private_directory(path: &Path) -> Result<()> {
-    fs::create_dir_all(path)?;
-    protect_private_path(path, PrivatePathKind::Directory)
-}
-
-fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    let mut file = options.open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    protect_private_path(path, PrivatePathKind::File)
-}
-
-fn write_private_file_create_new(path: &Path, bytes: &[u8]) -> Result<()> {
-    if path.exists() {
-        fs::remove_file(path)?;
-    }
-    write_private_file(path, bytes)
-}
-
-fn read_bounded(path: &Path, maximum: usize) -> Result<Vec<u8>> {
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() as usize > maximum
-    {
-        return Err(WorkflowLibraryError::CorruptDraft(
-            "draft_file_bounds".into(),
-        ));
-    }
-    Ok(fs::read(path)?)
-}
-
-fn sync_directory(path: &Path) -> Result<()> {
-    File::open(path)?.sync_all()?;
-    Ok(())
 }
 
 fn unix_millis() -> i64 {

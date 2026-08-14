@@ -17,6 +17,7 @@ pub mod workflow_drafts;
 pub mod workflow_library;
 pub mod workflow_match;
 pub mod workflow_protocol;
+pub mod workflow_publication;
 pub mod workflow_schema;
 
 pub const SCHEMA_MAJOR: u32 = 1;

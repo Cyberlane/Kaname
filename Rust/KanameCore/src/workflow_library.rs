@@ -9,7 +9,10 @@ use rusqlite::{Connection, ErrorCode, OpenFlags, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
-    fmt, fs, io,
+    fmt, fs,
+    fs::{File, OpenOptions},
+    io,
+    io::Write,
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -160,6 +163,10 @@ pub enum WorkflowLibraryError {
     InvalidDraft(&'static str),
     CorruptDraft(String),
     InjectedDraftInterruption,
+    WorkflowCompilationFailed(Vec<String>),
+    PublicationConflict(String),
+    InvalidRevisionBundle(String),
+    InjectedPublicationInterruption(&'static str),
 }
 
 impl fmt::Display for WorkflowLibraryError {
@@ -186,6 +193,22 @@ impl fmt::Display for WorkflowLibraryError {
             Self::InvalidDraft(code) => write!(formatter, "workflow draft invalid: {code}"),
             Self::CorruptDraft(code) => write!(formatter, "workflow draft corrupt: {code}"),
             Self::InjectedDraftInterruption => formatter.write_str("workflow_draft_interrupted"),
+            Self::WorkflowCompilationFailed(codes) => {
+                write!(
+                    formatter,
+                    "workflow_compilation_failed: {}",
+                    codes.join(",")
+                )
+            }
+            Self::PublicationConflict(code) => {
+                write!(formatter, "workflow publication conflict: {code}")
+            }
+            Self::InvalidRevisionBundle(code) => {
+                write!(formatter, "workflow revision bundle invalid: {code}")
+            }
+            Self::InjectedPublicationInterruption(stage) => {
+                write!(formatter, "workflow publication interrupted: {stage}")
+            }
         }
     }
 }
@@ -476,6 +499,40 @@ pub(crate) fn protect_private_path(path: &Path, kind: PrivatePathKind) -> Result
             PrivatePathKind::Directory => 0o700,
         }),
     )?;
+    Ok(())
+}
+
+pub(crate) fn ensure_private_directory(path: &Path) -> Result<()> {
+    fs::create_dir_all(path)?;
+    protect_private_path(path, PrivatePathKind::Directory)
+}
+
+pub(crate) fn write_new_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    let file = write_new_private_file_unflushed(path, bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+pub(crate) fn write_new_private_file_unflushed(path: &Path, bytes: &[u8]) -> Result<File> {
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    file.write_all(bytes)?;
+    protect_private_path(path, PrivatePathKind::File)?;
+    Ok(file)
+}
+
+pub(crate) fn read_bounded_private_file(path: &Path, maximum: usize) -> Result<Vec<u8>> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() as usize > maximum
+    {
+        return Err(WorkflowLibraryError::Integrity(
+            "private_file_bounds".into(),
+        ));
+    }
+    Ok(fs::read(path)?)
+}
+
+pub(crate) fn sync_directory(path: &Path) -> Result<()> {
+    File::open(path)?.sync_all()?;
     Ok(())
 }
 
