@@ -1,3 +1,5 @@
+import KanameDesktop
+import KanameProtocol
 import KanamePrototypeUI
 import SwiftUI
 
@@ -1399,6 +1401,7 @@ private enum AutomationInspectorSection: String, CaseIterable {
 private enum AutomationEditorMode: String, CaseIterable {
     case canvas = "Canvas"
     case outline = "Outline"
+    case source = "Source"
 }
 
 private enum AutomationBuilderDesignPanel {
@@ -1462,6 +1465,10 @@ private struct AutomationCanvasPreview: View {
     @State private var editorMode: AutomationEditorMode
     @State private var isEditing = false
     @State private var showsVersionHistory = false
+    @State private var selectedProblemID: String?
+    @State private var diagnosticNavigation = DesktopWorkflowDiagnosticNavigationState()
+    @State private var problemFocusMessage: String?
+    @State private var problemsExpanded: Bool
 
     init(workflowID: String) {
         self.workflowID = workflowID
@@ -1510,10 +1517,20 @@ private struct AutomationCanvasPreview: View {
         _selectedStepID = State(initialValue: initialSelection)
         _selectedEdgeID = State(initialValue: builderDesignPanel == .condition ? "interpret:correction:append" : nil)
         _inspectorSection = State(initialValue: initialPattern == .feedback ? .history : .configuration)
-        _editorMode = State(initialValue: arguments.contains("--desktop-automation-outline") ? .outline : .canvas)
+        if arguments.contains("--desktop-automation-builder-problems-source") {
+            _editorMode = State(initialValue: .source)
+        } else {
+            _editorMode = State(initialValue: arguments.contains("--desktop-automation-outline") ? .outline : .canvas)
+        }
         _isEditing = State(initialValue: arguments.contains("--desktop-automation-builder-editing"))
         _showsVersionHistory = State(
             initialValue: arguments.contains("--desktop-automation-builder-versions")
+        )
+        _selectedProblemID = State(
+            initialValue: AutomationWorkflowDiagnosticFixture.presentations.first?.id
+        )
+        _problemsExpanded = State(
+            initialValue: !arguments.contains("--desktop-automation-builder-problems-collapsed")
         )
     }
 
@@ -1526,6 +1543,9 @@ private struct AutomationCanvasPreview: View {
         graph.steps.first(where: { $0.id == selectedStepID })
             ?? graph.steps.first(where: { $0.id == graph.defaultSelectedID })
             ?? graph.steps[0]
+    }
+    private var selectedDiagnostic: DesktopWorkflowDiagnosticPresentation? {
+        AutomationWorkflowDiagnosticFixture.presentations.first { $0.id == selectedProblemID }
     }
 
     var body: some View {
@@ -1557,7 +1577,7 @@ private struct AutomationCanvasPreview: View {
     }
 
     private var fullCanvasWorkspace: some View {
-        VStack(spacing: 10) {
+        ZStack(alignment: .bottom) {
             HStack(alignment: .top, spacing: 12) {
                 AutomationNodePalette(isEditing: isEditing)
                     .frame(width: 178)
@@ -1566,8 +1586,9 @@ private struct AutomationCanvasPreview: View {
                     .frame(width: 248)
             }
             if builderDesignPanel == .problems {
-                AutomationProblemsDrawer()
-                    .frame(height: 146)
+                problemsDrawer
+                    .frame(height: problemsExpanded ? 194 : 46)
+                    .padding(8)
             }
         }
     }
@@ -1602,7 +1623,14 @@ private struct AutomationCanvasPreview: View {
 
     private var compactCanvasWorkspace: some View {
         VStack(spacing: 8) {
-            canvasSurface(minimumHeight: 350, compact: true)
+            ZStack(alignment: .bottom) {
+                canvasSurface(minimumHeight: 350, compact: true)
+                if builderDesignPanel == .problems {
+                    problemsDrawer
+                        .frame(height: problemsExpanded ? 184 : 46)
+                        .padding(8)
+                }
+            }
             HStack(spacing: 12) {
                 Label("Selected: \(selectedStep.title)", systemImage: selectedStep.symbol)
                     .foregroundStyle(selectedStep.kind.tint)
@@ -1642,6 +1670,8 @@ private struct AutomationCanvasPreview: View {
                     }
                 case .outline:
                     AutomationOutlinePreview(graph: graph, selectedStepID: $selectedStepID)
+                case .source:
+                    AutomationSourceDiagnosticPreview(diagnostic: selectedDiagnostic)
                 }
             }
             .frame(minHeight: minimumHeight)
@@ -1650,6 +1680,40 @@ private struct AutomationCanvasPreview: View {
         .padding(12)
         .frame(maxWidth: .infinity)
         .background(Nord.polarNight1.opacity(0.45), in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private var problemsDrawer: some View {
+        AutomationProblemsDrawer(
+            diagnostics: AutomationWorkflowDiagnosticFixture.presentations,
+            selectedID: $selectedProblemID,
+            isExpanded: $problemsExpanded,
+            focusMessage: problemFocusMessage,
+            onFocus: focusDiagnostic
+        )
+    }
+
+    private func focusDiagnostic(_ diagnostic: DesktopWorkflowDiagnosticPresentation) {
+        var navigation = diagnosticNavigation
+        let outcome = navigation.focus(
+            diagnostic,
+            availableNodeIDs: Set(graph.steps.map(\.id)),
+            availableEdgeIDs: Set(graph.edges.map(\.id))
+        )
+        diagnosticNavigation = navigation
+        selectedProblemID = diagnostic.id
+        switch outcome {
+        case let .focused(target):
+            if let nodeID = target.nodeID { selectedStepID = nodeID }
+            selectedEdgeID = target.edgeID
+            switch target.projection {
+            case .canvas: editorMode = .canvas
+            case .outline: editorMode = .outline
+            case .source: editorMode = .source
+            }
+            problemFocusMessage = "Focused \(target.projection.rawValue) at \(target.jsonPointer ?? target.nodeID ?? target.edgeID ?? "declared target")."
+        case .targetUnavailable:
+            problemFocusMessage = "The declared target is unavailable. The diagnostic remains selected without focusing a different item."
+        }
     }
 
     private var canvasHeader: some View {
@@ -1724,7 +1788,7 @@ private struct AutomationCanvasPreview: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(width: 150)
+            .frame(width: 220)
             Divider().frame(height: 18)
             if isEditing {
                 Button("Undo", systemImage: "arrow.uturn.backward") {}.buttonStyle(.plain)
@@ -1871,6 +1935,81 @@ private struct AutomationOutlinePreview: View {
         }
         .font(.caption2)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct AutomationSourceDiagnosticPreview: View {
+    let diagnostic: DesktopWorkflowDiagnosticPresentation?
+
+    private let lines = [
+        "{",
+        "  \"schemaVersion\": 1,",
+        "  \"graph\": {",
+        "    \"entryNodeID\": \"\",",
+        "    \"nodes\": [",
+        "      { \"id\": \"inbound\", \"type\": \"trigger.email\" },",
+        "      { \"id\": \"interpret\", \"type\": \"control.match\" },",
+        "      { \"id\": \"append\", \"type\": \"context.append\" },",
+        "      { \"id\": \"reply\", \"type\": \"effect.email.reply\" }",
+        "    ]",
+        "  }",
+        "}",
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sourceHeader
+            ScrollView([.horizontal, .vertical]) {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
+                        sourceLine(index: index, text: line)
+                    }
+                }
+            }
+            .background(Nord.polarNight0.opacity(0.7), in: RoundedRectangle(cornerRadius: 8))
+        }
+        .padding(10)
+        .background(Nord.polarNight0.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
+        .overlay { RoundedRectangle(cornerRadius: 12).stroke(Nord.polarNight3, lineWidth: 1) }
+    }
+
+    private var sourceHeader: some View {
+        HStack(spacing: 8) {
+            Label("workflow.json", systemImage: "doc.text")
+                .font(.caption.weight(.semibold))
+            if let pointer = diagnostic?.focusTarget.jsonPointer {
+                Text(pointer)
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(Nord.frost1)
+            }
+            Spacer()
+            if let range = diagnostic?.focusTarget.sourceRange {
+                Text("bytes \(range.start.byteOffset)–\(range.end.byteOffset)")
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func sourceLine(index: Int, text: String) -> some View {
+        let selected = isSelected(index)
+        return HStack(spacing: 12) {
+            Text(String(format: "%02d", index + 1))
+                .foregroundStyle(.tertiary)
+                .frame(width: 24, alignment: .trailing)
+            Text(text)
+                .foregroundStyle(selected ? Nord.snowStorm0 : Color.secondary)
+        }
+        .font(.system(size: 11, design: .monospaced))
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(selected ? Nord.auroraRed.opacity(0.18) : Color.clear)
+    }
+
+    private func isSelected(_ zeroBasedLine: Int) -> Bool {
+        guard let range = diagnostic?.focusTarget.sourceRange else { return false }
+        return zeroBasedLine >= Int(range.start.line) && zeroBasedLine <= Int(range.end.line)
     }
 }
 
@@ -3258,46 +3397,253 @@ private struct AutomationPublishReviewDesignPanel: View {
     }
 }
 
+private enum AutomationWorkflowDiagnosticFixture {
+    static let presentations: [DesktopWorkflowDiagnosticPresentation] = {
+        var response = Kaname_V1_CompileWorkflowResponse()
+        response.diagnostics = [
+            diagnostic(
+                code: "graph.entrypoint.missing",
+                severity: .error,
+                summary: "Choose one entry node before publishing.",
+                pointer: "/graph/entryNodeID",
+                line: 3,
+                byteOffset: 48
+            ),
+            diagnostic(
+                code: "graph.node.unreachable",
+                severity: .warning,
+                summary: "Append episode has no reachable incoming route.",
+                pointer: "/graph/nodes/7",
+                line: 7,
+                byteOffset: 212
+            ),
+            diagnostic(
+                code: "mapping.type.incompatible",
+                severity: .error,
+                summary: "The correction value does not match the declared input type.",
+                pointer: "/graph/nodes/2/configuration/mappings/0",
+                line: 6,
+                byteOffset: 176
+            ),
+            diagnostic(
+                code: "graph.cycle.unbounded",
+                severity: .error,
+                summary: "The feedback cycle requires an iteration or time bound.",
+                pointer: "/graph/edges/9",
+                line: 9,
+                byteOffset: 284
+            ),
+            diagnostic(
+                code: "effect.authority.undeclared",
+                severity: .error,
+                summary: "Reply + attach requires an explicit send authority envelope.",
+                pointer: "/graph/nodes/5/authority",
+                line: 8,
+                byteOffset: 252
+            ),
+        ]
+        let routes: [DesktopWorkflowDiagnosticRouteKey: DesktopWorkflowDiagnosticFocusTarget] = [
+            .init(code: "graph.node.unreachable", instancePointer: "/graph/nodes/7"):
+                .outline(nodeID: "append"),
+            .init(code: "graph.cycle.unbounded", instancePointer: "/graph/edges/9"):
+                .canvas(nodeID: "interpret", edgeID: "append-context-episode 4 · same case"),
+            .init(code: "effect.authority.undeclared", instancePointer: "/graph/nodes/5/authority"):
+                .canvas(nodeID: "reply"),
+        ]
+        let fixes: [DesktopWorkflowDiagnosticRouteKey: DesktopWorkflowDiagnosticFixMetadata] = [
+            .init(code: "graph.entrypoint.missing", instancePointer: "/graph/entryNodeID"):
+                .init(
+                    id: "choose-entry-node",
+                    title: "Preview entry selection",
+                    explanation: "Shows the eligible trigger nodes without changing the draft."
+                ),
+        ]
+        return DesktopWorkflowDiagnosticMapper.presentations(
+            response: response,
+            routes: routes,
+            fixes: fixes
+        )
+    }()
+
+    private static func diagnostic(
+        code: String,
+        severity: Kaname_V1_WorkflowDiagnosticSeverity,
+        summary: String,
+        pointer: String,
+        line: UInt32,
+        byteOffset: UInt64
+    ) -> Kaname_V1_WorkflowDiagnostic {
+        var start = Kaname_V1_WorkflowSourcePosition()
+        start.byteOffset = byteOffset
+        start.line = line
+        start.column = 4
+        var end = start
+        end.byteOffset += 18
+        end.column += 18
+        var location = Kaname_V1_WorkflowSourceLocation()
+        location.sourceID = "workflow.json"
+        location.jsonPointer = pointer
+        location.start = start
+        location.end = end
+        var result = Kaname_V1_WorkflowDiagnostic()
+        result.code = code
+        result.severity = severity
+        result.summary = summary
+        result.instancePointer = pointer
+        result.schemaPointer = "/properties/graph"
+        result.location = location
+        return result
+    }
+}
+
 private struct AutomationProblemsDrawer: View {
+    let diagnostics: [DesktopWorkflowDiagnosticPresentation]
+    @Binding var selectedID: String?
+    @Binding var isExpanded: Bool
+    let focusMessage: String?
+    let onFocus: (DesktopWorkflowDiagnosticPresentation) -> Void
+    @State private var previewedFixID: String?
+
+    private var selected: DesktopWorkflowDiagnosticPresentation? {
+        diagnostics.first { $0.id == selectedID } ?? diagnostics.first
+    }
+
     var body: some View {
+        Group {
+            if isExpanded {
+                expandedDrawer
+            } else {
+                collapsedDrawer
+            }
+        }
+        .padding(isExpanded ? 13 : 8)
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var collapsedDrawer: some View {
+        Button {
+            isExpanded = true
+        } label: {
+            HStack(spacing: 8) {
+                Label("Problems", systemImage: "exclamationmark.triangle.fill")
+                    .font(.headline)
+                Text("\(diagnostics.count)")
+                    .foregroundStyle(Nord.auroraYellow)
+                severitySummary
+                Spacer()
+                Text("Show diagnostics")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Image(systemName: "chevron.up")
+                    .foregroundStyle(.secondary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Show Problems, \(diagnostics.count) diagnostics")
+    }
+
+    private var expandedDrawer: some View {
         HStack(alignment: .top, spacing: 18) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Label("Problems", systemImage: "exclamationmark.triangle.fill").font(.headline)
-                    Text("3").foregroundStyle(Nord.auroraYellow)
+                    Text("\(diagnostics.count)").foregroundStyle(Nord.auroraYellow)
                     Spacer()
-                    Text("Click an item to focus its node and exact field").font(.caption).foregroundStyle(.secondary)
+                    Text("Select an item to focus its exact graph or source location")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button {
+                        isExpanded = false
+                    } label: {
+                        Image(systemName: "chevron.down")
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Collapse Problems")
                 }
-                problem("Interpret reply", detail: "The clarification outcome has no destination", symbol: "arrow.triangle.branch", tint: Nord.auroraRed)
-                problem("Wait for reply", detail: "Add a timeout route before publishing", symbol: "clock.badge", tint: Nord.auroraYellow)
+                ScrollView {
+                    LazyVStack(spacing: 3) {
+                        ForEach(diagnostics) { diagnostic in
+                            Button {
+                                selectedID = diagnostic.id
+                                onFocus(diagnostic)
+                            } label: {
+                                problem(diagnostic)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(diagnostic.accessibilityLabel)
+                            .accessibilityHint("Focuses the declared \(diagnostic.focusTarget.projection.rawValue) location")
+                        }
+                    }
+                }
             }
+            .frame(maxWidth: .infinity)
             Divider()
             VStack(alignment: .leading, spacing: 6) {
                 Text("Selected problem").font(.caption.weight(.semibold))
-                Text("Clarification outcome").font(.headline)
-                Text("Choose a compatible next node or mark this outcome as intentionally terminal.")
-                    .font(.caption).foregroundStyle(.secondary)
-                HStack {
-                    Button("Focus connection") {}.buttonStyle(.borderedProminent).controlSize(.small)
-                    Button("Mark terminal") {}.buttonStyle(.bordered).controlSize(.small)
+                if let selected {
+                    Text(selected.code).font(.system(.caption, design: .monospaced).weight(.bold))
+                    Text(selected.summary).font(.headline)
+                    Text(selected.instancePointer)
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(Nord.frost1)
+                    HStack {
+                        Button("Focus \(selected.focusTarget.projection.rawValue.capitalized)") {
+                            onFocus(selected)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        if let fix = selected.fix {
+                            Button(fix.title) { previewedFixID = fix.id }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                        }
+                    }
+                    if previewedFixID == selected.fix?.id, let fix = selected.fix {
+                        Label(fix.explanation, systemImage: "eye")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    } else if let focusMessage {
+                        Text(focusMessage).font(.caption2).foregroundStyle(.secondary)
+                    }
                 }
             }
-            .frame(width: 330, alignment: .leading)
+            .frame(width: 390, alignment: .leading)
         }
-        .padding(13)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
     }
 
-    private func problem(_ title: String, detail: String, symbol: String, tint: Color) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: symbol).foregroundStyle(tint).frame(width: 18)
+    private var severitySummary: some View {
+        let errors = diagnostics.filter { $0.severity == .error }.count
+        let warnings = diagnostics.filter { $0.severity == .warning }.count
+        return HStack(spacing: 8) {
+            Label("\(errors) errors", systemImage: "xmark.octagon.fill")
+                .foregroundStyle(Nord.auroraRed)
+            Label("\(warnings) warnings", systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(Nord.auroraYellow)
+        }
+        .font(.caption2)
+    }
+
+    private func problem(_ diagnostic: DesktopWorkflowDiagnosticPresentation) -> some View {
+        let selected = selectedID == diagnostic.id
+        return HStack(spacing: 8) {
+            Image(systemName: diagnostic.severity == .error ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
+                .foregroundStyle(diagnostic.severity == .error ? Nord.auroraRed : Nord.auroraYellow)
+                .frame(width: 18)
             VStack(alignment: .leading, spacing: 1) {
-                Text(title).font(.caption.weight(.semibold))
-                Text(detail).font(.caption2).foregroundStyle(.secondary)
+                Text(diagnostic.code).font(.system(.caption2, design: .monospaced).weight(.bold))
+                Text(diagnostic.summary).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer()
-            Image(systemName: "chevron.right").foregroundStyle(.secondary)
+            Text(diagnostic.focusTarget.projection.rawValue.capitalized)
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(Nord.frost1)
+            Image(systemName: selected ? "scope" : "chevron.right")
+                .foregroundStyle(selected ? Nord.frost1 : .secondary)
         }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 5)
+        .background(selected ? Nord.frost1.opacity(0.12) : Color.clear, in: RoundedRectangle(cornerRadius: 7))
     }
 }
 
