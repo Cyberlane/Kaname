@@ -49,6 +49,12 @@ pub enum WorkflowRuntimeContractError {
 pub type Result<T> = std::result::Result<T, WorkflowRuntimeContractError>;
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum WorkflowRuntimeCommand {
+    RequestRun(v1::RequestWorkflowRun),
+    CancelRun(v1::CancelWorkflowRun),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum WorkflowRuntimeEvent {
     RunTokenCreated(v1::WorkflowRunTokenCreated),
     AttemptStarted(v1::WorkflowAttemptStarted),
@@ -88,17 +94,23 @@ pub fn is_workflow_runtime_kind(kind: &str) -> bool {
 }
 
 pub fn validate_workflow_command(command: &v1::CommandEnvelope) -> Result<()> {
+    decode_workflow_command(command).map(|_| ())
+}
+
+pub fn decode_workflow_command(command: &v1::CommandEnvelope) -> Result<WorkflowRuntimeCommand> {
     validate_command_scope(command)?;
     match command.kind.as_str() {
         WORKFLOW_RUN_REQUEST_KIND => {
             let request: v1::RequestWorkflowRun =
                 decode_payload(command.payload.as_ref(), WORKFLOW_RUN_REQUEST_TYPE)?;
-            validate_run_request(&request)
+            validate_run_request(&request)?;
+            Ok(WorkflowRuntimeCommand::RequestRun(request))
         }
         WORKFLOW_RUN_CANCEL_KIND => {
             let request: v1::CancelWorkflowRun =
                 decode_payload(command.payload.as_ref(), WORKFLOW_RUN_CANCEL_TYPE)?;
-            validate_cancel_request(&request)
+            validate_cancel_request(&request)?;
+            Ok(WorkflowRuntimeCommand::CancelRun(request))
         }
         _ => Err(WorkflowRuntimeContractError::UnsupportedKind),
     }

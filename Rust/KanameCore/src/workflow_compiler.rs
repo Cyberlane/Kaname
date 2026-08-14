@@ -364,7 +364,7 @@ fn emit_compiled_artifact(
                 name: &node.name,
                 node_type: &node.node_type,
                 type_version: node.type_version,
-                execution_availability: "schema-only",
+                execution_availability: execution_availability(node),
                 config: &node.config,
                 ports,
             })
@@ -392,6 +392,26 @@ fn emit_compiled_artifact(
     let compiled = canonical_value(&artifact)?;
     digests.compiled_artifact_digest = compiled.sha256;
     Ok((compiled.canonical_bytes, digests))
+}
+
+fn execution_availability(node: &Node) -> &'static str {
+    match node.node_type.as_str() {
+        "trigger.manual" | "terminal.complete" | "terminal.fail"
+            if node.config.as_object().is_some_and(Map::is_empty) =>
+        {
+            "executable"
+        }
+        "data.validate" => "executable",
+        "control.match"
+            if matches!(
+                node.config.get("hitPolicy").and_then(Value::as_str),
+                Some("first" | "unique")
+            ) =>
+        {
+            "executable"
+        }
+        _ => "schema-only",
+    }
 }
 
 fn compile_graph(

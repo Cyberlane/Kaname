@@ -65,8 +65,11 @@ pub struct WorkflowRevisionContent {
     pub summary: WorkflowRevisionSummary,
     pub workflow_source: Vec<u8>,
     pub layout_source: Vec<u8>,
+    pub schema_bundle_source: Vec<u8>,
+    pub dependency_lock_source: Vec<u8>,
     pub configuration_source: Vec<u8>,
     pub compiled_source: Vec<u8>,
+    pub validation_source: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -214,8 +217,11 @@ impl WorkflowLibraryStore {
             summary: row.summary(active.as_deref() == Some(revision_id), execution_support),
             workflow_source: read_revision_file(&directory, "workflow.json")?,
             layout_source: read_revision_file(&directory, "layout.json")?,
+            schema_bundle_source: read_revision_file(&directory, "schemas/bundle.json")?,
+            dependency_lock_source: read_revision_file(&directory, "lock.json")?,
             configuration_source: read_revision_file(&directory, "schemas/configuration.json")?,
             compiled_source: read_revision_file(&directory, "compiled.json")?,
+            validation_source: read_revision_file(&directory, "validation.json")?,
         })
     }
 

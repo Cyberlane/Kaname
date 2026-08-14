@@ -282,7 +282,7 @@ fn history_comparison_and_alias_activation_survive_reopen_without_mutating_versi
     assert_eq!(published_item.state, WorkflowPortfolioState::Published);
     assert_eq!(
         published_item.execution_support,
-        Some(WorkflowExecutionSupport::Unsupported)
+        Some(WorkflowExecutionSupport::Executable)
     );
     let history = reopened
         .workflow_revision_history(WORKFLOW_ID, "active")
@@ -295,7 +295,7 @@ fn history_comparison_and_alias_activation_survive_reopen_without_mutating_versi
         vec![2, 1]
     );
     assert!(history.iter().all(|revision| {
-        revision.execution_support == WorkflowExecutionSupport::Unsupported && !revision.is_active
+        revision.execution_support == WorkflowExecutionSupport::Executable && !revision.is_active
     }));
     let loaded_first = reopened
         .load_workflow_revision("revision-one", "active")
@@ -368,7 +368,7 @@ fn history_comparison_and_alias_activation_survive_reopen_without_mutating_versi
     assert_eq!(item.latest_revision_number, Some(2));
     assert_eq!(
         item.execution_support,
-        Some(WorkflowExecutionSupport::Unsupported)
+        Some(WorkflowExecutionSupport::Executable)
     );
     assert!(matches!(
         reopened.set_workflow_activation(SetWorkflowActivation {
