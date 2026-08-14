@@ -472,7 +472,7 @@ fn unix_millis() -> i64 {
         .min(i64::MAX as u128) as i64
 }
 
-fn prepare_database_path(path: &Path) -> Result<()> {
+pub(crate) fn prepare_database_path(path: &Path) -> Result<()> {
     if path.as_os_str().is_empty() || path.file_name().is_none() {
         return Err(WorkflowLibraryError::UnsafePath("invalid_database_path"));
     }

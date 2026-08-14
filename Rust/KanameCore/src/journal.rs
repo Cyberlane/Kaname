@@ -79,6 +79,14 @@ pub struct ReplayPage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JournalEventPage {
+    pub events: Vec<v1::EventEnvelope>,
+    pub high_water_mark: u64,
+    pub next_store_position: u64,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     pub id: String,
     pub selector_id: String,
@@ -492,6 +500,57 @@ impl Journal {
             high_water_mark,
             has_more,
             gap_reason: None,
+        })
+    }
+
+    /// Reads the authoritative journal in global store order for disposable
+    /// projections. The returned envelopes are verified against their stored
+    /// wire digests before decoding; callers cannot supply a SQL selector.
+    pub fn event_page_after(
+        &self,
+        after_store_position: u64,
+        page_size: u32,
+    ) -> Result<JournalEventPage> {
+        let high_water_mark = db_u64(self.connection.query_row(
+            "SELECT COALESCE(MAX(store_position), 0) FROM events",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?)?;
+        let bounded_page_size = page_size.clamp(1, MAXIMUM_REPLAY_PAGE) as usize;
+        let mut statement = self.connection.prepare(
+            "SELECT wire, wire_digest FROM events WHERE store_position > ?1 ORDER BY store_position ASC LIMIT ?2",
+        )?;
+        let rows = statement.query_map(
+            params![
+                sql_u64(after_store_position)?,
+                (bounded_page_size + 1) as i64
+            ],
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+        )?;
+        let mut events = Vec::new();
+        for row in rows {
+            let (wire, wire_digest) = row?;
+            if digest(&wire) != wire_digest {
+                return Err(JournalError::Integrity(
+                    "stored_event_digest_mismatch".into(),
+                ));
+            }
+            let event = v1::EventEnvelope::decode(wire.as_slice())
+                .map_err(|_| JournalError::Integrity("stored_event_malformed".into()))?;
+            events.push(event);
+        }
+        let has_more = events.len() > bounded_page_size;
+        if has_more {
+            events.pop();
+        }
+        let next_store_position = events
+            .last()
+            .map_or(after_store_position, |event| event.store_position);
+        Ok(JournalEventPage {
+            events,
+            high_water_mark,
+            next_store_position,
+            has_more,
         })
     }
 

@@ -48,6 +48,33 @@ pub enum WorkflowRuntimeContractError {
 
 pub type Result<T> = std::result::Result<T, WorkflowRuntimeContractError>;
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum WorkflowRuntimeEvent {
+    RunTokenCreated(v1::WorkflowRunTokenCreated),
+    AttemptStarted(v1::WorkflowAttemptStarted),
+    AttemptSettled(v1::WorkflowAttemptSettled),
+    PortEmitted(v1::WorkflowPortEmitted),
+    EdgeCheckpointed(v1::WorkflowEdgeCheckpointed),
+    MatchTraceRecorded(v1::WorkflowMatchTraceRecorded),
+    RunCancellationRequested(v1::WorkflowRunCancellationRequested),
+    RunSettled(v1::WorkflowRunSettled),
+}
+
+impl WorkflowRuntimeEvent {
+    pub fn run_id(&self) -> &str {
+        match self {
+            Self::RunTokenCreated(payload) => &payload.run_id,
+            Self::AttemptStarted(payload) => &payload.run_id,
+            Self::AttemptSettled(payload) => &payload.run_id,
+            Self::PortEmitted(payload) => &payload.run_id,
+            Self::EdgeCheckpointed(payload) => &payload.run_id,
+            Self::MatchTraceRecorded(payload) => &payload.run_id,
+            Self::RunCancellationRequested(payload) => &payload.run_id,
+            Self::RunSettled(payload) => &payload.run_id,
+        }
+    }
+}
+
 pub fn is_workflow_runtime_kind(kind: &str) -> bool {
     [
         "workflow.run.",
@@ -78,12 +105,17 @@ pub fn validate_workflow_command(command: &v1::CommandEnvelope) -> Result<()> {
 }
 
 pub fn validate_workflow_event(event: &v1::EventEnvelope) -> Result<()> {
+    decode_workflow_event(event).map(|_| ())
+}
+
+pub fn decode_workflow_event(event: &v1::EventEnvelope) -> Result<WorkflowRuntimeEvent> {
     match event.kind.as_str() {
         WORKFLOW_RUN_TOKEN_CREATED_KIND => {
             let payload: v1::WorkflowRunTokenCreated =
                 decode_payload(event.payload.as_ref(), WORKFLOW_RUN_TOKEN_CREATED_TYPE)?;
             validate_token_created(&payload)?;
-            validate_event_context(event, &payload.run_id)
+            validate_event_context(event, &payload.run_id)?;
+            Ok(WorkflowRuntimeEvent::RunTokenCreated(payload))
         }
         WORKFLOW_ATTEMPT_STARTED_KIND => {
             let payload: v1::WorkflowAttemptStarted =
@@ -95,31 +127,36 @@ pub fn validate_workflow_event(event: &v1::EventEnvelope) -> Result<()> {
                 &payload.node_id,
                 payload.attempt_number,
             )?;
-            validate_event_context(event, &payload.run_id)
+            validate_event_context(event, &payload.run_id)?;
+            Ok(WorkflowRuntimeEvent::AttemptStarted(payload))
         }
         WORKFLOW_ATTEMPT_SETTLED_KIND => {
             let payload: v1::WorkflowAttemptSettled =
                 decode_payload(event.payload.as_ref(), WORKFLOW_ATTEMPT_SETTLED_TYPE)?;
             validate_attempt_settled(&payload)?;
-            validate_event_context(event, &payload.run_id)
+            validate_event_context(event, &payload.run_id)?;
+            Ok(WorkflowRuntimeEvent::AttemptSettled(payload))
         }
         WORKFLOW_PORT_EMITTED_KIND => {
             let payload: v1::WorkflowPortEmitted =
                 decode_payload(event.payload.as_ref(), WORKFLOW_PORT_EMITTED_TYPE)?;
             validate_port_emission(&payload)?;
-            validate_event_context(event, &payload.run_id)
+            validate_event_context(event, &payload.run_id)?;
+            Ok(WorkflowRuntimeEvent::PortEmitted(payload))
         }
         WORKFLOW_EDGE_CHECKPOINTED_KIND => {
             let payload: v1::WorkflowEdgeCheckpointed =
                 decode_payload(event.payload.as_ref(), WORKFLOW_EDGE_CHECKPOINTED_TYPE)?;
             validate_edge_checkpoint(&payload)?;
-            validate_event_context(event, &payload.run_id)
+            validate_event_context(event, &payload.run_id)?;
+            Ok(WorkflowRuntimeEvent::EdgeCheckpointed(payload))
         }
         WORKFLOW_MATCH_TRACE_RECORDED_KIND => {
             let payload: v1::WorkflowMatchTraceRecorded =
                 decode_payload(event.payload.as_ref(), WORKFLOW_MATCH_TRACE_RECORDED_TYPE)?;
             validate_match_trace(&payload)?;
-            validate_event_context(event, &payload.run_id)
+            validate_event_context(event, &payload.run_id)?;
+            Ok(WorkflowRuntimeEvent::MatchTraceRecorded(payload))
         }
         WORKFLOW_RUN_CANCELLATION_REQUESTED_KIND => {
             let payload: v1::WorkflowRunCancellationRequested = decode_payload(
@@ -127,13 +164,15 @@ pub fn validate_workflow_event(event: &v1::EventEnvelope) -> Result<()> {
                 WORKFLOW_RUN_CANCELLATION_REQUESTED_TYPE,
             )?;
             validate_cancellation_requested(&payload)?;
-            validate_event_context(event, &payload.run_id)
+            validate_event_context(event, &payload.run_id)?;
+            Ok(WorkflowRuntimeEvent::RunCancellationRequested(payload))
         }
         WORKFLOW_RUN_SETTLED_KIND => {
             let payload: v1::WorkflowRunSettled =
                 decode_payload(event.payload.as_ref(), WORKFLOW_RUN_SETTLED_TYPE)?;
             validate_run_settled(&payload)?;
-            validate_event_context(event, &payload.run_id)
+            validate_event_context(event, &payload.run_id)?;
+            Ok(WorkflowRuntimeEvent::RunSettled(payload))
         }
         _ => Err(WorkflowRuntimeContractError::UnsupportedKind),
     }
