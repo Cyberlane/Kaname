@@ -1,0 +1,19 @@
+{
+  "invocations": [
+    {
+      "protoFiles": [
+        "kaname/v1/common.proto",
+        "kaname/v1/command.proto",
+        "kaname/v1/event.proto",
+        "kaname/v1/replay.proto",
+        "kaname/v1/approval.proto",
+        "kaname/v1/queue.proto",
+        "kaname/v1/notification.proto",
+        "kaname/v1/sync.proto",
+        "kaname/v1/workflow.proto"
+      ],
+      "visibility": "public",
+      "fileNaming": "fullPath"
+    }
+  ]
+}

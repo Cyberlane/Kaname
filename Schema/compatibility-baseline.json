@@ -47,6 +47,18 @@
       "4": "SYNC_RECEIPT_STATE_APPLIED",
       "5": "SYNC_RECEIPT_STATE_REJECTED",
       "6": "SYNC_RECEIPT_STATE_RESYNC_REQUIRED"
+    },
+    "workflow.WorkflowCheckOutcome": {
+      "0": "WORKFLOW_CHECK_OUTCOME_UNSPECIFIED",
+      "1": "WORKFLOW_CHECK_OUTCOME_VALID",
+      "2": "WORKFLOW_CHECK_OUTCOME_INVALID",
+      "3": "WORKFLOW_CHECK_OUTCOME_REJECTED"
+    },
+    "workflow.WorkflowDiagnosticSeverity": {
+      "0": "WORKFLOW_DIAGNOSTIC_SEVERITY_UNSPECIFIED",
+      "1": "WORKFLOW_DIAGNOSTIC_SEVERITY_INFO",
+      "2": "WORKFLOW_DIAGNOSTIC_SEVERITY_WARNING",
+      "3": "WORKFLOW_DIAGNOSTIC_SEVERITY_ERROR"
     }
   },
   "messages": {
@@ -293,6 +305,67 @@
       "5": "string reason_code",
       "6": "uint64 mac_store_position",
       "7": "int64 recorded_at_unix_millis"
+    },
+    "workflow.CompileWorkflowRequest": {
+      "1": "SchemaVersion schema_version",
+      "2": "string request_id",
+      "3": "bytes manifest_json",
+      "4": "bytes schema_bundle_json",
+      "5": "bytes dependency_lock_json",
+      "6": "bytes configuration_contract_json",
+      "7": "uint32 maximum_diagnostics"
+    },
+    "workflow.CompileWorkflowResponse": {
+      "1": "SchemaVersion schema_version",
+      "2": "string request_id",
+      "3": "WorkflowCheckOutcome outcome",
+      "4": "WorkflowDiagnostic diagnostics",
+      "5": "bool diagnostics_truncated",
+      "6": "bytes compiled_artifact",
+      "7": "WorkflowArtifactDigests digests"
+    },
+    "workflow.ValidateWorkflowRequest": {
+      "1": "SchemaVersion schema_version",
+      "2": "string request_id",
+      "3": "bytes schema_json",
+      "4": "bytes instance_json",
+      "5": "uint32 maximum_diagnostics"
+    },
+    "workflow.ValidateWorkflowResponse": {
+      "1": "SchemaVersion schema_version",
+      "2": "string request_id",
+      "3": "WorkflowCheckOutcome outcome",
+      "4": "WorkflowDiagnostic diagnostics",
+      "5": "bool diagnostics_truncated",
+      "6": "bytes canonical_instance_json",
+      "7": "string instance_digest"
+    },
+    "workflow.WorkflowArtifactDigests": {
+      "1": "string definition_digest",
+      "2": "string layout_digest",
+      "3": "string schema_bundle_digest",
+      "4": "string dependency_lock_digest",
+      "5": "string configuration_contract_digest",
+      "6": "string compiled_artifact_digest"
+    },
+    "workflow.WorkflowDiagnostic": {
+      "1": "string code",
+      "2": "WorkflowDiagnosticSeverity severity",
+      "3": "string summary",
+      "4": "string instance_pointer",
+      "5": "string schema_pointer",
+      "6": "WorkflowSourceLocation location"
+    },
+    "workflow.WorkflowSourceLocation": {
+      "1": "string source_id",
+      "2": "string json_pointer",
+      "3": "WorkflowSourcePosition start",
+      "4": "WorkflowSourcePosition end"
+    },
+    "workflow.WorkflowSourcePosition": {
+      "1": "uint64 byte_offset",
+      "2": "uint32 line",
+      "3": "uint32 column"
     }
   }
 }

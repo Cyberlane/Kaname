@@ -1,0 +1,102 @@
+syntax = "proto3";
+
+package kaname.v1;
+
+import "kaname/v1/common.proto";
+
+enum WorkflowCheckOutcome {
+  WORKFLOW_CHECK_OUTCOME_UNSPECIFIED = 0;
+  WORKFLOW_CHECK_OUTCOME_VALID = 1;
+  WORKFLOW_CHECK_OUTCOME_INVALID = 2;
+  WORKFLOW_CHECK_OUTCOME_REJECTED = 3;
+}
+
+enum WorkflowDiagnosticSeverity {
+  WORKFLOW_DIAGNOSTIC_SEVERITY_UNSPECIFIED = 0;
+  WORKFLOW_DIAGNOSTIC_SEVERITY_INFO = 1;
+  WORKFLOW_DIAGNOSTIC_SEVERITY_WARNING = 2;
+  WORKFLOW_DIAGNOSTIC_SEVERITY_ERROR = 3;
+}
+
+// Zero-based UTF-8 byte, line, and column position within one declared source.
+message WorkflowSourcePosition {
+  uint64 byte_offset = 1;
+  uint32 line = 2;
+  uint32 column = 3;
+  reserved 4 to 15;
+}
+
+// A source span plus the nearest semantic JSON Pointer when one is known.
+message WorkflowSourceLocation {
+  string source_id = 1;
+  string json_pointer = 2;
+  WorkflowSourcePosition start = 3;
+  WorkflowSourcePosition end = 4;
+  reserved 5 to 15;
+}
+
+// A bounded, value-masked checker diagnostic suitable for local persistence.
+message WorkflowDiagnostic {
+  string code = 1;
+  WorkflowDiagnosticSeverity severity = 2;
+  string summary = 3;
+  string instance_pointer = 4;
+  string schema_pointer = 5;
+  WorkflowSourceLocation location = 6;
+  reserved 7 to 15;
+  reserved "raw_value", "private_context", "stack_trace";
+}
+
+message WorkflowArtifactDigests {
+  string definition_digest = 1;
+  string layout_digest = 2;
+  string schema_bundle_digest = 3;
+  string dependency_lock_digest = 4;
+  string configuration_contract_digest = 5;
+  string compiled_artifact_digest = 6;
+  reserved 7 to 15;
+}
+
+message ValidateWorkflowRequest {
+  SchemaVersion schema_version = 1;
+  string request_id = 2;
+  bytes schema_json = 3;
+  bytes instance_json = 4;
+  uint32 maximum_diagnostics = 5;
+  reserved 6 to 15;
+  reserved "schema_path", "instance_path";
+}
+
+message ValidateWorkflowResponse {
+  SchemaVersion schema_version = 1;
+  string request_id = 2;
+  WorkflowCheckOutcome outcome = 3;
+  repeated WorkflowDiagnostic diagnostics = 4;
+  bool diagnostics_truncated = 5;
+  bytes canonical_instance_json = 6;
+  string instance_digest = 7;
+  reserved 8 to 15;
+}
+
+message CompileWorkflowRequest {
+  SchemaVersion schema_version = 1;
+  string request_id = 2;
+  bytes manifest_json = 3;
+  bytes schema_bundle_json = 4;
+  bytes dependency_lock_json = 5;
+  bytes configuration_contract_json = 6;
+  uint32 maximum_diagnostics = 7;
+  reserved 8 to 15;
+  reserved "working_directory", "account_id", "credential";
+}
+
+message CompileWorkflowResponse {
+  SchemaVersion schema_version = 1;
+  string request_id = 2;
+  WorkflowCheckOutcome outcome = 3;
+  repeated WorkflowDiagnostic diagnostics = 4;
+  bool diagnostics_truncated = 5;
+  bytes compiled_artifact = 6;
+  WorkflowArtifactDigests digests = 7;
+  reserved 8 to 15;
+}

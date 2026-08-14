@@ -59,6 +59,11 @@ let package = Package(
             name: "KanameProtocol",
             dependencies: [
                 .product(name: "SwiftProtobuf", package: "swift-protobuf"),
+            ],
+            path: "proto",
+            exclude: ["kaname/qualification"],
+            plugins: [
+                .plugin(name: "SwiftProtobufPlugin", package: "swift-protobuf"),
             ]
         ),
         .target(
