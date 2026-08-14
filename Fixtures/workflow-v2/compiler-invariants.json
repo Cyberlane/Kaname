@@ -1,0 +1,51 @@
+{
+  "fixtureVersion": 1,
+  "privacyClass": "synthetic-public",
+  "invalidExpectations": [
+    {
+      "scenarioId": "W2-021",
+      "code": "graph.entrypoint.missing",
+      "sourceId": "workflow.json",
+      "jsonPointer": "/graph/entrypoints/0/nodeId"
+    },
+    {
+      "scenarioId": "W2-022",
+      "code": "graph.node.unreachable",
+      "sourceId": "workflow.json",
+      "jsonPointer": "/graph/nodes/2"
+    },
+    {
+      "scenarioId": "W2-023",
+      "code": "mapping.type.incompatible",
+      "sourceId": "workflow.json",
+      "jsonPointer": "/graph/edges/0/mapping"
+    },
+    {
+      "scenarioId": "W2-024",
+      "code": "graph.cycle.unbounded",
+      "sourceId": "workflow.json",
+      "jsonPointer": "/graph/nodes/0"
+    },
+    {
+      "scenarioId": "W2-025",
+      "code": "effect.authority.undeclared",
+      "sourceId": "workflow.json",
+      "jsonPointer": "/graph/nodes/0/policyRefs/authority"
+    }
+  ],
+  "requiredInvariantCodes": [
+    "dependency.node.unresolved",
+    "graph.cycle.unbounded",
+    "graph.entrypoint.missing",
+    "graph.input.required-missing",
+    "graph.join.inputs-insufficient",
+    "graph.node.unreachable",
+    "graph.output.fanout",
+    "graph.output.required-missing",
+    "graph.terminal.missing",
+    "mapping.type.incompatible",
+    "storage.declaration.missing",
+    "storage.promotion.invalid",
+    "effect.authority.undeclared"
+  ]
+}

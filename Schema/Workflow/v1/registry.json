@@ -7,7 +7,10 @@
     "manifest.schema.json",
     "workflow.schema.json",
     "graph.schema.json",
-    "node.schema.json"
+    "node.schema.json",
+    "compile-manifest.schema.json",
+    "dependency-lock.schema.json",
+    "compiled.schema.json"
   ],
   "executionStatus": "schema-only",
   "nodeTypes": [

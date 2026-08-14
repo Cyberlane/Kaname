@@ -11,6 +11,8 @@ struct DesktopWorkflowV2AcceptanceCorpusTests {
         let manifest = try #require(try JSONSerialization.jsonObject(with: manifestData) as? [String: Any])
         let scenarioPath = try #require(manifest["scenarioFile"] as? String)
         let scenarioData = try Data(contentsOf: root.appendingPathComponent(scenarioPath))
+        let compilerPath = try #require(manifest["compilerInvariantFile"] as? String)
+        let compilerData = try Data(contentsOf: root.appendingPathComponent(compilerPath))
         let document = try #require(try JSONSerialization.jsonObject(with: scenarioData) as? [String: Any])
         let scenarios = try #require(document["scenarios"] as? [[String: Any]])
 
@@ -19,6 +21,17 @@ struct DesktopWorkflowV2AcceptanceCorpusTests {
         #expect(manifest["privacyClass"] as? String == "synthetic-public")
         #expect(manifest["scenarioCount"] as? Int == scenarios.count)
         #expect(hexDigest(scenarioData) == manifest["scenarioFileSHA256"] as? String)
+        #expect(hexDigest(compilerData) == manifest["compilerInvariantFileSHA256"] as? String)
+        let compilerDocument = try #require(
+            try JSONSerialization.jsonObject(with: compilerData) as? [String: Any]
+        )
+        let compilerExpectations = try #require(
+            compilerDocument["invalidExpectations"] as? [[String: Any]]
+        )
+        #expect(compilerDocument["fixtureVersion"] as? Int == 1)
+        #expect(compilerDocument["privacyClass"] as? String == "synthetic-public")
+        #expect(compilerExpectations.compactMap { $0["scenarioId"] as? String }
+            == (21...25).map { String(format: "W2-%03d", $0) })
 
         let identifiers = try scenarios.map { try #require($0["id"] as? String) }
         #expect(Set(identifiers).count == identifiers.count)
@@ -59,6 +72,7 @@ struct DesktopWorkflowV2AcceptanceCorpusTests {
             root.appendingPathComponent("Fixtures/workflow-v2/README.md"),
             root.appendingPathComponent("Fixtures/workflow-v2/corpus-manifest.json"),
             root.appendingPathComponent("Fixtures/workflow-v2/scenarios.json"),
+            root.appendingPathComponent("Fixtures/workflow-v2/compiler-invariants.json"),
             root.appendingPathComponent("Fixtures/workflow-v2/visual-manifest.json"),
             root.appendingPathComponent("Scripts/capture-workflow-v2-visual-fixtures.sh"),
         ]

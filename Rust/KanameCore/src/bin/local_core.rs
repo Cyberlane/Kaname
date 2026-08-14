@@ -4,7 +4,7 @@ use kaname_core::{
     mobile::{EnrollmentAdmission, SyncAdmission},
     policy::{ApprovalResolutionResult, LocalPolicyCore, approval_fingerprint},
     v1::{self, EventEnvelope},
-    workflow_canonical,
+    workflow_canonical, workflow_compiler,
     workflow_schema::{self, WorkflowSchemaCheckRequest},
 };
 use prost::Message;
@@ -54,7 +54,8 @@ fn main() {
         [operation, fixture_id] if operation == "scale" => scale(fixture_id),
         [operation] if operation == "workflow-schema-check" => workflow_schema_check(),
         [operation] if operation == "workflow-canonicalize" => workflow_canonicalize(),
-        _ => Err("usage: kaname-local-core scenario <F-01..F-14> | scenario-store <F-01..F-14> <journal-path> | append-event <journal-path> < event-envelope.bin | authorize-action <journal-path> < approval-command.bin | record-review <journal-path> < command-envelope.bin | replay <journal-path> < replay-request.bin | mobile-propose <journal-path> < enrollment-challenge.bin | mobile-decide <journal-path> < enrollment-decision.bin | mobile-admit <journal-path> <recipient-device-id> <recipient-key-id> < encrypted-envelope.bin | scale <S-01..S-04> | workflow-schema-check < request.json | workflow-canonicalize < value.json".to_owned()),
+        [operation] if operation == "workflow-compile" => workflow_compile(),
+        _ => Err("usage: kaname-local-core scenario <F-01..F-14> | scenario-store <F-01..F-14> <journal-path> | append-event <journal-path> < event-envelope.bin | authorize-action <journal-path> < approval-command.bin | record-review <journal-path> < command-envelope.bin | replay <journal-path> < replay-request.bin | mobile-propose <journal-path> < enrollment-challenge.bin | mobile-decide <journal-path> < enrollment-decision.bin | mobile-admit <journal-path> <recipient-device-id> <recipient-key-id> < encrypted-envelope.bin | scale <S-01..S-04> | workflow-schema-check < request.json | workflow-canonicalize < value.json | workflow-compile < compile-request.bin".to_owned()),
     };
     match result {
         Ok(json) => println!("{json}"),
@@ -87,6 +88,19 @@ fn workflow_canonicalize_wire(wire: &[u8]) -> Result<String, String> {
         "sha256": report.sha256,
     }))
     .map_err(|_| "workflow_canonical_report_encoding_failed".into())
+}
+
+fn workflow_compile() -> Result<String, String> {
+    let wire = read_standard_input()?;
+    workflow_compile_wire(&wire)
+}
+
+fn workflow_compile_wire(wire: &[u8]) -> Result<String, String> {
+    let request = kaname_core::workflow_protocol::decode_compile_request(wire)
+        .map_err(|_| "workflow_compile_request_rejected".to_owned())?;
+    Ok(hex::encode(
+        workflow_compiler::compile(&request).encode_to_vec(),
+    ))
 }
 
 fn read_standard_input() -> Result<Vec<u8>, String> {
@@ -578,11 +592,11 @@ mod tests {
     use super::*;
     use kaname_core::v1::{
         ApprovalCommand, ApprovalDecision, ApprovalRequest, ApprovalResolution, CommandDisposition,
-        CommandEnvelope, DeviceEnrollmentChallenge, DeviceEnrollmentDecision,
-        DeviceEnrollmentReceipt, DeviceEnrollmentState, DevicePublicIdentity,
-        EncryptedSyncEnvelope, EventProvenance, EvidenceRetentionClass, OpaqueTypedPayload,
-        ReplayRequest, ReviewDecision, SchemaVersion, Scope, SyncAuthenticatedHeader, SyncReceipt,
-        SyncReceiptState,
+        CommandEnvelope, CompileWorkflowRequest, CompileWorkflowResponse,
+        DeviceEnrollmentChallenge, DeviceEnrollmentDecision, DeviceEnrollmentReceipt,
+        DeviceEnrollmentState, DevicePublicIdentity, EncryptedSyncEnvelope, EventProvenance,
+        EvidenceRetentionClass, OpaqueTypedPayload, ReplayRequest, ReviewDecision, SchemaVersion,
+        Scope, SyncAuthenticatedHeader, SyncReceipt, SyncReceiptState,
     };
     use tempfile::tempdir;
 
@@ -623,6 +637,26 @@ mod tests {
         assert_eq!(report["draft"], "2020-12");
         assert_eq!(report["outcome"], "invalid_instance");
         assert_eq!(report["diagnostics"][0]["instance_path"], "");
+    }
+
+    #[test]
+    fn workflow_compile_returns_the_versioned_bounded_response_contract() {
+        let request = CompileWorkflowRequest {
+            schema_version: Some(SchemaVersion { major: 1, minor: 0 }),
+            request_id: "compile:local-core-test".into(),
+            manifest_json: br#"{"compileManifestVersion":1}"#.to_vec(),
+            schema_bundle_json: br#"{}"#.to_vec(),
+            dependency_lock_json: br#"{"lockVersion":1,"dependencies":[]}"#.to_vec(),
+            configuration_contract_json: br#"{}"#.to_vec(),
+            maximum_diagnostics: 8,
+        };
+        let encoded = workflow_compile_wire(&request.encode_to_vec()).unwrap();
+        let response =
+            CompileWorkflowResponse::decode(hex::decode(encoded).unwrap().as_slice()).unwrap();
+        assert_eq!(response.request_id, request.request_id);
+        assert_eq!(response.outcome, v1::WorkflowCheckOutcome::Invalid as i32);
+        assert_eq!(response.diagnostics[0].code, "document.malformed");
+        assert!(response.compiled_artifact.is_empty());
     }
 
     #[test]

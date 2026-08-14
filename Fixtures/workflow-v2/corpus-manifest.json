@@ -3,6 +3,8 @@
   "privacyClass": "synthetic-public",
   "scenarioFile": "Fixtures/workflow-v2/scenarios.json",
   "scenarioFileSHA256": "a02c0bdedf403b18ac78929aa786bfad9159791c93af6eb4060d92819e571f0b",
+  "compilerInvariantFile": "Fixtures/workflow-v2/compiler-invariants.json",
+  "compilerInvariantFileSHA256": "2c73ade6cdf69f7f6bcab0cc98ee9c85330ddfe84fdf6e60fe2473317977d9d4",
   "scenarioCount": 25,
   "requiredCoverage": [
     "control.error-route",

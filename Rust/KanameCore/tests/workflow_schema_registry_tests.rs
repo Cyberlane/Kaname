@@ -1,4 +1,8 @@
 use jsonschema::{Draft, Registry};
+use kaname_core::{
+    v1::{CompileWorkflowRequest, SchemaVersion, WorkflowCheckOutcome},
+    workflow_compiler,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -116,7 +120,7 @@ fn node(node_type: &str, config: Value) -> Value {
 fn every_schema_is_draft_2020_12_valid_and_resolves_offline() {
     let documents = schema_documents();
     assert!(
-        documents.len() == 49,
+        documents.len() == 52,
         "the registry unexpectedly lost schema contracts"
     );
     let mut ids = std::collections::BTreeSet::new();
@@ -324,6 +328,40 @@ fn workflow_graph_and_node_envelope_are_closed_at_their_boundaries() {
     assert!(!is_valid(
         &documents["graph.schema.json"],
         &invalid_graph,
+        &registry
+    ));
+}
+
+#[test]
+fn compiler_output_validates_against_the_published_compiled_contract() {
+    let documents = schema_documents();
+    let registry = prepared_registry(&documents);
+    let goldens: Vec<CommonGolden> = serde_json::from_slice(
+        &fs::read(fixture_root().join("schema-v1-common-goldens.json")).unwrap(),
+    )
+    .unwrap();
+    let compilation_manifest = goldens
+        .iter()
+        .find(|golden| golden.schema == "compile-manifest.schema.json")
+        .unwrap();
+    let dependency_lock = goldens
+        .iter()
+        .find(|golden| golden.schema == "dependency-lock.schema.json")
+        .unwrap();
+    let response = workflow_compiler::compile(&CompileWorkflowRequest {
+        schema_version: Some(SchemaVersion { major: 1, minor: 0 }),
+        request_id: "compile:schema-contract".into(),
+        manifest_json: serde_json::to_vec(&compilation_manifest.valid).unwrap(),
+        schema_bundle_json: br#"{"bundleVersion":1,"schemas":[]}"#.to_vec(),
+        dependency_lock_json: serde_json::to_vec(&dependency_lock.valid).unwrap(),
+        configuration_contract_json: br#"{"type":"object"}"#.to_vec(),
+        maximum_diagnostics: 64,
+    });
+    assert_eq!(response.outcome, WorkflowCheckOutcome::Valid as i32);
+    let artifact: Value = serde_json::from_slice(&response.compiled_artifact).unwrap();
+    assert!(is_valid(
+        &documents["compiled.schema.json"],
+        &artifact,
         &registry
     ));
 }

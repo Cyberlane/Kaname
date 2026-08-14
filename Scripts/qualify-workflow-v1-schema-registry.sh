@@ -42,10 +42,10 @@ jq -n \
     }' > "$receipt"
 
 jq -e '
-    .schema_count == 49 and
+    .schema_count == 52 and
     .node_type_count == 25 and
     .node_golden_count == 25 and
-    .common_golden_count == 17 and
+    .common_golden_count == 20 and
     .executable_node_count == 0 and
     .offline_resolution_passed and
     .unknown_type_version_rejected and

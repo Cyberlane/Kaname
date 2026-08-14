@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.kaname.dev/workflow/v1/compile-manifest.schema.json",
+  "type": "object",
+  "required": [
+    "compileManifestVersion",
+    "workflow",
+    "layout"
+  ],
+  "properties": {
+    "compileManifestVersion": {
+      "const": 1
+    },
+    "workflow": {
+      "$ref": "workflow.schema.json"
+    },
+    "layout": {
+      "type": "object",
+      "maxProperties": 128,
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,6 +1,35 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.kaname.dev/workflow/v1/graph.schema.json",
+  "$defs": {
+    "entrypoint": {
+      "type": "object",
+      "required": [
+        "id",
+        "nodeId"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "identifiers.schema.json#/$defs/uuidV7"
+        },
+        "nodeId": {
+          "$ref": "identifiers.schema.json#/$defs/uuidV7"
+        },
+        "key": {
+          "$ref": "identifiers.schema.json#/$defs/key"
+        }
+      },
+      "additionalProperties": false
+    },
+    "entrypoints": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/$defs/entrypoint"
+      }
+    }
+  },
   "type": "object",
   "required": [
     "entrypoints",
@@ -9,28 +38,7 @@
   ],
   "properties": {
     "entrypoints": {
-      "type": "array",
-      "minItems": 1,
-      "maxItems": 64,
-      "items": {
-        "type": "object",
-        "required": [
-          "id",
-          "nodeId"
-        ],
-        "properties": {
-          "id": {
-            "$ref": "identifiers.schema.json#/$defs/uuidV7"
-          },
-          "nodeId": {
-            "$ref": "identifiers.schema.json#/$defs/uuidV7"
-          },
-          "key": {
-            "$ref": "identifiers.schema.json#/$defs/key"
-          }
-        },
-        "additionalProperties": false
-      }
+      "$ref": "#/$defs/entrypoints"
     },
     "nodes": {
       "type": "array",

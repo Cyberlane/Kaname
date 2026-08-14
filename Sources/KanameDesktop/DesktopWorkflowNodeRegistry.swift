@@ -176,8 +176,13 @@ public struct DesktopWorkflowNodeRegistry: Sendable {
             )
         }
         if type.hasPrefix("terminal.") {
+            let schema = switch type {
+            case "terminal.fail": errorSchemaRef
+            case "terminal.cancel": anySchemaRef
+            default: dataSchemaRef
+            }
             return try PortProfile(
-                staticPorts: [port("input", .input, dataSchemaRef)],
+                staticPorts: [port("input", .input, schema)],
                 dynamicRule: nil
             )
         }
@@ -221,7 +226,7 @@ public struct DesktopWorkflowNodeRegistry: Sendable {
             return try PortProfile(
                 staticPorts: [
                     port("error", .input, errorSchemaRef),
-                    port("retry", .output, controlSchemaRef),
+                    port("retry", .output, dataSchemaRef),
                     port("exhausted", .output, errorSchemaRef),
                 ],
                 dynamicRule: nil

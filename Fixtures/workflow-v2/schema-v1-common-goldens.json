@@ -315,5 +315,124 @@
       "releaseVersion": "one",
       "files": []
     }
+  },
+  {
+    "schema": "compile-manifest.schema.json",
+    "valid": {
+      "compileManifestVersion": 1,
+      "workflow": {
+        "formatVersion": 1,
+        "workflowId": "018f0000-0001-7000-8000-000000000001",
+        "packageId": "dev.kaname.compile-fixture",
+        "name": "Compile fixture",
+        "summary": "Synthetic compiler contract.",
+        "graph": {
+          "entrypoints": [
+            {
+              "id": "018f0000-0002-7000-8000-000000000002",
+              "nodeId": "018f0000-0003-7000-8000-000000000003"
+            }
+          ],
+          "nodes": [
+            {
+              "id": "018f0000-0003-7000-8000-000000000003",
+              "key": "complete",
+              "name": "Complete",
+              "type": "terminal.complete",
+              "typeVersion": 1,
+              "config": {}
+            }
+          ],
+          "edges": []
+        },
+        "interfaces": {},
+        "resources": {},
+        "policies": {},
+        "storage": {},
+        "metadata": {}
+      },
+      "layout": {
+        "nodes": []
+      }
+    },
+    "invalid": {
+      "compileManifestVersion": 2,
+      "workflow": {},
+      "layout": {}
+    }
+  },
+  {
+    "schema": "dependency-lock.schema.json",
+    "valid": {
+      "lockVersion": 1,
+      "dependencies": [
+        {
+          "kind": "capability",
+          "id": "dev.kaname.synthetic",
+          "version": "1.2.3",
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    "invalid": {
+      "lockVersion": 2,
+      "dependencies": [
+        {
+          "kind": "unknown",
+          "id": "invalid",
+          "digest": "bad"
+        }
+      ]
+    }
+  },
+  {
+    "schema": "compiled.schema.json",
+    "valid": {
+      "compiledFormatVersion": 1,
+      "workflowId": "018f0000-0001-7000-8000-000000000001",
+      "packageId": "dev.kaname.compile-fixture",
+      "definitionDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "layoutDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "schemaBundleDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "dependencyLockDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "configurationContractDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "entrypoints": [
+        {
+          "id": "018f0000-0002-7000-8000-000000000002",
+          "nodeId": "018f0000-0003-7000-8000-000000000003"
+        }
+      ],
+      "nodes": [
+        {
+          "id": "018f0000-0003-7000-8000-000000000003",
+          "key": "complete",
+          "name": "Complete",
+          "type": "terminal.complete",
+          "typeVersion": 1,
+          "executionAvailability": "schema-only",
+          "config": {},
+          "ports": [
+            {
+              "id": "input",
+              "key": "input",
+              "label": "Input",
+              "direction": "input",
+              "cardinality": "one",
+              "schemaRef": "dev.kaname.workflow.data/v1",
+              "required": true
+            }
+          ]
+        }
+      ],
+      "edges": [],
+      "resources": {},
+      "policies": {},
+      "storage": {},
+      "dependencies": []
+    },
+    "invalid": {
+      "compiledFormatVersion": 2,
+      "workflowId": "bad"
+    }
   }
 ]

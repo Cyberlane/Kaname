@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.kaname.dev/workflow/v1/dependency-lock.schema.json",
+  "$defs": {
+    "dependency": {
+      "type": "object",
+      "required": [
+        "kind",
+        "id",
+        "digest"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "capability",
+            "tool",
+            "connector",
+            "subflow",
+            "schema"
+          ]
+        },
+        "id": {
+          "$ref": "identifiers.schema.json#/$defs/packageId"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$"
+        },
+        "digest": {
+          "$ref": "identifiers.schema.json#/$defs/sha256"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "type": "object",
+  "required": [
+    "lockVersion",
+    "dependencies"
+  ],
+  "properties": {
+    "lockVersion": {
+      "const": 1
+    },
+    "dependencies": {
+      "type": "array",
+      "maxItems": 4096,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/dependency"
+      }
+    }
+  },
+  "additionalProperties": false
+}
