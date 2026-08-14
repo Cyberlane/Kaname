@@ -367,6 +367,22 @@ fn compiler_output_validates_against_the_published_compiled_contract() {
 }
 
 #[test]
+fn lossless_legacy_import_golden_validates_as_a_v1_workflow() {
+    let documents = schema_documents();
+    let registry = prepared_registry(&documents);
+    let imported: Value = serde_json::from_slice(
+        &fs::read(fixture_root().join("legacy-import-terminal-v1.json")).unwrap(),
+    )
+    .unwrap();
+
+    assert!(is_valid(
+        &documents["workflow.schema.json"],
+        &imported,
+        &registry
+    ));
+}
+
+#[test]
 fn committed_match_evaluation_traces_validate_against_the_published_contract() {
     let documents = schema_documents();
     let registry = prepared_registry(&documents);
