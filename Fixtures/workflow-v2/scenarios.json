@@ -1,0 +1,707 @@
+{
+  "corpusVersion": 1,
+  "scenarios": [
+    {
+      "id": "W2-001",
+      "title": "Linear typed success",
+      "category": "graph",
+      "coverage": ["graph.linear"],
+      "definition": {
+        "workflowID": "dev.kaname.fixture.linear",
+        "entrypoint": "trigger",
+        "nodes": [
+          {"id": "trigger", "type": "trigger.manual"},
+          {"id": "validate", "type": "data.validate"},
+          {"id": "complete", "type": "control.complete"}
+        ],
+        "edges": [
+          {"from": "trigger.success", "to": "validate.input"},
+          {"from": "validate.success", "to": "complete.input"}
+        ]
+      },
+      "input": {"requestID": "synthetic-001", "value": 5},
+      "expected": {
+        "compile": "valid",
+        "run": "succeeded",
+        "path": ["trigger", "validate", "complete"],
+        "emissions": ["trigger.success", "validate.success"],
+        "diagnosticCodes": [],
+        "inspectionGroups": ["input", "configuration", "output"]
+      },
+      "visualRoutes": ["builder.canvas", "runs.running", "runs.node-inspector"]
+    },
+    {
+      "id": "W2-002",
+      "title": "Typed error route",
+      "category": "control",
+      "coverage": ["control.error-route"],
+      "definition": {
+        "workflowID": "dev.kaname.fixture.error-route",
+        "entrypoint": "trigger",
+        "nodes": [
+          {"id": "trigger", "type": "trigger.manual"},
+          {"id": "validate", "type": "data.validate"},
+          {"id": "recover", "type": "control.complete"}
+        ],
+        "edges": [
+          {"from": "trigger.success", "to": "validate.input"},
+          {"from": "validate.error", "to": "recover.input"}
+        ]
+      },
+      "input": {"requestID": "synthetic-002", "value": "wrong-type"},
+      "expected": {
+        "compile": "valid",
+        "run": "succeeded",
+        "path": ["trigger", "validate", "recover"],
+        "emissions": ["trigger.success", "validate.error"],
+        "diagnosticCodes": [],
+        "inspectionGroups": ["input", "error", "output"]
+      },
+      "visualRoutes": ["builder.canvas", "runs.node-inspector"]
+    },
+    {
+      "id": "W2-003",
+      "title": "Match string equality",
+      "category": "match",
+      "coverage": ["match.string"],
+      "definition": {
+        "workflowID": "dev.kaname.fixture.match-string",
+        "entrypoint": "trigger",
+        "nodes": [
+          {"id": "trigger", "type": "trigger.manual"},
+          {"id": "match", "type": "control.match", "selector": "$.classification", "cases": [{"id": "urgent", "condition": {"equals": "urgent"}}, {"id": "otherwise", "condition": {"otherwise": true}}]},
+          {"id": "urgent", "type": "control.complete"},
+          {"id": "ordinary", "type": "control.complete"}
+        ],
+        "edges": [
+          {"from": "trigger.success", "to": "match.input"},
+          {"from": "match.case.urgent", "to": "urgent.input"},
+          {"from": "match.case.otherwise", "to": "ordinary.input"}
+        ]
+      },
+      "input": {"classification": "urgent"},
+      "expected": {
+        "compile": "valid",
+        "run": "succeeded",
+        "path": ["trigger", "match", "urgent"],
+        "emissions": ["match.case.urgent"],
+        "diagnosticCodes": [],
+        "inspectionGroups": ["input", "matchTrace", "output"]
+      },
+      "visualRoutes": ["builder.match", "runs.match-trace"]
+    },
+    {
+      "id": "W2-004",
+      "title": "Match numeric range",
+      "category": "match",
+      "coverage": ["match.number"],
+      "definition": {
+        "workflowID": "dev.kaname.fixture.match-number",
+        "entrypoint": "match",
+        "nodes": [
+          {"id": "match", "type": "control.match", "selector": "$.score", "cases": [{"id": "high", "condition": {"greaterThanOrEqual": 8}}, {"id": "otherwise", "condition": {"otherwise": true}}]},
+          {"id": "high", "type": "control.complete"},
+          {"id": "low", "type": "control.complete"}
+        ],
+        "edges": [
+          {"from": "match.case.high", "to": "high.input"},
+          {"from": "match.case.otherwise", "to": "low.input"}
+        ]
+      },
+      "input": {"score": 8},
+      "expected": {
+        "compile": "valid",
+        "run": "succeeded",
+        "path": ["match", "high"],
+        "emissions": ["match.case.high"],
+        "diagnosticCodes": [],
+        "inspectionGroups": ["input", "matchTrace", "output"]
+      },
+      "visualRoutes": ["builder.match", "runs.match-trace"]
+    },
+    {
+      "id": "W2-005",
+      "title": "Match optional object path present",
+      "category": "match",
+      "coverage": ["match.object-present"],
+      "definition": {
+        "workflowID": "dev.kaname.fixture.match-object-present",
+        "entrypoint": "match",
+        "nodes": [
+          {"id": "match", "type": "control.match", "selector": "$.customer.address.country", "cases": [{"id": "jp", "condition": {"equals": "JP"}}, {"id": "otherwise", "condition": {"otherwise": true}}]},
+          {"id": "jp", "type": "control.complete"},
+          {"id": "other", "type": "control.complete"}
+        ],
+        "edges": [
+          {"from": "match.case.jp", "to": "jp.input"},
+          {"from": "match.case.otherwise", "to": "other.input"}
+        ]
+      },
+      "input": {"customer": {"address": {"country": "JP"}}},
+      "expected": {
+        "compile": "valid",
+        "run": "succeeded",
+        "path": ["match", "jp"],
+        "emissions": ["match.case.jp"],
+        "matchState": "matched",
+        "diagnosticCodes": [],
+        "inspectionGroups": ["input", "matchTrace", "output"]
+      },
+      "visualRoutes": ["builder.match-object", "runs.match-trace"]
+    },
+    {
+      "id": "W2-006",
+      "title": "Match optional object path is null",
+      "category": "match",
+      "coverage": ["match.optional-null"],
+      "definition": {
+        "workflowID": "dev.kaname.fixture.match-null",
+        "entrypoint": "match",
+        "nodes": [
+          {"id": "match", "type": "control.match", "selector": "$.customer.address", "cases": [{"id": "null", "condition": {"isNull": true}}, {"id": "otherwise", "condition": {"otherwise": true}}]},
+          {"id": "null", "type": "control.complete"},
+          {"id": "other", "type": "control.complete"}
+        ],
+        "edges": [
+          {"from": "match.case.null", "to": "null.input"},
+          {"from": "match.case.otherwise", "to": "other.input"}
+        ]
+      },
+      "input": {"customer": {"address": null}},
+      "expected": {
+        "compile": "valid",
+        "run": "succeeded",
+        "path": ["match", "null"],
+        "emissions": ["match.case.null"],
+        "matchState": "matched",
+        "diagnosticCodes": [],
+        "inspectionGroups": ["input", "matchTrace", "output"]
+      },
+      "visualRoutes": ["builder.match-object", "runs.match-trace"]
+    },
+    {
+      "id": "W2-007",
+      "title": "Match optional object path is absent",
+      "category": "match",
+      "coverage": ["match.optional-missing"],
+      "definition": {
+        "workflowID": "dev.kaname.fixture.match-missing",
+        "entrypoint": "match",
+        "nodes": [
+          {"id": "match", "type": "control.match", "selector": "$.customer.address.country", "cases": [{"id": "missing", "condition": {"exists": false}}, {"id": "otherwise", "condition": {"otherwise": true}}]},
+          {"id": "missing", "type": "control.complete"},
+          {"id": "other", "type": "control.complete"}
+        ],
+        "edges": [
+          {"from": "match.case.missing", "to": "missing.input"},
+          {"from": "match.case.otherwise", "to": "other.input"}
+        ]
+      },
+      "input": {"customer": {}},
+      "expected": {
+        "compile": "valid",
+        "run": "succeeded",
+        "path": ["match", "missing"],
+        "emissions": ["match.case.missing"],
+        "matchState": "matched",
+        "diagnosticCodes": [],
+        "inspectionGroups": ["input", "matchTrace", "output"]
+      },
+      "visualRoutes": ["builder.match-object", "runs.match-trace"]
+    },
+    {
+      "id": "W2-008",
+      "title": "Match optional path encounters wrong type",
+      "category": "match",
+      "coverage": ["match.optional-wrong-type"],
+      "definition": {
+        "workflowID": "dev.kaname.fixture.match-wrong-type",
+        "entrypoint": "match",
+        "nodes": [
+          {"id": "match", "type": "control.match", "selector": "$.customer.address.country", "cases": [{"id": "jp", "condition": {"equals": "JP"}}, {"id": "otherwise", "condition": {"otherwise": true}}]},
+          {"id": "jp", "type": "control.complete"},
+          {"id": "other", "type": "control.complete"},
+          {"id": "failed", "type": "control.fail"}
+        ],
+        "edges": [
+          {"from": "match.case.jp", "to": "jp.input"},
+          {"from": "match.case.otherwise", "to": "other.input"},
+          {"from": "match.error", "to": "failed.input"}
+        ]
+      },
+      "input": {"customer": {"address": "not-an-object"}},
+      "expected": {
+        "compile": "valid",
+        "run": "failed",
+        "path": ["match", "failed"],
+        "emissions": ["match.error"],
+        "matchState": "evaluationError",
+        "diagnosticCodes": [],
+        "inspectionGroups": ["input", "matchTrace", "error"]
+      },
+      "visualRoutes": ["builder.match-object", "runs.match-trace", "runs.error"]
+    },
+    {
+      "id": "W2-009",
+      "title": "Match array membership",
+      "category": "match",
+      "coverage": ["match.array"],
+      "definition": {
+        "workflowID": "dev.kaname.fixture.match-array",
+        "entrypoint": "match",
+        "nodes": [
+          {"id": "match", "type": "control.match", "selector": "$.labels", "cases": [{"id": "review", "condition": {"contains": "review"}}, {"id": "otherwise", "condition": {"otherwise": true}}]},
+          {"id": "review", "type": "control.complete"},
+          {"id": "ordinary", "type": "control.complete"}
+        ],
+        "edges": [
+          {"from": "match.case.review", "to": "review.input"},
+          {"from": "match.case.otherwise", "to": "ordinary.input"}
+        ]
+      },
+      "input": {"labels": ["synthetic", "review"]},
+      "expected": {
+        "compile": "valid",
+        "run": "succeeded",
+        "path": ["match", "review"],
+        "emissions": ["match.case.review"],
+        "diagnosticCodes": [],
+        "inspectionGroups": ["input", "matchTrace", "output"]
+      },
+      "visualRoutes": ["builder.match", "runs.match-trace"]
+    },
+    {
+      "id": "W2-010",
+      "title": "Match compound boolean group",
+      "category": "match",
+      "coverage": ["match.compound"],
+      "definition": {
+        "workflowID": "dev.kaname.fixture.match-compound",
+        "entrypoint": "match",
+        "nodes": [
+          {"id": "match", "type": "control.match", "selector": "$", "cases": [{"id": "priority", "condition": {"all": [{"path": "$.score", "greaterThanOrEqual": 8}, {"any": [{"path": "$.region", "equals": "APAC"}, {"path": "$.manualOverride", "equals": true}]}]}}, {"id": "otherwise", "condition": {"otherwise": true}}]},
+          {"id": "priority", "type": "control.complete"},
+          {"id": "ordinary", "type": "control.complete"}
+        ],
+        "edges": [
+          {"from": "match.case.priority", "to": "priority.input"},
+          {"from": "match.case.otherwise", "to": "ordinary.input"}
+        ]
+      },
+      "input": {"score": 9, "region": "APAC", "manualOverride": false},
+      "expected": {
+        "compile": "valid",
+        "run": "succeeded",
+        "path": ["match", "priority"],
+        "emissions": ["match.case.priority"],
+        "diagnosticCodes": [],
+        "inspectionGroups": ["input", "matchTrace", "output"]
+      },
+      "visualRoutes": ["builder.match-compound", "runs.match-trace"]
+    },
+    {
+      "id": "W2-011",
+      "title": "Parallel branches join after all",
+      "category": "control",
+      "coverage": ["control.parallel-join"],
+      "definition": {
+        "workflowID": "dev.kaname.fixture.parallel",
+        "entrypoint": "fork",
+        "nodes": [
+          {"id": "fork", "type": "control.fork"},
+          {"id": "left", "type": "data.transform"},
+          {"id": "right", "type": "data.transform"},
+          {"id": "join", "type": "control.join", "policy": "all"},
+          {"id": "complete", "type": "control.complete"}
+        ],
+        "edges": [
+          {"from": "fork.branch.left", "to": "left.input"},
+          {"from": "fork.branch.right", "to": "right.input"},
+          {"from": "left.success", "to": "join.left"},
+          {"from": "right.success", "to": "join.right"},
+          {"from": "join.success", "to": "complete.input"}
+        ]
+      },
+      "input": {"value": "synthetic"},
+      "expected": {
+        "compile": "valid",
+        "run": "succeeded",
+        "path": ["fork", "left", "right", "join", "complete"],
+        "emissions": ["fork.branch.left", "fork.branch.right", "join.success"],
+        "diagnosticCodes": [],
+        "inspectionGroups": ["tokens", "input", "output"]
+      },
+      "visualRoutes": ["builder.parallel", "runs.running"]
+    },
+    {
+      "id": "W2-012",
+      "title": "Retry does not consume unknown outcome",
+      "category": "control",
+      "coverage": ["control.retry-unknown"],
+      "definition": {
+        "workflowID": "dev.kaname.fixture.retry-unknown",
+        "entrypoint": "effect",
+        "nodes": [
+          {"id": "effect", "type": "effect.synthetic", "idempotency": "required"},
+          {"id": "retry", "type": "control.retry", "maximumAttempts": 3},
+          {"id": "reconcile", "type": "control.reconcile"}
+        ],
+        "edges": [
+          {"from": "effect.error.retryable", "to": "retry.input"},
+          {"from": "retry.retry", "to": "effect.input"},
+          {"from": "effect.error.unknownOutcome", "to": "reconcile.input"}
+        ]
+      },
+      "input": {"effectID": "synthetic-effect-012"},
+      "expected": {
+        "compile": "valid",
+        "run": "waitingForReconciliation",
+        "path": ["effect", "reconcile"],
+        "emissions": ["effect.error.unknownOutcome"],
+        "attemptCount": 1,
+        "diagnosticCodes": [],
+        "inspectionGroups": ["input", "error", "reconciliation"]
+      },
+      "visualRoutes": ["builder.retry", "runs.unknown-outcome"]
+    },
+    {
+      "id": "W2-013",
+      "title": "Durable reply wait resumes once",
+      "category": "control",
+      "coverage": ["control.wait-resume"],
+      "definition": {
+        "workflowID": "dev.kaname.fixture.wait",
+        "entrypoint": "wait",
+        "nodes": [
+          {"id": "wait", "type": "control.wait.event", "correlationPath": "$.caseID", "expirySeconds": 86400},
+          {"id": "complete", "type": "control.complete"}
+        ],
+        "edges": [{"from": "wait.resumed", "to": "complete.input"}]
+      },
+      "input": {"caseID": "synthetic-case-013"},
+      "expected": {
+        "compile": "valid",
+        "run": "succeededAfterResume",
+        "path": ["wait", "complete"],
+        "emissions": ["wait.resumed"],
+        "duplicateEventsIgnored": 1,
+        "diagnosticCodes": [],
+        "inspectionGroups": ["subscription", "resumeEvent", "output"]
+      },
+      "visualRoutes": ["builder.wait-loop", "runs.waiting", "runs.resumed"]
+    },
+    {
+      "id": "W2-014",
+      "title": "Scoped storage promotion and job deletion",
+      "category": "storage",
+      "coverage": ["storage.scopes-promotion"],
+      "definition": {
+        "workflowID": "dev.kaname.fixture.storage",
+        "entrypoint": "write",
+        "storage": [{"scope": "job"}, {"scope": "case"}, {"scope": "workflow"}],
+        "nodes": [
+          {"id": "write", "type": "storage.write", "scope": "job"},
+          {"id": "promote", "type": "storage.promote", "from": "job", "to": "workflow"},
+          {"id": "complete", "type": "control.complete"}
+        ],
+        "edges": [
+          {"from": "write.success", "to": "promote.input"},
+          {"from": "promote.success", "to": "complete.input"}
+        ]
+      },
+      "input": {"key": "report", "content": "synthetic-report"},
+      "expected": {
+        "compile": "valid",
+        "run": "succeeded",
+        "path": ["write", "promote", "complete"],
+        "emissions": ["write.success", "promote.success"],
+        "jobReferencesAfterDeletion": 0,
+        "workflowReferencesAfterDeletion": 1,
+        "diagnosticCodes": [],
+        "inspectionGroups": ["input", "storageMutation", "lineage", "output"]
+      },
+      "visualRoutes": ["builder.storage", "runs.storage-inspector"]
+    },
+    {
+      "id": "W2-015",
+      "title": "Historical run pins immutable workflow version",
+      "category": "version",
+      "coverage": ["version.pinned-history"],
+      "definition": {
+        "workflowID": "dev.kaname.fixture.versioned",
+        "entrypoint": "complete",
+        "nodes": [{"id": "complete", "type": "control.complete"}],
+        "edges": []
+      },
+      "input": {"revision": 6},
+      "expected": {
+        "compile": "valid",
+        "run": "succeeded",
+        "path": ["complete"],
+        "emissions": [],
+        "pinnedRevision": 6,
+        "visibleAfterPublishingRevision": 7,
+        "diagnosticCodes": [],
+        "inspectionGroups": ["version", "configuration", "output"]
+      },
+      "visualRoutes": ["portfolio.versions", "runs.history", "runs.revision-diagram"]
+    },
+    {
+      "id": "W2-016",
+      "title": "Delete successful run immediately",
+      "category": "retention",
+      "coverage": ["retention.delete-after-success"],
+      "definition": {
+        "workflowID": "dev.kaname.fixture.retention-success",
+        "entrypoint": "complete",
+        "retention": {"mode": "deleteAfterSuccess"},
+        "nodes": [{"id": "complete", "type": "control.complete"}],
+        "edges": []
+      },
+      "input": {"value": "synthetic"},
+      "expected": {
+        "compile": "valid",
+        "run": "succeededThenPurged",
+        "path": ["complete"],
+        "emissions": [],
+        "runPayloadRetained": false,
+        "revisionRetained": true,
+        "diagnosticCodes": [],
+        "inspectionGroups": ["purgeReceipt"]
+      },
+      "visualRoutes": ["runs.retention", "runs.purged"]
+    },
+    {
+      "id": "W2-017",
+      "title": "Keep run forever",
+      "category": "retention",
+      "coverage": ["retention.keep-forever"],
+      "definition": {
+        "workflowID": "dev.kaname.fixture.retention-forever",
+        "entrypoint": "complete",
+        "retention": {"mode": "forever"},
+        "nodes": [{"id": "complete", "type": "control.complete"}],
+        "edges": []
+      },
+      "input": {"value": "synthetic"},
+      "expected": {
+        "compile": "valid",
+        "run": "succeeded",
+        "path": ["complete"],
+        "emissions": [],
+        "runPayloadRetained": true,
+        "diagnosticCodes": [],
+        "inspectionGroups": ["input", "output", "retention"]
+      },
+      "visualRoutes": ["runs.retention", "runs.history"]
+    },
+    {
+      "id": "W2-018",
+      "title": "Manual deletion preserves promoted artifacts",
+      "category": "retention",
+      "coverage": ["retention.manual-delete"],
+      "definition": {
+        "workflowID": "dev.kaname.fixture.retention-manual",
+        "entrypoint": "complete",
+        "retention": {"mode": "days", "days": 30},
+        "nodes": [{"id": "complete", "type": "control.complete"}],
+        "edges": []
+      },
+      "input": {"promotedArtifactID": "synthetic-artifact-018"},
+      "expected": {
+        "compile": "valid",
+        "run": "manuallyPurged",
+        "path": ["complete"],
+        "emissions": [],
+        "runPayloadRetained": false,
+        "promotedArtifactRetained": true,
+        "diagnosticCodes": [],
+        "inspectionGroups": ["deletionPreview", "purgeReceipt"]
+      },
+      "visualRoutes": ["runs.delete-preview", "runs.purged"]
+    },
+    {
+      "id": "W2-019",
+      "title": "Grouped LLM attempt inspection",
+      "category": "inspection",
+      "coverage": ["inspection.llm-groups"],
+      "definition": {
+        "workflowID": "dev.kaname.fixture.llm-inspection",
+        "entrypoint": "model",
+        "nodes": [
+          {"id": "model", "type": "model.structured", "outputSchema": {"type": "object", "required": ["answer"]}},
+          {"id": "complete", "type": "control.complete"}
+        ],
+        "edges": [{"from": "model.success", "to": "complete.input"}]
+      },
+      "input": {"request": "Summarize the synthetic fixture"},
+      "expected": {
+        "compile": "valid",
+        "run": "succeeded",
+        "path": ["model", "complete"],
+        "emissions": ["model.success"],
+        "diagnosticCodes": [],
+        "inspectionGroups": ["context", "messages", "tools", "toolCalls", "usage", "validation", "output"]
+      },
+      "visualRoutes": ["runs.llm-context", "runs.llm-tools", "runs.llm-messages"]
+    },
+    {
+      "id": "W2-020",
+      "title": "Synthetic correction creates a related episode",
+      "category": "feedback",
+      "coverage": ["feedback.correction-episode"],
+      "definition": {
+        "workflowID": "dev.kaname.fixture.correction",
+        "entrypoint": "produce",
+        "nodes": [
+          {"id": "produce", "type": "capability.synthetic"},
+          {"id": "deliver", "type": "effect.synthetic-draft"},
+          {"id": "wait", "type": "control.wait.event", "correlationPath": "$.caseID"},
+          {"id": "compileContext", "type": "context.compile-case"},
+          {"id": "revise", "type": "capability.synthetic"}
+        ],
+        "edges": [
+          {"from": "produce.success", "to": "deliver.input"},
+          {"from": "deliver.success", "to": "wait.input"},
+          {"from": "wait.resumed", "to": "compileContext.input"},
+          {"from": "compileContext.success", "to": "revise.input"}
+        ]
+      },
+      "input": {"caseID": "synthetic-case-020", "request": "Create a synthetic report", "correction": "Change the heading color"},
+      "expected": {
+        "compile": "valid",
+        "run": "succeededAfterResume",
+        "path": ["produce", "deliver", "wait", "compileContext", "revise"],
+        "emissions": ["produce.success", "deliver.success", "wait.resumed", "compileContext.success"],
+        "caseEpisodeCount": 2,
+        "contextIncludesPriorEpisodes": true,
+        "diagnosticCodes": [],
+        "inspectionGroups": ["case", "episodes", "context", "input", "output"]
+      },
+      "visualRoutes": ["builder.feedback-loop", "runs.case-history", "runs.llm-context"]
+    },
+    {
+      "id": "W2-021",
+      "title": "Missing entrypoint is rejected",
+      "category": "invalid-graph",
+      "coverage": ["graph.missing-entrypoint"],
+      "definition": {
+        "workflowID": "dev.kaname.fixture.invalid-entrypoint",
+        "entrypoint": "missing",
+        "nodes": [{"id": "complete", "type": "control.complete"}],
+        "edges": []
+      },
+      "input": {},
+      "expected": {
+        "compile": "rejected",
+        "run": "notRun",
+        "path": [],
+        "emissions": [],
+        "diagnosticCodes": ["graph.entrypoint.missing"],
+        "inspectionGroups": ["problems"]
+      },
+      "visualRoutes": ["builder.problems", "builder.source"]
+    },
+    {
+      "id": "W2-022",
+      "title": "Unreachable node is rejected",
+      "category": "invalid-graph",
+      "coverage": ["graph.unreachable-node"],
+      "definition": {
+        "workflowID": "dev.kaname.fixture.invalid-unreachable",
+        "entrypoint": "complete",
+        "nodes": [
+          {"id": "complete", "type": "control.complete"},
+          {"id": "orphan", "type": "data.transform"}
+        ],
+        "edges": []
+      },
+      "input": {},
+      "expected": {
+        "compile": "rejected",
+        "run": "notRun",
+        "path": [],
+        "emissions": [],
+        "diagnosticCodes": ["graph.node.unreachable"],
+        "inspectionGroups": ["problems"]
+      },
+      "visualRoutes": ["builder.problems", "builder.canvas"]
+    },
+    {
+      "id": "W2-023",
+      "title": "Incompatible mapping is rejected",
+      "category": "invalid-graph",
+      "coverage": ["graph.incompatible-mapping"],
+      "definition": {
+        "workflowID": "dev.kaname.fixture.invalid-mapping",
+        "entrypoint": "source",
+        "nodes": [
+          {"id": "source", "type": "data.constant-string"},
+          {"id": "number", "type": "data.require-number"}
+        ],
+        "edges": [{"from": "source.success", "to": "number.input"}]
+      },
+      "input": {},
+      "expected": {
+        "compile": "rejected",
+        "run": "notRun",
+        "path": [],
+        "emissions": [],
+        "diagnosticCodes": ["mapping.type.incompatible"],
+        "inspectionGroups": ["problems", "mapping"]
+      },
+      "visualRoutes": ["builder.problems", "builder.mapping"]
+    },
+    {
+      "id": "W2-024",
+      "title": "Unbounded cycle is rejected",
+      "category": "invalid-graph",
+      "coverage": ["graph.unbounded-cycle"],
+      "definition": {
+        "workflowID": "dev.kaname.fixture.invalid-cycle",
+        "entrypoint": "a",
+        "nodes": [
+          {"id": "a", "type": "data.transform"},
+          {"id": "b", "type": "data.transform"}
+        ],
+        "edges": [
+          {"from": "a.success", "to": "b.input"},
+          {"from": "b.success", "to": "a.input"}
+        ]
+      },
+      "input": {},
+      "expected": {
+        "compile": "rejected",
+        "run": "notRun",
+        "path": [],
+        "emissions": [],
+        "diagnosticCodes": ["graph.cycle.unbounded"],
+        "inspectionGroups": ["problems"]
+      },
+      "visualRoutes": ["builder.problems", "builder.canvas"]
+    },
+    {
+      "id": "W2-025",
+      "title": "Undeclared effect authority is rejected",
+      "category": "invalid-graph",
+      "coverage": ["graph.undeclared-effect"],
+      "definition": {
+        "workflowID": "dev.kaname.fixture.invalid-effect",
+        "entrypoint": "effect",
+        "authority": [],
+        "nodes": [{"id": "effect", "type": "effect.synthetic"}],
+        "edges": []
+      },
+      "input": {},
+      "expected": {
+        "compile": "rejected",
+        "run": "notRun",
+        "path": [],
+        "emissions": [],
+        "diagnosticCodes": ["effect.authority.undeclared"],
+        "inspectionGroups": ["problems", "authority"]
+      },
+      "visualRoutes": ["builder.problems", "builder.authority"]
+    }
+  ]
+}
