@@ -238,6 +238,49 @@ public struct DesktopWorkflowProjectedRetry: Identifiable, Equatable, Sendable {
     public let storePosition: UInt64
 }
 
+public struct DesktopWorkflowWaitCorrelation: Equatable, Sendable {
+    public let key: String
+    public let sha256: String
+}
+
+public struct DesktopWorkflowProjectedWait: Identifiable, Equatable, Sendable {
+    public var id: String { subscriptionID }
+    public let subscriptionID: String
+    public let waitNodeID: String
+    public let executionTokenID: String
+    public let controllerAttemptID: String
+    public let workflowID: String
+    public let revisionID: String
+    public let packageDigest: String
+    public let kind: String
+    public let ownerKind: String
+    public let ownerID: String
+    public let correlation: [DesktopWorkflowWaitCorrelation]
+    public let inputValueID: String
+    public let inputSHA256: String
+    public let status: String
+    public let decision: String?
+    public let resolvingSignalID: String?
+    public let output: DesktopWorkflowProjectedValue?
+    public let reasonCode: String?
+    public let expiresAtUnixMillis: Int64
+    public let subscribedStorePosition: UInt64
+    public let resolvedStorePosition: UInt64?
+}
+
+public struct DesktopWorkflowProjectedWaitSignal: Identifiable, Equatable, Sendable {
+    public var id: String { signalID }
+    public let signalID: String
+    public let signalCommandID: String
+    public let kind: String
+    public let ownerKind: String
+    public let ownerID: String
+    public let correlation: [DesktopWorkflowWaitCorrelation]
+    public let value: DesktopWorkflowProjectedValue
+    public let recordedAtUnixMillis: Int64
+    public let storePosition: UInt64
+}
+
 public struct DesktopWorkflowProjectedMatchTrace: Identifiable, Equatable, Sendable {
     public var id: String { eventID }
     public let eventID: String
@@ -285,6 +328,8 @@ public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
     public let joins: [DesktopWorkflowProjectedJoin]
     public let iterations: [DesktopWorkflowProjectedIteration]
     public let retries: [DesktopWorkflowProjectedRetry]
+    public let waits: [DesktopWorkflowProjectedWait]
+    public let waitSignals: [DesktopWorkflowProjectedWaitSignal]
 
     public init(
         runID: String, workflowID: String, revisionID: String, packageDigest: String,
@@ -297,7 +342,9 @@ public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
         executionTokens: [DesktopWorkflowProjectedExecutionToken] = [],
         joins: [DesktopWorkflowProjectedJoin] = [],
         iterations: [DesktopWorkflowProjectedIteration] = [],
-        retries: [DesktopWorkflowProjectedRetry] = []
+        retries: [DesktopWorkflowProjectedRetry] = [],
+        waits: [DesktopWorkflowProjectedWait] = [],
+        waitSignals: [DesktopWorkflowProjectedWaitSignal] = []
     ) {
         self.runID = runID
         self.workflowID = workflowID
@@ -321,6 +368,8 @@ public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
         self.joins = joins
         self.iterations = iterations
         self.retries = retries
+        self.waits = waits
+        self.waitSignals = waitSignals
     }
 
     public func attempt(for nodeID: String) -> DesktopWorkflowProjectedAttempt? {
@@ -585,7 +634,9 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
             executionTokens: try run.executionTokens.map(executionToken),
             joins: try run.joins.map(join),
             iterations: try run.iterations.map(iteration),
-            retries: try run.retries.map(retry)
+            retries: try run.retries.map(retry),
+            waits: try run.waits.map(wait),
+            waitSignals: try run.waitSignals.map(waitSignal)
         )
     }
 
@@ -813,6 +864,84 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
             error: try value(item.error),
             storePosition: item.storePosition
         )
+    }
+
+    private static func wait(
+        _ item: Kaname_V1_WorkflowProjectedWait
+    ) throws -> DesktopWorkflowProjectedWait {
+        guard !item.subscriptionID.isEmpty, !item.waitNodeID.isEmpty,
+              !item.executionTokenID.isEmpty, !item.controllerAttemptID.isEmpty,
+              !item.workflowID.isEmpty, !item.revisionID.isEmpty,
+              item.packageDigest.count == 64,
+              ["timer", "event", "reply"].contains(item.kind),
+              ["case", "installation", "workflow"].contains(item.ownerKind),
+              !item.ownerID.isEmpty, !item.correlation.isEmpty,
+              !item.inputValueID.isEmpty, item.inputSha256.count == 64,
+              ["waiting", "resumed", "expired", "cancelled"].contains(item.status),
+              item.expiresAtUnixMillis > 0, item.subscribedStorePosition > 0 else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        let resolved = item.status != "waiting"
+        guard resolved == !item.decision.isEmpty,
+              resolved == (item.resolvedStorePosition > 0),
+              !resolved || item.decision == item.status else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        return DesktopWorkflowProjectedWait(
+            subscriptionID: item.subscriptionID,
+            waitNodeID: item.waitNodeID,
+            executionTokenID: item.executionTokenID,
+            controllerAttemptID: item.controllerAttemptID,
+            workflowID: item.workflowID,
+            revisionID: item.revisionID,
+            packageDigest: item.packageDigest,
+            kind: item.kind,
+            ownerKind: item.ownerKind,
+            ownerID: item.ownerID,
+            correlation: try item.correlation.map(waitCorrelation),
+            inputValueID: item.inputValueID,
+            inputSHA256: item.inputSha256,
+            status: item.status,
+            decision: item.decision.nilIfEmpty,
+            resolvingSignalID: item.resolvingSignalID.nilIfEmpty,
+            output: try item.hasOutput ? value(item.output) : nil,
+            reasonCode: item.reasonCode.nilIfEmpty,
+            expiresAtUnixMillis: item.expiresAtUnixMillis,
+            subscribedStorePosition: item.subscribedStorePosition,
+            resolvedStorePosition: item.resolvedStorePosition > 0 ? item.resolvedStorePosition : nil
+        )
+    }
+
+    private static func waitSignal(
+        _ item: Kaname_V1_WorkflowProjectedWaitSignal
+    ) throws -> DesktopWorkflowProjectedWaitSignal {
+        guard !item.signalID.isEmpty, !item.signalCommandID.isEmpty,
+              ["event", "reply"].contains(item.kind),
+              ["case", "installation", "workflow"].contains(item.ownerKind),
+              !item.ownerID.isEmpty, !item.correlation.isEmpty,
+              item.hasValue, item.storePosition > 0 else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        return DesktopWorkflowProjectedWaitSignal(
+            signalID: item.signalID,
+            signalCommandID: item.signalCommandID,
+            kind: item.kind,
+            ownerKind: item.ownerKind,
+            ownerID: item.ownerID,
+            correlation: try item.correlation.map(waitCorrelation),
+            value: try value(item.value),
+            recordedAtUnixMillis: item.recordedAtUnixMillis,
+            storePosition: item.storePosition
+        )
+    }
+
+    private static func waitCorrelation(
+        _ item: Kaname_V1_WorkflowWaitCorrelation
+    ) throws -> DesktopWorkflowWaitCorrelation {
+        guard !item.key.isEmpty, item.sha256.count == 64 else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        return DesktopWorkflowWaitCorrelation(key: item.key, sha256: item.sha256)
     }
 
     private static func matchTrace(_ item: Kaname_V1_WorkflowProjectedMatchTrace) throws -> DesktopWorkflowProjectedMatchTrace {

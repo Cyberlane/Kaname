@@ -246,7 +246,7 @@ public struct DesktopWorkflowNodeRegistry: Sendable {
                 staticPorts: [
                     port("input", .input, dataSchemaRef),
                     port("resumed", .output, dataSchemaRef),
-                    port("expired", .output, controlSchemaRef, required: false),
+                    port("expired", .output, dataSchemaRef, required: false),
                     port("error", .output, errorSchemaRef, required: false),
                 ],
                 dynamicRule: nil

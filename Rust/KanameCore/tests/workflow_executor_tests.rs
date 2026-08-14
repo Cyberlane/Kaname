@@ -3,7 +3,8 @@ use kaname_core::{
     open_workflow_library, open_workflow_scoped_storage,
     v1::{
         CancelWorkflowRun, CommandEnvelope, OpaqueTypedPayload, RequestWorkflowRun, SchemaVersion,
-        Scope, WorkflowInputBinding, WorkflowRunTokenCreated, WorkflowValueReference,
+        Scope, SignalWorkflowWait, WorkflowInputBinding, WorkflowRunTokenCreated,
+        WorkflowValueReference, WorkflowWaitCorrelation,
     },
     workflow_drafts::CreateWorkflowDraft,
     workflow_executor::{
@@ -15,7 +16,8 @@ use kaname_core::{
     workflow_publication::{PublishWorkflowRevision, PublishedWorkflowRevision},
     workflow_runtime::{
         WORKFLOW_RUN_CANCEL_KIND, WORKFLOW_RUN_CANCEL_TYPE, WORKFLOW_RUN_REQUEST_KIND,
-        WORKFLOW_RUN_REQUEST_TYPE, WORKFLOW_RUN_TOKEN_CREATED_KIND,
+        WORKFLOW_RUN_REQUEST_TYPE, WORKFLOW_RUN_TOKEN_CREATED_KIND, WORKFLOW_WAIT_SIGNAL_KIND,
+        WORKFLOW_WAIT_SIGNAL_TYPE,
     },
     workflow_storage::{
         WorkflowStorageAccessContext, WorkflowStorageNamespace, WorkflowStorageScopeKind,
@@ -46,6 +48,8 @@ const ITERATION_WORKFLOW_ID: &str = "018f5900-0001-7000-8000-000000000001";
 const ITERATION_REVISION_ID: &str = "revision-iteration-001";
 const RETRY_WORKFLOW_ID: &str = "018f5c00-0001-7000-8000-000000000001";
 const RETRY_REVISION_ID: &str = "revision-retry-001";
+const WAIT_WORKFLOW_ID: &str = "018f6000-0001-7000-8000-000000000001";
+const WAIT_REVISION_ID: &str = "revision-wait-001";
 
 #[test]
 fn bounded_iteration_limits_concurrency_collects_failures_and_is_crash_exact() {
@@ -131,9 +135,14 @@ fn fail_fast_iteration_records_pending_partition_and_cancels_remaining_items() {
     );
     let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
     assert_eq!(
-        workflow_executor::execute(&mut journal, &library, &command)
-            .unwrap()
-            .outcome,
+        workflow_executor::execute_at_unix_millis(
+            &mut journal,
+            &library,
+            &command,
+            command.submitted_at_unix_millis,
+        )
+        .unwrap()
+        .outcome,
         DurableRunOutcome::Failed
     );
     let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
@@ -209,6 +218,242 @@ fn retry_deadline_and_attempt_counter_survive_restart_before_exhaustion() {
     assert_eq!(run.retries[0].next_attempt_number, 2);
     assert_eq!(run.retries[1].decision, "exhausted");
     assert_eq!(run.retries[1].next_attempt_number, 3);
+}
+
+#[test]
+fn durable_timer_wait_survives_restart_and_resumes_at_its_exact_deadline() {
+    let directory = tempdir().unwrap();
+    let (library, published) = published_wait_library(directory.path(), "timer");
+    let command = control_run_command(
+        "run-wait-timer-001",
+        &published,
+        WAIT_WORKFLOW_ID,
+        WAIT_REVISION_ID,
+        json!({"caseId": "case-42"}),
+    );
+    let started_at = command.submitted_at_unix_millis;
+    let deadline = started_at + 5_000;
+    let journal_path = directory.path().join("wait-runtime.sqlite");
+    let mut journal = Journal::open(&journal_path, &CURSOR_KEY).unwrap();
+    let waiting =
+        workflow_executor::execute_at_unix_millis(&mut journal, &library, &command, started_at)
+            .unwrap();
+    assert_eq!(waiting.outcome, DurableRunOutcome::Waiting);
+    assert_eq!(waiting.next_attempt_at_unix_millis, Some(deadline));
+    let before = run_wires(&journal, "run-wait-timer-001");
+    drop(journal);
+    let mut journal = Journal::open(&journal_path, &CURSOR_KEY).unwrap();
+    assert_eq!(
+        workflow_executor::execute_at_unix_millis(&mut journal, &library, &command, deadline - 1,)
+            .unwrap()
+            .outcome,
+        DurableRunOutcome::Waiting
+    );
+    assert_eq!(run_wires(&journal, "run-wait-timer-001"), before);
+    assert_eq!(
+        workflow_executor::execute_at_unix_millis(&mut journal, &library, &command, deadline)
+            .unwrap()
+            .outcome,
+        DurableRunOutcome::Succeeded
+    );
+
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    projection.catch_up(&journal).unwrap();
+    let run = projection
+        .inspect_runs(None, Some("run-wait-timer-001"), 1)
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(run.waits.len(), 1);
+    assert_eq!(run.waits[0].kind, "timer");
+    assert_eq!(run.waits[0].decision, "resumed");
+    assert_eq!(run.waits[0].expires_at_unix_millis, deadline);
+}
+
+#[test]
+fn wait_signal_before_subscription_is_correlated_once_and_projected() {
+    let directory = tempdir().unwrap();
+    let (library, published) = published_wait_library(directory.path(), "reply");
+    let run_id = "run-wait-early-reply-001";
+    let command = control_run_command(
+        run_id,
+        &published,
+        WAIT_WORKFLOW_ID,
+        WAIT_REVISION_ID,
+        json!({"caseId": "case-42"}),
+    );
+    let signal = wait_signal_command(
+        run_id,
+        "signal-early-001",
+        "reply",
+        "case-42",
+        1_786_220_099_900,
+    );
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    assert!(
+        !workflow_executor::record_wait_signal(&mut journal, &signal)
+            .unwrap()
+            .duplicate
+    );
+    assert!(
+        workflow_executor::record_wait_signal(&mut journal, &signal)
+            .unwrap()
+            .duplicate
+    );
+    assert_eq!(
+        workflow_executor::execute_at_unix_millis(
+            &mut journal,
+            &library,
+            &command,
+            command.submitted_at_unix_millis + 300,
+        )
+        .unwrap()
+        .outcome,
+        DurableRunOutcome::Succeeded
+    );
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    projection.catch_up(&journal).unwrap();
+    assert_eq!(projection.row_count("wait_signals").unwrap(), 1);
+    assert_eq!(projection.row_count("waits").unwrap(), 1);
+    let run = projection
+        .inspect_runs(None, Some(run_id), 1)
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(run.wait_signals[0].signal_id, "signal-early-001");
+    assert_eq!(run.waits[0].resolving_signal_id, "signal-early-001");
+    assert_eq!(run.waits[0].revision_id, WAIT_REVISION_ID);
+    assert_eq!(run.waits[0].package_digest, published.package_digest);
+}
+
+#[test]
+fn wrong_correlation_cannot_resume_wait_and_exact_reply_does() {
+    let directory = tempdir().unwrap();
+    let (library, published) = published_wait_library(directory.path(), "event");
+    let run_id = "run-wait-correlation-001";
+    let command = control_run_command(
+        run_id,
+        &published,
+        WAIT_WORKFLOW_ID,
+        WAIT_REVISION_ID,
+        json!({"caseId": "case-42"}),
+    );
+    let deadline = command.submitted_at_unix_millis + 5_000;
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    assert_eq!(
+        workflow_executor::execute_at_unix_millis(
+            &mut journal,
+            &library,
+            &command,
+            command.submitted_at_unix_millis,
+        )
+        .unwrap()
+        .outcome,
+        DurableRunOutcome::Waiting
+    );
+    let wrong = wait_signal_command(
+        run_id,
+        "signal-wrong-001",
+        "event",
+        "case-99",
+        command.submitted_at_unix_millis + 100,
+    );
+    workflow_executor::record_wait_signal(&mut journal, &wrong).unwrap();
+    let still_waiting = workflow_executor::execute_at_unix_millis(
+        &mut journal,
+        &library,
+        &command,
+        command.submitted_at_unix_millis + 200,
+    )
+    .unwrap();
+    assert_eq!(still_waiting.outcome, DurableRunOutcome::Waiting);
+    assert_eq!(still_waiting.next_attempt_at_unix_millis, Some(deadline));
+
+    let exact = wait_signal_command(
+        run_id,
+        "signal-exact-001",
+        "event",
+        "case-42",
+        command.submitted_at_unix_millis + 300,
+    );
+    workflow_executor::record_wait_signal(&mut journal, &exact).unwrap();
+    assert_eq!(
+        workflow_executor::execute_at_unix_millis(
+            &mut journal,
+            &library,
+            &command,
+            command.submitted_at_unix_millis + 300,
+        )
+        .unwrap()
+        .outcome,
+        DurableRunOutcome::Succeeded
+    );
+}
+
+#[test]
+fn reply_wait_expiry_and_cancellation_are_durable_terminal_decisions() {
+    for (run_id, cancel, expected_decision, expected_outcome) in [
+        (
+            "run-wait-expiry-001",
+            false,
+            "expired",
+            DurableRunOutcome::Succeeded,
+        ),
+        (
+            "run-wait-cancel-001",
+            true,
+            "cancelled",
+            DurableRunOutcome::Cancelled,
+        ),
+    ] {
+        let directory = tempdir().unwrap();
+        let (library, published) = published_wait_library(directory.path(), "reply");
+        let command = control_run_command(
+            run_id,
+            &published,
+            WAIT_WORKFLOW_ID,
+            WAIT_REVISION_ID,
+            json!({"caseId": "case-42"}),
+        );
+        let deadline = command.submitted_at_unix_millis + 5_000;
+        let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+        assert_eq!(
+            workflow_executor::execute_at_unix_millis(
+                &mut journal,
+                &library,
+                &command,
+                command.submitted_at_unix_millis,
+            )
+            .unwrap()
+            .outcome,
+            DurableRunOutcome::Waiting
+        );
+        let outcome = if cancel {
+            let token = run_token(&journal, run_id);
+            workflow_executor::request_cancellation(
+                &mut journal,
+                &cancel_command(run_id, &token.run_token_id),
+            )
+            .unwrap();
+            workflow_executor::execute(&mut journal, &library, &command)
+                .unwrap()
+                .outcome
+        } else {
+            workflow_executor::execute_at_unix_millis(&mut journal, &library, &command, deadline)
+                .unwrap()
+                .outcome
+        };
+        assert_eq!(outcome, expected_outcome);
+        let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+        projection.catch_up(&journal).unwrap();
+        let run = projection
+            .inspect_runs(None, Some(run_id), 1)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(run.waits[0].decision, expected_decision);
+        assert_ne!(run.waits[0].resolved_store_position, 0);
+    }
 }
 
 #[test]
@@ -927,6 +1172,23 @@ fn published_retry_library(
     )
 }
 
+fn published_wait_library(
+    application_support: &std::path::Path,
+    kind: &str,
+) -> (
+    kaname_core::workflow_library::WorkflowLibraryStore,
+    PublishedWorkflowRevision,
+) {
+    publish_control_library(
+        application_support,
+        WAIT_WORKFLOW_ID,
+        WAIT_REVISION_ID,
+        "dev.kaname.wait-runtime",
+        wait_workflow_source(kind),
+        json!({"bundleVersion": 1, "schemas": []}),
+    )
+}
+
 fn publish_control_library(
     application_support: &std::path::Path,
     workflow_id: &str,
@@ -1116,6 +1378,39 @@ fn retry_workflow_source() -> Value {
             ((2, "retry"), (1, "input")),
             ((2, "exhausted"), (4, "input")),
             ((2, "unknown"), (4, "input")),
+        ],
+    )
+}
+
+fn wait_workflow_source(kind: &str) -> Value {
+    let ids = [
+        "018f6000-0002-7000-8000-000000000002",
+        "018f6000-0003-7000-8000-000000000003",
+        "018f6000-0004-7000-8000-000000000004",
+        "018f6000-0005-7000-8000-000000000005",
+    ];
+    control_graph_source(
+        WAIT_WORKFLOW_ID,
+        "dev.kaname.wait-runtime",
+        &ids,
+        vec![
+            ("manual", "trigger.manual", json!({})),
+            (
+                "wait",
+                "control.wait",
+                json!({
+                    "kind": kind,
+                    "correlation": [{"root": "input", "pointer": "/caseId"}],
+                    "expirySeconds": 5
+                }),
+            ),
+            ("complete-resumed", "terminal.complete", json!({})),
+            ("complete-expired", "terminal.complete", json!({})),
+        ],
+        vec![
+            ((0, "success"), (1, "input")),
+            ((1, "resumed"), (2, "input")),
+            ((1, "expired"), (3, "input")),
         ],
     )
 }
@@ -1516,6 +1811,38 @@ fn cancel_command(run_id: &str, token_id: &str) -> CommandEnvelope {
             reason_code: "owner-requested".into(),
         },
         1_786_220_100_100,
+    )
+}
+
+fn wait_signal_command(
+    run_id: &str,
+    signal_id: &str,
+    kind: &str,
+    case_id: &str,
+    submitted_at_unix_millis: i64,
+) -> CommandEnvelope {
+    let correlation_value = serde_json_canonicalizer::to_vec(&json!(case_id)).unwrap();
+    command(
+        &format!("command-{signal_id}"),
+        &format!("idempotency-{signal_id}"),
+        WORKFLOW_WAIT_SIGNAL_KIND,
+        WORKFLOW_WAIT_SIGNAL_TYPE,
+        SignalWorkflowWait {
+            run_id: run_id.into(),
+            signal_id: signal_id.into(),
+            kind: kind.into(),
+            owner_kind: "workflow".into(),
+            owner_id: WAIT_WORKFLOW_ID.into(),
+            correlation: vec![WorkflowWaitCorrelation {
+                key: "input:/caseId".into(),
+                sha256: hex::encode(Sha256::digest(&correlation_value)),
+            }],
+            value: Some(inline_value(
+                &format!("value-{signal_id}"),
+                json!({"caseId": case_id, "signalId": signal_id}),
+            )),
+        },
+        submitted_at_unix_millis,
     )
 }
 

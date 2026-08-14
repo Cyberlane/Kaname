@@ -2,12 +2,14 @@ use kaname_core::{
     journal::{Journal, JournalError},
     v1::{
         CancelWorkflowRun, CommandEnvelope, EventEnvelope, EventProvenance, EvidenceRetentionClass,
-        OpaqueTypedPayload, RequestWorkflowRun, SchemaVersion, Scope, WorkflowAttemptOutcome,
-        WorkflowAttemptSettled, WorkflowAttemptStarted, WorkflowEdgeCheckpointState,
-        WorkflowEdgeCheckpointed, WorkflowInputBinding, WorkflowJoinDecision,
-        WorkflowJoinEvaluated, WorkflowMatchTraceRecorded, WorkflowPortEmitted,
-        WorkflowRunCancellationRequested, WorkflowRunOutcome, WorkflowRunSettled,
-        WorkflowRunTokenCreated, WorkflowValueReference,
+        OpaqueTypedPayload, RequestWorkflowRun, SchemaVersion, Scope, SignalWorkflowWait,
+        WorkflowAttemptOutcome, WorkflowAttemptSettled, WorkflowAttemptStarted,
+        WorkflowEdgeCheckpointState, WorkflowEdgeCheckpointed, WorkflowInputBinding,
+        WorkflowJoinDecision, WorkflowJoinEvaluated, WorkflowMatchTraceRecorded,
+        WorkflowPortEmitted, WorkflowRunCancellationRequested, WorkflowRunOutcome,
+        WorkflowRunSettled, WorkflowRunTokenCreated, WorkflowValueReference,
+        WorkflowWaitCorrelation, WorkflowWaitDecision, WorkflowWaitResolved,
+        WorkflowWaitSignalRecorded, WorkflowWaitSubscribed,
     },
     workflow_runtime::{
         WORKFLOW_ATTEMPT_SETTLED_KIND, WORKFLOW_ATTEMPT_SETTLED_TYPE,
@@ -20,6 +22,9 @@ use kaname_core::{
         WORKFLOW_RUN_CANCELLATION_REQUESTED_TYPE, WORKFLOW_RUN_REQUEST_KIND,
         WORKFLOW_RUN_REQUEST_TYPE, WORKFLOW_RUN_SETTLED_KIND, WORKFLOW_RUN_SETTLED_TYPE,
         WORKFLOW_RUN_TOKEN_CREATED_KIND, WORKFLOW_RUN_TOKEN_CREATED_TYPE,
+        WORKFLOW_WAIT_RESOLVED_KIND, WORKFLOW_WAIT_RESOLVED_TYPE, WORKFLOW_WAIT_SIGNAL_KIND,
+        WORKFLOW_WAIT_SIGNAL_RECORDED_KIND, WORKFLOW_WAIT_SIGNAL_RECORDED_TYPE,
+        WORKFLOW_WAIT_SIGNAL_TYPE, WORKFLOW_WAIT_SUBSCRIBED_KIND, WORKFLOW_WAIT_SUBSCRIBED_TYPE,
     },
 };
 use prost::Message;
@@ -56,6 +61,115 @@ fn workflow_commands_are_typed_bounded_and_idempotent() {
         journal.admit_command(&reused),
         Err(JournalError::Integrity(code)) if code == "idempotency_key_reused"
     ));
+}
+
+#[test]
+fn wait_commands_and_subscription_lifecycle_are_typed_and_bounded() {
+    let correlation = vec![WorkflowWaitCorrelation {
+        key: "input:/caseId".into(),
+        sha256: "b".repeat(64),
+    }];
+    let signal_value = inline_value("value-signal", br#"{"caseId":"case-42"}"#);
+    let signal = command_envelope(
+        "command-signal-001",
+        "wait-signal-key-001",
+        WORKFLOW_WAIT_SIGNAL_KIND,
+        WORKFLOW_WAIT_SIGNAL_TYPE,
+        SignalWorkflowWait {
+            run_id: RUN_ID.into(),
+            signal_id: "signal-001".into(),
+            kind: "reply".into(),
+            owner_kind: "workflow".into(),
+            owner_id: "workflow-001".into(),
+            correlation: correlation.clone(),
+            value: Some(signal_value.clone()),
+        },
+    );
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    assert_eq!(
+        journal.admit_command(&signal).unwrap().command_id,
+        "command-signal-001"
+    );
+    for event in [
+        runtime_event(
+            "event-signal-001",
+            WORKFLOW_WAIT_SIGNAL_RECORDED_KIND,
+            WORKFLOW_WAIT_SIGNAL_RECORDED_TYPE,
+            WorkflowWaitSignalRecorded {
+                run_id: RUN_ID.into(),
+                signal_id: "signal-001".into(),
+                signal_command_id: "command-signal-001".into(),
+                kind: "reply".into(),
+                owner_kind: "workflow".into(),
+                owner_id: "workflow-001".into(),
+                correlation: correlation.clone(),
+                value: Some(signal_value.clone()),
+            },
+            "command-signal-001",
+            RUN_ID,
+        ),
+        runtime_event(
+            "event-wait-subscribed-001",
+            WORKFLOW_WAIT_SUBSCRIBED_KIND,
+            WORKFLOW_WAIT_SUBSCRIBED_TYPE,
+            WorkflowWaitSubscribed {
+                run_id: RUN_ID.into(),
+                run_token_id: TOKEN_ID.into(),
+                subscription_id: "subscription-001".into(),
+                wait_node_id: "wait-reply".into(),
+                execution_token_id: "execution-token-001".into(),
+                controller_attempt_id: "attempt-wait-001".into(),
+                workflow_id: "workflow-001".into(),
+                revision_id: "revision-001".into(),
+                package_digest: "a".repeat(64),
+                kind: "reply".into(),
+                owner_kind: "workflow".into(),
+                owner_id: "workflow-001".into(),
+                correlation: correlation.clone(),
+                input_value_id: "value-input".into(),
+                input_sha256: "c".repeat(64),
+                expires_at_unix_millis: 1_786_220_060_000,
+            },
+            "attempt-wait-001",
+            RUN_ID,
+        ),
+        runtime_event(
+            "event-wait-resolved-001",
+            WORKFLOW_WAIT_RESOLVED_KIND,
+            WORKFLOW_WAIT_RESOLVED_TYPE,
+            WorkflowWaitResolved {
+                run_id: RUN_ID.into(),
+                run_token_id: TOKEN_ID.into(),
+                subscription_id: "subscription-001".into(),
+                decision: WorkflowWaitDecision::Resumed as i32,
+                signal_id: "signal-001".into(),
+                output: Some(signal_value),
+                reason_code: String::new(),
+            },
+            "event-signal-001",
+            RUN_ID,
+        ),
+    ] {
+        journal.append_event(event).unwrap();
+    }
+
+    let mut unordered = signal;
+    unordered.command_id = "command-signal-invalid".into();
+    unordered.idempotency_key = "wait-signal-invalid".into();
+    let mut payload =
+        SignalWorkflowWait::decode(unordered.payload.as_ref().unwrap().value.as_slice()).unwrap();
+    payload.correlation = vec![
+        WorkflowWaitCorrelation {
+            key: "input:/z".into(),
+            sha256: "d".repeat(64),
+        },
+        WorkflowWaitCorrelation {
+            key: "input:/a".into(),
+            sha256: "e".repeat(64),
+        },
+    ];
+    unordered.payload.as_mut().unwrap().value = payload.encode_to_vec();
+    assert_invalid_command(&mut journal, unordered);
 }
 
 #[test]

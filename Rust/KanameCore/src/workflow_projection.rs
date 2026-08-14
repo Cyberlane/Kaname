@@ -23,7 +23,7 @@ use std::{
     time::Duration,
 };
 
-const PROJECTION_SCHEMA_VERSION: i64 = 5;
+const PROJECTION_SCHEMA_VERSION: i64 = 6;
 const DEFAULT_BATCH_SIZE: u32 = 250;
 
 const INITIAL_SCHEMA: &str = r#"
@@ -267,6 +267,50 @@ CREATE TABLE workflow_retry_evaluations (
 ) STRICT;
 CREATE INDEX workflow_retry_evaluations_run_position
     ON workflow_retry_evaluations(run_id, store_position, event_id);
+
+CREATE TABLE workflow_wait_signals (
+    signal_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    signal_command_id TEXT NOT NULL UNIQUE,
+    kind TEXT NOT NULL CHECK (kind IN ('event', 'reply')),
+    owner_kind TEXT NOT NULL CHECK (owner_kind IN ('case', 'installation', 'workflow')),
+    owner_id TEXT NOT NULL,
+    correlation_json TEXT NOT NULL,
+    value_id TEXT NOT NULL REFERENCES workflow_values(value_id) ON DELETE RESTRICT,
+    recorded_at_unix_millis INTEGER NOT NULL CHECK (recorded_at_unix_millis >= 0),
+    store_position INTEGER NOT NULL UNIQUE CHECK (store_position > 0),
+    UNIQUE(run_id, signal_id)
+) STRICT;
+CREATE INDEX workflow_wait_signals_run_position
+    ON workflow_wait_signals(run_id, store_position, signal_id);
+
+CREATE TABLE workflow_waits (
+    subscription_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+    run_token_id TEXT NOT NULL,
+    wait_node_id TEXT NOT NULL,
+    execution_token_id TEXT NOT NULL,
+    controller_attempt_id TEXT NOT NULL UNIQUE REFERENCES workflow_attempts(attempt_id) ON DELETE CASCADE,
+    workflow_id TEXT NOT NULL,
+    revision_id TEXT NOT NULL,
+    package_digest TEXT NOT NULL CHECK (length(package_digest) = 64),
+    kind TEXT NOT NULL CHECK (kind IN ('timer', 'event', 'reply')),
+    owner_kind TEXT NOT NULL CHECK (owner_kind IN ('case', 'installation', 'workflow')),
+    owner_id TEXT NOT NULL,
+    correlation_json TEXT NOT NULL,
+    input_value_id TEXT NOT NULL,
+    input_sha256 TEXT NOT NULL CHECK (length(input_sha256) = 64),
+    status TEXT NOT NULL CHECK (status IN ('waiting', 'resumed', 'expired', 'cancelled')),
+    decision TEXT CHECK (decision IN ('resumed', 'expired', 'cancelled')),
+    resolving_signal_id TEXT,
+    output_value_id TEXT REFERENCES workflow_values(value_id) ON DELETE RESTRICT,
+    reason_code TEXT,
+    expires_at_unix_millis INTEGER NOT NULL CHECK (expires_at_unix_millis > 0),
+    subscribed_store_position INTEGER NOT NULL UNIQUE CHECK (subscribed_store_position > 0),
+    resolved_store_position INTEGER UNIQUE
+) STRICT;
+CREATE INDEX workflow_waits_run_position
+    ON workflow_waits(run_id, subscribed_store_position, subscription_id);
 
 CREATE TABLE workflow_projected_events (
     event_id TEXT PRIMARY KEY,
@@ -554,6 +598,52 @@ CREATE INDEX workflow_retry_evaluations_run_position
     ON workflow_retry_evaluations(run_id, store_position, event_id);
 "#;
 
+const PROJECTION_MIGRATION_6: &str = r#"
+CREATE TABLE IF NOT EXISTS workflow_wait_signals (
+    signal_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    signal_command_id TEXT NOT NULL UNIQUE,
+    kind TEXT NOT NULL CHECK (kind IN ('event', 'reply')),
+    owner_kind TEXT NOT NULL CHECK (owner_kind IN ('case', 'installation', 'workflow')),
+    owner_id TEXT NOT NULL,
+    correlation_json TEXT NOT NULL,
+    value_id TEXT NOT NULL REFERENCES workflow_values(value_id) ON DELETE RESTRICT,
+    recorded_at_unix_millis INTEGER NOT NULL CHECK (recorded_at_unix_millis >= 0),
+    store_position INTEGER NOT NULL UNIQUE CHECK (store_position > 0),
+    UNIQUE(run_id, signal_id)
+) STRICT;
+CREATE INDEX IF NOT EXISTS workflow_wait_signals_run_position
+    ON workflow_wait_signals(run_id, store_position, signal_id);
+
+CREATE TABLE IF NOT EXISTS workflow_waits (
+    subscription_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+    run_token_id TEXT NOT NULL,
+    wait_node_id TEXT NOT NULL,
+    execution_token_id TEXT NOT NULL,
+    controller_attempt_id TEXT NOT NULL UNIQUE REFERENCES workflow_attempts(attempt_id) ON DELETE CASCADE,
+    workflow_id TEXT NOT NULL,
+    revision_id TEXT NOT NULL,
+    package_digest TEXT NOT NULL CHECK (length(package_digest) = 64),
+    kind TEXT NOT NULL CHECK (kind IN ('timer', 'event', 'reply')),
+    owner_kind TEXT NOT NULL CHECK (owner_kind IN ('case', 'installation', 'workflow')),
+    owner_id TEXT NOT NULL,
+    correlation_json TEXT NOT NULL,
+    input_value_id TEXT NOT NULL,
+    input_sha256 TEXT NOT NULL CHECK (length(input_sha256) = 64),
+    status TEXT NOT NULL CHECK (status IN ('waiting', 'resumed', 'expired', 'cancelled')),
+    decision TEXT CHECK (decision IN ('resumed', 'expired', 'cancelled')),
+    resolving_signal_id TEXT,
+    output_value_id TEXT REFERENCES workflow_values(value_id) ON DELETE RESTRICT,
+    reason_code TEXT,
+    expires_at_unix_millis INTEGER NOT NULL CHECK (expires_at_unix_millis > 0),
+    subscribed_store_position INTEGER NOT NULL UNIQUE CHECK (subscribed_store_position > 0),
+    resolved_store_position INTEGER UNIQUE
+) STRICT;
+CREATE INDEX IF NOT EXISTS workflow_waits_run_position
+    ON workflow_waits(run_id, subscribed_store_position, subscription_id);
+"#;
+
 #[derive(Debug)]
 pub enum WorkflowProjectionError {
     Database(rusqlite::Error),
@@ -738,6 +828,15 @@ impl WorkflowRunProjection {
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             transaction.execute_batch(PROJECTION_MIGRATION_5_RESET)?;
+            transaction.pragma_update(None, "user_version", 5)?;
+            refresh_state_digest(&transaction)?;
+            transaction.commit()?;
+        }
+        let found: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if found == 5 {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(PROJECTION_MIGRATION_6)?;
             transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
             refresh_state_digest(&transaction)?;
             transaction.commit()?;
@@ -785,13 +884,15 @@ impl WorkflowRunProjection {
                  LEFT JOIN workflow_iterations i ON i.run_id = r.run_id
                  LEFT JOIN workflow_execution_tokens iteration_resumed
                    ON iteration_resumed.execution_token_id = i.resumed_execution_token_id
+                 LEFT JOIN workflow_waits w ON w.run_id = r.run_id
                  WHERE r.status IN ('succeeded', 'failed', 'cancelled')
                    AND ((t.source_emission_id IS NOT NULL AND e.emission_id IS NULL)
                      OR (j.event_id IS NOT NULL AND resumed.execution_token_id IS NULL)
                      OR (i.event_id IS NOT NULL AND i.decision IS NULL)
                      OR (i.event_id IS NOT NULL AND i.decision IS NOT NULL
                          AND iteration_resumed.execution_token_id IS NULL)
-                     OR t.status = 'active')
+                     OR t.status = 'active'
+                     OR w.status = 'waiting')
                  LIMIT 1",
                 [],
                 |_| Ok(()),
@@ -928,6 +1029,8 @@ impl WorkflowRunProjection {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute_batch(
             "DELETE FROM workflow_projected_events;
+             DELETE FROM workflow_waits;
+             DELETE FROM workflow_wait_signals;
              DELETE FROM workflow_retry_evaluations;
              DELETE FROM workflow_iterations;
              DELETE FROM workflow_join_evaluations;
@@ -958,6 +1061,8 @@ impl WorkflowRunProjection {
             "joins" => "SELECT COUNT(*) FROM workflow_join_evaluations",
             "iterations" => "SELECT COUNT(*) FROM workflow_iterations",
             "retries" => "SELECT COUNT(*) FROM workflow_retry_evaluations",
+            "waits" => "SELECT COUNT(*) FROM workflow_waits",
+            "wait_signals" => "SELECT COUNT(*) FROM workflow_wait_signals",
             "events" => "SELECT COUNT(*) FROM workflow_projected_events",
             "values" => "SELECT COUNT(*) FROM workflow_values",
             _ => return Err(WorkflowProjectionError::Integrity("unknown_table".into())),
@@ -1103,6 +1208,8 @@ impl WorkflowRunProjection {
             joins: self.inspect_joins(run_id)?,
             iterations: self.inspect_iterations(run_id)?,
             retries: self.inspect_retries(run_id)?,
+            waits: self.inspect_waits(run_id)?,
+            wait_signals: self.inspect_wait_signals(run_id)?,
         })
     }
 
@@ -1607,6 +1714,146 @@ impl WorkflowRunProjection {
                     retry_input: Some(self.inspect_value(&row.11)?),
                     error: Some(self.inspect_value(&row.12)?),
                     store_position: projected_u64(row.13)?,
+                })
+            })
+            .collect()
+    }
+
+    fn inspect_waits(&self, run_id: &str) -> Result<Vec<v1::WorkflowProjectedWait>> {
+        let mut statement = self.connection.prepare(
+            "SELECT subscription_id, wait_node_id, execution_token_id, controller_attempt_id,
+                    workflow_id, revision_id, package_digest, kind, owner_kind, owner_id,
+                    correlation_json, input_value_id, input_sha256, status, decision,
+                    resolving_signal_id, output_value_id, reason_code, expires_at_unix_millis,
+                    subscribed_store_position, resolved_store_position
+             FROM workflow_waits WHERE run_id = ?1
+             ORDER BY subscribed_store_position, subscription_id",
+        )?;
+        type WaitRow = (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            i64,
+            i64,
+            Option<i64>,
+        );
+        let rows = statement.query_map([run_id], |row| -> rusqlite::Result<WaitRow> {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+                row.get(9)?,
+                row.get(10)?,
+                row.get(11)?,
+                row.get(12)?,
+                row.get(13)?,
+                row.get(14)?,
+                row.get(15)?,
+                row.get(16)?,
+                row.get(17)?,
+                row.get(18)?,
+                row.get(19)?,
+                row.get(20)?,
+            ))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|row| {
+                Ok(v1::WorkflowProjectedWait {
+                    subscription_id: row.0,
+                    wait_node_id: row.1,
+                    execution_token_id: row.2,
+                    controller_attempt_id: row.3,
+                    workflow_id: row.4,
+                    revision_id: row.5,
+                    package_digest: row.6,
+                    kind: row.7,
+                    owner_kind: row.8,
+                    owner_id: row.9,
+                    correlation: decode_wait_correlation(&row.10)?,
+                    input_value_id: row.11,
+                    input_sha256: row.12,
+                    status: row.13,
+                    decision: row.14.unwrap_or_default(),
+                    resolving_signal_id: row.15.unwrap_or_default(),
+                    output: self.inspect_optional_value(row.16.as_deref())?,
+                    reason_code: row.17.unwrap_or_default(),
+                    expires_at_unix_millis: row.18,
+                    subscribed_store_position: projected_u64(row.19)?,
+                    resolved_store_position: row
+                        .20
+                        .map(projected_u64)
+                        .transpose()?
+                        .unwrap_or_default(),
+                })
+            })
+            .collect()
+    }
+
+    fn inspect_wait_signals(&self, run_id: &str) -> Result<Vec<v1::WorkflowProjectedWaitSignal>> {
+        let mut statement = self.connection.prepare(
+            "SELECT signal_id, signal_command_id, kind, owner_kind, owner_id,
+                    correlation_json, value_id, recorded_at_unix_millis, store_position
+             FROM workflow_wait_signals WHERE run_id = ?1 ORDER BY store_position, signal_id",
+        )?;
+        type SignalRow = (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            i64,
+            i64,
+        );
+        let rows = statement.query_map([run_id], |row| -> rusqlite::Result<SignalRow> {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+            ))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|row| {
+                Ok(v1::WorkflowProjectedWaitSignal {
+                    signal_id: row.0,
+                    signal_command_id: row.1,
+                    kind: row.2,
+                    owner_kind: row.3,
+                    owner_id: row.4,
+                    correlation: decode_wait_correlation(&row.5)?,
+                    value: Some(self.inspect_value(&row.6)?),
+                    recorded_at_unix_millis: row.7,
+                    store_position: projected_u64(row.8)?,
                 })
             })
             .collect()
@@ -2158,6 +2405,145 @@ fn apply_event(transaction: &Transaction<'_>, event: &v1::EventEnvelope) -> Resu
             )?;
             touch_run(transaction, &payload.run_id, event.store_position)?;
         }
+        WorkflowRuntimeEvent::WaitSignalRecorded(payload) => {
+            let value = payload.value.as_ref().ok_or_else(|| {
+                WorkflowProjectionError::Lifecycle("wait_signal_value_missing".into())
+            })?;
+            insert_value(transaction, value)?;
+            transaction.execute(
+                "INSERT INTO workflow_wait_signals
+                 (signal_id, run_id, signal_command_id, kind, owner_kind, owner_id,
+                  correlation_json, value_id, recorded_at_unix_millis, store_position)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    payload.signal_id,
+                    payload.run_id,
+                    payload.signal_command_id,
+                    payload.kind,
+                    payload.owner_kind,
+                    payload.owner_id,
+                    wait_correlation_json(&payload.correlation)?,
+                    value.value_id,
+                    event.occurred_at_unix_millis,
+                    sql_u64(event.store_position)?,
+                ],
+            )?;
+            if run_exists(transaction, &payload.run_id)? {
+                touch_run(transaction, &payload.run_id, event.store_position)?;
+            }
+        }
+        WorkflowRuntimeEvent::WaitSubscribed(payload) => {
+            require_active_attempt(
+                transaction,
+                &payload.run_id,
+                &payload.run_token_id,
+                &payload.controller_attempt_id,
+                &payload.wait_node_id,
+                None,
+                Some(&payload.execution_token_id),
+            )?;
+            let pins: (String, String, String) = transaction.query_row(
+                "SELECT workflow_id, revision_id, package_digest FROM workflow_runs WHERE run_id = ?1",
+                [&payload.run_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            if pins
+                != (
+                    payload.workflow_id.clone(),
+                    payload.revision_id.clone(),
+                    payload.package_digest.clone(),
+                )
+            {
+                return lifecycle("wait_revision_pin_mismatch");
+            }
+            transaction.execute(
+                "INSERT INTO workflow_waits
+                 (subscription_id, run_id, run_token_id, wait_node_id, execution_token_id,
+                  controller_attempt_id, workflow_id, revision_id, package_digest, kind,
+                  owner_kind, owner_id, correlation_json, input_value_id, input_sha256,
+                  status, expires_at_unix_millis, subscribed_store_position)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                         ?13, ?14, ?15, 'waiting', ?16, ?17)",
+                params![
+                    payload.subscription_id,
+                    payload.run_id,
+                    payload.run_token_id,
+                    payload.wait_node_id,
+                    payload.execution_token_id,
+                    payload.controller_attempt_id,
+                    payload.workflow_id,
+                    payload.revision_id,
+                    payload.package_digest,
+                    payload.kind,
+                    payload.owner_kind,
+                    payload.owner_id,
+                    wait_correlation_json(&payload.correlation)?,
+                    payload.input_value_id,
+                    payload.input_sha256,
+                    payload.expires_at_unix_millis,
+                    sql_u64(event.store_position)?,
+                ],
+            )?;
+            touch_run(transaction, &payload.run_id, event.store_position)?;
+        }
+        WorkflowRuntimeEvent::WaitResolved(payload) => {
+            require_active_run(transaction, &payload.run_id, &payload.run_token_id)?;
+            let wait: Option<(String, String)> = transaction
+                .query_row(
+                    "SELECT status, kind FROM workflow_waits
+                     WHERE subscription_id = ?1 AND run_id = ?2 AND run_token_id = ?3",
+                    params![
+                        payload.subscription_id,
+                        payload.run_id,
+                        payload.run_token_id
+                    ],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let Some((status, kind)) = wait else {
+                return lifecycle("wait_subscription_missing");
+            };
+            if status != "waiting" {
+                return lifecycle("wait_not_active");
+            }
+            let decision = match v1::WorkflowWaitDecision::try_from(payload.decision) {
+                Ok(v1::WorkflowWaitDecision::Resumed) => "resumed",
+                Ok(v1::WorkflowWaitDecision::Expired) => "expired",
+                Ok(v1::WorkflowWaitDecision::Cancelled) => "cancelled",
+                _ => return lifecycle("wait_decision_invalid"),
+            };
+            if decision == "resumed" && kind != "timer" {
+                let signal_run: Option<String> = transaction
+                    .query_row(
+                        "SELECT run_id FROM workflow_wait_signals WHERE signal_id = ?1",
+                        [&payload.signal_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if signal_run.as_deref() != Some(payload.run_id.as_str()) {
+                    return lifecycle("wait_resolving_signal_missing");
+                }
+            }
+            let output_value_id = insert_optional_value(transaction, payload.output.as_ref())?;
+            let updated = transaction.execute(
+                "UPDATE workflow_waits SET status = ?1, decision = ?1,
+                   resolving_signal_id = NULLIF(?2, ''), output_value_id = ?3,
+                   reason_code = NULLIF(?4, ''), resolved_store_position = ?5
+                 WHERE subscription_id = ?6 AND status = 'waiting'",
+                params![
+                    decision,
+                    payload.signal_id,
+                    output_value_id,
+                    payload.reason_code,
+                    sql_u64(event.store_position)?,
+                    payload.subscription_id,
+                ],
+            )?;
+            if updated != 1 {
+                return lifecycle("wait_not_active");
+            }
+            touch_run(transaction, &payload.run_id, event.store_position)?;
+        }
         WorkflowRuntimeEvent::AttemptStarted(payload) => {
             require_active_run(transaction, &payload.run_id, &payload.run_token_id)?;
             require_execution_token(
@@ -2445,19 +2831,21 @@ fn apply_event(transaction: &Transaction<'_>, event: &v1::EventEnvelope) -> Resu
             )?;
         }
     }
-    transaction.execute(
-        "INSERT INTO workflow_projected_events
-         (event_id, run_id, kind, store_position, stream_sequence, occurred_at_unix_millis)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            event.event_id,
-            run_id,
-            event.kind,
-            sql_u64(event.store_position)?,
-            sql_u64(event.stream_sequence)?,
-            event.occurred_at_unix_millis,
-        ],
-    )?;
+    if run_exists(transaction, &run_id)? {
+        transaction.execute(
+            "INSERT INTO workflow_projected_events
+             (event_id, run_id, kind, store_position, stream_sequence, occurred_at_unix_millis)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                event.event_id,
+                run_id,
+                event.kind,
+                sql_u64(event.store_position)?,
+                sql_u64(event.stream_sequence)?,
+                event.occurred_at_unix_millis,
+            ],
+        )?;
+    }
     Ok(true)
 }
 
@@ -2742,6 +3130,24 @@ fn string_list_json(values: &[String]) -> Result<String> {
         .map_err(|_| WorkflowProjectionError::Integrity("string_list_encode_failed".into()))
 }
 
+fn wait_correlation_json(values: &[v1::WorkflowWaitCorrelation]) -> Result<String> {
+    let pairs = values
+        .iter()
+        .map(|value| [value.key.clone(), value.sha256.clone()])
+        .collect::<Vec<_>>();
+    serde_json::to_string(&pairs)
+        .map_err(|_| WorkflowProjectionError::Integrity("wait_correlation_encode_failed".into()))
+}
+
+fn decode_wait_correlation(value: &str) -> Result<Vec<v1::WorkflowWaitCorrelation>> {
+    let pairs: Vec<[String; 2]> = serde_json::from_str(value)
+        .map_err(|_| WorkflowProjectionError::Integrity("wait_correlation_decode_failed".into()))?;
+    Ok(pairs
+        .into_iter()
+        .map(|[key, sha256]| v1::WorkflowWaitCorrelation { key, sha256 })
+        .collect())
+}
+
 fn lifecycle<T>(code: &'static str) -> Result<T> {
     Err(WorkflowProjectionError::Lifecycle(code.into()))
 }
@@ -2853,6 +3259,18 @@ fn canonical_state_bytes(connection: &Connection) -> Result<Vec<u8>> {
                 "retries",
                 "SELECT event_id, run_id, retry_node_id, execution_token_id, controller_attempt_id, failed_attempt_id, target_node_id, error_code, decision, next_attempt_number, maximum_attempts, delay_milliseconds, eligible_at_unix_millis, retry_input_value_id, error_value_id, evaluated_at_unix_millis, store_position FROM workflow_retry_evaluations ORDER BY run_id, store_position, event_id",
                 17,
+            )?,
+            table_rows(
+                connection,
+                "waits",
+                "SELECT subscription_id, run_id, run_token_id, wait_node_id, execution_token_id, controller_attempt_id, workflow_id, revision_id, package_digest, kind, owner_kind, owner_id, correlation_json, input_value_id, input_sha256, status, decision, resolving_signal_id, output_value_id, reason_code, expires_at_unix_millis, subscribed_store_position, resolved_store_position FROM workflow_waits ORDER BY run_id, subscribed_store_position, subscription_id",
+                23,
+            )?,
+            table_rows(
+                connection,
+                "wait_signals",
+                "SELECT signal_id, run_id, signal_command_id, kind, owner_kind, owner_id, correlation_json, value_id, recorded_at_unix_millis, store_position FROM workflow_wait_signals ORDER BY run_id, store_position, signal_id",
+                10,
             )?,
             table_rows(
                 connection,

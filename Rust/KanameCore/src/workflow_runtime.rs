@@ -12,6 +12,7 @@ use std::collections::BTreeSet;
 
 pub const WORKFLOW_RUN_REQUEST_KIND: &str = "workflow.run.request";
 pub const WORKFLOW_RUN_CANCEL_KIND: &str = "workflow.run.cancel";
+pub const WORKFLOW_WAIT_SIGNAL_KIND: &str = "workflow.wait.signal";
 pub const WORKFLOW_RUN_TOKEN_CREATED_KIND: &str = "workflow.run.token-created";
 pub const WORKFLOW_EXECUTION_TOKEN_CREATED_KIND: &str = "workflow.execution-token.created";
 pub const WORKFLOW_EXECUTION_TOKEN_SETTLED_KIND: &str = "workflow.execution-token.settled";
@@ -19,6 +20,9 @@ pub const WORKFLOW_JOIN_EVALUATED_KIND: &str = "workflow.join.evaluated";
 pub const WORKFLOW_ITERATION_PLANNED_KIND: &str = "workflow.iteration.planned";
 pub const WORKFLOW_ITERATION_EVALUATED_KIND: &str = "workflow.iteration.evaluated";
 pub const WORKFLOW_RETRY_EVALUATED_KIND: &str = "workflow.retry.evaluated";
+pub const WORKFLOW_WAIT_SIGNAL_RECORDED_KIND: &str = "workflow.wait.signal-recorded";
+pub const WORKFLOW_WAIT_SUBSCRIBED_KIND: &str = "workflow.wait.subscribed";
+pub const WORKFLOW_WAIT_RESOLVED_KIND: &str = "workflow.wait.resolved";
 pub const WORKFLOW_ATTEMPT_STARTED_KIND: &str = "workflow.attempt.started";
 pub const WORKFLOW_ATTEMPT_SETTLED_KIND: &str = "workflow.attempt.settled";
 pub const WORKFLOW_PORT_EMITTED_KIND: &str = "workflow.port.emitted";
@@ -29,6 +33,7 @@ pub const WORKFLOW_RUN_SETTLED_KIND: &str = "workflow.run.settled";
 
 pub const WORKFLOW_RUN_REQUEST_TYPE: &str = "kaname.workflow.run-request.v1";
 pub const WORKFLOW_RUN_CANCEL_TYPE: &str = "kaname.workflow.run-cancel.v1";
+pub const WORKFLOW_WAIT_SIGNAL_TYPE: &str = "kaname.workflow.wait-signal.v1";
 pub const WORKFLOW_RUN_TOKEN_CREATED_TYPE: &str = "kaname.workflow.run-token-created.v1";
 pub const WORKFLOW_EXECUTION_TOKEN_CREATED_TYPE: &str =
     "kaname.workflow.execution-token-created.v1";
@@ -38,6 +43,9 @@ pub const WORKFLOW_JOIN_EVALUATED_TYPE: &str = "kaname.workflow.join-evaluated.v
 pub const WORKFLOW_ITERATION_PLANNED_TYPE: &str = "kaname.workflow.iteration-planned.v1";
 pub const WORKFLOW_ITERATION_EVALUATED_TYPE: &str = "kaname.workflow.iteration-evaluated.v1";
 pub const WORKFLOW_RETRY_EVALUATED_TYPE: &str = "kaname.workflow.retry-evaluated.v1";
+pub const WORKFLOW_WAIT_SIGNAL_RECORDED_TYPE: &str = "kaname.workflow.wait-signal-recorded.v1";
+pub const WORKFLOW_WAIT_SUBSCRIBED_TYPE: &str = "kaname.workflow.wait-subscribed.v1";
+pub const WORKFLOW_WAIT_RESOLVED_TYPE: &str = "kaname.workflow.wait-resolved.v1";
 pub const WORKFLOW_ATTEMPT_STARTED_TYPE: &str = "kaname.workflow.attempt-started.v1";
 pub const WORKFLOW_ATTEMPT_SETTLED_TYPE: &str = "kaname.workflow.attempt-settled.v1";
 pub const WORKFLOW_PORT_EMITTED_TYPE: &str = "kaname.workflow.port-emitted.v1";
@@ -63,9 +71,11 @@ pub enum WorkflowRuntimeContractError {
 pub type Result<T> = std::result::Result<T, WorkflowRuntimeContractError>;
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum WorkflowRuntimeCommand {
     RequestRun(v1::RequestWorkflowRun),
     CancelRun(v1::CancelWorkflowRun),
+    SignalWait(v1::SignalWorkflowWait),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -78,6 +88,9 @@ pub enum WorkflowRuntimeEvent {
     IterationPlanned(v1::WorkflowIterationPlanned),
     IterationEvaluated(v1::WorkflowIterationEvaluated),
     RetryEvaluated(v1::WorkflowRetryEvaluated),
+    WaitSignalRecorded(v1::WorkflowWaitSignalRecorded),
+    WaitSubscribed(v1::WorkflowWaitSubscribed),
+    WaitResolved(v1::WorkflowWaitResolved),
     AttemptStarted(v1::WorkflowAttemptStarted),
     AttemptSettled(v1::WorkflowAttemptSettled),
     PortEmitted(v1::WorkflowPortEmitted),
@@ -97,6 +110,9 @@ impl WorkflowRuntimeEvent {
             Self::IterationPlanned(payload) => &payload.run_id,
             Self::IterationEvaluated(payload) => &payload.run_id,
             Self::RetryEvaluated(payload) => &payload.run_id,
+            Self::WaitSignalRecorded(payload) => &payload.run_id,
+            Self::WaitSubscribed(payload) => &payload.run_id,
+            Self::WaitResolved(payload) => &payload.run_id,
             Self::AttemptStarted(payload) => &payload.run_id,
             Self::AttemptSettled(payload) => &payload.run_id,
             Self::PortEmitted(payload) => &payload.run_id,
@@ -119,6 +135,7 @@ pub fn is_workflow_runtime_kind(kind: &str) -> bool {
         "workflow.join.",
         "workflow.iteration.",
         "workflow.retry.",
+        "workflow.wait.",
     ]
     .iter()
     .any(|prefix| kind.starts_with(prefix))
@@ -142,6 +159,12 @@ pub fn decode_workflow_command(command: &v1::CommandEnvelope) -> Result<Workflow
                 decode_payload(command.payload.as_ref(), WORKFLOW_RUN_CANCEL_TYPE)?;
             validate_cancel_request(&request)?;
             Ok(WorkflowRuntimeCommand::CancelRun(request))
+        }
+        WORKFLOW_WAIT_SIGNAL_KIND => {
+            let request: v1::SignalWorkflowWait =
+                decode_payload(command.payload.as_ref(), WORKFLOW_WAIT_SIGNAL_TYPE)?;
+            validate_wait_signal(&request)?;
+            Ok(WorkflowRuntimeCommand::SignalWait(request))
         }
         _ => Err(WorkflowRuntimeContractError::UnsupportedKind),
     }
@@ -205,6 +228,27 @@ pub fn decode_workflow_event(event: &v1::EventEnvelope) -> Result<WorkflowRuntim
             validate_retry_evaluated(&payload)?;
             validate_event_context(event, &payload.run_id)?;
             Ok(WorkflowRuntimeEvent::RetryEvaluated(payload))
+        }
+        WORKFLOW_WAIT_SIGNAL_RECORDED_KIND => {
+            let payload: v1::WorkflowWaitSignalRecorded =
+                decode_payload(event.payload.as_ref(), WORKFLOW_WAIT_SIGNAL_RECORDED_TYPE)?;
+            validate_wait_signal_recorded(&payload)?;
+            validate_event_context(event, &payload.run_id)?;
+            Ok(WorkflowRuntimeEvent::WaitSignalRecorded(payload))
+        }
+        WORKFLOW_WAIT_SUBSCRIBED_KIND => {
+            let payload: v1::WorkflowWaitSubscribed =
+                decode_payload(event.payload.as_ref(), WORKFLOW_WAIT_SUBSCRIBED_TYPE)?;
+            validate_wait_subscribed(&payload)?;
+            validate_event_context(event, &payload.run_id)?;
+            Ok(WorkflowRuntimeEvent::WaitSubscribed(payload))
+        }
+        WORKFLOW_WAIT_RESOLVED_KIND => {
+            let payload: v1::WorkflowWaitResolved =
+                decode_payload(event.payload.as_ref(), WORKFLOW_WAIT_RESOLVED_TYPE)?;
+            validate_wait_resolved(&payload)?;
+            validate_event_context(event, &payload.run_id)?;
+            Ok(WorkflowRuntimeEvent::WaitResolved(payload))
         }
         WORKFLOW_ATTEMPT_STARTED_KIND => {
             let payload: v1::WorkflowAttemptStarted =
@@ -325,6 +369,123 @@ fn validate_run_request(request: &v1::RequestWorkflowRun) -> Result<()> {
 fn validate_cancel_request(request: &v1::CancelWorkflowRun) -> Result<()> {
     validate_run_and_token(&request.run_id, &request.run_token_id)?;
     validate_identifier(&request.reason_code, 128, "reason_code")
+}
+
+fn validate_wait_signal(request: &v1::SignalWorkflowWait) -> Result<()> {
+    validate_identifier(&request.run_id, 128, "run_id")?;
+    validate_identifier(&request.signal_id, 128, "signal_id")?;
+    validate_wait_identity(
+        &request.kind,
+        &request.owner_kind,
+        &request.owner_id,
+        &request.correlation,
+        false,
+    )?;
+    validate_value(request.value.as_ref())
+}
+
+fn validate_wait_signal_recorded(payload: &v1::WorkflowWaitSignalRecorded) -> Result<()> {
+    validate_identifier(&payload.run_id, 128, "run_id")?;
+    validate_identifier(&payload.signal_id, 128, "signal_id")?;
+    validate_identifier(&payload.signal_command_id, 128, "signal_command_id")?;
+    validate_wait_identity(
+        &payload.kind,
+        &payload.owner_kind,
+        &payload.owner_id,
+        &payload.correlation,
+        false,
+    )?;
+    validate_value(payload.value.as_ref())
+}
+
+fn validate_wait_subscribed(payload: &v1::WorkflowWaitSubscribed) -> Result<()> {
+    validate_run_and_token(&payload.run_id, &payload.run_token_id)?;
+    for (value, code) in [
+        (&payload.subscription_id, "subscription_id"),
+        (&payload.wait_node_id, "wait_node_id"),
+        (&payload.execution_token_id, "execution_token_id"),
+        (&payload.controller_attempt_id, "controller_attempt_id"),
+        (&payload.workflow_id, "workflow_id"),
+        (&payload.revision_id, "revision_id"),
+        (&payload.input_value_id, "input_value_id"),
+    ] {
+        validate_identifier(value, 128, code)?;
+    }
+    validate_digest(&payload.package_digest, "package_digest")?;
+    validate_digest(&payload.input_sha256, "input_sha256")?;
+    validate_wait_identity(
+        &payload.kind,
+        &payload.owner_kind,
+        &payload.owner_id,
+        &payload.correlation,
+        true,
+    )?;
+    if payload.expires_at_unix_millis <= 0 {
+        return invalid("wait_expiry");
+    }
+    Ok(())
+}
+
+fn validate_wait_resolved(payload: &v1::WorkflowWaitResolved) -> Result<()> {
+    validate_run_and_token(&payload.run_id, &payload.run_token_id)?;
+    validate_identifier(&payload.subscription_id, 128, "subscription_id")?;
+    let decision = v1::WorkflowWaitDecision::try_from(payload.decision)
+        .map_err(|_| invalid_error("wait_decision"))?;
+    match decision {
+        v1::WorkflowWaitDecision::Resumed => {
+            validate_identifier(&payload.signal_id, 128, "signal_id")?;
+            validate_value(payload.output.as_ref())?;
+            if !payload.reason_code.is_empty() {
+                return invalid("wait_resume_contract");
+            }
+        }
+        v1::WorkflowWaitDecision::Expired => {
+            if !payload.signal_id.is_empty() {
+                return invalid("wait_expiry_contract");
+            }
+            validate_value(payload.output.as_ref())?;
+            if payload.reason_code != "wait.expired" {
+                return invalid("wait_expiry_contract");
+            }
+        }
+        v1::WorkflowWaitDecision::Cancelled => {
+            if !payload.signal_id.is_empty() || payload.output.is_some() {
+                return invalid("wait_cancellation_contract");
+            }
+            validate_identifier(&payload.reason_code, 128, "reason_code")?;
+        }
+        v1::WorkflowWaitDecision::Unspecified => return invalid("wait_decision"),
+    }
+    Ok(())
+}
+
+fn validate_wait_identity(
+    kind: &str,
+    owner_kind: &str,
+    owner_id: &str,
+    correlation: &[v1::WorkflowWaitCorrelation],
+    timer_allowed: bool,
+) -> Result<()> {
+    if !matches!(kind, "event" | "reply") && !(timer_allowed && kind == "timer") {
+        return invalid("wait_kind");
+    }
+    if !matches!(owner_kind, "case" | "installation" | "workflow") {
+        return invalid("wait_owner_kind");
+    }
+    validate_identifier(owner_id, 128, "wait_owner_id")?;
+    if correlation.is_empty() || correlation.len() > 16 {
+        return invalid("wait_correlation_count");
+    }
+    let mut previous = None;
+    for item in correlation {
+        validate_text(&item.key, 512, "wait_correlation_key")?;
+        validate_digest(&item.sha256, "wait_correlation_digest")?;
+        if previous.is_some_and(|key: &str| key >= item.key.as_str()) {
+            return invalid("wait_correlation_order");
+        }
+        previous = Some(item.key.as_str());
+    }
+    Ok(())
 }
 
 fn validate_token_created(payload: &v1::WorkflowRunTokenCreated) -> Result<()> {

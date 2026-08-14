@@ -13,7 +13,6 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 const DATA_SCHEMA: &str = "dev.kaname.workflow.data/v1";
 const ERROR_SCHEMA: &str = "dev.kaname.workflow.error/v1";
-const CONTROL_SCHEMA: &str = "dev.kaname.workflow.control/v1";
 const ANY_SCHEMA: &str = "dev.kaname.workflow.any/v1";
 
 #[derive(Debug, Deserialize)]
@@ -426,6 +425,7 @@ fn execution_availability(node: &Node) -> &'static str {
         "control.parallel" => "executable",
         "control.for-each" => "executable",
         "control.retry" => "executable",
+        "control.wait" => "executable",
         "control.join"
             if matches!(
                 node.config.get("policy").and_then(Value::as_str),
@@ -1329,7 +1329,7 @@ fn ports_for(node: &Node) -> Result<Vec<PortContract>, &'static str> {
                     "expired",
                     PortDirection::Output,
                     PortCardinality::One,
-                    CONTROL_SCHEMA,
+                    DATA_SCHEMA,
                     false,
                 ),
                 error(),

@@ -11,11 +11,22 @@ The projection exposes separate evidence groups for:
 - output emissions and bounded value references;
 - error code and error value;
 - Match evaluation traces;
-- edge checkpoints; and
+- edge checkpoints;
+- durable timer, event, and reply subscriptions with their isolated owner,
+  exact correlation digests, expiry, revision/package pin, resolution, and
+  resolving signal; and
 - raw projected event identities and journal positions.
 
 Inline canonical JSON can be displayed directly. A storage-backed or purged value retains its identity, content type, byte count, and digest while the UI explains that content is unavailable. It is never rendered as an empty value or a successful result.
 
+Wait signals are durable and idempotent even when they arrive before the wait
+subscription exists. One signal can resolve at most one subscription. Wrong
+owners or correlations remain visible evidence but cannot resume the workflow;
+timers resume at their recorded deadline, event/reply waits expire at theirs,
+and cancellation records an explicit cancelled wait before settling its node.
+
 The production Automations screen uses a fixed-size graph world inside two-axis scrolling, with explicit zoom controls. Narrow windows drill from the run list into detail instead of compressing the list, canvas, and inspector into one unreadable row.
 
-This slice is read-only. It does not execute workflows, dereference future object storage, access accounts or credentials, invoke providers, or perform external effects.
+The inspection transport itself is read-only. It does not dereference scoped
+storage, access accounts or credentials, invoke providers, or perform external
+effects; wait execution remains inside the typed durable runtime.

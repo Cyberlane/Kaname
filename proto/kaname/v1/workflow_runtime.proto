@@ -65,6 +65,24 @@ message CancelWorkflowRun {
   reserved 4 to 15;
 }
 
+message WorkflowWaitCorrelation {
+  string key = 1;
+  string sha256 = 2;
+  reserved 3 to 10;
+}
+
+// Payload for command kind `workflow.wait.signal`.
+message SignalWorkflowWait {
+  string run_id = 1;
+  string signal_id = 2;
+  string kind = 3;
+  string owner_kind = 4;
+  string owner_id = 5;
+  repeated WorkflowWaitCorrelation correlation = 6;
+  WorkflowValueReference value = 7;
+  reserved 8 to 20;
+}
+
 // Payload for event kind `workflow.run.token-created`.
 message WorkflowRunTokenCreated {
   string run_id = 1;
@@ -217,6 +235,56 @@ message WorkflowRetryEvaluated {
   WorkflowValueReference retry_input = 14;
   WorkflowValueReference error = 15;
   reserved 16 to 25;
+}
+
+message WorkflowWaitSignalRecorded {
+  string run_id = 1;
+  string signal_id = 2;
+  string signal_command_id = 3;
+  string kind = 4;
+  string owner_kind = 5;
+  string owner_id = 6;
+  repeated WorkflowWaitCorrelation correlation = 7;
+  WorkflowValueReference value = 8;
+  reserved 9 to 20;
+}
+
+message WorkflowWaitSubscribed {
+  string run_id = 1;
+  string run_token_id = 2;
+  string subscription_id = 3;
+  string wait_node_id = 4;
+  string execution_token_id = 5;
+  string controller_attempt_id = 6;
+  string workflow_id = 7;
+  string revision_id = 8;
+  string package_digest = 9;
+  string kind = 10;
+  string owner_kind = 11;
+  string owner_id = 12;
+  repeated WorkflowWaitCorrelation correlation = 13;
+  string input_value_id = 14;
+  string input_sha256 = 15;
+  int64 expires_at_unix_millis = 16;
+  reserved 17 to 25;
+}
+
+enum WorkflowWaitDecision {
+  WORKFLOW_WAIT_DECISION_UNSPECIFIED = 0;
+  WORKFLOW_WAIT_DECISION_RESUMED = 1;
+  WORKFLOW_WAIT_DECISION_EXPIRED = 2;
+  WORKFLOW_WAIT_DECISION_CANCELLED = 3;
+}
+
+message WorkflowWaitResolved {
+  string run_id = 1;
+  string run_token_id = 2;
+  string subscription_id = 3;
+  WorkflowWaitDecision decision = 4;
+  string signal_id = 5;
+  WorkflowValueReference output = 6;
+  string reason_code = 7;
+  reserved 8 to 20;
 }
 
 // Payload for event kind `workflow.attempt.started`.
@@ -486,6 +554,44 @@ message WorkflowProjectedRetryEvaluation {
   reserved 15 to 25;
 }
 
+message WorkflowProjectedWait {
+  string subscription_id = 1;
+  string wait_node_id = 2;
+  string execution_token_id = 3;
+  string controller_attempt_id = 4;
+  string workflow_id = 5;
+  string revision_id = 6;
+  string package_digest = 7;
+  string kind = 8;
+  string owner_kind = 9;
+  string owner_id = 10;
+  repeated WorkflowWaitCorrelation correlation = 11;
+  string input_value_id = 12;
+  string input_sha256 = 13;
+  string status = 14;
+  string decision = 15;
+  string resolving_signal_id = 16;
+  WorkflowProjectedValue output = 17;
+  string reason_code = 18;
+  int64 expires_at_unix_millis = 19;
+  uint64 subscribed_store_position = 20;
+  uint64 resolved_store_position = 21;
+  reserved 22 to 30;
+}
+
+message WorkflowProjectedWaitSignal {
+  string signal_id = 1;
+  string signal_command_id = 2;
+  string kind = 3;
+  string owner_kind = 4;
+  string owner_id = 5;
+  repeated WorkflowWaitCorrelation correlation = 6;
+  WorkflowProjectedValue value = 7;
+  int64 recorded_at_unix_millis = 8;
+  uint64 store_position = 9;
+  reserved 10 to 20;
+}
+
 message WorkflowProjectedMatchTrace {
   string event_id = 1;
   string attempt_id = 2;
@@ -537,7 +643,9 @@ message WorkflowProjectedRun {
   repeated WorkflowProjectedJoinEvaluation joins = 25;
   repeated WorkflowProjectedIteration iterations = 26;
   repeated WorkflowProjectedRetryEvaluation retries = 27;
-  reserved 28 to 35;
+  repeated WorkflowProjectedWait waits = 28;
+  repeated WorkflowProjectedWaitSignal wait_signals = 29;
+  reserved 30 to 35;
 }
 
 message WorkflowRunInspectionResponse {

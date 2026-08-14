@@ -119,6 +119,12 @@
       "1": "WORKFLOW_RUN_OUTCOME_SUCCEEDED",
       "2": "WORKFLOW_RUN_OUTCOME_FAILED",
       "3": "WORKFLOW_RUN_OUTCOME_CANCELLED"
+    },
+    "workflow_runtime.WorkflowWaitDecision": {
+      "0": "WORKFLOW_WAIT_DECISION_UNSPECIFIED",
+      "1": "WORKFLOW_WAIT_DECISION_RESUMED",
+      "2": "WORKFLOW_WAIT_DECISION_EXPIRED",
+      "3": "WORKFLOW_WAIT_DECISION_CANCELLED"
     }
   },
   "messages": {
@@ -566,6 +572,15 @@
       "6": "string trigger_event_id",
       "7": "WorkflowInputBinding inputs"
     },
+    "workflow_runtime.SignalWorkflowWait": {
+      "1": "string run_id",
+      "2": "string signal_id",
+      "3": "string kind",
+      "4": "string owner_kind",
+      "5": "string owner_id",
+      "6": "WorkflowWaitCorrelation correlation",
+      "7": "WorkflowValueReference value"
+    },
     "workflow_runtime.WorkflowAttemptSettled": {
       "1": "string run_id",
       "10": "string execution_token_id",
@@ -853,6 +868,8 @@
       "25": "WorkflowProjectedJoinEvaluation joins",
       "26": "WorkflowProjectedIteration iterations",
       "27": "WorkflowProjectedRetryEvaluation retries",
+      "28": "WorkflowProjectedWait waits",
+      "29": "WorkflowProjectedWaitSignal wait_signals",
       "3": "string request_command_id",
       "4": "string workflow_id",
       "5": "string revision_id",
@@ -870,6 +887,40 @@
       "5": "bytes inline_canonical_json",
       "6": "string storage_reference_id",
       "7": "string availability"
+    },
+    "workflow_runtime.WorkflowProjectedWait": {
+      "1": "string subscription_id",
+      "10": "string owner_id",
+      "11": "WorkflowWaitCorrelation correlation",
+      "12": "string input_value_id",
+      "13": "string input_sha256",
+      "14": "string status",
+      "15": "string decision",
+      "16": "string resolving_signal_id",
+      "17": "WorkflowProjectedValue output",
+      "18": "string reason_code",
+      "19": "int64 expires_at_unix_millis",
+      "2": "string wait_node_id",
+      "20": "uint64 subscribed_store_position",
+      "21": "uint64 resolved_store_position",
+      "3": "string execution_token_id",
+      "4": "string controller_attempt_id",
+      "5": "string workflow_id",
+      "6": "string revision_id",
+      "7": "string package_digest",
+      "8": "string kind",
+      "9": "string owner_kind"
+    },
+    "workflow_runtime.WorkflowProjectedWaitSignal": {
+      "1": "string signal_id",
+      "2": "string signal_command_id",
+      "3": "string kind",
+      "4": "string owner_kind",
+      "5": "string owner_id",
+      "6": "WorkflowWaitCorrelation correlation",
+      "7": "WorkflowProjectedValue value",
+      "8": "int64 recorded_at_unix_millis",
+      "9": "uint64 store_position"
     },
     "workflow_runtime.WorkflowRetryEvaluated": {
       "1": "string run_id",
@@ -943,6 +994,47 @@
       "4": "string sha256",
       "5": "bytes inline_canonical_json",
       "6": "string storage_reference_id"
+    },
+    "workflow_runtime.WorkflowWaitCorrelation": {
+      "1": "string key",
+      "2": "string sha256"
+    },
+    "workflow_runtime.WorkflowWaitResolved": {
+      "1": "string run_id",
+      "2": "string run_token_id",
+      "3": "string subscription_id",
+      "4": "WorkflowWaitDecision decision",
+      "5": "string signal_id",
+      "6": "WorkflowValueReference output",
+      "7": "string reason_code"
+    },
+    "workflow_runtime.WorkflowWaitSignalRecorded": {
+      "1": "string run_id",
+      "2": "string signal_id",
+      "3": "string signal_command_id",
+      "4": "string kind",
+      "5": "string owner_kind",
+      "6": "string owner_id",
+      "7": "WorkflowWaitCorrelation correlation",
+      "8": "WorkflowValueReference value"
+    },
+    "workflow_runtime.WorkflowWaitSubscribed": {
+      "1": "string run_id",
+      "10": "string kind",
+      "11": "string owner_kind",
+      "12": "string owner_id",
+      "13": "WorkflowWaitCorrelation correlation",
+      "14": "string input_value_id",
+      "15": "string input_sha256",
+      "16": "int64 expires_at_unix_millis",
+      "2": "string run_token_id",
+      "3": "string subscription_id",
+      "4": "string wait_node_id",
+      "5": "string execution_token_id",
+      "6": "string controller_attempt_id",
+      "7": "string workflow_id",
+      "8": "string revision_id",
+      "9": "string package_digest"
     }
   }
 }

@@ -385,8 +385,9 @@ struct DesktopDurableWorkflowRunsView: View {
             let retries = run.retries.filter {
                 $0.retryNodeID == node.id || $0.targetNodeID == node.id
             }
-            if iterations.isEmpty, retries.isEmpty {
-                explainedEmpty("This node has no iteration or retry controller evidence.")
+            let waits = run.waits.filter { $0.waitNodeID == node.id }
+            if iterations.isEmpty, retries.isEmpty, waits.isEmpty {
+                explainedEmpty("This node has no iteration, retry, or durable wait evidence.")
             } else {
                 VStack(alignment: .leading, spacing: 7) {
                     ForEach(iterations) { iteration in
@@ -399,6 +400,26 @@ struct DesktopDurableWorkflowRunsView: View {
                         evidenceCard(
                             title: "Retry \(retry.decision) · attempt \(retry.nextAttemptNumber)/\(retry.maximumAttempts)",
                             detail: "Target \(retry.targetNodeID)\nError \(retry.errorCode)\nDelay \(retry.delayMilliseconds) ms · eligible \(retry.eligibleAtUnixMillis.map(String.init) ?? "not scheduled")\nJournal \(retry.storePosition)"
+                        )
+                    }
+                    ForEach(waits) { wait in
+                        let correlation = wait.correlation
+                            .map { "\($0.key)=\($0.sha256.prefix(12))…" }
+                            .joined(separator: "\n")
+                        let signal = wait.resolvingSignalID.flatMap { signalID in
+                            run.waitSignals.first { $0.signalID == signalID }
+                        }
+                        let observed = run.waitSignals.filter {
+                            $0.kind == wait.kind
+                                && $0.ownerKind == wait.ownerKind
+                                && $0.ownerID == wait.ownerID
+                        }.map {
+                            let match = $0.correlation == wait.correlation ? "exact" : "correlation mismatch"
+                            return "\($0.signalID) · \(match) · journal \($0.storePosition)"
+                        }.joined(separator: "\n")
+                        evidenceCard(
+                            title: "\(wait.kind.capitalized) wait · \(wait.status)",
+                            detail: "Subscription \(wait.subscriptionID)\nOwner \(wait.ownerKind):\(wait.ownerID)\nCorrelation\n\(correlation)\nExpires \(wait.expiresAtUnixMillis)\nSignal \(wait.resolvingSignalID ?? "not received")\(signal.map { " at journal \($0.storePosition)" } ?? "")\nObserved signals\n\(observed.nilIfBlank ?? "none")\nPinned revision \(wait.revisionID)\nJournal \(wait.subscribedStorePosition)…\(wait.resolvedStorePosition.map(String.init) ?? "active")"
                         )
                     }
                 }

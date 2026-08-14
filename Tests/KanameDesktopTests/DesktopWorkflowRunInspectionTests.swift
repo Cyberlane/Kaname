@@ -47,6 +47,10 @@ struct DesktopWorkflowRunInspectionTests {
         #expect(run.iterations.first?.failedExecutionTokenIDs == ["token-failed"])
         #expect(run.retries.first?.decision == "scheduled")
         #expect(run.retries.first?.eligibleAtUnixMillis == 2_000)
+        #expect(run.waits.first?.kind == "reply")
+        #expect(run.waits.first?.decision == "resumed")
+        #expect(run.waits.first?.revisionID == "revision-v2")
+        #expect(run.waitSignals.first?.signalID == "signal-run-v2")
         #expect(run.events.map(\.storePosition) == [11, 12, 13, 14, 15])
     }
 }
@@ -216,6 +220,40 @@ private actor HistoricalRunTransport:
         retry.retryInput = value
         retry.error = value
         retry.storePosition = 15
+        var correlation = Kaname_V1_WorkflowWaitCorrelation()
+        correlation.key = "input:/caseId"
+        correlation.sha256 = String(repeating: "d", count: 64)
+        var wait = Kaname_V1_WorkflowProjectedWait()
+        wait.subscriptionID = "subscription-\(id)"
+        wait.waitNodeID = "trigger"
+        wait.executionTokenID = token.executionTokenID
+        wait.controllerAttemptID = attempt.attemptID
+        wait.workflowID = "workflow-one"
+        wait.revisionID = revision
+        wait.packageDigest = String(repeating: digest, count: 64)
+        wait.kind = "reply"
+        wait.ownerKind = "workflow"
+        wait.ownerID = "workflow-one"
+        wait.correlation = [correlation]
+        wait.inputValueID = value.valueID
+        wait.inputSha256 = value.sha256
+        wait.status = "resumed"
+        wait.decision = "resumed"
+        wait.resolvingSignalID = "signal-\(id)"
+        wait.output = value
+        wait.expiresAtUnixMillis = 2_000
+        wait.subscribedStorePosition = 12
+        wait.resolvedStorePosition = 15
+        var waitSignal = Kaname_V1_WorkflowProjectedWaitSignal()
+        waitSignal.signalID = "signal-\(id)"
+        waitSignal.signalCommandID = "command-signal-\(id)"
+        waitSignal.kind = "reply"
+        waitSignal.ownerKind = "workflow"
+        waitSignal.ownerID = "workflow-one"
+        waitSignal.correlation = [correlation]
+        waitSignal.value = value
+        waitSignal.recordedAtUnixMillis = 1_035
+        waitSignal.storePosition = 14
         var trace = Kaname_V1_WorkflowProjectedMatchTrace()
         trace.eventID = "event-trace-\(id)"
         trace.attemptID = attempt.attemptID
@@ -246,6 +284,8 @@ private actor HistoricalRunTransport:
         projected.executionTokens = [token]
         projected.iterations = [iteration]
         projected.retries = [retry]
+        projected.waits = [wait]
+        projected.waitSignals = [waitSignal]
         projected.events = (11...15).map { position in
             var event = Kaname_V1_WorkflowProjectedEventReference()
             event.eventID = "event-\(id)-\(position)"

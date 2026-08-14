@@ -123,6 +123,14 @@ pub struct WorkflowCancellationReceipt {
     pub duplicate: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowWaitSignalReceipt {
+    pub run_id: String,
+    pub signal_id: String,
+    pub event_id: String,
+    pub duplicate: bool,
+}
+
 /// Host-resolved storage ownership. Runtime request fields pin these values in
 /// the journal, but never authorize themselves.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,6 +241,8 @@ struct RecordedRun {
     joins: Vec<RecordedJoin>,
     iterations: Vec<RecordedIteration>,
     retries: Vec<RecordedRetry>,
+    wait_signals: BTreeMap<String, RecordedWaitSignal>,
+    waits: BTreeMap<String, RecordedWait>,
     attempts: Vec<RecordedAttempt>,
     emissions: BTreeMap<String, RecordedEmission>,
     edges: Vec<RecordedEdge>,
@@ -265,6 +275,20 @@ struct RecordedIteration {
 struct RecordedRetry {
     event_id: String,
     payload: v1::WorkflowRetryEvaluated,
+}
+
+struct RecordedWaitSignal {
+    event_id: String,
+    store_position: u64,
+    occurred_at_unix_millis: i64,
+    payload: v1::WorkflowWaitSignalRecorded,
+}
+
+struct RecordedWait {
+    subscribed_event_id: String,
+    subscribed: v1::WorkflowWaitSubscribed,
+    resolved_event_id: Option<String>,
+    resolved: Option<v1::WorkflowWaitResolved>,
 }
 
 struct RecordedAttempt {
@@ -410,6 +434,11 @@ fn execute_internal(
                 "request_kind_required",
             ));
         }
+        WorkflowRuntimeCommand::SignalWait(_) => {
+            return Err(WorkflowExecutionError::InvalidCommand(
+                "request_kind_required",
+            ));
+        }
     };
     let package = load_execution_package(library, &request)?;
     validate_storage_authority(&package, &request, storage.is_some(), authority)?;
@@ -494,6 +523,11 @@ pub fn request_cancellation(
                 "cancellation_kind_required",
             ));
         }
+        WorkflowRuntimeCommand::SignalWait(_) => {
+            return Err(WorkflowExecutionError::InvalidCommand(
+                "cancellation_kind_required",
+            ));
+        }
     };
     let state = recorded_run(journal, &request.run_id)?;
     let token = state
@@ -530,6 +564,52 @@ pub fn request_cancellation(
     Ok(WorkflowCancellationReceipt {
         run_id: request.run_id,
         run_token_id: request.run_token_id,
+        event_id,
+        duplicate: append.duplicate,
+    })
+}
+
+/// Durably records an externally supplied event/reply signal. The run and its
+/// wait subscription may be created before or after this command; matching is
+/// performed only by the pinned wait identity during execution.
+pub fn record_wait_signal(
+    journal: &mut Journal,
+    command: &v1::CommandEnvelope,
+) -> Result<WorkflowWaitSignalReceipt> {
+    let signal = match workflow_runtime::decode_workflow_command(command)
+        .map_err(|_| WorkflowExecutionError::InvalidCommand("wait_signal_contract"))?
+    {
+        WorkflowRuntimeCommand::SignalWait(signal) => signal,
+        _ => {
+            return Err(WorkflowExecutionError::InvalidCommand(
+                "wait_signal_kind_required",
+            ));
+        }
+    };
+    journal.admit_command(command)?;
+    let event_id = stable_id("event", &[&signal.run_id, "wait-signal", &signal.signal_id]);
+    let event = runtime_event(
+        command.submitted_at_unix_millis,
+        &event_id,
+        workflow_runtime::WORKFLOW_WAIT_SIGNAL_RECORDED_KIND,
+        workflow_runtime::WORKFLOW_WAIT_SIGNAL_RECORDED_TYPE,
+        v1::WorkflowWaitSignalRecorded {
+            run_id: signal.run_id.clone(),
+            signal_id: signal.signal_id.clone(),
+            signal_command_id: command.command_id.clone(),
+            kind: signal.kind,
+            owner_kind: signal.owner_kind,
+            owner_id: signal.owner_id,
+            correlation: signal.correlation,
+            value: signal.value,
+        },
+        &command.command_id,
+        &signal.run_id,
+    );
+    let append = journal.append_event(event)?;
+    Ok(WorkflowWaitSignalReceipt {
+        run_id: signal.run_id,
+        signal_id: signal.signal_id,
         event_id,
         duplicate: append.duplicate,
     })
@@ -683,6 +763,24 @@ fn load_execution_package(
                 return Err(WorkflowExecutionError::Unsupported("retry_contract".into()));
             }
         }
+        if node.node_type == "control.wait" {
+            let config: WaitConfig = serde_json::from_value(node.config.clone())
+                .map_err(|_| WorkflowExecutionError::Integrity("wait_config".into()))?;
+            let mut keys = BTreeSet::new();
+            if !matches!(config.kind.as_str(), "timer" | "event" | "reply")
+                || config.correlation.is_empty()
+                || config.correlation.len() > 16
+                || config.expiry_seconds == 0
+                || config.expiry_seconds > 31_536_000
+                || config.correlation.iter().any(|selector| {
+                    selector.root != "input"
+                        || selector.pointer.is_empty()
+                        || !keys.insert(format!("{}:{}", selector.root, selector.pointer))
+                })
+            {
+                return Err(WorkflowExecutionError::Unsupported("wait_contract".into()));
+            }
+        }
     }
     for (key, declaration) in &compiled.storage {
         if key != &declaration.key
@@ -785,6 +883,7 @@ fn validate_compiled_subset(compiled: &CompiledWorkflow) -> Result<()> {
                     | "control.join"
                     | "control.for-each"
                     | "control.retry"
+                    | "control.wait"
                     | "storage.read"
                     | "storage.write"
                     | "storage.promote"
@@ -885,6 +984,35 @@ fn next_events(
 
     if let Some(cancellation) = state.cancellation.as_ref() {
         if let Some(active) = active_attempt(state)? {
+            if let Some(wait) = state.waits.values().find(|wait| {
+                wait.subscribed.controller_attempt_id == active.started.attempt_id
+                    && wait.resolved.is_none()
+            }) {
+                return Ok(vec![runtime_event(
+                    cancellation_time(state, command.submitted_at_unix_millis),
+                    &stable_id(
+                        "event",
+                        &[
+                            &request.run_id,
+                            "wait-cancelled",
+                            &wait.subscribed.subscription_id,
+                        ],
+                    ),
+                    workflow_runtime::WORKFLOW_WAIT_RESOLVED_KIND,
+                    workflow_runtime::WORKFLOW_WAIT_RESOLVED_TYPE,
+                    v1::WorkflowWaitResolved {
+                        run_id: request.run_id.clone(),
+                        run_token_id: token_id.to_owned(),
+                        subscription_id: wait.subscribed.subscription_id.clone(),
+                        decision: v1::WorkflowWaitDecision::Cancelled as i32,
+                        signal_id: String::new(),
+                        output: None,
+                        reason_code: cancellation.reason_code.clone(),
+                    },
+                    &cancellation.cancel_command_id,
+                    &request.run_id,
+                )]);
+            }
             let emissions = emissions_for_attempt(state, &active.started.attempt_id);
             let event_id = stable_id(
                 "event",
@@ -1065,6 +1193,19 @@ fn node_event_sequence(
     }
     if node.node_type == "control.retry" {
         return retry_controller_event_sequence(
+            package,
+            command,
+            request,
+            token_id,
+            state,
+            attempt,
+            node,
+            &inputs,
+            now_unix_millis,
+        );
+    }
+    if node.node_type == "control.wait" {
+        return wait_controller_event_sequence(
             package,
             command,
             request,
@@ -1734,6 +1875,295 @@ fn retry_controller_event_sequence(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+fn wait_controller_event_sequence(
+    package: &ExecutionPackage,
+    command: &v1::CommandEnvelope,
+    request: &v1::RequestWorkflowRun,
+    run_token_id: &str,
+    state: &RecordedRun,
+    attempt: &RecordedAttempt,
+    node: &CompiledNode,
+    inputs: &[(
+        Option<&v1::WorkflowEdgeCheckpointed>,
+        v1::WorkflowValueReference,
+    )],
+    now_unix_millis: i64,
+) -> Result<Vec<v1::EventEnvelope>> {
+    let config: WaitConfig = serde_json::from_value(node.config.clone())
+        .map_err(|_| WorkflowExecutionError::Integrity("wait_config".into()))?;
+    let input = inputs
+        .last()
+        .ok_or_else(|| WorkflowExecutionError::Lifecycle("wait_input_missing".into()))?
+        .1
+        .clone();
+    let correlation = wait_correlation(&input, &config)?;
+    let (owner_kind, owner_id) = wait_owner(request);
+    let subscription_id = stable_id(
+        "wait",
+        &[&request.run_id, &node.id, &attempt.started.attempt_id],
+    );
+    let recorded = state.waits.get(&subscription_id);
+    if recorded.is_none() {
+        let expiry_millis = config
+            .expiry_seconds
+            .checked_mul(1_000)
+            .and_then(|value| i64::try_from(value).ok())
+            .and_then(|value| attempt.started_at_unix_millis.checked_add(value))
+            .ok_or_else(|| WorkflowExecutionError::Integrity("wait_deadline_overflow".into()))?;
+        return Ok(vec![runtime_event(
+            command.submitted_at_unix_millis,
+            &stable_id(
+                "event",
+                &[&request.run_id, "wait-subscribed", &subscription_id],
+            ),
+            workflow_runtime::WORKFLOW_WAIT_SUBSCRIBED_KIND,
+            workflow_runtime::WORKFLOW_WAIT_SUBSCRIBED_TYPE,
+            v1::WorkflowWaitSubscribed {
+                run_id: request.run_id.clone(),
+                run_token_id: run_token_id.to_owned(),
+                subscription_id,
+                wait_node_id: node.id.clone(),
+                execution_token_id: attempt.started.execution_token_id.clone(),
+                controller_attempt_id: attempt.started.attempt_id.clone(),
+                workflow_id: request.workflow_id.clone(),
+                revision_id: request.revision_id.clone(),
+                package_digest: request.package_digest.clone(),
+                kind: config.kind,
+                owner_kind,
+                owner_id,
+                correlation,
+                input_value_id: input.value_id,
+                input_sha256: input.sha256,
+                expires_at_unix_millis: expiry_millis,
+            },
+            &attempt.started_event_id,
+            &request.run_id,
+        )]);
+    }
+    let recorded = recorded.unwrap();
+    if recorded.subscribed.run_token_id != run_token_id
+        || recorded.subscribed.wait_node_id != node.id
+        || recorded.subscribed.execution_token_id != attempt.started.execution_token_id
+        || recorded.subscribed.controller_attempt_id != attempt.started.attempt_id
+        || recorded.subscribed.workflow_id != request.workflow_id
+        || recorded.subscribed.revision_id != request.revision_id
+        || recorded.subscribed.package_digest != request.package_digest
+        || recorded.subscribed.kind != config.kind
+        || recorded.subscribed.owner_kind != owner_kind
+        || recorded.subscribed.owner_id != owner_id
+        || recorded.subscribed.correlation != correlation
+        || recorded.subscribed.input_value_id != input.value_id
+        || recorded.subscribed.input_sha256 != input.sha256
+    {
+        return Err(WorkflowExecutionError::Integrity("wait_pin_drift".into()));
+    }
+    if let Some(resolved) = recorded.resolved.as_ref() {
+        let decision = v1::WorkflowWaitDecision::try_from(resolved.decision)
+            .map_err(|_| WorkflowExecutionError::Integrity("wait_decision".into()))?;
+        return match decision {
+            v1::WorkflowWaitDecision::Resumed => controller_output_events(
+                &package.compiled,
+                command,
+                request,
+                run_token_id,
+                attempt,
+                node,
+                "resumed",
+                resolved
+                    .output
+                    .clone()
+                    .ok_or_else(|| WorkflowExecutionError::Integrity("wait_output".into()))?,
+                recorded
+                    .resolved_event_id
+                    .as_deref()
+                    .ok_or_else(|| WorkflowExecutionError::Integrity("wait_event_id".into()))?,
+            ),
+            v1::WorkflowWaitDecision::Expired => controller_output_events(
+                &package.compiled,
+                command,
+                request,
+                run_token_id,
+                attempt,
+                node,
+                "expired",
+                resolved
+                    .output
+                    .clone()
+                    .ok_or_else(|| WorkflowExecutionError::Integrity("wait_output".into()))?,
+                recorded
+                    .resolved_event_id
+                    .as_deref()
+                    .ok_or_else(|| WorkflowExecutionError::Integrity("wait_event_id".into()))?,
+            ),
+            v1::WorkflowWaitDecision::Cancelled => Err(WorkflowExecutionError::Lifecycle(
+                "cancelled_wait_without_run_cancellation".into(),
+            )),
+            v1::WorkflowWaitDecision::Unspecified => {
+                Err(WorkflowExecutionError::Integrity("wait_decision".into()))
+            }
+        };
+    }
+
+    let consumed = state
+        .waits
+        .values()
+        .filter_map(|wait| wait.resolved.as_ref())
+        .map(|resolved| resolved.signal_id.as_str())
+        .filter(|signal_id| !signal_id.is_empty())
+        .collect::<BTreeSet<_>>();
+    let matching_signal = state
+        .wait_signals
+        .values()
+        .filter(|signal| {
+            !consumed.contains(signal.payload.signal_id.as_str())
+                && signal.payload.kind == recorded.subscribed.kind
+                && signal.payload.owner_kind == recorded.subscribed.owner_kind
+                && signal.payload.owner_id == recorded.subscribed.owner_id
+                && signal.payload.correlation == recorded.subscribed.correlation
+                && signal.occurred_at_unix_millis <= recorded.subscribed.expires_at_unix_millis
+        })
+        .min_by_key(|signal| signal.store_position);
+    if let Some(signal) = matching_signal {
+        return Ok(vec![wait_resolved_event(
+            signal.occurred_at_unix_millis,
+            request,
+            run_token_id,
+            recorded,
+            v1::WorkflowWaitDecision::Resumed,
+            signal.payload.signal_id.clone(),
+            signal.payload.value.clone(),
+            String::new(),
+            &signal.event_id,
+        )]);
+    }
+    if now_unix_millis < recorded.subscribed.expires_at_unix_millis {
+        return Err(WorkflowExecutionError::WaitingUntil(
+            recorded.subscribed.expires_at_unix_millis,
+        ));
+    }
+    if recorded.subscribed.kind == "timer" {
+        let signal_id = stable_id("timer", &[&request.run_id, &subscription_id]);
+        let output = value_from_json(
+            &stable_id("value", &[&request.run_id, &subscription_id, "timer"]),
+            &json!({
+                "kind": "timer",
+                "scheduledForUnixMillis": recorded.subscribed.expires_at_unix_millis,
+                "subscriptionId": subscription_id,
+            }),
+        )?;
+        return Ok(vec![wait_resolved_event(
+            recorded.subscribed.expires_at_unix_millis,
+            request,
+            run_token_id,
+            recorded,
+            v1::WorkflowWaitDecision::Resumed,
+            signal_id,
+            Some(output),
+            String::new(),
+            &recorded.subscribed_event_id,
+        )]);
+    }
+    let output = value_from_json(
+        &stable_id("value", &[&request.run_id, &subscription_id, "expired"]),
+        &json!({
+            "kind": recorded.subscribed.kind,
+            "expiredAtUnixMillis": recorded.subscribed.expires_at_unix_millis,
+            "subscriptionId": subscription_id,
+        }),
+    )?;
+    Ok(vec![wait_resolved_event(
+        recorded.subscribed.expires_at_unix_millis,
+        request,
+        run_token_id,
+        recorded,
+        v1::WorkflowWaitDecision::Expired,
+        String::new(),
+        Some(output),
+        "wait.expired".into(),
+        &recorded.subscribed_event_id,
+    )])
+}
+
+fn wait_owner(request: &v1::RequestWorkflowRun) -> (String, String) {
+    if !request.case_id.is_empty() {
+        ("case".into(), request.case_id.clone())
+    } else if !request.installation_id.is_empty() {
+        ("installation".into(), request.installation_id.clone())
+    } else {
+        ("workflow".into(), request.workflow_id.clone())
+    }
+}
+
+fn wait_correlation(
+    input: &v1::WorkflowValueReference,
+    config: &WaitConfig,
+) -> Result<Vec<v1::WorkflowWaitCorrelation>> {
+    let root = inline_json(input)?;
+    let mut correlation = config
+        .correlation
+        .iter()
+        .map(|selector| {
+            let value = root.pointer(&selector.pointer).ok_or_else(|| {
+                WorkflowExecutionError::Lifecycle("wait_correlation_missing".into())
+            })?;
+            let canonical = workflow_canonical::canonicalize(
+                &serde_json::to_vec(value)
+                    .map_err(|_| WorkflowExecutionError::Encoding("wait_correlation"))?,
+            )
+            .map_err(|_| WorkflowExecutionError::Encoding("wait_correlation_canonical"))?;
+            Ok(v1::WorkflowWaitCorrelation {
+                key: format!("{}:{}", selector.root, selector.pointer),
+                sha256: canonical
+                    .sha256
+                    .strip_prefix("sha256:")
+                    .ok_or(WorkflowExecutionError::Encoding("wait_correlation_digest"))?
+                    .to_owned(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    correlation.sort_by(|left, right| left.key.cmp(&right.key));
+    Ok(correlation)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn wait_resolved_event(
+    occurred_at_unix_millis: i64,
+    request: &v1::RequestWorkflowRun,
+    run_token_id: &str,
+    wait: &RecordedWait,
+    decision: v1::WorkflowWaitDecision,
+    signal_id: String,
+    output: Option<v1::WorkflowValueReference>,
+    reason_code: String,
+    causation_id: &str,
+) -> v1::EventEnvelope {
+    runtime_event(
+        occurred_at_unix_millis,
+        &stable_id(
+            "event",
+            &[
+                &request.run_id,
+                "wait-resolved",
+                &wait.subscribed.subscription_id,
+            ],
+        ),
+        workflow_runtime::WORKFLOW_WAIT_RESOLVED_KIND,
+        workflow_runtime::WORKFLOW_WAIT_RESOLVED_TYPE,
+        v1::WorkflowWaitResolved {
+            run_id: request.run_id.clone(),
+            run_token_id: run_token_id.to_owned(),
+            subscription_id: wait.subscribed.subscription_id.clone(),
+            decision: decision as i32,
+            signal_id,
+            output,
+            reason_code,
+        },
+        causation_id,
+        &request.run_id,
+    )
+}
+
 fn classify_retry_decision(
     error: &Value,
     error_code: &str,
@@ -2219,6 +2649,14 @@ struct RetryBackoffConfig {
     maximum_seconds: f64,
     #[serde(default = "default_retry_jitter")]
     jitter: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WaitConfig {
+    kind: String,
+    correlation: Vec<StorageValueSelector>,
+    expiry_seconds: u64,
 }
 
 fn default_retry_jitter() -> String {
@@ -3958,6 +4396,58 @@ fn recorded_run(journal: &Journal, run_id: &str) -> Result<RecordedRun> {
                     event_id: envelope.event_id,
                     payload,
                 });
+            }
+            WorkflowRuntimeEvent::WaitSignalRecorded(payload) => {
+                if state
+                    .wait_signals
+                    .insert(
+                        payload.signal_id.clone(),
+                        RecordedWaitSignal {
+                            event_id: envelope.event_id,
+                            store_position: envelope.store_position,
+                            occurred_at_unix_millis: envelope.occurred_at_unix_millis,
+                            payload,
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(WorkflowExecutionError::Lifecycle(
+                        "duplicate_wait_signal".into(),
+                    ));
+                }
+            }
+            WorkflowRuntimeEvent::WaitSubscribed(payload) => {
+                if state
+                    .waits
+                    .insert(
+                        payload.subscription_id.clone(),
+                        RecordedWait {
+                            subscribed_event_id: envelope.event_id,
+                            subscribed: payload,
+                            resolved_event_id: None,
+                            resolved: None,
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(WorkflowExecutionError::Lifecycle(
+                        "duplicate_wait_subscription".into(),
+                    ));
+                }
+            }
+            WorkflowRuntimeEvent::WaitResolved(payload) => {
+                let wait = state
+                    .waits
+                    .get_mut(&payload.subscription_id)
+                    .ok_or_else(|| {
+                        WorkflowExecutionError::Lifecycle("wait_subscription_missing".into())
+                    })?;
+                if wait.resolved.replace(payload).is_some() {
+                    return Err(WorkflowExecutionError::Lifecycle(
+                        "wait_resolved_twice".into(),
+                    ));
+                }
+                wait.resolved_event_id = Some(envelope.event_id);
             }
             WorkflowRuntimeEvent::AttemptStarted(payload) => {
                 if state
