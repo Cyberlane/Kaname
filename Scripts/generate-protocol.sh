@@ -64,6 +64,7 @@ proto_inputs=(
   kaname/v1/notification.proto
   kaname/v1/sync.proto
   kaname/v1/workflow.proto
+  kaname/v1/workflow_runtime.proto
 )
 
 "$protoc" \

@@ -9,6 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "../../proto/kaname/v1/notification.proto",
         "../../proto/kaname/v1/sync.proto",
         "../../proto/kaname/v1/workflow.proto",
+        "../../proto/kaname/v1/workflow_runtime.proto",
     ];
     let protoc = protoc_bin_vendored::protoc_bin_path()?;
     let mut config = prost_build::Config::new();

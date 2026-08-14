@@ -128,6 +128,96 @@ struct WorkflowProtocolContractTests {
     }
 
     @Test
+    func workflowRuntimeCommandsAndEventsRoundTripAsTypedPayloads() throws {
+        let value = runtimeValue(id: "value-five", json: #"{"value":5}"#)
+        var input = Kaname_V1_WorkflowInputBinding()
+        input.portID = "input"
+        input.value = value
+        var request = Kaname_V1_RequestWorkflowRun()
+        request.runID = "run-one"
+        request.workflowID = "workflow-one"
+        request.revisionID = "revision-six"
+        request.packageDigest = String(repeating: "a", count: 64)
+        request.triggerKind = "manual"
+        request.inputs = [input]
+        var cancel = Kaname_V1_CancelWorkflowRun()
+        cancel.runID = request.runID
+        cancel.runTokenID = "run-token-one"
+        cancel.reasonCode = "owner-requested"
+        var token = Kaname_V1_WorkflowRunTokenCreated()
+        token.runID = request.runID
+        token.runTokenID = cancel.runTokenID
+        token.requestCommandID = "command-run-one"
+        token.workflowID = request.workflowID
+        token.revisionID = request.revisionID
+        token.packageDigest = request.packageDigest
+        var started = Kaname_V1_WorkflowAttemptStarted()
+        started.runID = request.runID
+        started.runTokenID = token.runTokenID
+        started.attemptID = "attempt-one"
+        started.nodeID = "match-route"
+        started.attemptNumber = 1
+        var emitted = Kaname_V1_WorkflowPortEmitted()
+        emitted.runID = request.runID
+        emitted.runTokenID = token.runTokenID
+        emitted.emissionID = "emission-five"
+        emitted.attemptID = started.attemptID
+        emitted.nodeID = started.nodeID
+        emitted.portID = "case-five"
+        emitted.value = value
+        var edge = Kaname_V1_WorkflowEdgeCheckpointed()
+        edge.runID = request.runID
+        edge.runTokenID = token.runTokenID
+        edge.edgeID = "edge-five"
+        edge.emissionID = emitted.emissionID
+        edge.targetNodeID = "complete"
+        edge.targetPortID = "input"
+        edge.state = .admitted
+        var trace = Kaname_V1_WorkflowMatchTraceRecorded()
+        trace.runID = request.runID
+        trace.runTokenID = token.runTokenID
+        trace.attemptID = started.attemptID
+        trace.nodeID = started.nodeID
+        trace.inputValueID = value.valueID
+        trace.evaluatedCaseIds = ["case-five"]
+        trace.matchedCaseIds = ["case-five"]
+        trace.emittedPortIds = ["case-five"]
+        trace.trace = runtimeValue(id: "trace-five", json: #"{"matched":"case-five"}"#)
+        var attemptSettled = Kaname_V1_WorkflowAttemptSettled()
+        attemptSettled.runID = request.runID
+        attemptSettled.runTokenID = token.runTokenID
+        attemptSettled.attemptID = started.attemptID
+        attemptSettled.nodeID = started.nodeID
+        attemptSettled.attemptNumber = 1
+        attemptSettled.outcome = .succeeded
+        attemptSettled.emissionIds = [emitted.emissionID]
+        var cancellation = Kaname_V1_WorkflowRunCancellationRequested()
+        cancellation.runID = request.runID
+        cancellation.runTokenID = token.runTokenID
+        cancellation.cancelCommandID = "command-cancel-one"
+        cancellation.reasonCode = "owner-requested"
+        var settled = Kaname_V1_WorkflowRunSettled()
+        settled.runID = request.runID
+        settled.runTokenID = token.runTokenID
+        settled.outcome = .succeeded
+        settled.finalEmissionIds = [emitted.emissionID]
+
+        try roundTrip(request)
+        try roundTrip(cancel)
+        try roundTrip(token)
+        try roundTrip(started)
+        try roundTrip(emitted)
+        try roundTrip(edge)
+        try roundTrip(trace)
+        try roundTrip(attemptSettled)
+        try roundTrip(cancellation)
+        try roundTrip(settled)
+        let requestWire = try request.serializedData()
+        #expect(!String(decoding: requestWire, as: UTF8.self).contains("workspace_path"))
+        #expect(!String(decoding: requestWire, as: UTF8.self).contains("credential"))
+    }
+
+    @Test
     func malformedWireFailsWithoutProducingAPartialRequest() {
         #expect(throws: (any Error).self) {
             _ = try Kaname_V1_CompileWorkflowRequest(serializedBytes: [0x0a])
@@ -148,5 +238,21 @@ struct WorkflowProtocolContractTests {
         var version = Kaname_V1_SchemaVersion()
         version.major = 1
         return version
+    }
+
+    private func runtimeValue(id: String, json: String) -> Kaname_V1_WorkflowValueReference {
+        let data = Data(json.utf8)
+        var value = Kaname_V1_WorkflowValueReference()
+        value.valueID = id
+        value.contentType = "application/json"
+        value.byteCount = UInt64(data.count)
+        value.sha256 = String(repeating: "a", count: 64)
+        value.inlineCanonicalJson = data
+        return value
+    }
+
+    private func roundTrip<M: SwiftProtobuf.Message & Equatable>(_ message: M) throws {
+        let decoded = try M(serializedBytes: message.serializedData())
+        #expect(decoded == message)
     }
 }

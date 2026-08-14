@@ -5,7 +5,7 @@
 //! integrity substitute. Projections are rebuildable and snapshots are
 //! disposable accelerators rather than an authority for new facts.
 
-use crate::{MAXIMUM_ENVELOPE_BYTES, SCHEMA_MAJOR, v1};
+use crate::{MAXIMUM_ENVELOPE_BYTES, SCHEMA_MAJOR, v1, workflow_runtime};
 use prost::Message;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, backup::Backup, params};
 use serde::{Deserialize, Serialize};
@@ -817,6 +817,10 @@ fn validate_command(command: &v1::CommandEnvelope) -> Result<()> {
     if command.kind.len() > 128 || command.actor_id.len() > 256 {
         return Err(JournalError::Protocol("command_field_too_large"));
     }
+    if workflow_runtime::is_workflow_runtime_kind(&command.kind) {
+        workflow_runtime::validate_workflow_command(command)
+            .map_err(|_| JournalError::Protocol("invalid_workflow_runtime_command"))?;
+    }
     Ok(())
 }
 
@@ -832,6 +836,10 @@ fn validate_event_shape(event: &v1::EventEnvelope) -> Result<()> {
     }
     if event.kind.len() > 128 || event.stream_id.len() > 256 {
         return Err(JournalError::Protocol("event_field_too_large"));
+    }
+    if workflow_runtime::is_workflow_runtime_kind(&event.kind) {
+        workflow_runtime::validate_workflow_event(event)
+            .map_err(|_| JournalError::Protocol("invalid_workflow_runtime_event"))?;
     }
     Ok(())
 }

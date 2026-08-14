@@ -19,6 +19,7 @@ pub mod workflow_library;
 pub mod workflow_match;
 pub mod workflow_protocol;
 pub mod workflow_publication;
+pub mod workflow_runtime;
 pub mod workflow_schema;
 pub mod workflow_versions;
 

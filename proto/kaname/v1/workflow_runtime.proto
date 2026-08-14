@@ -1,0 +1,157 @@
+syntax = "proto3";
+
+package kaname.v1;
+
+// A value recorded directly in the bounded journal or represented by an
+// opaque storage reference. Host paths and secret material are never valid
+// references.
+message WorkflowValueReference {
+  string value_id = 1;
+  string content_type = 2;
+  uint64 byte_count = 3;
+  string sha256 = 4;
+  bytes inline_canonical_json = 5;
+  string storage_reference_id = 6;
+  reserved 7 to 15;
+  reserved "host_path", "raw_path", "secret";
+}
+
+message WorkflowInputBinding {
+  string port_id = 1;
+  WorkflowValueReference value = 2;
+  reserved 3 to 10;
+}
+
+// Payload for command kind `workflow.run.request`.
+message RequestWorkflowRun {
+  string run_id = 1;
+  string workflow_id = 2;
+  string revision_id = 3;
+  string package_digest = 4;
+  string trigger_kind = 5;
+  string trigger_event_id = 6;
+  repeated WorkflowInputBinding inputs = 7;
+  reserved 8 to 20;
+  reserved "workflow_path", "database_path", "credential";
+}
+
+// Payload for command kind `workflow.run.cancel`.
+message CancelWorkflowRun {
+  string run_id = 1;
+  string run_token_id = 2;
+  string reason_code = 3;
+  reserved 4 to 15;
+}
+
+// Payload for event kind `workflow.run.token-created`.
+message WorkflowRunTokenCreated {
+  string run_id = 1;
+  string run_token_id = 2;
+  string request_command_id = 3;
+  string workflow_id = 4;
+  string revision_id = 5;
+  string package_digest = 6;
+  reserved 7 to 20;
+}
+
+// Payload for event kind `workflow.attempt.started`.
+message WorkflowAttemptStarted {
+  string run_id = 1;
+  string run_token_id = 2;
+  string attempt_id = 3;
+  string node_id = 4;
+  uint32 attempt_number = 5;
+  reserved 6 to 15;
+}
+
+enum WorkflowAttemptOutcome {
+  WORKFLOW_ATTEMPT_OUTCOME_UNSPECIFIED = 0;
+  WORKFLOW_ATTEMPT_OUTCOME_SUCCEEDED = 1;
+  WORKFLOW_ATTEMPT_OUTCOME_FAILED = 2;
+  WORKFLOW_ATTEMPT_OUTCOME_CANCELLED = 3;
+}
+
+// Payload for event kind `workflow.attempt.settled`.
+message WorkflowAttemptSettled {
+  string run_id = 1;
+  string run_token_id = 2;
+  string attempt_id = 3;
+  string node_id = 4;
+  uint32 attempt_number = 5;
+  WorkflowAttemptOutcome outcome = 6;
+  string error_code = 7;
+  WorkflowValueReference error = 8;
+  repeated string emission_ids = 9;
+  reserved 10 to 20;
+}
+
+// Payload for event kind `workflow.port.emitted`.
+message WorkflowPortEmitted {
+  string run_id = 1;
+  string run_token_id = 2;
+  string emission_id = 3;
+  string attempt_id = 4;
+  string node_id = 5;
+  string port_id = 6;
+  WorkflowValueReference value = 7;
+  reserved 8 to 20;
+}
+
+enum WorkflowEdgeCheckpointState {
+  WORKFLOW_EDGE_CHECKPOINT_STATE_UNSPECIFIED = 0;
+  WORKFLOW_EDGE_CHECKPOINT_STATE_ADMITTED = 1;
+  WORKFLOW_EDGE_CHECKPOINT_STATE_SKIPPED = 2;
+}
+
+// Payload for event kind `workflow.edge.checkpointed`.
+message WorkflowEdgeCheckpointed {
+  string run_id = 1;
+  string run_token_id = 2;
+  string edge_id = 3;
+  string emission_id = 4;
+  string target_node_id = 5;
+  string target_port_id = 6;
+  WorkflowEdgeCheckpointState state = 7;
+  reserved 8 to 20;
+}
+
+// Payload for event kind `workflow.match.trace-recorded`.
+message WorkflowMatchTraceRecorded {
+  string run_id = 1;
+  string run_token_id = 2;
+  string attempt_id = 3;
+  string node_id = 4;
+  string input_value_id = 5;
+  repeated string evaluated_case_ids = 6;
+  repeated string matched_case_ids = 7;
+  repeated string emitted_port_ids = 8;
+  WorkflowValueReference trace = 9;
+  reserved 10 to 20;
+}
+
+// Payload for event kind `workflow.run.cancellation-requested`.
+message WorkflowRunCancellationRequested {
+  string run_id = 1;
+  string run_token_id = 2;
+  string cancel_command_id = 3;
+  string reason_code = 4;
+  reserved 5 to 15;
+}
+
+enum WorkflowRunOutcome {
+  WORKFLOW_RUN_OUTCOME_UNSPECIFIED = 0;
+  WORKFLOW_RUN_OUTCOME_SUCCEEDED = 1;
+  WORKFLOW_RUN_OUTCOME_FAILED = 2;
+  WORKFLOW_RUN_OUTCOME_CANCELLED = 3;
+}
+
+// Payload for event kind `workflow.run.settled`.
+message WorkflowRunSettled {
+  string run_id = 1;
+  string run_token_id = 2;
+  WorkflowRunOutcome outcome = 3;
+  string error_code = 4;
+  WorkflowValueReference error = 5;
+  repeated string final_emission_ids = 6;
+  reserved 7 to 20;
+}
