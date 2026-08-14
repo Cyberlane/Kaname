@@ -9284,6 +9284,16 @@ private struct DesktopAutomationsView: View {
     @State private var automationPendingDeletion: DesktopAutomationRule?
 
     var body: some View {
+        Group {
+            if CommandLine.arguments.contains("--desktop-automation-workflows-prototype") {
+                AutomationWorkflowDesignPreview()
+            } else {
+                productionWorkspace
+            }
+        }
+    }
+
+    private var productionWorkspace: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 SurfaceHeader(

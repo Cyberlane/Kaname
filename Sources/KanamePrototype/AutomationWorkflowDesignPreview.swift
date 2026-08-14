@@ -1,0 +1,4843 @@
+import KanamePrototypeUI
+import SwiftUI
+
+struct AutomationWorkflowDesignPreview: View {
+    private enum Direction: String, CaseIterable {
+        case portfolio = "Workflows"
+        case canvas = "Builder"
+        case operations = "Run history"
+    }
+
+    @State private var direction: Direction
+    @State private var selectedWorkflowID = "reply-driven"
+    private let showsMatchRoutingDesign: Bool
+
+    init() {
+        let arguments = CommandLine.arguments
+        showsMatchRoutingDesign = arguments.contains(where: { $0.hasPrefix("--desktop-automation-builder-match") })
+        let initial: Direction
+        if arguments.contains("--desktop-automation-design-runs") {
+            initial = .operations
+        } else if arguments.contains(where: { $0.hasPrefix("--desktop-automation-builder") })
+                    || arguments.contains("--desktop-automation-canvas-parallel")
+                    || arguments.contains("--desktop-automation-canvas-approval")
+                    || arguments.contains("--desktop-automation-canvas-feedback")
+                    || arguments.contains("--desktop-automation-canvas-recovery")
+                    || arguments.contains("--desktop-automation-small-readable")
+                    || arguments.contains("--desktop-automation-small-overview")
+                    || arguments.contains("--desktop-automation-small-focus")
+                    || arguments.contains("--desktop-automation-outline") {
+            initial = .canvas
+        } else {
+            initial = .portfolio
+        }
+        _direction = State(initialValue: initial)
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            VStack(spacing: 0) {
+                if proxy.size.width < 950 {
+                    compactProductHeader
+                } else {
+                    SurfaceHeader(
+                        title: "Automations",
+                        detail: "Design, connect, run, and understand every repeatable workflow",
+                        symbol: "point.3.connected.trianglepath.dotted"
+                    ) {
+                        Label("Design preview", systemImage: "hammer.fill")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Nord.auroraYellow)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(Nord.auroraYellow.opacity(0.12), in: Capsule())
+                        Button("New workflow", systemImage: "plus") {}
+                            .buttonStyle(.borderedProminent)
+                            .disabled(true)
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.top, 22)
+                    .padding(.bottom, 16)
+                }
+
+                HStack(spacing: 16) {
+                    Picker("Design direction", selection: $direction) {
+                        ForEach(Direction.allCases, id: \.self) { item in
+                            Text(item.rawValue).tag(item)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: proxy.size.width < 950 ? 300 : 390)
+
+                    Spacer()
+
+                    Label(proxy.size.width < 950 ? "Fixture only" : "Fixture data · no live actions", systemImage: "lock.shield")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 20)
+                .padding(.bottom, proxy.size.width < 950 ? 10 : 16)
+
+                Divider()
+
+                ScrollView {
+                    Group {
+                        switch direction {
+                        case .canvas:
+                            if showsMatchRoutingDesign {
+                                AutomationMatchRoutingDesignPreview()
+                            } else {
+                                AutomationCanvasPreview(workflowID: selectedWorkflowID)
+                                    .id(selectedWorkflowID)
+                            }
+                        case .portfolio:
+                            AutomationPipelinePreview(
+                                selectedWorkflowID: $selectedWorkflowID,
+                                openBuilder: { direction = .canvas },
+                                openRunHistory: { direction = .operations }
+                            )
+                        case .operations:
+                            AutomationRunsPreview()
+                        }
+                    }
+                    .padding(proxy.size.width < 950 ? 14 : 20)
+                }
+            }
+            .background(Nord.polarNight0)
+        }
+    }
+
+    private var compactProductHeader: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "point.3.connected.trianglepath.dotted")
+                .foregroundStyle(Nord.frost1)
+                .frame(width: 30, height: 30)
+                .background(Nord.frost1.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Automations").font(.headline.weight(.bold))
+                Text("Design, run, and debug repeatable work")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Label("Design preview", systemImage: "hammer.fill")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Nord.auroraYellow)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(Nord.auroraYellow.opacity(0.12), in: Capsule())
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 14)
+        .padding(.bottom, 12)
+    }
+}
+
+private enum AutomationMatchDesignOption: String, CaseIterable, Identifiable {
+    case namedPorts = "Named ports"
+    case expandedBoard = "Expanded board"
+    case objectConditions = "Object rules"
+    case errorRecovery = "Error + retry"
+
+    var id: String { rawValue }
+
+    init(arguments: [String]) {
+        if arguments.contains("--desktop-automation-builder-match-board") { self = .expandedBoard }
+        else if arguments.contains("--desktop-automation-builder-match-object") { self = .objectConditions }
+        else if arguments.contains("--desktop-automation-builder-match-error") { self = .errorRecovery }
+        else { self = .namedPorts }
+    }
+
+    var title: String {
+        switch self {
+        case .namedPorts: "Option A · Compact Match with named ports"
+        case .expandedBoard: "Option B · Expand Match into a switchboard"
+        case .objectConditions: "Option C · Match a whole object with compound conditions"
+        case .errorRecovery: "Required scenario · Match an error into retry or recovery"
+        }
+    }
+
+    var summary: String {
+        switch self {
+        case .namedPorts: "Best for a small, typed set of cases that should remain visible on the canvas"
+        case .expandedBoard: "Keeps many cases readable without turning every workflow node into a very tall card"
+        case .objectConditions: "Each output arm can combine nested fields with ALL, ANY, and NOT groups"
+        case .errorRecovery: "Routes a typed error while keeping retry policy and unknown outcomes explicit"
+        }
+    }
+}
+
+private struct AutomationMatchRoutingDesignPreview: View {
+    @State private var option: AutomationMatchDesignOption
+
+    init() {
+        _option = State(initialValue: AutomationMatchDesignOption(arguments: CommandLine.arguments))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 14) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Match routing").font(.title3.weight(.bold))
+                    Text(option.title).font(.caption.weight(.semibold)).foregroundStyle(Nord.frost1)
+                    Text(option.summary).font(.caption2).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Picker("Match design", selection: $option) {
+                    ForEach(AutomationMatchDesignOption.allCases) { item in
+                        Text(item.rawValue).tag(item)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 480)
+                Label("Design only", systemImage: "hammer.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Nord.auroraYellow)
+            }
+
+            HStack(alignment: .top, spacing: 12) {
+                AutomationMatchRoutingCanvas(option: option)
+                    .frame(maxWidth: .infinity, minHeight: 570)
+                AutomationMatchRoutingInspector(option: option)
+                    .frame(width: 310)
+                    .frame(minHeight: 570)
+            }
+        }
+        .frame(minHeight: 630, alignment: .topLeading)
+    }
+}
+
+private struct AutomationMatchRoutingCanvas: View {
+    let option: AutomationMatchDesignOption
+
+    var body: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 10) {
+                Label("Canvas", systemImage: "point.3.connected.trianglepath.dotted")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Nord.frost1)
+                Text("Readable 100%").font(.caption2).foregroundStyle(.secondary)
+                Spacer()
+                Label("One value in", systemImage: "arrow.right")
+                Label(option == .errorRecovery ? "One safe route out" : "One matching route out", systemImage: "arrow.triangle.branch")
+            }
+            .font(.caption2)
+
+            GeometryReader { proxy in
+                ZStack {
+                    Canvas { context, size in
+                        drawRoutes(context: &context, size: size)
+                    }
+                    .allowsHitTesting(false)
+
+                    switch option {
+                    case .namedPorts:
+                        namedPortsNodes(size: proxy.size)
+                    case .expandedBoard:
+                        expandedBoardNodes(size: proxy.size)
+                    case .objectConditions:
+                        objectConditionNodes(size: proxy.size)
+                    case .errorRecovery:
+                        errorRecoveryNodes(size: proxy.size)
+                    }
+                }
+            }
+            .background {
+                Canvas { context, size in
+                    var dots = Path()
+                    stride(from: CGFloat(14), through: size.width, by: 18).forEach { x in
+                        stride(from: CGFloat(14), through: size.height, by: 18).forEach { y in
+                            dots.addEllipse(in: CGRect(x: x, y: y, width: 1.2, height: 1.2))
+                        }
+                    }
+                    context.fill(dots, with: .color(Nord.polarNight3.opacity(0.38)))
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay { RoundedRectangle(cornerRadius: 12).stroke(Nord.polarNight3, lineWidth: 1) }
+
+            HStack(spacing: 14) {
+                Label("Success", systemImage: "checkmark.circle.fill").foregroundStyle(Nord.auroraGreen)
+                Label("Error", systemImage: "xmark.octagon.fill").foregroundStyle(Nord.auroraRed)
+                Label("Match route", systemImage: "arrow.triangle.branch").foregroundStyle(Nord.auroraYellow)
+                Label("Retry loop", systemImage: "arrow.clockwise").foregroundStyle(Nord.auroraOrange)
+                Spacer()
+                Text("Case order and fallback are versioned with the workflow")
+            }
+            .font(.caption2)
+        }
+        .padding(12)
+        .background(Nord.polarNight1.opacity(0.46), in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    @ViewBuilder
+    private func namedPortsNodes(size: CGSize) -> some View {
+        outputProducingNode(
+            title: "Extract priority",
+            subtitle: "Returns Int",
+            symbol: "number",
+            success: "value",
+            error: "error"
+        )
+        .frame(width: 165)
+        .position(x: size.width * 0.13, y: size.height * 0.50)
+
+        compactMatchNode(
+            title: "Match priority",
+            input: "Success.value · Int",
+            cases: [
+                ("5", "Urgent path", Nord.auroraRed),
+                ("8", "Review path", Nord.auroraYellow),
+                ("_", "Otherwise", Nord.frost1),
+            ]
+        )
+        .frame(width: 230)
+        .position(x: size.width * 0.46, y: size.height * 0.50)
+
+        routeDestination("Urgent", detail: "Notify now", symbol: "bell.badge.fill", tint: Nord.auroraRed)
+            .frame(width: 165)
+            .position(x: size.width * 0.82, y: size.height * 0.24)
+        routeDestination("Review", detail: "Human decision", symbol: "person.crop.circle.badge.questionmark", tint: Nord.auroraYellow)
+            .frame(width: 165)
+            .position(x: size.width * 0.82, y: size.height * 0.50)
+        routeDestination("Normal", detail: "Continue", symbol: "arrow.right.circle", tint: Nord.frost1)
+            .frame(width: 165)
+            .position(x: size.width * 0.82, y: size.height * 0.76)
+    }
+
+    @ViewBuilder
+    private func expandedBoardNodes(size: CGSize) -> some View {
+        outputProducingNode(
+            title: "Classify request",
+            subtitle: "Returns String?",
+            symbol: "tag",
+            success: "code",
+            error: "error"
+        )
+        .frame(width: 165)
+        .position(x: size.width * 0.11, y: size.height * 0.50)
+
+        expandedMatchBoard
+            .frame(width: 340)
+            .position(x: size.width * 0.48, y: size.height * 0.50)
+
+        routeDestination("Fast path", detail: "Codes 5 or 8", symbol: "bolt.fill", tint: Nord.auroraGreen)
+            .frame(width: 160)
+            .position(x: size.width * 0.84, y: size.height * 0.19)
+        routeDestination("Follow-up", detail: "Range 13…19", symbol: "clock.arrow.circlepath", tint: Nord.auroraPurple)
+            .frame(width: 160)
+            .position(x: size.width * 0.84, y: size.height * 0.40)
+        routeDestination("Missing value", detail: "Ask for input", symbol: "questionmark.circle", tint: Nord.auroraYellow)
+            .frame(width: 160)
+            .position(x: size.width * 0.84, y: size.height * 0.61)
+        routeDestination("Default", detail: "Safe fallback", symbol: "arrow.down.right.circle", tint: Nord.frost1)
+            .frame(width: 160)
+            .position(x: size.width * 0.84, y: size.height * 0.82)
+    }
+
+    @ViewBuilder
+    private func objectConditionNodes(size: CGSize) -> some View {
+        outputProducingNode(
+            title: "Assess request",
+            subtitle: "Returns RequestResult",
+            symbol: "curlybraces.square",
+            success: "result",
+            error: "error"
+        )
+        .frame(width: 175)
+        .position(x: size.width * 0.11, y: size.height * 0.50)
+
+        complexObjectMatchBoard
+            .frame(width: 380)
+            .position(x: size.width * 0.49, y: size.height * 0.50)
+
+        routeDestination("Priority retry", detail: "ALL + nested ANY", symbol: "arrow.clockwise", tint: Nord.auroraOrange)
+            .frame(width: 175)
+            .position(x: size.width * 0.85, y: size.height * 0.25)
+        routeDestination("Manual review", detail: "Risk or missing data", symbol: "person.crop.circle.badge.questionmark", tint: Nord.auroraYellow)
+            .frame(width: 175)
+            .position(x: size.width * 0.85, y: size.height * 0.52)
+        routeDestination("Standard path", detail: "Otherwise", symbol: "arrow.right.circle", tint: Nord.frost1)
+            .frame(width: 175)
+            .position(x: size.width * 0.85, y: size.height * 0.79)
+    }
+
+    @ViewBuilder
+    private func errorRecoveryNodes(size: CGSize) -> some View {
+        outputProducingNode(
+            title: "Apply action",
+            subtitle: "Idempotent effect",
+            symbol: "checkmark.shield",
+            success: "receipt",
+            error: "Error.kind"
+        )
+        .frame(width: 175)
+        .position(x: size.width * 0.12, y: size.height * 0.42)
+
+        compactMatchNode(
+            title: "Match error",
+            input: "Error.kind · ErrorKind",
+            cases: [
+                ("timeout", "Retry", Nord.auroraOrange),
+                ("invalid_input", "Review", Nord.auroraYellow),
+                ("unknown", "Reconcile", Nord.auroraRed),
+                ("_", "Fail safely", Nord.frost1),
+            ]
+        )
+        .frame(width: 240)
+        .position(x: size.width * 0.44, y: size.height * 0.58)
+
+        routeDestination("Receipt", detail: "Success continues", symbol: "doc.text.magnifyingglass", tint: Nord.auroraGreen)
+            .frame(width: 165)
+            .position(x: size.width * 0.82, y: size.height * 0.15)
+        routeDestination("Retry controller", detail: "Max 3 · backoff", symbol: "arrow.clockwise", tint: Nord.auroraOrange)
+            .frame(width: 175)
+            .position(x: size.width * 0.74, y: size.height * 0.38)
+        routeDestination("Human review", detail: "Correct input", symbol: "person.crop.circle.badge.exclamationmark", tint: Nord.auroraYellow)
+            .frame(width: 175)
+            .position(x: size.width * 0.80, y: size.height * 0.62)
+        routeDestination("Reconcile", detail: "Never auto-retry", symbol: "questionmark.diamond.fill", tint: Nord.auroraRed)
+            .frame(width: 175)
+            .position(x: size.width * 0.80, y: size.height * 0.84)
+    }
+
+    private var expandedMatchBoard: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.triangle.branch").foregroundStyle(Nord.auroraYellow)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Match classification.code").font(.caption.weight(.bold))
+                    Text("Expanded while selected · String?").font(.caption2).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text("FIRST MATCH")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(Nord.auroraYellow)
+            }
+            .padding(10)
+            .background(Nord.auroraYellow.opacity(0.08))
+
+            expandedBoardRow("01", pattern: "5 | 8", destination: "Fast path", tint: Nord.auroraGreen)
+            expandedBoardRow("02", pattern: "13…19", destination: "Follow-up", tint: Nord.auroraPurple)
+            expandedBoardRow("03", pattern: "null", destination: "Missing value", tint: Nord.auroraYellow)
+            expandedBoardRow("04", pattern: "\"blocked\"", destination: "Human review", tint: Nord.auroraRed)
+            expandedBoardRow("05", pattern: "_ otherwise", destination: "Default", tint: Nord.frost1)
+            Button("Add case", systemImage: "plus") {}
+                .buttonStyle(.plain)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(Nord.frost1)
+                .padding(9)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
+        .overlay { RoundedRectangle(cornerRadius: 12).stroke(Nord.auroraYellow.opacity(0.52), lineWidth: 1.4) }
+    }
+
+    private var complexObjectMatchBoard: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.triangle.branch").foregroundStyle(Nord.auroraYellow)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Match success.result").font(.caption.weight(.bold))
+                    Text("RequestResult object · first match").font(.caption2).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text("COMPOUND")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(Nord.auroraYellow)
+            }
+            .padding(10)
+            .background(Nord.auroraYellow.opacity(0.08))
+
+            compoundCaseRow(
+                "01",
+                title: "Priority retry",
+                summary: "ALL 2 · nested ANY 1 of 2",
+                tint: Nord.auroraOrange
+            )
+            compoundCaseRow(
+                "02",
+                title: "Manual review",
+                summary: "ANY 2 conditions",
+                tint: Nord.auroraYellow
+            )
+            compoundCaseRow(
+                "03",
+                title: "Otherwise",
+                summary: "Every valid unmatched value",
+                tint: Nord.frost1
+            )
+
+            HStack(spacing: 10) {
+                Label("String", systemImage: "textformat")
+                Label("Number", systemImage: "number")
+                Label("Object", systemImage: "curlybraces")
+                Label("Array", systemImage: "square.stack.3d.up")
+            }
+            .font(.system(size: 8, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .padding(9)
+        }
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
+        .overlay { RoundedRectangle(cornerRadius: 12).stroke(Nord.auroraYellow.opacity(0.52), lineWidth: 1.4) }
+    }
+
+    private func compoundCaseRow(_ index: String, title: String, summary: String, tint: Color) -> some View {
+        HStack(spacing: 8) {
+            Text(index).font(.system(size: 8, weight: .bold, design: .monospaced)).foregroundStyle(.secondary)
+            Image(systemName: title == "Otherwise" ? "arrow.down.right" : "point.3.filled.connected.trianglepath.dotted")
+                .font(.system(size: 9))
+                .foregroundStyle(tint)
+                .frame(width: 14)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.caption2.weight(.bold))
+                Text(summary).font(.system(size: 9, design: .monospaced)).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Circle().fill(tint).frame(width: 8, height: 8)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .background(Nord.polarNight0.opacity(0.55))
+        .overlay(alignment: .bottom) { Divider() }
+    }
+
+    private func expandedBoardRow(_ index: String, pattern: String, destination: String, tint: Color) -> some View {
+        HStack(spacing: 8) {
+            Text(index).font(.system(size: 8, weight: .bold, design: .monospaced)).foregroundStyle(.secondary)
+            Text(pattern).font(.system(.caption2, design: .monospaced).weight(.semibold)).frame(width: 80, alignment: .leading)
+            Image(systemName: "arrow.right").font(.system(size: 8)).foregroundStyle(tint)
+            Text(destination).font(.caption2).lineLimit(1)
+            Spacer()
+            Circle().fill(tint).frame(width: 8, height: 8)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(Nord.polarNight0.opacity(0.55))
+        .overlay(alignment: .bottom) { Divider() }
+    }
+
+    private func outputProducingNode(
+        title: String,
+        subtitle: String,
+        symbol: String,
+        success: String,
+        error: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Label(title, systemImage: symbol).font(.caption.weight(.bold))
+            Text(subtitle).font(.caption2).foregroundStyle(.secondary)
+            Divider()
+            outputPort("Success · \(success)", tint: Nord.auroraGreen)
+            outputPort("Error · \(error)", tint: Nord.auroraRed)
+        }
+        .padding(10)
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 11))
+        .overlay { RoundedRectangle(cornerRadius: 11).stroke(Nord.frost1.opacity(0.45), lineWidth: 1) }
+    }
+
+    private func outputPort(_ label: String, tint: Color) -> some View {
+        HStack(spacing: 5) {
+            Text(label).font(.system(size: 9, weight: .semibold, design: .monospaced)).foregroundStyle(tint)
+            Spacer()
+            Circle().fill(tint).frame(width: 8, height: 8)
+        }
+    }
+
+    private func compactMatchNode(
+        title: String,
+        input: String,
+        cases: [(String, String, Color)]
+    ) -> some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.triangle.branch").foregroundStyle(Nord.auroraYellow)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title).font(.caption.weight(.bold))
+                    Text("Typed · first match").font(.caption2).foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            .padding(10)
+            .background(Nord.auroraYellow.opacity(0.08))
+
+            HStack(spacing: 6) {
+                Circle().fill(Nord.frost1).frame(width: 7, height: 7)
+                Text(input).font(.system(size: 9, weight: .semibold, design: .monospaced)).lineLimit(1)
+                Spacer()
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(Nord.polarNight0.opacity(0.65))
+
+            ForEach(Array(cases.enumerated()), id: \.offset) { index, item in
+                HStack(spacing: 7) {
+                    Text(String(format: "%02d", index + 1))
+                        .font(.system(size: 8, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    Text(item.0)
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .frame(width: 68, alignment: .leading)
+                    Text(item.1).font(.caption2).lineLimit(1)
+                    Spacer(minLength: 0)
+                    Circle().fill(item.2).frame(width: 8, height: 8)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .overlay(alignment: .bottom) {
+                    if index < cases.count - 1 { Divider() }
+                }
+            }
+        }
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
+        .overlay { RoundedRectangle(cornerRadius: 12).stroke(Nord.auroraYellow.opacity(0.58), lineWidth: 1.5) }
+    }
+
+    private func routeDestination(_ title: String, detail: String, symbol: String, tint: Color) -> some View {
+        HStack(spacing: 9) {
+            Image(systemName: symbol).foregroundStyle(tint).frame(width: 18)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.caption.weight(.bold)).lineLimit(1)
+                Text(detail).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 10))
+        .overlay { RoundedRectangle(cornerRadius: 10).stroke(tint.opacity(0.46), lineWidth: 1) }
+    }
+
+    private func drawRoutes(context: inout GraphicsContext, size: CGSize) {
+        switch option {
+        case .namedPorts:
+            drawRoute(&context, from: CGPoint(x: size.width * 0.13 + 82, y: size.height * 0.50 + 13), to: CGPoint(x: size.width * 0.46 - 115, y: size.height * 0.50 - 40), tint: Nord.auroraGreen)
+            drawRoute(&context, from: CGPoint(x: size.width * 0.46 + 115, y: size.height * 0.50 - 10), to: CGPoint(x: size.width * 0.82 - 82, y: size.height * 0.24), tint: Nord.auroraRed)
+            drawRoute(&context, from: CGPoint(x: size.width * 0.46 + 115, y: size.height * 0.50 + 25), to: CGPoint(x: size.width * 0.82 - 82, y: size.height * 0.50), tint: Nord.auroraYellow)
+            drawRoute(&context, from: CGPoint(x: size.width * 0.46 + 115, y: size.height * 0.50 + 60), to: CGPoint(x: size.width * 0.82 - 82, y: size.height * 0.76), tint: Nord.frost1)
+        case .expandedBoard:
+            drawRoute(&context, from: CGPoint(x: size.width * 0.11 + 82, y: size.height * 0.50 + 13), to: CGPoint(x: size.width * 0.48 - 170, y: size.height * 0.50 - 125), tint: Nord.auroraGreen)
+            let boardX = size.width * 0.48 + 170
+            drawRoute(&context, from: CGPoint(x: boardX, y: size.height * 0.50 - 78), to: CGPoint(x: size.width * 0.84 - 80, y: size.height * 0.19), tint: Nord.auroraGreen)
+            drawRoute(&context, from: CGPoint(x: boardX, y: size.height * 0.50 - 38), to: CGPoint(x: size.width * 0.84 - 80, y: size.height * 0.40), tint: Nord.auroraPurple)
+            drawRoute(&context, from: CGPoint(x: boardX, y: size.height * 0.50 + 2), to: CGPoint(x: size.width * 0.84 - 80, y: size.height * 0.61), tint: Nord.auroraYellow)
+            drawRoute(&context, from: CGPoint(x: boardX, y: size.height * 0.50 + 82), to: CGPoint(x: size.width * 0.84 - 80, y: size.height * 0.82), tint: Nord.frost1)
+        case .objectConditions:
+            drawRoute(&context, from: CGPoint(x: size.width * 0.11 + 87, y: size.height * 0.50 + 13), to: CGPoint(x: size.width * 0.49 - 190, y: size.height * 0.50 - 70), tint: Nord.auroraGreen)
+            let boardX = size.width * 0.49 + 190
+            drawRoute(&context, from: CGPoint(x: boardX, y: size.height * 0.50 - 42), to: CGPoint(x: size.width * 0.85 - 87, y: size.height * 0.25), tint: Nord.auroraOrange)
+            drawRoute(&context, from: CGPoint(x: boardX, y: size.height * 0.50 + 10), to: CGPoint(x: size.width * 0.85 - 87, y: size.height * 0.52), tint: Nord.auroraYellow)
+            drawRoute(&context, from: CGPoint(x: boardX, y: size.height * 0.50 + 64), to: CGPoint(x: size.width * 0.85 - 87, y: size.height * 0.79), tint: Nord.frost1)
+        case .errorRecovery:
+            drawRoute(&context, from: CGPoint(x: size.width * 0.12 + 87, y: size.height * 0.42 - 7), to: CGPoint(x: size.width * 0.82 - 82, y: size.height * 0.15), tint: Nord.auroraGreen)
+            drawRoute(&context, from: CGPoint(x: size.width * 0.12 + 87, y: size.height * 0.42 + 25), to: CGPoint(x: size.width * 0.44 - 120, y: size.height * 0.58 - 54), tint: Nord.auroraRed)
+            drawRoute(&context, from: CGPoint(x: size.width * 0.44 + 120, y: size.height * 0.58 - 18), to: CGPoint(x: size.width * 0.74 - 87, y: size.height * 0.38), tint: Nord.auroraOrange)
+            drawRoute(&context, from: CGPoint(x: size.width * 0.44 + 120, y: size.height * 0.58 + 18), to: CGPoint(x: size.width * 0.80 - 87, y: size.height * 0.62), tint: Nord.auroraYellow)
+            drawRoute(&context, from: CGPoint(x: size.width * 0.44 + 120, y: size.height * 0.58 + 54), to: CGPoint(x: size.width * 0.80 - 87, y: size.height * 0.84), tint: Nord.auroraRed)
+            drawRetryLoop(&context, size: size)
+        }
+    }
+
+    private func drawRoute(
+        _ context: inout GraphicsContext,
+        from start: CGPoint,
+        to end: CGPoint,
+        tint: Color
+    ) {
+        var path = Path()
+        path.move(to: start)
+        let distance = max(44, abs(end.x - start.x) * 0.44)
+        path.addCurve(
+            to: end,
+            control1: CGPoint(x: start.x + distance, y: start.y),
+            control2: CGPoint(x: end.x - distance, y: end.y)
+        )
+        context.stroke(path, with: .color(tint.opacity(0.78)), style: StrokeStyle(lineWidth: 2, dash: [7, 5]))
+
+        var arrow = Path()
+        arrow.move(to: end)
+        arrow.addLine(to: CGPoint(x: end.x - 8, y: end.y - 5))
+        arrow.addLine(to: CGPoint(x: end.x - 8, y: end.y + 5))
+        arrow.closeSubpath()
+        context.fill(arrow, with: .color(tint))
+    }
+
+    private func drawRetryLoop(_ context: inout GraphicsContext, size: CGSize) {
+        let start = CGPoint(x: size.width * 0.74, y: size.height * 0.38 - 38)
+        let end = CGPoint(x: size.width * 0.12, y: size.height * 0.42 - 68)
+        var path = Path()
+        path.move(to: start)
+        path.addCurve(
+            to: end,
+            control1: CGPoint(x: start.x, y: size.height * 0.05),
+            control2: CGPoint(x: end.x, y: size.height * 0.05)
+        )
+        context.stroke(path, with: .color(Nord.auroraOrange.opacity(0.9)), style: StrokeStyle(lineWidth: 2.4, dash: [8, 5]))
+
+        var arrow = Path()
+        arrow.move(to: end)
+        arrow.addLine(to: CGPoint(x: end.x + 8, y: end.y - 5))
+        arrow.addLine(to: CGPoint(x: end.x + 8, y: end.y + 5))
+        arrow.closeSubpath()
+        context.fill(arrow, with: .color(Nord.auroraOrange))
+    }
+}
+
+private struct AutomationMatchRoutingInspector: View {
+    let option: AutomationMatchDesignOption
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 9) {
+                Image(systemName: "arrow.triangle.branch")
+                    .foregroundStyle(Nord.auroraYellow)
+                    .frame(width: 30, height: 30)
+                    .background(Nord.auroraYellow.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(inspectorTitle).font(.headline)
+                    Text("Deterministic routing · no side effects").font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+
+            Divider()
+            inspectorField("Input value", value: inputValue, symbol: option == .errorRecovery ? "xmark.octagon" : "arrow.down.doc")
+            inspectorField("Input type", value: inputType, symbol: "curlybraces")
+            inspectorField("Selection", value: "First matching case", symbol: "list.number")
+
+            HStack(spacing: 7) {
+                Label("Typed", systemImage: "checkmark.seal.fill")
+                Label("Ordered", systemImage: "arrow.down")
+                Label("Exhaustive", systemImage: "checkmark.circle.fill")
+            }
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundStyle(Nord.auroraGreen)
+
+            Divider()
+            HStack {
+                Text("Cases").font(.caption.weight(.bold))
+                Spacer()
+                Text(caseCount).font(.caption2).foregroundStyle(.secondary)
+            }
+
+            VStack(spacing: 0) {
+                ForEach(Array(cases.enumerated()), id: \.offset) { index, item in
+                    inspectorCase(index + 1, pattern: item.0, destination: item.1, tint: item.2)
+                    if index < cases.count - 1 { Divider() }
+                }
+            }
+            .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 9))
+
+            Button("Add case", systemImage: "plus") {}
+                .buttonStyle(.bordered)
+
+            if option == .objectConditions {
+                complexConditionPanel
+            } else if option == .errorRecovery {
+                errorSafetyPanel
+            } else {
+                Label("A value that matches no explicit case must use Otherwise; silent dropping is not allowed.", systemImage: "shield.fill")
+                    .font(.caption2)
+                    .foregroundStyle(Nord.auroraYellow)
+                    .padding(9)
+                    .background(Nord.auroraYellow.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+            }
+
+            Spacer(minLength: 0)
+            Divider()
+            Label("Run history records the input value, selected case, and route edge.", systemImage: "clock.arrow.circlepath")
+                .font(.caption2).foregroundStyle(.secondary)
+        }
+        .padding(14)
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private var inspectorTitle: String {
+        switch option {
+        case .objectConditions: "Match object"
+        case .errorRecovery: "Match error"
+        default: "Match value"
+        }
+    }
+
+    private var inputValue: String {
+        switch option {
+        case .namedPorts: "Extract priority → Success.value"
+        case .expandedBoard: "Classify request → Success.code"
+        case .objectConditions: "Assess request → Success.result"
+        case .errorRecovery: "Apply action → Error.kind"
+        }
+    }
+
+    private var inputType: String {
+        switch option {
+        case .namedPorts: "Int"
+        case .expandedBoard: "String?"
+        case .objectConditions: "RequestResult object"
+        case .errorRecovery: "ErrorKind"
+        }
+    }
+
+    private var caseCount: String {
+        "\(cases.count) outputs"
+    }
+
+    private var cases: [(String, String, Color)] {
+        switch option {
+        case .namedPorts:
+            [("5", "Urgent", Nord.auroraRed), ("8", "Review", Nord.auroraYellow), ("_", "Normal", Nord.frost1)]
+        case .expandedBoard:
+            [("5 | 8", "Fast path", Nord.auroraGreen), ("13…19", "Follow-up", Nord.auroraPurple), ("null", "Missing value", Nord.auroraYellow), ("\"blocked\"", "Human review", Nord.auroraRed), ("_", "Default", Nord.frost1)]
+        case .objectConditions:
+            [("ALL + ANY", "Priority retry", Nord.auroraOrange), ("ANY", "Manual review", Nord.auroraYellow), ("_", "Standard path", Nord.frost1)]
+        case .errorRecovery:
+            [(".timeout", "Retry controller", Nord.auroraOrange), (".invalidInput", "Human review", Nord.auroraYellow), (".unknownOutcome", "Reconcile", Nord.auroraRed), ("_", "Fail safely", Nord.frost1)]
+        }
+    }
+
+    private func inspectorField(_ label: String, value: String, symbol: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label(label, systemImage: symbol).font(.caption2).foregroundStyle(.secondary)
+            Text(value)
+                .font(.system(.caption, design: .monospaced).weight(.semibold))
+                .textSelection(.enabled)
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 7))
+        }
+    }
+
+    private func inspectorCase(_ index: Int, pattern: String, destination: String, tint: Color) -> some View {
+        HStack(spacing: 7) {
+            Text(String(format: "%02d", index))
+                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                .foregroundStyle(.secondary)
+            Circle().fill(tint).frame(width: 7, height: 7)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(pattern).font(.system(.caption2, design: .monospaced).weight(.bold))
+                Text(destination).font(.caption2).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Image(systemName: "line.diagonal.arrow").font(.caption2).foregroundStyle(tint)
+        }
+        .padding(8)
+    }
+
+    private var errorSafetyPanel: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("Retry remains a control node", systemImage: "arrow.clockwise.circle.fill")
+                .font(.caption.weight(.bold)).foregroundStyle(Nord.auroraOrange)
+            safetyRow("Maximum attempts", value: "3")
+            safetyRow("Backoff", value: "2 s · ×2 · jitter")
+            safetyRow("Idempotency", value: "Required")
+            safetyRow("Unknown outcome", value: "Never auto-retry")
+        }
+        .padding(9)
+        .background(Nord.auroraOrange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+        .overlay { RoundedRectangle(cornerRadius: 8).stroke(Nord.auroraOrange.opacity(0.28), lineWidth: 1) }
+    }
+
+    private var complexConditionPanel: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                Label("Priority retry", systemImage: "point.3.filled.connected.trianglepath.dotted")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(Nord.auroraOrange)
+                Spacer()
+                Text("ALL").font(.system(size: 9, weight: .bold, design: .monospaced))
+            }
+
+            conditionRow("status", relation: "equals", value: "failed", tint: Nord.auroraGreen)
+            conditionRow("error.retryable", relation: "is", value: "true", tint: Nord.auroraGreen)
+
+            HStack {
+                Text("AND").font(.system(size: 8, weight: .bold, design: .monospaced)).foregroundStyle(.secondary)
+                Divider()
+                Text("ANY · 1 of 2").font(.system(size: 9, weight: .bold, design: .monospaced)).foregroundStyle(Nord.frost1)
+                Spacer()
+                Button("+ condition") {}.buttonStyle(.plain).font(.system(size: 9))
+            }
+            .frame(height: 18)
+
+            conditionRow("customer.tier", relation: "equals", value: "priority", tint: Nord.frost1)
+            conditionRow("value", relation: "≥", value: "10,000", tint: Nord.frost1)
+
+            HStack(spacing: 7) {
+                Button("+ AND") {}.buttonStyle(.bordered).controlSize(.mini)
+                Button("+ ANY") {}.buttonStyle(.bordered).controlSize(.mini)
+                Button("+ NOT") {}.buttonStyle(.bordered).controlSize(.mini)
+                Spacer()
+                Label("Fixture matched", systemImage: "checkmark.circle.fill")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Nord.auroraGreen)
+            }
+        }
+        .padding(9)
+        .background(Nord.auroraOrange.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
+        .overlay { RoundedRectangle(cornerRadius: 8).stroke(Nord.auroraOrange.opacity(0.26), lineWidth: 1) }
+    }
+
+    private func conditionRow(_ field: String, relation: String, value: String, tint: Color) -> some View {
+        HStack(spacing: 5) {
+            Text(field).font(.system(size: 9, weight: .semibold, design: .monospaced)).lineLimit(1)
+            Text(relation).font(.system(size: 9)).foregroundStyle(.secondary)
+            Spacer(minLength: 2)
+            Text(value).font(.system(size: 9, weight: .bold, design: .monospaced)).foregroundStyle(tint).lineLimit(1)
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 5)
+        .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func safetyRow(_ label: String, value: String) -> some View {
+        HStack {
+            Text(label).foregroundStyle(.secondary)
+            Spacer()
+            Text(value).fontWeight(.semibold)
+        }
+        .font(.caption2)
+    }
+}
+
+private enum AutomationPreviewState {
+    case complete
+    case running
+    case waiting
+    case blocked
+    case planned
+
+    var label: String {
+        switch self {
+        case .complete: "Complete"
+        case .running: "Running"
+        case .waiting: "Waiting"
+        case .blocked: "Blocked"
+        case .planned: "Planned"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .complete: "checkmark.circle.fill"
+        case .running: "arrow.triangle.2.circlepath.circle.fill"
+        case .waiting: "pause.circle.fill"
+        case .blocked: "exclamationmark.triangle.fill"
+        case .planned: "circle.dashed"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .complete: Nord.auroraGreen
+        case .running: Nord.frost1
+        case .waiting: Nord.auroraYellow
+        case .blocked: Nord.auroraRed
+        case .planned: Color.secondary
+        }
+    }
+}
+
+private struct AutomationWorkflowPreview: Identifiable {
+    let id: String
+    let name: String
+    let summary: String
+    let symbol: String
+    let progress: Int
+    let state: AutomationPreviewState
+    let version: Int
+    let trigger: String
+    let lastRun: String
+    let retention: String
+
+    static let portfolio: [Self] = [
+        .init(id: "reply-driven", name: "Reply-driven reporting", summary: "Produce, deliver, and revise artifacts through email", symbol: "arrow.trianglehead.2.clockwise.rotate.90", progress: 3, state: .waiting, version: 6, trigger: "Email reply", lastRun: "Waiting · 12 min", retention: "30 days"),
+        .init(id: "mailbox-review", name: "Mailbox review", summary: "Review and classify incoming mail", symbol: "tray.full", progress: 3, state: .running, version: 4, trigger: "Every hour", lastRun: "Running · now", retention: "30 days"),
+        .init(id: "approved-cleanup", name: "Approved cleanup", summary: "Apply reviewed labels and archive", symbol: "archivebox", progress: 2, state: .waiting, version: 3, trigger: "Manual", lastRun: "Waiting · 2 h", retention: "30 days"),
+        .init(id: "sender-cleanup", name: "Sender cleanup", summary: "Exact-scope recurring cleanup", symbol: "scope", progress: 1, state: .planned, version: 1, trigger: "Daily 09:00", lastRun: "Never", retention: "After success"),
+        .init(id: "financial-filing", name: "Financial filing", summary: "Preserve and file financial mail", symbol: "doc.text", progress: 2, state: .waiting, version: 5, trigger: "New mail", lastRun: "Passed · yesterday", retention: "Forever"),
+        .init(id: "structured-ingestion", name: "Structured ingestion", summary: "Parse messages into a dataset", symbol: "tablecells", progress: 2, state: .blocked, version: 2, trigger: "New mail", lastRun: "Blocked · 3 d", retention: "30 days"),
+        .init(id: "newsletter", name: "Newsletter management", summary: "Review subscriptions and cleanup", symbol: "newspaper", progress: 1, state: .planned, version: 1, trigger: "Weekly", lastRun: "Never", retention: "30 days"),
+        .init(id: "correspondence", name: "Correspondence", summary: "Draft, review, reply, and forward", symbol: "arrowshape.turn.up.left", progress: 1, state: .planned, version: 2, trigger: "Manual", lastRun: "Passed · 8 d", retention: "30 days"),
+        .init(id: "filter-management", name: "Filter management", summary: "Preview and reconcile provider rules", symbol: "line.3.horizontal.decrease.circle", progress: 1, state: .planned, version: 1, trigger: "Manual", lastRun: "Never", retention: "After success"),
+    ]
+}
+
+private struct AutomationMigrationProgress: View {
+    let completed: Int
+    private let labels = ["Designed", "Tested", "Shadowed", "Live"]
+
+    var body: some View {
+        HStack(spacing: 5) {
+            ForEach(Array(labels.enumerated()), id: \.offset) { index, label in
+                Circle()
+                    .fill(index < completed ? Nord.auroraGreen : Nord.polarNight3)
+                    .frame(width: 7, height: 7)
+                    .help(label)
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Migration: \(completed) of \(labels.count) stages complete")
+    }
+}
+
+private struct AutomationPipelinePreview: View {
+    @Binding var selectedWorkflowID: String
+    let openBuilder: () -> Void
+    let openRunHistory: () -> Void
+    @State private var search = ""
+    @State private var filter = WorkflowLibraryFilter.all
+
+    private enum WorkflowLibraryFilter: String, CaseIterable {
+        case all = "All"
+        case active = "Active"
+        case drafts = "Drafts"
+        case attention = "Attention"
+    }
+
+    private var selectedWorkflow: AutomationWorkflowPreview {
+        AutomationWorkflowPreview.portfolio.first(where: { $0.id == selectedWorkflowID })
+            ?? AutomationWorkflowPreview.portfolio[0]
+    }
+
+    private var visibleWorkflows: [AutomationWorkflowPreview] {
+        AutomationWorkflowPreview.portfolio.filter { workflow in
+            let searchMatches = search.isEmpty
+                || workflow.name.localizedCaseInsensitiveContains(search)
+                || workflow.summary.localizedCaseInsensitiveContains(search)
+            let filterMatches: Bool
+            switch filter {
+            case .all: filterMatches = true
+            case .active: filterMatches = [.running, .waiting, .complete].contains(workflow.state)
+            case .drafts: filterMatches = workflow.state == .planned
+            case .attention: filterMatches = workflow.state == .blocked
+            }
+            return searchMatches && filterMatches
+        }
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let isCompact = proxy.size.width < 1_050
+            VStack(alignment: .leading, spacing: 14) {
+                if isCompact {
+                    libraryTitle
+                    libraryControls
+                } else {
+                    HStack(spacing: 12) {
+                        libraryTitle
+                        Spacer()
+                        libraryControls
+                    }
+                }
+
+                HStack(alignment: .top, spacing: 14) {
+                    workflowTable(isCompact: isCompact)
+                        .frame(maxWidth: .infinity)
+                    workflowSummary
+                        .frame(width: 270)
+                }
+            }
+        }
+        .frame(minHeight: 570)
+    }
+
+    private var libraryTitle: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("Workflow library").font(.title3.weight(.bold))
+            Text("Every workflow, trigger, published version, last run, and retention policy")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private var libraryControls: some View {
+        HStack(spacing: 12) {
+            TextField("Search workflows", text: $search)
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: 230)
+            Picker("Filter", selection: $filter) {
+                ForEach(WorkflowLibraryFilter.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(maxWidth: 280)
+            Button("New workflow", systemImage: "plus") {}
+                .buttonStyle(.borderedProminent)
+                .disabled(true)
+        }
+    }
+
+    private func workflowTable(isCompact: Bool) -> some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Text("Workflow").frame(maxWidth: .infinity, alignment: .leading)
+                Text("State").frame(width: 95, alignment: .leading)
+                if !isCompact {
+                    Text("Trigger").frame(width: 100, alignment: .leading)
+                }
+                Text("Version").frame(width: 60, alignment: .leading)
+                if !isCompact {
+                    Text("Last run").frame(width: 105, alignment: .leading)
+                }
+                Text("Retention").frame(width: 92, alignment: .leading)
+                Color.clear.frame(width: 8, height: 1)
+            }
+            .font(.caption2.weight(.bold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            Divider()
+
+            ForEach(visibleWorkflows) { workflow in
+                Button {
+                    selectedWorkflowID = workflow.id
+                    openBuilder()
+                } label: {
+                    HStack(spacing: 12) {
+                        HStack(spacing: 9) {
+                            Image(systemName: workflow.symbol)
+                                .frame(width: 22)
+                                .foregroundStyle(workflow.state.tint)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(workflow.name).font(.caption.weight(.semibold)).lineLimit(1)
+                                Text(workflow.summary).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        Label(workflow.state.label, systemImage: workflow.state.symbol)
+                            .foregroundStyle(workflow.state.tint)
+                            .frame(width: 95, alignment: .leading)
+                        if !isCompact {
+                            Text(workflow.trigger).frame(width: 100, alignment: .leading)
+                        }
+                        Text("v\(workflow.version)").font(.system(.caption, design: .monospaced)).frame(width: 60, alignment: .leading)
+                        if !isCompact {
+                            Text(workflow.lastRun).frame(width: 105, alignment: .leading)
+                        }
+                        Text(workflow.retention).frame(width: 92, alignment: .leading)
+                        Image(systemName: "chevron.right")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .font(.caption2)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .background(
+                        selectedWorkflowID == workflow.id ? Nord.frost1.opacity(0.16) : Color.clear,
+                        in: RoundedRectangle(cornerRadius: 8)
+                    )
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(8)
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private var workflowSummary: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                Image(systemName: selectedWorkflow.symbol)
+                    .foregroundStyle(selectedWorkflow.state.tint)
+                    .frame(width: 34, height: 34)
+                    .background(selectedWorkflow.state.tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(selectedWorkflow.name).font(.headline)
+                    Text("Published v\(selectedWorkflow.version)").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Text(selectedWorkflow.summary).font(.caption).foregroundStyle(.secondary)
+            Divider()
+            libraryFact("State", value: selectedWorkflow.state.label)
+            libraryFact("Trigger", value: selectedWorkflow.trigger)
+            libraryFact("Last run", value: selectedWorkflow.lastRun)
+            libraryFact("History", value: selectedWorkflow.retention)
+            Divider()
+            Text("Migration").font(.caption2.weight(.bold)).foregroundStyle(.secondary)
+            AutomationMigrationProgress(completed: selectedWorkflow.progress)
+            Text("Designed · Tested · Shadowed · Live")
+                .font(.caption2).foregroundStyle(.secondary)
+            Spacer(minLength: 12)
+            Button("Open in Builder", systemImage: "point.3.connected.trianglepath.dotted") {
+                openBuilder()
+            }
+                .buttonStyle(.borderedProminent)
+            Button("View run history", systemImage: "clock.arrow.circlepath") {
+                openRunHistory()
+            }
+                .buttonStyle(.bordered)
+        }
+        .padding(14)
+        .frame(minHeight: 520, alignment: .topLeading)
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private func libraryFact(_ label: String, value: String) -> some View {
+        LabeledContent(label) { Text(value).foregroundStyle(.secondary) }
+            .font(.caption)
+    }
+}
+
+private struct AutomationPipelineStrip: View {
+    let stages: [(String, String, AutomationPreviewState)]
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 24.0, paused: reduceMotion)) { timeline in
+            let phase = timeline.date.timeIntervalSinceReferenceDate
+            HStack(spacing: 0) {
+                ForEach(Array(stages.enumerated()), id: \.offset) { index, stage in
+                    VStack(spacing: 7) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 12)
+                                .fill(Nord.polarNight2)
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 12)
+                                        .stroke(stage.2.tint.opacity(stage.2 == .running ? 0.95 : 0.35), lineWidth: stage.2 == .running ? 2 : 1)
+                                }
+                            Image(systemName: stage.1)
+                                .foregroundStyle(stage.2.tint)
+                                .scaleEffect(stage.2 == .running && !reduceMotion ? 1 + sin(phase * 4) * 0.08 : 1)
+                        }
+                        .frame(height: 54)
+                        Text(stage.0).font(.caption2.weight(.semibold)).lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity)
+
+                    if index < stages.count - 1 {
+                        Rectangle()
+                            .fill(index < 3 ? Nord.auroraGreen.opacity(0.8) : Nord.polarNight3)
+                            .frame(width: 12, height: 2)
+                            .overlay(alignment: .trailing) {
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 7, weight: .bold))
+                                    .foregroundStyle(index < 3 ? Nord.auroraGreen : .secondary)
+                            }
+                            .padding(.bottom, 23)
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+    }
+}
+
+private enum AutomationCanvasPattern: String, CaseIterable, Identifiable {
+    case decision = "Decision"
+    case parallel = "Parallel"
+    case approval = "Approval"
+    case feedback = "Feedback"
+    case recovery = "Recovery"
+
+    var id: String { rawValue }
+
+    var summary: String {
+        switch self {
+        case .decision: "Route one input by a deterministic outcome"
+        case .parallel: "Fan out independent work and join its results"
+        case .approval: "Pause, revise, wait, and resume durably"
+        case .feedback: "Keep one case alive across replies, revisions, and attachments"
+        case .recovery: "Separate retryable failures from unknown outcomes"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .decision: "Mailbox review / Decision"
+        case .parallel: "Mailbox review / Parallel work"
+        case .approval: "Correspondence / Approval"
+        case .feedback: "Reply-driven case / Episode 3"
+        case .recovery: "Approved effect / Recovery"
+        }
+    }
+
+    var graph: AutomationCanvasGraph {
+        switch self {
+        case .decision:
+            AutomationCanvasGraph(
+                defaultSelectedID: "classify",
+                groups: [
+                    .init(id: "read", title: "READ-ONLY", x: 0.02, y: 0.08, width: 0.67, height: 0.84, tint: Nord.frost1),
+                    .init(id: "routes", title: "ROUTED OUTPUTS", x: 0.71, y: 0.08, width: 0.27, height: 0.84, tint: Nord.auroraYellow),
+                ],
+                steps: [
+                    .init(id: "trigger", title: "New mail", subtitle: "Account-scoped trigger", symbol: "envelope.badge", kind: .trigger, x: 0.10, y: 0.50, state: .complete, input: "Mail event", output: "Message reference", authority: "Observe only"),
+                    .init(id: "freeze", title: "Freeze result", subtitle: "Complete pagination", symbol: "snowflake", kind: .data, x: 0.32, y: 0.50, state: .complete, input: "Search query", output: "Frozen batch", authority: "Read mail"),
+                    .init(id: "classify", title: "Classify", subtitle: "Deterministic policy", symbol: "arrow.triangle.branch", kind: .decision, x: 0.57, y: 0.50, state: .running, input: "Frozen batch", output: "Three typed routes", authority: "No effect authority"),
+                    .init(id: "protected", title: "Protected", subtitle: "Record exclusion", symbol: "shield.fill", kind: .policy, x: 0.84, y: 0.20, state: .complete, input: "Protected items", output: "Exclusion receipt", authority: "No effect"),
+                    .init(id: "eligible", title: "Eligible", subtitle: "Continue subflow", symbol: "square.stack.3d.up", kind: .subflow, x: 0.84, y: 0.50, state: .waiting, input: "Eligible items", output: "Reviewed proposal", authority: "Inherited: none"),
+                    .init(id: "uncertain", title: "Needs review", subtitle: "Human decision", symbol: "person.crop.circle.badge.questionmark", kind: .human, x: 0.84, y: 0.80, state: .waiting, input: "Uncertain items", output: "Reviewed route", authority: "Decision only"),
+                ],
+                edges: [
+                    .init("trigger", "freeze", label: "message", kind: .data, active: true),
+                    .init("freeze", "classify", label: "184 items", kind: .data, active: true),
+                    .init("classify", "protected", label: "protected", kind: .conditional, active: false),
+                    .init("classify", "eligible", label: "eligible", kind: .success, active: false),
+                    .init("classify", "uncertain", label: "uncertain", kind: .conditional, active: true),
+                ]
+            )
+        case .parallel:
+            AutomationCanvasGraph(
+                defaultSelectedID: "fanout",
+                groups: [
+                    .init(id: "parallel", title: "PARALLEL LANES", x: 0.34, y: 0.07, width: 0.42, height: 0.86, tint: Nord.auroraPurple),
+                ],
+                steps: [
+                    .init(id: "batch", title: "Frozen batch", subtitle: "184 messages", symbol: "shippingbox", kind: .data, x: 0.10, y: 0.50, state: .complete, input: "Query result", output: "Mail batch", authority: "Read only"),
+                    .init(id: "fanout", title: "Fan out", subtitle: "Start 3 lanes", symbol: "arrow.triangle.branch", kind: .parallel, x: 0.30, y: 0.50, state: .running, input: "Mail batch", output: "Three streams", authority: "No effect"),
+                    .init(id: "label", title: "Plan labels", subtitle: "Deterministic", symbol: "tag", kind: .data, x: 0.54, y: 0.20, state: .running, input: "Mail stream", output: "Label plan", authority: "Proposal only"),
+                    .init(id: "extract", title: "Extract fields", subtitle: "Private capability", symbol: "tablecells", kind: .subflow, x: 0.54, y: 0.50, state: .running, input: "Mail stream", output: "Dataset rows", authority: "Private dataset"),
+                    .init(id: "summarize", title: "Summarize", subtitle: "Minimum projection", symbol: "sparkles", kind: .ai, x: 0.54, y: 0.80, state: .running, input: "Allowed fields", output: "Short summary", authority: "Declared egress"),
+                    .init(id: "join", title: "Join", subtitle: "Wait for all lanes", symbol: "arrow.triangle.merge", kind: .join, x: 0.74, y: 0.50, state: .waiting, input: "3 typed results", output: "Combined result", authority: "No effect"),
+                    .init(id: "receipt", title: "Receipt", subtitle: "One evidence set", symbol: "doc.text.magnifyingglass", kind: .receipt, x: 0.91, y: 0.50, state: .planned, input: "Combined result", output: "Run evidence", authority: "Local write"),
+                ],
+                edges: [
+                    .init("batch", "fanout", label: "batch", kind: .data, active: true),
+                    .init("fanout", "label", label: "lane 1", kind: .parallel, active: true),
+                    .init("fanout", "extract", label: "lane 2", kind: .parallel, active: true),
+                    .init("fanout", "summarize", label: "lane 3", kind: .parallel, active: true),
+                    .init("label", "join", label: "plan", kind: .parallel, active: true),
+                    .init("extract", "join", label: "rows", kind: .parallel, active: true),
+                    .init("summarize", "join", label: "summary", kind: .parallel, active: true),
+                    .init("join", "receipt", label: "all complete", kind: .success, active: false),
+                ]
+            )
+        case .approval:
+            AutomationCanvasGraph(
+                defaultSelectedID: "approval",
+                groups: [
+                    .init(id: "human", title: "HUMAN BOUNDARY", x: 0.25, y: 0.08, width: 0.34, height: 0.84, tint: Nord.auroraYellow),
+                    .init(id: "effect", title: "APPROVED EFFECT", x: 0.61, y: 0.08, width: 0.37, height: 0.84, tint: Nord.auroraRed),
+                ],
+                steps: [
+                    .init(id: "draft", title: "Prepare draft", subtitle: "No send", symbol: "square.and.pencil", kind: .data, x: 0.10, y: 0.50, state: .complete, input: "Full thread", output: "Draft proposal", authority: "Draft only"),
+                    .init(id: "approval", title: "Review", subtitle: "Recipients + content", symbol: "person.crop.circle.badge.checkmark", kind: .human, x: 0.40, y: 0.50, state: .waiting, input: "Draft proposal", output: "Approve or revise", authority: "Human decision"),
+                    .init(id: "send", title: "Send", subtitle: "Idempotent effect", symbol: "paperplane.fill", kind: .effect, x: 0.69, y: 0.27, state: .planned, input: "Approved envelope", output: "Provider receipt", authority: "Exact send approval"),
+                    .init(id: "revise", title: "Revise", subtitle: "Return to review", symbol: "arrow.uturn.backward", kind: .loop, x: 0.69, y: 0.73, state: .planned, input: "Review notes", output: "New draft revision", authority: "No send"),
+                    .init(id: "wait", title: "Wait for reply", subtitle: "Durable resume", symbol: "clock.badge", kind: .wait, x: 0.89, y: 0.27, state: .planned, input: "Sent thread", output: "Reply event", authority: "Observe only"),
+                ],
+                edges: [
+                    .init("draft", "approval", label: "proposal", kind: .data, active: true),
+                    .init("approval", "send", label: "approve", kind: .success, active: false),
+                    .init("approval", "revise", label: "changes", kind: .conditional, active: true),
+                    .init("revise", "approval", label: "revision 2", kind: .loop, active: true),
+                    .init("send", "wait", label: "reconciled", kind: .success, active: false),
+                ]
+            )
+        case .feedback:
+            AutomationCanvasGraph(
+                defaultSelectedID: "context",
+                groups: [
+                    .init(id: "case", title: "CASE-184 · ONE DURABLE CONVERSATION", x: 0.02, y: 0.05, width: 0.96, height: 0.90, tint: Nord.frost1),
+                    .init(id: "effect-wait", title: "EFFECT + DURABLE WAIT", x: 0.80, y: 0.08, width: 0.18, height: 0.70, tint: Nord.auroraRed),
+                    .init(id: "episodes", title: "FEEDBACK EPISODES · ARTIFACT LINEAGE", x: 0.36, y: 0.68, width: 0.62, height: 0.27, tint: Nord.auroraPurple),
+                ],
+                steps: [
+                    .init(id: "inbound", title: "Inbound email", subtitle: "New message or reply", symbol: "envelope.badge", kind: .trigger, x: 0.09, y: 0.28, state: .complete, input: "Scoped mail event", output: "Thread + message refs", authority: "Observe only"),
+                    .init(id: "correlate", title: "Correlate case", subtitle: "Thread + durable case ID", symbol: "link", kind: .decision, x: 0.27, y: 0.28, state: .complete, input: "Thread reference", output: "Existing or new case", authority: "No effect"),
+                    .init(id: "context", title: "Compile context", subtitle: "Episodes + current facts", symbol: "text.append", kind: .context, x: 0.46, y: 0.28, state: .running, input: "Case history + artifacts", output: "Bounded context pack", authority: "Private case data"),
+                    .init(id: "execute", title: "Run work type", subtitle: "Pinned private subflow", symbol: "square.stack.3d.up", kind: .subflow, x: 0.65, y: 0.28, state: .planned, input: "Context + current inputs", output: "Artifact revision", authority: "Subflow contract"),
+                    .init(id: "verify", title: "Verify all", subtitle: "Whole-request checks", symbol: "checkmark.seal", kind: .policy, x: 0.83, y: 0.28, state: .planned, input: "Artifact + acceptance rules", output: "Verified revision", authority: "No send"),
+                    .init(id: "reply", title: "Reply + attach", subtitle: "Same email thread", symbol: "paperplane.fill", kind: .effect, x: 0.90, y: 0.50, state: .planned, input: "Verified artifact v3", output: "Provider receipt", authority: "Exact send approval"),
+                    .init(id: "wait", title: "Wait for reply", subtitle: "Sending is not completion", symbol: "clock.badge", kind: .wait, x: 0.90, y: 0.72, state: .waiting, input: "Thread checkpoint", output: "Reply event", authority: "Observe only"),
+                    .init(id: "interpret", title: "Interpret reply", subtitle: "Accept, correct, clarify", symbol: "arrow.triangle.branch", kind: .decision, x: 0.70, y: 0.80, state: .running, input: "Reply + case context", output: "Typed response route", authority: "No effect"),
+                    .init(id: "append", title: "Append episode", subtitle: "Supersede, never erase", symbol: "text.badge.plus", kind: .context, x: 0.46, y: 0.80, state: .planned, input: "Correction or new file", output: "Episode 4 + artifact refs", authority: "Private case write"),
+                    .init(id: "close", title: "Close case", subtitle: "Accepted or manually closed", symbol: "checkmark.circle.fill", kind: .receipt, x: 0.90, y: 0.92, state: .planned, input: "Accepted outcome", output: "Case receipt", authority: "Local state only"),
+                ],
+                edges: [
+                    .init("inbound", "correlate", label: "mail event", kind: .data, active: true),
+                    .init("correlate", "context", label: "same case", kind: .success, active: true),
+                    .init("context", "execute", label: "episode 3", kind: .data, active: true),
+                    .init("execute", "verify", label: "artifact v3", kind: .data, active: false),
+                    .init("verify", "reply", label: "all checks pass", kind: .success, active: false),
+                    .init("reply", "wait", label: "sent + reconciled", kind: .success, active: false),
+                    .init("wait", "interpret", label: "reply received", kind: .data, active: true),
+                    .init("interpret", "close", label: "accepted", kind: .success, active: false),
+                    .init("interpret", "append", label: "change / clarify / file", kind: .conditional, active: true),
+                    .init("append", "context", label: "episode 4 · same case", kind: .loop, active: true),
+                ]
+            )
+        case .recovery:
+            AutomationCanvasGraph(
+                defaultSelectedID: "effect",
+                groups: [
+                    .init(id: "effect", title: "EFFECT BOUNDARY", x: 0.20, y: 0.08, width: 0.27, height: 0.84, tint: Nord.auroraRed),
+                    .init(id: "recovery", title: "RECOVERY ROUTES", x: 0.49, y: 0.08, width: 0.49, height: 0.84, tint: Nord.auroraOrange),
+                ],
+                steps: [
+                    .init(id: "each", title: "For each item", subtitle: "Bounded batch", symbol: "repeat", kind: .loop, x: 0.09, y: 0.50, state: .complete, input: "Frozen targets", output: "One target", authority: "No effect"),
+                    .init(id: "effect", title: "Apply action", subtitle: "Idempotency key", symbol: "checkmark.shield", kind: .effect, x: 0.33, y: 0.50, state: .running, input: "Exact target", output: "Effect outcome", authority: "Frozen batch approval"),
+                    .init(id: "success", title: "Succeeded", subtitle: "Reconcile target", symbol: "checkmark.circle.fill", kind: .receipt, x: 0.60, y: 0.20, state: .complete, input: "Known success", output: "Verified receipt", authority: "Read back"),
+                    .init(id: "retry", title: "Retry", subtitle: "Backoff + limit", symbol: "arrow.clockwise", kind: .loop, x: 0.60, y: 0.50, state: .waiting, input: "Known failure", output: "New attempt", authority: "Same approved target"),
+                    .init(id: "unknown", title: "Unknown outcome", subtitle: "Never auto-retry", symbol: "questionmark.diamond.fill", kind: .error, x: 0.60, y: 0.80, state: .blocked, input: "Ambiguous result", output: "Attention item", authority: "Effects blocked"),
+                    .init(id: "reconcile", title: "Human reconcile", subtitle: "Inspect provider", symbol: "person.crop.circle.badge.exclamationmark", kind: .human, x: 0.87, y: 0.80, state: .waiting, input: "Unknown outcome", output: "Resolved status", authority: "Decision only"),
+                    .init(id: "receipt", title: "Batch receipt", subtitle: "Success / skip / fail", symbol: "doc.text.magnifyingglass", kind: .receipt, x: 0.87, y: 0.20, state: .planned, input: "Settled targets", output: "Audit evidence", authority: "Local write"),
+                ],
+                edges: [
+                    .init("each", "effect", label: "target 38", kind: .data, active: true),
+                    .init("effect", "success", label: "success", kind: .success, active: false),
+                    .init("effect", "retry", label: "known failure", kind: .error, active: true),
+                    .init("effect", "unknown", label: "ambiguous", kind: .error, active: false),
+                    .init("retry", "effect", label: "attempt 2", kind: .loop, active: true),
+                    .init("unknown", "reconcile", label: "needs you", kind: .error, active: false),
+                    .init("success", "receipt", label: "verified", kind: .success, active: false),
+                    .init("reconcile", "receipt", label: "settled", kind: .conditional, active: false),
+                ]
+            )
+        }
+    }
+}
+
+private enum AutomationInspectorSection: String, CaseIterable {
+    case configuration = "Config"
+    case data = "Data"
+    case history = "History"
+    case safety = "Safety"
+}
+
+private enum AutomationEditorMode: String, CaseIterable {
+    case canvas = "Canvas"
+    case outline = "Outline"
+}
+
+private enum AutomationBuilderDesignPanel {
+    case standard
+    case newWorkflow
+    case condition
+    case mapping
+    case test
+    case problems
+    case publish
+    case storage
+    case storagePromotion
+
+    init(arguments: [String]) {
+        if arguments.contains("--desktop-automation-builder-new") { self = .newWorkflow }
+        else if arguments.contains("--desktop-automation-builder-condition") { self = .condition }
+        else if arguments.contains("--desktop-automation-builder-mapping") { self = .mapping }
+        else if arguments.contains("--desktop-automation-builder-test") { self = .test }
+        else if arguments.contains("--desktop-automation-builder-problems") { self = .problems }
+        else if arguments.contains("--desktop-automation-builder-publish") { self = .publish }
+        else if arguments.contains("--desktop-automation-builder-storage-promotion") { self = .storagePromotion }
+        else if arguments.contains("--desktop-automation-builder-storage") { self = .storage }
+        else { self = .standard }
+    }
+}
+
+private enum AutomationCanvasViewportPreset {
+    case standard
+    case readable
+    case semanticOverview
+    case feedbackFocus
+
+    var title: String {
+        switch self {
+        case .standard: "Stable canvas"
+        case .readable: "Readable 100%"
+        case .semanticOverview: "Fit all · semantic overview"
+        case .feedbackFocus: "Focus · Feedback & correction"
+        }
+    }
+
+    var zoomLabel: String {
+        switch self {
+        case .standard: "Fit"
+        case .readable: "100%"
+        case .semanticOverview: "Fit"
+        case .feedbackFocus: "Focus"
+        }
+    }
+}
+
+private struct AutomationCanvasPreview: View {
+    private let workflowID: String
+    private let viewportPreset: AutomationCanvasViewportPreset
+    private let builderDesignPanel: AutomationBuilderDesignPanel
+    @State private var pattern: AutomationCanvasPattern
+    @State private var selectedStepID: String
+    @State private var selectedEdgeID: String?
+    @State private var inspectorSection = AutomationInspectorSection.configuration
+    @State private var isSimulating = true
+    @State private var editorMode: AutomationEditorMode
+    @State private var isEditing = false
+    @State private var showsVersionHistory = false
+
+    init(workflowID: String) {
+        self.workflowID = workflowID
+        let arguments = CommandLine.arguments
+        builderDesignPanel = AutomationBuilderDesignPanel(arguments: arguments)
+        if arguments.contains("--desktop-automation-small-readable") {
+            viewportPreset = .readable
+        } else if arguments.contains("--desktop-automation-small-overview") {
+            viewportPreset = .semanticOverview
+        } else if arguments.contains("--desktop-automation-small-focus") {
+            viewportPreset = .feedbackFocus
+        } else if arguments.contains(where: { $0.hasPrefix("--desktop-automation-builder") }) {
+            viewportPreset = .readable
+        } else {
+            viewportPreset = .standard
+        }
+        let initialPattern: AutomationCanvasPattern
+        if arguments.contains("--desktop-automation-small-readable")
+            || arguments.contains("--desktop-automation-small-overview")
+            || arguments.contains("--desktop-automation-small-focus") {
+            initialPattern = .feedback
+        } else if arguments.contains("--desktop-automation-canvas-parallel") {
+            initialPattern = .parallel
+        } else if arguments.contains("--desktop-automation-canvas-approval") {
+            initialPattern = .approval
+        } else if arguments.contains("--desktop-automation-canvas-feedback") {
+            initialPattern = .feedback
+        } else if arguments.contains("--desktop-automation-canvas-recovery") {
+            initialPattern = .recovery
+        } else {
+            switch workflowID {
+            case "reply-driven": initialPattern = .feedback
+            case "correspondence": initialPattern = .approval
+            case "approved-cleanup", "filter-management": initialPattern = .recovery
+            default: initialPattern = .decision
+            }
+        }
+        _pattern = State(initialValue: initialPattern)
+        let initialSelection: String
+        switch builderDesignPanel {
+        case .condition, .test, .problems: initialSelection = "interpret"
+        case .mapping: initialSelection = "context"
+        case .storage, .storagePromotion: initialSelection = "execute"
+        default: initialSelection = viewportPreset == .feedbackFocus ? "interpret" : initialPattern.graph.defaultSelectedID
+        }
+        _selectedStepID = State(initialValue: initialSelection)
+        _selectedEdgeID = State(initialValue: builderDesignPanel == .condition ? "interpret:correction:append" : nil)
+        _inspectorSection = State(initialValue: initialPattern == .feedback ? .history : .configuration)
+        _editorMode = State(initialValue: arguments.contains("--desktop-automation-outline") ? .outline : .canvas)
+        _isEditing = State(initialValue: arguments.contains("--desktop-automation-builder-editing"))
+        _showsVersionHistory = State(
+            initialValue: arguments.contains("--desktop-automation-builder-versions")
+        )
+    }
+
+    private var graph: AutomationCanvasGraph { pattern.graph }
+    private var workflow: AutomationWorkflowPreview {
+        AutomationWorkflowPreview.portfolio.first(where: { $0.id == workflowID })
+            ?? AutomationWorkflowPreview.portfolio[0]
+    }
+    private var selectedStep: AutomationCanvasStep {
+        graph.steps.first(where: { $0.id == selectedStepID })
+            ?? graph.steps.first(where: { $0.id == graph.defaultSelectedID })
+            ?? graph.steps[0]
+    }
+
+    var body: some View {
+        Group {
+            if builderDesignPanel == .newWorkflow {
+                AutomationNewWorkflowDesign()
+            } else {
+                GeometryReader { proxy in
+                    VStack(alignment: .leading, spacing: 12) {
+                        if proxy.size.width >= 1_050 {
+                            canvasHeader
+                        } else {
+                            compactCanvasHeader
+                        }
+                        if proxy.size.width >= 1_050 {
+                            fullCanvasWorkspace
+                        } else {
+                            compactCanvasWorkspace
+                        }
+                    }
+                }
+            }
+        }
+        .frame(minHeight: 510)
+        .onChange(of: pattern) { newPattern in
+            selectedStepID = newPattern.graph.defaultSelectedID
+            inspectorSection = newPattern == .feedback ? .history : .configuration
+        }
+    }
+
+    private var fullCanvasWorkspace: some View {
+        VStack(spacing: 10) {
+            HStack(alignment: .top, spacing: 12) {
+                AutomationNodePalette(isEditing: isEditing)
+                    .frame(width: 178)
+                canvasSurface(minimumHeight: builderDesignPanel == .problems ? 390 : 510, compact: false)
+                builderInspector
+                    .frame(width: 248)
+            }
+            if builderDesignPanel == .problems {
+                AutomationProblemsDrawer()
+                    .frame(height: 146)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var builderInspector: some View {
+        switch builderDesignPanel {
+        case .condition:
+            AutomationConditionDesignPanel()
+        case .mapping:
+            AutomationDataMappingDesignPanel()
+        case .test:
+            AutomationNodeTestDesignPanel()
+        case .publish:
+            AutomationPublishReviewDesignPanel(currentVersion: workflow.version)
+        case .storage:
+            AutomationStorageAccessDesignPanel()
+        case .storagePromotion:
+            AutomationStoragePromotionDesignPanel()
+        case .standard, .problems, .newWorkflow:
+            if showsVersionHistory {
+                AutomationVersionHistoryPanel(currentVersion: workflow.version)
+            } else {
+                AutomationNodeInspector(
+                    step: selectedStep,
+                    section: $inspectorSection,
+                    showsCaseHistory: pattern == .feedback
+                )
+            }
+        }
+    }
+
+    private var compactCanvasWorkspace: some View {
+        VStack(spacing: 8) {
+            canvasSurface(minimumHeight: 350, compact: true)
+            HStack(spacing: 12) {
+                Label("Selected: \(selectedStep.title)", systemImage: selectedStep.symbol)
+                    .foregroundStyle(selectedStep.kind.tint)
+                Divider().frame(height: 16)
+                Text("\(selectedStep.input) → \(selectedStep.output)")
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Spacer()
+                Label(selectedStep.authority, systemImage: "lock.shield")
+                    .foregroundStyle(selectedStep.kind == .effect ? Nord.auroraYellow : .secondary)
+                    .lineLimit(1)
+            }
+            .font(.caption)
+            .padding(.horizontal, 4)
+        }
+    }
+
+    private func canvasSurface(minimumHeight: CGFloat, compact: Bool) -> some View {
+        VStack(spacing: 8) {
+            canvasToolbar(compact: compact)
+            Group {
+                switch editorMode {
+                case .canvas:
+                    if builderDesignPanel == .storage || builderDesignPanel == .storagePromotion {
+                        AutomationStorageCanvasDesign(
+                            mode: builderDesignPanel == .storagePromotion ? .promotion : .scopes
+                        )
+                    } else {
+                        AutomationNodeCanvas(
+                            graph: graph,
+                            selectedStepID: $selectedStepID,
+                            isSimulating: isSimulating,
+                            viewportPreset: viewportPreset,
+                            selectedEdgeID: $selectedEdgeID,
+                            isEditing: isEditing
+                        )
+                    }
+                case .outline:
+                    AutomationOutlinePreview(graph: graph, selectedStepID: $selectedStepID)
+                }
+            }
+            .frame(minHeight: minimumHeight)
+            canvasLegend(compact: compact)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity)
+        .background(Nord.polarNight1.opacity(0.45), in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private var canvasHeader: some View {
+        HStack(spacing: 14) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(workflow.name).font(.title3.weight(.bold))
+                HStack(spacing: 7) {
+                    Text(pattern.title + " · " + pattern.summary).font(.caption).foregroundStyle(.secondary)
+                    Text(isEditing ? "DRAFT v\(workflow.version + 1)" : "PUBLISHED v\(workflow.version)")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(isEditing ? Nord.auroraYellow : Nord.auroraGreen)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background((isEditing ? Nord.auroraYellow : Nord.auroraGreen).opacity(0.12), in: Capsule())
+                }
+            }
+            Spacer()
+            Picker("Canvas pattern", selection: $pattern) {
+                ForEach(AutomationCanvasPattern.allCases) { item in
+                    Text(item.rawValue).tag(item)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 390)
+            Button("Versions", systemImage: "clock.arrow.circlepath") {
+                showsVersionHistory.toggle()
+            }
+            .buttonStyle(.bordered)
+            Button(
+                isEditing ? "Finish draft" : "Edit as v\(workflow.version + 1)",
+                systemImage: isEditing ? "checkmark" : "square.and.pencil"
+            ) {
+                isEditing.toggle()
+                showsVersionHistory = false
+                isSimulating = false
+            }
+            .buttonStyle(.borderedProminent)
+        }
+    }
+
+    private var compactCanvasHeader: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(workflow.name).font(.headline.weight(.bold))
+                Text(isEditing ? "Reply-driven case · DRAFT v\(workflow.version + 1)" : "Reply-driven case · PUBLISHED v\(workflow.version)")
+                    .font(.caption)
+                    .foregroundStyle(isEditing ? Nord.auroraYellow : .secondary)
+            }
+            Spacer()
+            Label(viewportPreset.title, systemImage: "viewfinder")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Nord.frost1)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(Nord.frost1.opacity(0.12), in: Capsule())
+            if isEditing {
+                Button("Add", systemImage: "plus") {}.buttonStyle(.bordered).controlSize(.small)
+                Button("Inspect", systemImage: "sidebar.right") {}.buttonStyle(.bordered).controlSize(.small)
+            } else {
+                Button("Edit", systemImage: "square.and.pencil") {}.buttonStyle(.bordered).controlSize(.small)
+            }
+        }
+    }
+
+    private func canvasToolbar(compact: Bool) -> some View {
+        HStack(spacing: 12) {
+            Picker("Editor", selection: $editorMode) {
+                ForEach(AutomationEditorMode.allCases, id: \.self) { item in
+                    Text(item.rawValue).tag(item)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 150)
+            Divider().frame(height: 18)
+            if isEditing {
+                Button("Undo", systemImage: "arrow.uturn.backward") {}.buttonStyle(.plain)
+                Button("Redo", systemImage: "arrow.uturn.forward") {}.buttonStyle(.plain).disabled(true)
+                Label("Draft changes", systemImage: "circle.fill").foregroundStyle(Nord.auroraYellow)
+            } else {
+                Label("Validated", systemImage: "checkmark.seal.fill")
+                    .foregroundStyle(Nord.auroraGreen)
+            }
+            if !compact {
+                Text("\(graph.steps.count) nodes · \(graph.edges.count) connections")
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            if isEditing {
+                Button("Discard", role: .destructive) {}.buttonStyle(.plain)
+                Button("Publish v7") {}.buttonStyle(.borderedProminent).controlSize(.small).disabled(true)
+            } else {
+                Button(isSimulating ? "Pause preview" : "Preview run", systemImage: isSimulating ? "pause.fill" : "play.fill") {
+                    isSimulating.toggle()
+                }
+                .buttonStyle(.plain)
+            }
+            HStack(spacing: 7) {
+                Image(systemName: "minus.magnifyingglass")
+                Text(viewportPreset.zoomLabel)
+                    .font(.system(.caption, design: .monospaced).weight(.semibold))
+                Image(systemName: "plus.magnifyingglass")
+                Divider().frame(height: 14)
+                Image(systemName: "arrow.down.right.and.arrow.up.left")
+                    .help("Fit all")
+                Image(systemName: "map")
+                    .help("Toggle minimap")
+            }
+            .foregroundStyle(.secondary)
+            if !compact {
+                Label("Autosaved", systemImage: "checkmark.circle")
+                    .foregroundStyle(Nord.auroraGreen)
+            }
+        }
+        .font(.caption)
+    }
+
+    private func canvasLegend(compact: Bool) -> some View {
+        HStack(spacing: 14) {
+            Label("Data", systemImage: "circle.fill").foregroundStyle(Nord.frost1)
+            Label("Decision", systemImage: "circle.fill").foregroundStyle(Nord.auroraYellow)
+            Label("Parallel", systemImage: "circle.fill").foregroundStyle(Nord.auroraPurple)
+            Label("Effect", systemImage: "circle.fill").foregroundStyle(Nord.auroraRed)
+            if !compact {
+                Label("Error / retry", systemImage: "circle.fill").foregroundStyle(Nord.auroraOrange)
+            }
+            Spacer()
+            if !compact {
+                Text(editorMode == .canvas ? "Animated dashes show the active fixture path" : "Branches remain explicit in incoming and outgoing routes")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .font(.caption2)
+    }
+}
+
+private struct AutomationOutlinePreview: View {
+    let graph: AutomationCanvasGraph
+    @Binding var selectedStepID: String
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Text("Node").frame(width: 190, alignment: .leading)
+                Text("Incoming").frame(maxWidth: .infinity, alignment: .leading)
+                Text("Outgoing").frame(maxWidth: .infinity, alignment: .leading)
+                Text("Authority").frame(width: 150, alignment: .leading)
+            }
+            .font(.caption2.weight(.bold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+
+            Divider()
+
+            ScrollView {
+                LazyVStack(spacing: 4) {
+                    ForEach(graph.steps) { step in
+                        Button {
+                            selectedStepID = step.id
+                        } label: {
+                            HStack(spacing: 12) {
+                                HStack(spacing: 8) {
+                                    Image(systemName: step.symbol)
+                                        .foregroundStyle(step.kind.tint)
+                                        .frame(width: 18)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(step.title).font(.caption.weight(.semibold))
+                                        Text(step.kind.label).font(.system(size: 8, weight: .bold)).foregroundStyle(step.kind.tint)
+                                    }
+                                }
+                                .frame(width: 190, alignment: .leading)
+                                routeList(incomingEdges(for: step.id))
+                                routeList(outgoingEdges(for: step.id))
+                                Text(step.authority)
+                                    .font(.caption2)
+                                    .foregroundStyle(step.kind == .effect ? Nord.auroraYellow : .secondary)
+                                    .frame(width: 150, alignment: .leading)
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(
+                                selectedStepID == step.id ? Nord.frost1.opacity(0.12) : Color.clear,
+                                in: RoundedRectangle(cornerRadius: 8)
+                            )
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(8)
+            }
+        }
+        .background(Nord.polarNight0.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
+        .overlay { RoundedRectangle(cornerRadius: 12).stroke(Nord.polarNight3, lineWidth: 1) }
+    }
+
+    private func incomingEdges(for stepID: String) -> [AutomationCanvasEdge] {
+        graph.edges.filter { $0.targetID == stepID }
+    }
+
+    private func outgoingEdges(for stepID: String) -> [AutomationCanvasEdge] {
+        graph.edges.filter { $0.sourceID == stepID }
+    }
+
+    private func routeList(_ edges: [AutomationCanvasEdge]) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            if edges.isEmpty {
+                Text("—").foregroundStyle(.tertiary)
+            } else {
+                ForEach(edges) { edge in
+                    HStack(spacing: 5) {
+                        Circle().fill(edge.kind.tint).frame(width: 6, height: 6)
+                        Text(edge.label).lineLimit(1)
+                    }
+                }
+            }
+        }
+        .font(.caption2)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct AutomationNodePalette: View {
+    let isEditing: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Add").font(.headline)
+                Spacer()
+                Image(systemName: "square.grid.2x2").foregroundStyle(.secondary)
+            }
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                Text("Search nodes and patterns")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .padding(7)
+            .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 7))
+            paletteSection("START", items: [
+                ("Trigger", "bolt.fill"), ("Schedule", "calendar.badge.clock"),
+            ])
+            paletteSection("PROCESS", items: [
+                ("Data", "square.3.layers.3d"), ("Transform", "wand.and.stars"),
+                ("AI", "sparkles"), ("Context", "text.append"),
+                ("Subflow", "square.stack.3d.up"),
+            ])
+            paletteSection("FLOW", items: [
+                ("Decision", "arrow.triangle.branch"), ("Parallel", "arrow.triangle.2.circlepath"),
+                ("Join", "arrow.triangle.merge"), ("Loop", "repeat"),
+                ("Wait", "clock.badge"),
+            ])
+            paletteSection("STORAGE", items: [
+                ("Job storage", "shippingbox"), ("Workflow storage", "externaldrive"),
+                ("Promote", "arrow.up.doc"),
+            ])
+            paletteSection("CONTROL", items: [
+                ("Human review", "person.crop.circle"), ("Effect", "checkmark.shield"),
+                ("Receipt", "doc.text.magnifyingglass"),
+            ])
+            paletteSection("PATTERNS", items: [
+                ("Email feedback", "envelope.arrow.triangle.branch"),
+                ("Approval + wait", "person.badge.clock"),
+            ])
+            Spacer(minLength: 0)
+            Label(
+                isEditing ? "Drag or press Return to add" : "Edit to change this graph",
+                systemImage: isEditing ? "keyboard" : "lock.fill"
+            )
+            .font(.caption2)
+            .foregroundStyle(isEditing ? Nord.frost1 : .secondary)
+        }
+        .padding(13)
+        .frame(minHeight: 566, alignment: .topLeading)
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private func paletteSection(_ title: String, items: [(String, String)]) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.secondary)
+                .padding(.top, 4)
+            ForEach(items, id: \.0) { item in
+                HStack(spacing: 6) {
+                    Image(systemName: item.1).frame(width: 14)
+                    Text(item.0).lineLimit(1)
+                    Spacer(minLength: 0)
+                    if isEditing { Image(systemName: "plus.circle").foregroundStyle(Nord.frost1) }
+                }
+                .font(.caption.weight(.medium))
+                .padding(.vertical, 2)
+            }
+        }
+    }
+}
+
+private enum AutomationCanvasNodeKind {
+    case trigger
+    case data
+    case policy
+    case decision
+    case parallel
+    case join
+    case loop
+    case ai
+    case context
+    case human
+    case wait
+    case effect
+    case error
+    case subflow
+    case receipt
+
+    var label: String {
+        switch self {
+        case .trigger: "TRIGGER"
+        case .data: "DATA"
+        case .policy: "POLICY"
+        case .decision: "DECISION"
+        case .parallel: "PARALLEL"
+        case .join: "JOIN"
+        case .loop: "LOOP"
+        case .ai: "AI"
+        case .context: "CONTEXT"
+        case .human: "HUMAN"
+        case .wait: "WAIT"
+        case .effect: "EFFECT"
+        case .error: "ERROR"
+        case .subflow: "SUBFLOW"
+        case .receipt: "RECEIPT"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .trigger, .data, .policy, .receipt: Nord.frost1
+        case .context: Nord.frost0
+        case .decision, .human, .wait: Nord.auroraYellow
+        case .parallel, .join, .loop, .subflow: Nord.auroraPurple
+        case .ai: Nord.frost0
+        case .effect, .error: Nord.auroraRed
+        }
+    }
+}
+
+private struct AutomationCanvasStep: Identifiable {
+    let id: String
+    let title: String
+    let subtitle: String
+    let symbol: String
+    let kind: AutomationCanvasNodeKind
+    let x: CGFloat
+    let y: CGFloat
+    let state: AutomationPreviewState
+    let input: String
+    let output: String
+    let authority: String
+}
+
+private struct AutomationCanvasEdge: Identifiable {
+    enum Kind {
+        case data
+        case conditional
+        case success
+        case parallel
+        case error
+        case loop
+
+        var tint: Color {
+            switch self {
+            case .data: Nord.frost1
+            case .conditional: Nord.auroraYellow
+            case .success: Nord.auroraGreen
+            case .parallel: Nord.auroraPurple
+            case .error: Nord.auroraRed
+            case .loop: Nord.auroraOrange
+            }
+        }
+    }
+
+    let id: String
+    let sourceID: String
+    let targetID: String
+    let label: String
+    let kind: Kind
+    let active: Bool
+
+    init(_ sourceID: String, _ targetID: String, label: String, kind: Kind, active: Bool) {
+        id = "\(sourceID)-\(targetID)-\(label)"
+        self.sourceID = sourceID
+        self.targetID = targetID
+        self.label = label
+        self.kind = kind
+        self.active = active
+    }
+}
+
+private struct AutomationCanvasGroup: Identifiable {
+    let id: String
+    let title: String
+    let x: CGFloat
+    let y: CGFloat
+    let width: CGFloat
+    let height: CGFloat
+    let tint: Color
+}
+
+private struct AutomationCanvasGraph {
+    let defaultSelectedID: String
+    let groups: [AutomationCanvasGroup]
+    let steps: [AutomationCanvasStep]
+    let edges: [AutomationCanvasEdge]
+}
+
+private struct AutomationNodeCanvas: View {
+    let graph: AutomationCanvasGraph
+    @Binding var selectedStepID: String
+    let isSimulating: Bool
+    var viewportPreset: AutomationCanvasViewportPreset = .standard
+    var selectedEdgeID: Binding<String?>? = nil
+    var isEditing = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private let worldSize = CGSize(width: 1_320, height: 620)
+
+    private struct ViewportLayout {
+        let scale: CGFloat
+        let offset: CGPoint
+        let semanticOverview: Bool
+        let showsMinimap: Bool
+
+        func position(x: CGFloat, y: CGFloat, worldSize: CGSize) -> CGPoint {
+            CGPoint(
+                x: x * worldSize.width * scale + offset.x,
+                y: y * worldSize.height * scale + offset.y
+            )
+        }
+
+        func visibleWorldRect(viewportSize: CGSize, worldSize: CGSize) -> CGRect {
+            CGRect(
+                x: -offset.x / scale,
+                y: -offset.y / scale,
+                width: viewportSize.width / scale,
+                height: viewportSize.height / scale
+            )
+            .intersection(CGRect(origin: .zero, size: worldSize))
+        }
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let layout = viewportLayout(in: proxy.size)
+            TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: reduceMotion || !isSimulating)) { timeline in
+                let phase = timeline.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.0)
+                ZStack {
+                    ForEach(graph.groups) { group in
+                        AutomationCanvasGroupView(group: group)
+                            .frame(
+                                width: group.width * worldSize.width * layout.scale,
+                                height: group.height * worldSize.height * layout.scale
+                            )
+                            .position(layout.position(
+                                x: group.x + group.width / 2,
+                                y: group.y + group.height / 2,
+                                worldSize: worldSize
+                            ))
+                    }
+
+                    Canvas { context, size in
+                        drawEdges(context: &context, size: size, phase: phase, layout: layout)
+                    }
+
+                    ForEach(graph.edges) { edge in
+                        if let position = edgeLabelPosition(edge, size: proxy.size, layout: layout) {
+                            if let selectedEdgeID {
+                                Button {
+                                    selectedEdgeID.wrappedValue = edge.id
+                                } label: {
+                                    edgeLabel(edge, selected: selectedEdgeID.wrappedValue == edge.id)
+                                }
+                                .buttonStyle(.plain)
+                                .position(position)
+                            } else {
+                                edgeLabel(edge, selected: false)
+                                    .position(position)
+                            }
+                        }
+                    }
+
+                    ForEach(graph.steps) { step in
+                        Button {
+                            selectedStepID = step.id
+                            selectedEdgeID?.wrappedValue = nil
+                        } label: {
+                            if layout.semanticOverview {
+                                AutomationSemanticNodeCard(
+                                    step: step,
+                                    selected: selectedStepID == step.id
+                                )
+                            } else {
+                                AutomationNodeCard(
+                                    step: step,
+                                    selected: selectedStepID == step.id,
+                                    animated: isSimulating && step.state == .running && !reduceMotion,
+                                    phase: phase,
+                                    collapsedSubflow: viewportPreset == .feedbackFocus && step.id == "execute"
+                                )
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .position(layout.position(x: step.x, y: step.y, worldSize: worldSize))
+                    }
+
+                    if isEditing, let firstEdge = graph.edges.first,
+                       let position = edgeLabelPosition(firstEdge, size: proxy.size, layout: layout) {
+                        Button {
+                            selectedEdgeID?.wrappedValue = firstEdge.id
+                        } label: {
+                            Image(systemName: "plus")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundStyle(Nord.polarNight0)
+                                .frame(width: 20, height: 20)
+                                .background(Nord.frost1, in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Insert a compatible node on this connection")
+                        .position(x: position.x, y: position.y + 24)
+                    }
+                }
+            }
+            .overlay(alignment: .topLeading) {
+                Label(viewportPreset.title, systemImage: viewportSymbol)
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(Nord.frost1)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(Nord.polarNight0.opacity(0.94), in: Capsule())
+                    .overlay { Capsule().stroke(Nord.frost1.opacity(0.35), lineWidth: 1) }
+                    .padding(10)
+            }
+            .overlay(alignment: .bottomTrailing) {
+                if layout.showsMinimap {
+                    AutomationCanvasMinimap(
+                        graph: graph,
+                        worldSize: worldSize,
+                        visibleWorldRect: layout.visibleWorldRect(
+                            viewportSize: proxy.size,
+                            worldSize: worldSize
+                        )
+                    )
+                    .padding(10)
+                }
+            }
+        }
+        .background { AutomationDotGrid() }
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay { RoundedRectangle(cornerRadius: 12).stroke(Nord.polarNight3, lineWidth: 1) }
+    }
+
+    private var viewportSymbol: String {
+        switch viewportPreset {
+        case .standard: "viewfinder"
+        case .readable: "text.magnifyingglass"
+        case .semanticOverview: "arrow.down.right.and.arrow.up.left"
+        case .feedbackFocus: "scope"
+        }
+    }
+
+    private func viewportLayout(in size: CGSize) -> ViewportLayout {
+        let fittedScale = min(
+            (size.width - 44) / worldSize.width,
+            (size.height - 40) / worldSize.height
+        )
+
+        switch viewportPreset {
+        case .standard:
+            let scale = min(1, fittedScale)
+            return centeredLayout(scale: scale, size: size, semanticOverview: false, showsMinimap: false)
+        case .semanticOverview:
+            return centeredLayout(
+                scale: min(1, fittedScale),
+                size: size,
+                semanticOverview: true,
+                showsMinimap: false
+            )
+        case .readable:
+            let scale: CGFloat = 1
+            let selectedStep = graph.steps.first(where: { $0.id == selectedStepID })
+                ?? graph.steps.first(where: { $0.id == graph.defaultSelectedID })
+            let focusX = graph.defaultSelectedID == "fanout" && selectedStepID == "fanout"
+                ? 0.52
+                : (selectedStep?.x ?? 0.5)
+            let target = CGPoint(
+                x: focusX * worldSize.width,
+                y: (selectedStep?.y ?? 0.5) * worldSize.height
+            )
+            return ViewportLayout(
+                scale: scale,
+                offset: CGPoint(x: size.width / 2 - target.x, y: size.height / 2 - target.y),
+                semanticOverview: false,
+                showsMinimap: true
+            )
+        case .feedbackFocus:
+            let focusRect = CGRect(
+                x: worldSize.width * 0.32,
+                y: worldSize.height * 0.16,
+                width: worldSize.width * 0.66,
+                height: worldSize.height * 0.78
+            )
+            let scale = min(
+                (size.width - 54) / focusRect.width,
+                (size.height - 46) / focusRect.height,
+                1
+            )
+            return ViewportLayout(
+                scale: scale,
+                offset: CGPoint(
+                    x: size.width / 2 - focusRect.midX * scale - 78,
+                    y: size.height / 2 - focusRect.midY * scale
+                ),
+                semanticOverview: false,
+                showsMinimap: true
+            )
+        }
+    }
+
+    private func centeredLayout(
+        scale: CGFloat,
+        size: CGSize,
+        semanticOverview: Bool,
+        showsMinimap: Bool
+    ) -> ViewportLayout {
+        ViewportLayout(
+            scale: scale,
+            offset: CGPoint(
+                x: (size.width - worldSize.width * scale) / 2,
+                y: (size.height - worldSize.height * scale) / 2
+            ),
+            semanticOverview: semanticOverview,
+            showsMinimap: showsMinimap
+        )
+    }
+
+    private func edgeLabel(_ edge: AutomationCanvasEdge, selected: Bool) -> some View {
+        HStack(spacing: 4) {
+            Circle().fill(edge.kind.tint).frame(width: 5, height: 5)
+            Text(edge.label)
+        }
+        .font(.system(size: 9, weight: .semibold))
+        .foregroundStyle(edge.kind.tint)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(selected ? edge.kind.tint.opacity(0.22) : Nord.polarNight0.opacity(0.94), in: Capsule())
+        .overlay {
+            if selected { Capsule().stroke(edge.kind.tint, lineWidth: 1.5) }
+        }
+        .help("Inspect data checkpoint")
+    }
+
+    private func drawEdges(
+        context: inout GraphicsContext,
+        size: CGSize,
+        phase: Double,
+        layout: ViewportLayout
+    ) {
+        for edge in graph.edges {
+            guard let source = graph.steps.first(where: { $0.id == edge.sourceID }),
+                  let target = graph.steps.first(where: { $0.id == edge.targetID }) else { continue }
+            let route = edgeRoute(edge: edge, source: source, target: target, size: size, layout: layout)
+            let selected = selectedEdgeID?.wrappedValue == edge.id
+            let tint = selected || edge.active ? edge.kind.tint : Nord.polarNight3
+            context.stroke(
+                route.path,
+                with: .color(tint),
+                style: StrokeStyle(
+                    lineWidth: selected ? 4 : (edge.active ? 2.5 : 1.5),
+                    dash: edge.active ? [7, 6] : [],
+                    dashPhase: edge.active && isSimulating && !reduceMotion ? -phase * 28 : 0
+                )
+            )
+            drawArrowhead(context: &context, tip: route.end, tangentFrom: route.control2, tint: tint)
+        }
+    }
+
+    private func edgeRoute(
+        edge: AutomationCanvasEdge,
+        source: AutomationCanvasStep,
+        target: AutomationCanvasStep,
+        size: CGSize,
+        layout: ViewportLayout
+    ) -> (path: Path, end: CGPoint, control2: CGPoint) {
+        let sourceCenter = layout.position(x: source.x, y: source.y, worldSize: worldSize)
+        let targetCenter = layout.position(x: target.x, y: target.y, worldSize: worldSize)
+        let deltaX = targetCenter.x - sourceCenter.x
+        let deltaY = targetCenter.y - sourceCenter.y
+        let nodeHalfWidth: CGFloat = layout.semanticOverview ? 52 : 77
+        let nodeHalfHeight: CGFloat = layout.semanticOverview ? 25 : 36
+        var path = Path()
+
+        if edge.kind == .loop {
+            if abs(deltaX) < 44 {
+                let start = CGPoint(x: sourceCenter.x - nodeHalfWidth, y: sourceCenter.y)
+                let end = CGPoint(x: targetCenter.x - nodeHalfWidth, y: targetCenter.y)
+                let loopX = max(14, min(start.x, end.x) - 64)
+                let control1 = CGPoint(x: loopX, y: start.y)
+                let control2 = CGPoint(x: loopX, y: end.y)
+                path.move(to: start)
+                path.addCurve(to: end, control1: control1, control2: control2)
+                return (path, end, control2)
+            }
+
+            let start = CGPoint(x: sourceCenter.x + nodeHalfWidth, y: sourceCenter.y)
+            let end = CGPoint(x: targetCenter.x - nodeHalfWidth, y: targetCenter.y)
+            let loopY = min(size.height - 12, max(start.y, end.y) + 72)
+            let control1 = CGPoint(x: start.x + 46, y: loopY)
+            let control2 = CGPoint(x: end.x - 46, y: loopY)
+            path.move(to: start)
+            path.addCurve(to: end, control1: control1, control2: control2)
+            return (path, end, control2)
+        }
+
+        if abs(deltaX) >= abs(deltaY) {
+            let direction: CGFloat = deltaX >= 0 ? 1 : -1
+            let start = CGPoint(x: sourceCenter.x + direction * nodeHalfWidth, y: sourceCenter.y)
+            let end = CGPoint(x: targetCenter.x - direction * nodeHalfWidth, y: targetCenter.y)
+            let bend = max(22, abs(end.x - start.x) * 0.45)
+            let control1 = CGPoint(x: start.x + direction * bend, y: start.y)
+            let control2 = CGPoint(x: end.x - direction * bend, y: end.y)
+            path.move(to: start)
+            path.addCurve(to: end, control1: control1, control2: control2)
+            return (path, end, control2)
+        }
+
+        let direction: CGFloat = deltaY >= 0 ? 1 : -1
+        let start = CGPoint(x: sourceCenter.x, y: sourceCenter.y + direction * nodeHalfHeight)
+        let end = CGPoint(x: targetCenter.x, y: targetCenter.y - direction * nodeHalfHeight)
+        let bend = max(18, abs(end.y - start.y) * 0.45)
+        let control1 = CGPoint(x: start.x, y: start.y + direction * bend)
+        let control2 = CGPoint(x: end.x, y: end.y - direction * bend)
+        path.move(to: start)
+        path.addCurve(to: end, control1: control1, control2: control2)
+        return (path, end, control2)
+    }
+
+    private func drawArrowhead(
+        context: inout GraphicsContext,
+        tip: CGPoint,
+        tangentFrom: CGPoint,
+        tint: Color
+    ) {
+        let angle = atan2(tip.y - tangentFrom.y, tip.x - tangentFrom.x)
+        let length: CGFloat = 8
+        let width: CGFloat = 4.5
+        let base = CGPoint(x: tip.x - cos(angle) * length, y: tip.y - sin(angle) * length)
+        let perpendicular = CGPoint(x: -sin(angle) * width, y: cos(angle) * width)
+        var arrow = Path()
+        arrow.move(to: tip)
+        arrow.addLine(to: CGPoint(x: base.x + perpendicular.x, y: base.y + perpendicular.y))
+        arrow.addLine(to: CGPoint(x: base.x - perpendicular.x, y: base.y - perpendicular.y))
+        arrow.closeSubpath()
+        context.fill(arrow, with: .color(tint))
+    }
+
+    private func edgeLabelPosition(
+        _ edge: AutomationCanvasEdge,
+        size: CGSize,
+        layout: ViewportLayout
+    ) -> CGPoint? {
+        guard let source = graph.steps.first(where: { $0.id == edge.sourceID }),
+              let target = graph.steps.first(where: { $0.id == edge.targetID }) else { return nil }
+        let sourcePosition = layout.position(x: source.x, y: source.y, worldSize: worldSize)
+        let targetPosition = layout.position(x: target.x, y: target.y, worldSize: worldSize)
+        if edge.kind == .loop, abs(target.x - source.x) < 0.06 {
+            return CGPoint(
+                x: max(54, sourcePosition.x - 92),
+                y: (sourcePosition.y + targetPosition.y) * 0.5
+            )
+        }
+        if edge.kind == .loop || target.x < source.x {
+            return CGPoint(
+                x: (sourcePosition.x + targetPosition.x) * 0.5,
+                y: min(size.height - 16, max(sourcePosition.y, targetPosition.y) + 34)
+            )
+        }
+        if abs(target.y - source.y) < 0.05 {
+            return CGPoint(
+                x: (sourcePosition.x + targetPosition.x) * 0.5,
+                y: sourcePosition.y - 48
+            )
+        }
+        if abs(target.y - source.y) > abs(target.x - source.x) {
+            return CGPoint(
+                x: (sourcePosition.x + targetPosition.x) * 0.5 + 18,
+                y: (sourcePosition.y + targetPosition.y) * 0.5
+            )
+        }
+        return CGPoint(
+            x: (sourcePosition.x + targetPosition.x) * 0.5,
+            y: (sourcePosition.y + targetPosition.y) * 0.5 - 10
+        )
+    }
+}
+
+private struct AutomationCanvasMinimap: View {
+    let graph: AutomationCanvasGraph
+    let worldSize: CGSize
+    let visibleWorldRect: CGRect
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Label("Map", systemImage: "map")
+                Spacer()
+                Text("drag viewport")
+                    .foregroundStyle(.secondary)
+            }
+            .font(.system(size: 9, weight: .bold))
+
+            Canvas { context, size in
+                let scaleX = size.width / worldSize.width
+                let scaleY = size.height / worldSize.height
+                for edge in graph.edges {
+                    guard let source = graph.steps.first(where: { $0.id == edge.sourceID }),
+                          let target = graph.steps.first(where: { $0.id == edge.targetID }) else { continue }
+                    var path = Path()
+                    path.move(to: CGPoint(x: source.x * size.width, y: source.y * size.height))
+                    path.addLine(to: CGPoint(x: target.x * size.width, y: target.y * size.height))
+                    context.stroke(path, with: .color(edge.kind.tint.opacity(0.45)), lineWidth: 1)
+                }
+                for step in graph.steps {
+                    let rect = CGRect(
+                        x: step.x * size.width - 3,
+                        y: step.y * size.height - 2,
+                        width: 6,
+                        height: 4
+                    )
+                    context.fill(Path(roundedRect: rect, cornerRadius: 1), with: .color(step.kind.tint))
+                }
+                let viewportRect = CGRect(
+                    x: visibleWorldRect.minX * scaleX,
+                    y: visibleWorldRect.minY * scaleY,
+                    width: visibleWorldRect.width * scaleX,
+                    height: visibleWorldRect.height * scaleY
+                )
+                context.fill(Path(viewportRect), with: .color(Nord.frost1.opacity(0.12)))
+                context.stroke(Path(viewportRect), with: .color(Nord.frost1), lineWidth: 1.5)
+            }
+            .frame(height: 64)
+            .background(Nord.polarNight0.opacity(0.7), in: RoundedRectangle(cornerRadius: 6))
+        }
+        .padding(8)
+        .frame(width: 170)
+        .background(Nord.polarNight1.opacity(0.97), in: RoundedRectangle(cornerRadius: 10))
+        .overlay { RoundedRectangle(cornerRadius: 10).stroke(Nord.polarNight3, lineWidth: 1) }
+        .shadow(color: .black.opacity(0.25), radius: 8, y: 3)
+    }
+}
+
+private struct AutomationSemanticNodeCard: View {
+    let step: AutomationCanvasStep
+    let selected: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: step.symbol)
+                .foregroundStyle(step.kind.tint)
+            Text(step.title)
+                .font(.system(size: 9, weight: .semibold))
+                .lineLimit(2)
+            Spacer(minLength: 0)
+            Circle().fill(step.state.tint).frame(width: 5, height: 5)
+        }
+        .padding(.horizontal, 8)
+        .frame(width: 104, height: 50, alignment: .leading)
+        .background(Nord.polarNight2, in: RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(selected ? Nord.frost1 : step.kind.tint.opacity(0.45), lineWidth: selected ? 2 : 1)
+        }
+    }
+}
+
+private struct AutomationCanvasGroupView: View {
+    let group: AutomationCanvasGroup
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 12)
+            .fill(group.tint.opacity(0.035))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(group.tint.opacity(0.25), style: StrokeStyle(lineWidth: 1, dash: [5, 5]))
+            }
+            .overlay(alignment: .topLeading) {
+                Text(group.title)
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(group.tint.opacity(0.85))
+                    .padding(8)
+            }
+    }
+}
+
+private struct AutomationDotGrid: View {
+    var body: some View {
+        Canvas { context, size in
+            let spacing: CGFloat = 18
+            for x in stride(from: spacing, to: size.width, by: spacing) {
+                for y in stride(from: spacing, to: size.height, by: spacing) {
+                    let rect = CGRect(x: x, y: y, width: 1.4, height: 1.4)
+                    context.fill(Path(ellipseIn: rect), with: .color(Nord.polarNight3.opacity(0.7)))
+                }
+            }
+        }
+        .background(Nord.polarNight0.opacity(0.55))
+    }
+}
+
+private struct AutomationNodeCard: View {
+    let step: AutomationCanvasStep
+    let selected: Bool
+    let animated: Bool
+    let phase: Double
+    var collapsedSubflow = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(step.kind.label)
+                .font(.system(size: 8, weight: .bold))
+                .foregroundStyle(step.kind.tint)
+            HStack(spacing: 7) {
+                Image(systemName: step.symbol).foregroundStyle(step.kind.tint)
+                Text(step.title).font(.caption.weight(.semibold)).lineLimit(1)
+                Spacer(minLength: 0)
+                Circle().fill(step.state.tint).frame(width: 6, height: 6)
+            }
+            Text(step.subtitle).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            if collapsedSubflow {
+                HStack(spacing: 4) {
+                    Image(systemName: "rectangle.stack")
+                    Text("5 internal steps collapsed")
+                }
+                .font(.system(size: 8, weight: .semibold))
+                .foregroundStyle(Nord.auroraPurple)
+            }
+        }
+        .padding(10)
+        .frame(width: 154, alignment: .leading)
+        .background(Nord.polarNight2, in: RoundedRectangle(cornerRadius: 11))
+        .overlay {
+            RoundedRectangle(cornerRadius: 11)
+                .stroke(
+                    selected ? Nord.frost1 : step.kind.tint.opacity(step.state == .running ? 0.9 : 0.30),
+                    lineWidth: selected || step.state == .running ? 2 : 1
+                )
+        }
+        .shadow(color: step.kind.tint.opacity(animated ? 0.16 + sin(phase * .pi * 2) * 0.10 : 0), radius: 8)
+    }
+}
+
+private enum AutomationStorageCanvasMode {
+    case scopes
+    case promotion
+}
+
+private struct AutomationStorageCanvasDesign: View {
+    let mode: AutomationStorageCanvasMode
+
+    var body: some View {
+        GeometryReader { proxy in
+            let width = proxy.size.width
+            let leftX = max(84, width * 0.17)
+            let middleX = width * 0.50
+            let rightX = min(width - 84, width * 0.83)
+            let jobStorageWidth = min(360, width - 80)
+            let workflowStorageWidth = min(410, width - 56)
+
+            ZStack {
+                AutomationDotGrid()
+
+                RoundedRectangle(cornerRadius: 14)
+                    .fill(Nord.frost1.opacity(0.035))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 14)
+                            .stroke(Nord.frost1.opacity(0.42), style: StrokeStyle(lineWidth: 1.5, dash: [7, 6]))
+                    }
+                    .frame(width: width - 24, height: 310)
+                    .position(x: width / 2, y: 167)
+
+                Canvas { context, _ in
+                    drawStorageConnections(
+                        context: &context,
+                        leftX: leftX,
+                        middleX: middleX,
+                        rightX: rightX
+                    )
+                }
+
+                HStack(spacing: 6) {
+                    Image(systemName: "shippingbox.fill")
+                    Text("JOB BOUNDARY · RUN #184")
+                }
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(Nord.frost1)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(Nord.polarNight0.opacity(0.94), in: Capsule())
+                .position(x: 112, y: 26)
+
+                AutomationStorageProcessCard(
+                    title: "Compile context",
+                    subtitle: "Build bounded input",
+                    symbol: "text.append",
+                    access: "READS BOTH"
+                )
+                .position(x: leftX, y: 100)
+
+                AutomationStorageProcessCard(
+                    title: "Run work type",
+                    subtitle: "Create revision",
+                    symbol: "square.stack.3d.up",
+                    access: "JOB READ + WRITE",
+                    selected: mode == .scopes
+                )
+                .position(x: middleX, y: 100)
+
+                AutomationStorageProcessCard(
+                    title: "Verify all",
+                    subtitle: "Validate output",
+                    symbol: "checkmark.seal",
+                    access: "JOB READ"
+                )
+                .position(x: rightX, y: 100)
+
+                AutomationStorageResourceCard(
+                    title: "Job storage · #184",
+                    subtitle: "Visible only inside this job · survives waits and restarts",
+                    symbol: "shippingbox.fill",
+                    tint: Nord.frost1,
+                    facts: ["7 values", "3 files", "48.2 MB", "Deletes with job"],
+                    width: jobStorageWidth,
+                    selected: mode == .scopes
+                )
+                .position(x: middleX, y: 244)
+
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.up.doc.fill")
+                    Text(mode == .promotion ? "PROMOTE · SELECTED" : "EXPLICIT PROMOTION ONLY")
+                }
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(mode == .promotion ? Nord.auroraYellow : Nord.auroraPurple)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 6)
+                .background(Nord.polarNight0, in: Capsule())
+                .overlay {
+                    Capsule().stroke(
+                        mode == .promotion ? Nord.auroraYellow : Nord.auroraPurple.opacity(0.55),
+                        lineWidth: mode == .promotion ? 2 : 1
+                    )
+                }
+                .position(x: middleX, y: 350)
+
+                AutomationStorageResourceCard(
+                    title: "Workflow storage · Reply-driven reporting",
+                    subtitle: "Isolated installation storage · durable across jobs and versions",
+                    symbol: "externaldrive.fill",
+                    tint: Nord.auroraPurple,
+                    facts: ["templates/", "cases/", "86 MB", "Explicit lifecycle"],
+                    width: workflowStorageWidth,
+                    selected: mode == .promotion
+                )
+                .position(x: middleX, y: 438)
+
+                Label("Workflow storage is outside the job deletion boundary", systemImage: "lock.shield.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .position(x: middleX, y: 500)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay { RoundedRectangle(cornerRadius: 12).stroke(Nord.polarNight3, lineWidth: 1) }
+    }
+
+    private func drawStorageConnections(
+        context: inout GraphicsContext,
+        leftX: CGFloat,
+        middleX: CGFloat,
+        rightX: CGFloat
+    ) {
+        var flow = Path()
+        flow.move(to: CGPoint(x: leftX + 72, y: 100))
+        flow.addLine(to: CGPoint(x: middleX - 72, y: 100))
+        flow.move(to: CGPoint(x: middleX + 72, y: 100))
+        flow.addLine(to: CGPoint(x: rightX - 72, y: 100))
+        context.stroke(flow, with: .color(Nord.frost1), style: StrokeStyle(lineWidth: 2.2, dash: [7, 6]))
+
+        var jobAccess = Path()
+        for x in [leftX, middleX, rightX] {
+            jobAccess.move(to: CGPoint(x: x, y: 142))
+            jobAccess.addCurve(
+                to: CGPoint(x: middleX + (x - middleX) * 0.38, y: 198),
+                control1: CGPoint(x: x, y: 170),
+                control2: CGPoint(x: middleX + (x - middleX) * 0.38, y: 174)
+            )
+        }
+        context.stroke(jobAccess, with: .color(Nord.frost1.opacity(0.78)), style: StrokeStyle(lineWidth: 1.7, dash: [4, 5]))
+
+        var promotion = Path()
+        promotion.move(to: CGPoint(x: middleX, y: 290))
+        promotion.addLine(to: CGPoint(x: middleX, y: 397))
+        context.stroke(
+            promotion,
+            with: .color(mode == .promotion ? Nord.auroraYellow : Nord.auroraPurple.opacity(0.65)),
+            style: StrokeStyle(lineWidth: mode == .promotion ? 3 : 1.8, dash: mode == .promotion ? [7, 5] : [4, 6])
+        )
+    }
+}
+
+private struct AutomationStorageProcessCard: View {
+    let title: String
+    let subtitle: String
+    let symbol: String
+    let access: String
+    var selected = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 7) {
+                Image(systemName: symbol).foregroundStyle(Nord.frost1)
+                Text(title).font(.caption.weight(.bold)).lineLimit(1)
+            }
+            Text(subtitle).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            Text(access)
+                .font(.system(size: 8, weight: .bold))
+                .foregroundStyle(Nord.frost1)
+        }
+        .padding(10)
+        .frame(width: 148, height: 84, alignment: .leading)
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 11))
+        .overlay {
+            RoundedRectangle(cornerRadius: 11)
+                .stroke(selected ? Nord.frost1 : Nord.polarNight3, lineWidth: selected ? 2 : 1)
+        }
+    }
+}
+
+private struct AutomationStorageResourceCard: View {
+    let title: String
+    let subtitle: String
+    let symbol: String
+    let tint: Color
+    let facts: [String]
+    let width: CGFloat
+    let selected: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 9) {
+                Image(systemName: symbol)
+                    .foregroundStyle(tint)
+                    .frame(width: 28, height: 28)
+                    .background(tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 8))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.caption.weight(.bold)).lineLimit(1)
+                    Text(subtitle).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+            HStack(spacing: 6) {
+                ForEach(facts, id: \.self) { fact in
+                    Text(fact)
+                        .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(fact.contains("Deletes") ? Nord.auroraYellow : tint)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(tint.opacity(0.09), in: Capsule())
+                }
+            }
+        }
+        .padding(11)
+        .frame(width: width, height: 92, alignment: .leading)
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(selected ? tint : Nord.polarNight3, lineWidth: selected ? 2 : 1)
+        }
+    }
+}
+
+private struct AutomationNewWorkflowDesign: View {
+    private let templates: [(String, String, String, Color)] = [
+        ("Email feedback loop", "Keep one durable conversation across revisions and replies", "envelope.arrow.triangle.branch", Nord.frost1),
+        ("Classify and route", "Choose one typed path from a bounded classification", "arrow.triangle.branch", Nord.auroraYellow),
+        ("Parallel review", "Run independent checks and join their results", "arrow.triangle.2.circlepath", Nord.auroraPurple),
+        ("Approval and effect", "Preview an exact effect, wait for approval, then reconcile", "checkmark.shield", Nord.auroraGreen),
+        ("Batch processing", "Process a bounded collection with visible aggregation", "square.stack.3d.up", Nord.frost2),
+        ("Blank workflow", "Start with a trigger and add only compatible nodes", "plus.rectangle.on.rectangle", Color.secondary),
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Create workflow").font(.title2.weight(.bold))
+                    Text("Begin with a proven pattern, duplicate a version, or start from a typed trigger.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Cancel") {}.buttonStyle(.bordered)
+            }
+
+            HStack(spacing: 10) {
+                Label("Patterns", systemImage: "square.grid.2x2.fill")
+                    .foregroundStyle(Nord.frost1)
+                Text("My workflows").foregroundStyle(.secondary)
+                Text("Imported source").foregroundStyle(.secondary)
+                Spacer()
+                HStack(spacing: 7) {
+                    Image(systemName: "magnifyingglass")
+                    Text("Search patterns")
+                }
+                .font(.caption).foregroundStyle(.secondary)
+                .padding(.horizontal, 10).padding(.vertical, 7)
+                .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 8))
+            }
+            .font(.caption.weight(.semibold))
+
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: 12)], spacing: 12) {
+                ForEach(templates, id: \.0) { template in
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Image(systemName: template.2)
+                                .foregroundStyle(template.3)
+                                .frame(width: 30, height: 30)
+                                .background(template.3.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                            Spacer()
+                            Image(systemName: "arrow.up.right").foregroundStyle(.secondary)
+                        }
+                        Text(template.0).font(.headline)
+                        Text(template.1).font(.caption).foregroundStyle(.secondary)
+                            .frame(minHeight: 32, alignment: .topLeading)
+                        Divider()
+                        HStack {
+                            Label(template.0 == "Blank workflow" ? "1 starting node" : "Editable copy", systemImage: "doc.on.doc")
+                            Spacer()
+                            Text("Use pattern").foregroundStyle(Nord.frost1)
+                        }
+                        .font(.caption2.weight(.semibold))
+                    }
+                    .padding(14)
+                    .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
+                    .overlay { RoundedRectangle(cornerRadius: 12).stroke(template.0 == "Email feedback loop" ? Nord.frost1 : Nord.polarNight3) }
+                }
+            }
+
+            HStack {
+                Label("Patterns create an editable draft. Linked subflows remain version-pinned.", systemImage: "info.circle")
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Create draft from Email feedback loop", systemImage: "arrow.right") {}
+                    .buttonStyle(.borderedProminent)
+            }
+            .font(.caption)
+        }
+        .padding(18)
+        .background(Nord.polarNight0)
+    }
+}
+
+private struct AutomationBuilderInspectorShell<Content: View, Footer: View>: View {
+    let title: String
+    let subtitle: String
+    let symbol: String
+    let tint: Color
+    @ViewBuilder let content: Content
+    @ViewBuilder let footer: Footer
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 9) {
+                Image(systemName: symbol)
+                    .foregroundStyle(tint)
+                    .frame(width: 28, height: 28)
+                    .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title).font(.headline).lineLimit(1)
+                    Text(subtitle.uppercased()).font(.caption2.weight(.bold)).foregroundStyle(tint)
+                }
+            }
+            Divider()
+            content
+            Spacer(minLength: 0)
+            Divider()
+            footer
+        }
+        .font(.caption)
+        .padding(13)
+        .frame(minHeight: 566, alignment: .topLeading)
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+    }
+}
+
+private struct AutomationConditionDesignPanel: View {
+    var body: some View {
+        AutomationBuilderInspectorShell(
+            title: "Correction requested",
+            subtitle: "Selected connection",
+            symbol: "arrow.triangle.branch",
+            tint: Nord.auroraYellow
+        ) {
+            Text("Follow this path when").font(.caption.weight(.semibold))
+            conditionField("Interpret reply", symbol: "point.3.connected.trianglepath.dotted")
+            conditionField("Intent", symbol: "chevron.right.2")
+            HStack(spacing: 6) {
+                conditionField("equals", symbol: "equal")
+                conditionField("correction", symbol: "text.quote")
+            }
+            HStack {
+                Button("+ AND") {}.buttonStyle(.bordered).controlSize(.small)
+                Button("+ OR") {}.buttonStyle(.bordered).controlSize(.small)
+            }
+            Divider()
+            Text("Sample evaluation").font(.caption.weight(.semibold))
+            Label("Matched fixture: Customer correction #3", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(Nord.auroraGreen)
+            Text("“Please keep the totals but change the table layout.”")
+                .foregroundStyle(.secondary)
+            DisclosureGroup("Advanced predicate") {
+                Text("/intent equals correction")
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+        } footer: {
+            Label("1 of 3 outcomes tested", systemImage: "checkmark.seal")
+                .foregroundStyle(Nord.auroraYellow)
+        }
+    }
+
+    private func conditionField(_ text: String, symbol: String) -> some View {
+        HStack {
+            Image(systemName: symbol).foregroundStyle(.secondary)
+            Text(text).font(.caption.weight(.medium))
+            Spacer()
+            Image(systemName: "chevron.down").foregroundStyle(.secondary)
+        }
+        .padding(8)
+        .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 7))
+    }
+}
+
+private struct AutomationDataMappingDesignPanel: View {
+    var body: some View {
+        AutomationBuilderInspectorShell(
+            title: "Compile context",
+            subtitle: "Input mapping",
+            symbol: "text.append",
+            tint: Nord.frost1
+        ) {
+            Picker("Mapping", selection: .constant("Input")) {
+                Text("Setup").tag("Setup")
+                Text("Input").tag("Input")
+                Text("Output").tag("Output")
+                Text("Policy").tag("Policy")
+            }
+            .pickerStyle(.segmented).labelsHidden()
+            Text("Available data").font(.caption.weight(.semibold))
+            dataSource("Inbound email", field: "thread.id", sample: "18f3…", tint: Nord.frost1)
+            dataSource("Interpret reply", field: "instruction", sample: "change layout", tint: Nord.auroraYellow)
+            dataSource("Case state", field: "episodes[]", sample: "3 items", tint: Nord.auroraPurple)
+            Divider()
+            Text("Node inputs").font(.caption.weight(.semibold))
+            mappedField("caseID", source: "Inbound email · thread.id")
+            mappedField("instructions", source: "Interpret reply · instruction")
+            mappedField("history", source: "Case state · episodes[]")
+        } footer: {
+            Label("3 mappings · all types compatible", systemImage: "checkmark.seal.fill")
+                .foregroundStyle(Nord.auroraGreen)
+        }
+    }
+
+    private func dataSource(_ title: String, field: String, sample: String, tint: Color) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack { Circle().fill(tint).frame(width: 6, height: 6); Text(title).fontWeight(.semibold); Spacer(); Image(systemName: "line.3.horizontal") }
+            HStack { Text(field).font(.system(.caption2, design: .monospaced)); Spacer(); Text(sample).foregroundStyle(.secondary) }
+        }
+        .padding(8).background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 7))
+    }
+
+    private func mappedField(_ target: String, source: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(target).font(.system(.caption2, design: .monospaced)).foregroundStyle(.secondary)
+            HStack { Image(systemName: "link").foregroundStyle(Nord.frost1); Text(source).lineLimit(1); Spacer(); Image(systemName: "checkmark.circle.fill").foregroundStyle(Nord.auroraGreen) }
+        }
+        .padding(8).background(Nord.frost1.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
+    }
+}
+
+private struct AutomationStorageAccessDesignPanel: View {
+    var body: some View {
+        AutomationBuilderInspectorShell(
+            title: "Run work type",
+            subtitle: "Storage access",
+            symbol: "externaldrive.badge.checkmark",
+            tint: Nord.frost1
+        ) {
+            Text("Declared access").font(.caption.weight(.semibold))
+            storageScope(
+                "Job storage",
+                detail: "Read + write",
+                paths: "artifacts/draft/*\nstate/progress",
+                symbol: "shippingbox.fill",
+                tint: Nord.frost1
+            )
+            storageScope(
+                "Workflow storage",
+                detail: "Read only",
+                paths: "templates/*\nreference/*",
+                symbol: "externaldrive.fill",
+                tint: Nord.auroraPurple
+            )
+            Divider()
+            Text("Commit visibility").font(.caption.weight(.semibold))
+            Label("Changes become visible after this node commits", systemImage: "checkmark.seal")
+                .foregroundStyle(Nord.auroraGreen)
+            Text("Parallel branches may read the same job data. A same-key write conflict fails visibly unless an atomic update or Join is declared.")
+                .foregroundStyle(.secondary)
+            Divider()
+            Label("No raw filesystem path", systemImage: "lock.shield.fill")
+                .foregroundStyle(.secondary)
+            Text("The node receives scoped file and value handles only.")
+                .foregroundStyle(.secondary)
+        } footer: {
+            Label("2 scopes · no cross-workflow access", systemImage: "checkmark.seal.fill")
+                .foregroundStyle(Nord.auroraGreen)
+        }
+    }
+
+    private func storageScope(
+        _ title: String,
+        detail: String,
+        paths: String,
+        symbol: String,
+        tint: Color
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Image(systemName: symbol).foregroundStyle(tint)
+                Text(title).fontWeight(.semibold)
+                Spacer()
+                Text(detail).font(.caption2.weight(.bold)).foregroundStyle(tint)
+            }
+            Text(paths)
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(.secondary)
+        }
+        .padding(9)
+        .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+        .overlay { RoundedRectangle(cornerRadius: 8).stroke(tint.opacity(0.28), lineWidth: 1) }
+    }
+}
+
+private struct AutomationStoragePromotionDesignPanel: View {
+    var body: some View {
+        AutomationBuilderInspectorShell(
+            title: "Promote artifact",
+            subtitle: "Durable storage write",
+            symbol: "arrow.up.doc.fill",
+            tint: Nord.auroraYellow
+        ) {
+            Text("Source · job storage").font(.caption.weight(.semibold))
+            storagePath("outputs/report-v3.xlsx", detail: "48.0 MB · digest 7d91…a8c2", tint: Nord.frost1)
+            HStack {
+                Spacer()
+                Image(systemName: "arrow.down").foregroundStyle(Nord.auroraYellow)
+                Spacer()
+            }
+            Text("Destination · workflow storage").font(.caption.weight(.semibold))
+            storagePath("cases/CASE-184/current/report.xlsx", detail: "Durable across jobs and versions", tint: Nord.auroraPurple)
+            Divider()
+            promotionFact("On conflict", value: "Create a new revision")
+            promotionFact("Retention", value: "Until explicit removal")
+            promotionFact("Provenance", value: "Job #184 + content digest")
+            promotionFact("Publish impact", value: "Storage contract changed")
+            Divider()
+            Label("Copy, verify digest, then publish durable reference", systemImage: "checkmark.shield.fill")
+                .foregroundStyle(Nord.auroraGreen)
+            Text("The original job copy remains available until the job is deleted.")
+                .foregroundStyle(.secondary)
+        } footer: {
+            Label("Workflow copy survives job deletion", systemImage: "externaldrive.fill.badge.checkmark")
+                .foregroundStyle(Nord.auroraPurple)
+        }
+    }
+
+    private func storagePath(_ path: String, detail: String, tint: Color) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(path).font(.system(.caption2, design: .monospaced)).foregroundStyle(tint)
+            Text(detail).font(.caption2).foregroundStyle(.secondary)
+        }
+        .padding(9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func promotionFact(_ label: String, value: String) -> some View {
+        HStack(alignment: .top) {
+            Text(label).foregroundStyle(.secondary)
+            Spacer()
+            Text(value).fontWeight(.semibold).multilineTextAlignment(.trailing)
+        }
+    }
+}
+
+private struct AutomationNodeTestDesignPanel: View {
+    var body: some View {
+        AutomationBuilderInspectorShell(
+            title: "Interpret reply",
+            subtitle: "Test node",
+            symbol: "play.square.stack",
+            tint: Nord.auroraGreen
+        ) {
+            Text("Fixture").font(.caption.weight(.semibold))
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Customer correction #3").fontWeight(.semibold)
+                    Text("Redacted historical input").font(.caption2).foregroundStyle(.secondary)
+                }
+                Spacer(); Image(systemName: "chevron.down")
+            }
+            .padding(9).background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+            HStack {
+                Button("Test node", systemImage: "play.fill") {}.buttonStyle(.borderedProminent).controlSize(.small)
+                Button("Test path") {}.buttonStyle(.bordered).controlSize(.small)
+            }
+            Divider()
+            Label("Completed in 1.2 s", systemImage: "checkmark.circle.fill").foregroundStyle(Nord.auroraGreen)
+            testFact("Outcome", value: "correction")
+            testFact("Confidence", value: "0.96")
+            testFact("Next path", value: "Append episode")
+            Divider()
+            Text("Output preview").font(.caption.weight(.semibold))
+            Text("{\n  intent: correction,\n  preserveTotals: true,\n  requestedChange: tableLayout\n}")
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(Nord.frost1)
+                .padding(8).frame(maxWidth: .infinity, alignment: .leading)
+                .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 7))
+        } footer: {
+            Label("Effect nodes remain proposed only", systemImage: "network.slash")
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func testFact(_ label: String, value: String) -> some View {
+        HStack { Text(label).foregroundStyle(.secondary); Spacer(); Text(value).fontWeight(.semibold) }
+    }
+}
+
+private struct AutomationPublishReviewDesignPanel: View {
+    let currentVersion: Int
+
+    var body: some View {
+        AutomationBuilderInspectorShell(
+            title: "Review v\(currentVersion + 1)",
+            subtitle: "Publish checkpoint",
+            symbol: "arrow.up.doc.fill",
+            tint: Nord.auroraGreen
+        ) {
+            HStack {
+                Text("v\(currentVersion)").foregroundStyle(.secondary)
+                Image(systemName: "arrow.right")
+                Text("v\(currentVersion + 1)").fontWeight(.bold)
+                Spacer(); Text("Draft").foregroundStyle(Nord.auroraYellow)
+            }
+            reviewRow("Graph", detail: "+2 nodes · +3 connections", state: .attention)
+            reviewRow("Mappings", detail: "3 changed · all valid", state: .passed)
+            reviewRow("Subflows", detail: "Work subflow pinned v3", state: .passed)
+            reviewRow("Fixtures", detail: "6 of 6 paths pass", state: .passed)
+            reviewRow("Authority", detail: "No increase", state: .passed)
+            Divider()
+            Text("Activation").font(.caption.weight(.semibold))
+            Label("Publish without activating", systemImage: "circle.inset.filled")
+                .foregroundStyle(Nord.frost1)
+            Text("Existing runs remain on their original definition. Activation is a separate action.")
+                .foregroundStyle(.secondary)
+            Button("View visual diff", systemImage: "point.3.connected.trianglepath.dotted") {}
+                .buttonStyle(.bordered).controlSize(.small)
+        } footer: {
+            Button("Publish immutable v\(currentVersion + 1)", systemImage: "checkmark.seal.fill") {}
+                .buttonStyle(.borderedProminent)
+        }
+    }
+
+    private enum ReviewState { case passed, attention }
+
+    private func reviewRow(_ title: String, detail: String, state: ReviewState) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: state == .passed ? "checkmark.circle.fill" : "circlebadge.2.fill")
+                .foregroundStyle(state == .passed ? Nord.auroraGreen : Nord.auroraYellow)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).fontWeight(.semibold)
+                Text(detail).font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+private struct AutomationProblemsDrawer: View {
+    var body: some View {
+        HStack(alignment: .top, spacing: 18) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Label("Problems", systemImage: "exclamationmark.triangle.fill").font(.headline)
+                    Text("3").foregroundStyle(Nord.auroraYellow)
+                    Spacer()
+                    Text("Click an item to focus its node and exact field").font(.caption).foregroundStyle(.secondary)
+                }
+                problem("Interpret reply", detail: "The clarification outcome has no destination", symbol: "arrow.triangle.branch", tint: Nord.auroraRed)
+                problem("Wait for reply", detail: "Add a timeout route before publishing", symbol: "clock.badge", tint: Nord.auroraYellow)
+            }
+            Divider()
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Selected problem").font(.caption.weight(.semibold))
+                Text("Clarification outcome").font(.headline)
+                Text("Choose a compatible next node or mark this outcome as intentionally terminal.")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Button("Focus connection") {}.buttonStyle(.borderedProminent).controlSize(.small)
+                    Button("Mark terminal") {}.buttonStyle(.bordered).controlSize(.small)
+                }
+            }
+            .frame(width: 330, alignment: .leading)
+        }
+        .padding(13)
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func problem(_ title: String, detail: String, symbol: String, tint: Color) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: symbol).foregroundStyle(tint).frame(width: 18)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(.caption.weight(.semibold))
+                Text(detail).font(.caption2).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Image(systemName: "chevron.right").foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct AutomationVersionHistoryPanel: View {
+    let currentVersion: Int
+
+    private var versions: [(Int, String, String, Bool)] {
+        (0..<min(currentVersion, 4)).map { offset in
+            let version = currentVersion - offset
+            if offset == 0 { return (version, "Current", "Published today · 3 runs", true) }
+            if offset == 3 { return (version, "Retired", "18 Jul · 8 runs", false) }
+            return (version, "Published", offset == 1 ? "9 Aug · 12 runs" : "2 Aug · 21 runs", false)
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Versions").font(.headline)
+                Spacer()
+                Text("4 retained").font(.caption2).foregroundStyle(.secondary)
+            }
+            Text("Each publish creates an immutable revision. Runs keep the exact graph and settings they used.")
+                .font(.caption).foregroundStyle(.secondary)
+            Divider()
+            ForEach(versions, id: \.0) { version in
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("v\(version.0)").font(.system(.caption, design: .monospaced).weight(.bold))
+                        Text(version.1)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(version.3 ? Nord.auroraGreen : .secondary)
+                        Spacer()
+                        if version.3 { Image(systemName: "checkmark.circle.fill").foregroundStyle(Nord.auroraGreen) }
+                    }
+                    Text(version.2).font(.caption2).foregroundStyle(.secondary)
+                    HStack(spacing: 8) {
+                        Label("Graph", systemImage: "point.3.connected.trianglepath.dotted")
+                        Label("Settings", systemImage: "slider.horizontal.3")
+                    }
+                    .font(.system(size: 9)).foregroundStyle(Nord.frost1)
+                }
+                .padding(9)
+                .background(version.3 ? Nord.frost1.opacity(0.12) : Nord.polarNight2.opacity(0.7), in: RoundedRectangle(cornerRadius: 9))
+            }
+            Spacer(minLength: 0)
+            Divider()
+            Button(
+                "Compare v\(max(1, currentVersion - 1)) ↔ v\(currentVersion)",
+                systemImage: "arrow.left.arrow.right"
+            ) {}
+                .buttonStyle(.bordered)
+                .disabled(true)
+            Label("Published versions cannot be edited", systemImage: "lock.fill")
+                .font(.caption2).foregroundStyle(.secondary)
+        }
+        .padding(13)
+        .frame(minHeight: 566, alignment: .topLeading)
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+    }
+}
+
+private struct AutomationNodeInspector: View {
+    let step: AutomationCanvasStep
+    @Binding var section: AutomationInspectorSection
+    let showsCaseHistory: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 9) {
+                Image(systemName: step.symbol)
+                    .foregroundStyle(step.kind.tint)
+                    .frame(width: 28, height: 28)
+                    .background(step.kind.tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(step.title).font(.headline).lineLimit(1)
+                    Text(step.kind.label).font(.caption2.weight(.bold)).foregroundStyle(step.kind.tint)
+                }
+            }
+
+            Picker("Inspector", selection: $section) {
+                ForEach(AutomationInspectorSection.allCases, id: \.self) { item in
+                    Text(item.rawValue).tag(item)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            inspectorContent
+            Spacer(minLength: 0)
+            Divider()
+            Label("Fixture contract passed", systemImage: "checkmark.seal.fill")
+                .foregroundStyle(Nord.auroraGreen)
+            Label("No live connections", systemImage: "network.slash")
+                .foregroundStyle(.secondary)
+        }
+        .font(.caption)
+        .padding(13)
+        .frame(minHeight: 566, alignment: .topLeading)
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    @ViewBuilder
+    private var inspectorContent: some View {
+        switch section {
+        case .configuration:
+            inspectorFact("Node ID", value: step.id)
+            inspectorFact("Execution", value: executionLabel)
+            inspectorFact("Retry", value: retryLabel)
+            Divider()
+            Text(step.subtitle).foregroundStyle(.secondary)
+        case .data:
+            inspectorFact("Input", value: step.input)
+            inspectorFact("Output", value: step.output)
+            inspectorFact("Retention", value: "Until settled")
+            Divider()
+            Label("Typed ports validated", systemImage: "point.3.connected.trianglepath.dotted")
+                .foregroundStyle(Nord.frost1)
+        case .history:
+            if showsCaseHistory {
+                inspectorFact("Case", value: "CASE-184 · open")
+                inspectorFact("Conversation", value: "One durable context")
+                inspectorFact("Current", value: "Episode 3 · correction")
+                inspectorFact("Artifacts", value: "v3 current · v1–v2 retained")
+                Divider()
+                historyRow("1", title: "Initial request", detail: "Artifact v1 · superseded", state: .complete)
+                historyRow("2", title: "Correction", detail: "Artifact v2 · superseded", state: .complete)
+                historyRow("3", title: "Revised attachment", detail: "Artifact v3 · current", state: .running)
+                Divider()
+                Text("Only current facts and required evidence enter the next model context. The complete lineage stays inspectable.")
+                    .foregroundStyle(.secondary)
+            } else {
+                inspectorFact("Run", value: "#184")
+                inspectorFact("Definition", value: "revision 1.0.0")
+                inspectorFact("Input snapshot", value: "Immutable")
+                inspectorFact("Replay boundary", value: retryLabel)
+                Divider()
+                Text("Published definitions and completed node attempts remain immutable.")
+                    .foregroundStyle(.secondary)
+            }
+        case .safety:
+            inspectorFact("Authority", value: step.authority)
+            inspectorFact("Network", value: step.kind == .effect ? "Allowlisted connector" : "None by default")
+            inspectorFact("Model egress", value: step.kind == .ai ? "Declared projection" : "None")
+            Divider()
+            Text(step.kind == .effect ? "The exact target and approval are rechecked immediately before execution." : "This node cannot inherit effect authority from its trigger or upstream nodes.")
+                .foregroundStyle(step.kind == .effect ? Nord.auroraYellow : .secondary)
+        }
+    }
+
+    private var executionLabel: String {
+        switch step.kind {
+        case .human, .wait: "Durable pause"
+        case .decision, .policy, .data, .loop, .join, .parallel: "Deterministic"
+        case .ai: "Model-assisted"
+        case .context: "Deterministic projection"
+        case .effect: "Privileged connector"
+        case .trigger: "Event observation"
+        case .error: "Blocked attention"
+        case .subflow: "Pinned revision"
+        case .receipt: "Local evidence"
+        }
+    }
+
+    private var retryLabel: String {
+        switch step.kind {
+        case .effect: "Only known-safe failures"
+        case .error: "Never automatic"
+        case .human, .wait: "Resume, not retry"
+        default: "From captured input"
+        }
+    }
+
+    private func inspectorFact(_ label: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label).font(.caption2).foregroundStyle(.secondary)
+            Text(value).font(.caption.weight(.medium)).textSelection(.enabled)
+        }
+    }
+
+    private func historyRow(
+        _ episode: String,
+        title: String,
+        detail: String,
+        state: AutomationPreviewState
+    ) -> some View {
+        HStack(alignment: .top, spacing: 7) {
+            Text(episode)
+                .font(.system(size: 9, weight: .bold, design: .rounded))
+                .foregroundStyle(state.tint)
+                .frame(width: 18, height: 18)
+                .background(state.tint.opacity(0.12), in: Circle())
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(.caption.weight(.semibold))
+                Text(detail).font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+private enum AutomationRunRetention: String, CaseIterable {
+    case thirtyDays = "30 days"
+    case deleteAfterSuccess = "Delete after success"
+    case forever = "Keep forever"
+}
+
+private struct AutomationRunFixture: Identifiable {
+    let id: Int
+    let workflow: String
+    let version: Int
+    let detail: String
+    let state: AutomationPreviewState
+    let pattern: AutomationCanvasPattern
+    let expiry: String
+}
+
+private enum AutomationRunInspectorTab: String, CaseIterable {
+    case data = "Data"
+    case storage = "Storage"
+    case logs = "Logs"
+    case configuration = "Config"
+    case evidence = "Evidence"
+}
+
+private enum AutomationRunDataView: String, CaseIterable {
+    case table = "Table"
+    case json = "JSON"
+    case schema = "Schema"
+}
+
+private enum AutomationStepInspectorSection: String, CaseIterable, Identifiable {
+    case overview = "Overview"
+    case inputs = "Inputs"
+    case context = "Context"
+    case messages = "Messages"
+    case tools = "Tools"
+    case outputs = "Output"
+    case errors = "Errors"
+    case usage = "Usage"
+    case storage = "Storage"
+    case logs = "Logs"
+    case raw = "Raw evidence"
+
+    var id: String { rawValue }
+
+    var symbol: String {
+        switch self {
+        case .overview: "rectangle.grid.2x2"
+        case .inputs: "arrow.down.doc"
+        case .context: "text.append"
+        case .messages: "bubble.left.and.bubble.right"
+        case .tools: "wrench.and.screwdriver"
+        case .outputs: "arrow.up.doc"
+        case .errors: "exclamationmark.triangle"
+        case .usage: "gauge.with.dots.needle.67percent"
+        case .storage: "shippingbox"
+        case .logs: "text.alignleft"
+        case .raw: "chevron.left.forwardslash.chevron.right"
+        }
+    }
+}
+
+private enum AutomationRunStepInspectorPreview {
+    case automatic
+    case inputs
+    case error
+    case llmContext
+    case llmMessages
+    case llmTools
+
+    init(arguments: [String]) {
+        if arguments.contains("--desktop-automation-run-step-detail") { self = .inputs }
+        else if arguments.contains("--desktop-automation-run-step-error") { self = .error }
+        else if arguments.contains("--desktop-automation-run-llm-context") { self = .llmContext }
+        else if arguments.contains("--desktop-automation-run-llm-messages") { self = .llmMessages }
+        else if arguments.contains("--desktop-automation-run-llm-tools") { self = .llmTools }
+        else { self = .automatic }
+    }
+}
+
+private struct AutomationRunsPreview: View {
+    private let showsJobStorageDesign: Bool
+    @State private var selectedRunID = 184
+    @State private var retention = AutomationRunRetention.thirtyDays
+    @State private var search = ""
+    @State private var showsRetentionSettings = false
+    @State private var compactShowsDetail = false
+    @State private var selectedRunStepID = "context"
+    @State private var selectedRunEdgeID: String?
+    @State private var inspectorTab = AutomationRunInspectorTab.data
+    @State private var dataView = AutomationRunDataView.table
+    @State private var stepInspectorSection = AutomationStepInspectorSection.inputs
+    @State private var showsDeleteJobConfirmation = false
+
+    private let runs: [AutomationRunFixture] = [
+        .init(id: 184, workflow: "Reply-driven reporting", version: 6, detail: "Waiting for reply · 12 min", state: .waiting, pattern: .feedback, expiry: "Deletes 12 Sep"),
+        .init(id: 183, workflow: "Reply-driven reporting", version: 6, detail: "Passed · 1 h ago", state: .complete, pattern: .feedback, expiry: "Deletes 12 Sep"),
+        .init(id: 182, workflow: "Reply-driven reporting", version: 5, detail: "Passed · yesterday", state: .complete, pattern: .feedback, expiry: "Deletes 11 Sep"),
+        .init(id: 181, workflow: "Mailbox review", version: 4, detail: "Failed · yesterday", state: .blocked, pattern: .decision, expiry: "Deletes 11 Sep"),
+        .init(id: 180, workflow: "Approved cleanup", version: 3, detail: "Passed · 3 d ago", state: .complete, pattern: .approval, expiry: "Deletes 9 Sep"),
+        .init(id: 179, workflow: "Mailbox digest", version: 3, detail: "Passed · 4 d ago", state: .complete, pattern: .parallel, expiry: "Deletes 8 Sep"),
+        .init(id: 178, workflow: "Approved cleanup", version: 3, detail: "Failed · 5 d ago", state: .blocked, pattern: .recovery, expiry: "Deletes 7 Sep"),
+    ]
+
+    init() {
+        let arguments = CommandLine.arguments
+        let requestedStepInspector = AutomationRunStepInspectorPreview(arguments: arguments)
+        let startsWithDeletePreview = arguments.contains("--desktop-automation-run-storage-delete")
+        showsJobStorageDesign = arguments.contains("--desktop-automation-run-storage") || startsWithDeletePreview
+        if arguments.contains("--desktop-automation-run-edge") {
+            _selectedRunEdgeID = State(initialValue: "context-execute-episode 3")
+        }
+        if showsJobStorageDesign {
+            _inspectorTab = State(initialValue: .storage)
+        }
+        if startsWithDeletePreview {
+            _selectedRunID = State(initialValue: 183)
+            _showsDeleteJobConfirmation = State(initialValue: true)
+        }
+        switch requestedStepInspector {
+        case .inputs:
+            _selectedRunID = State(initialValue: 184)
+            _selectedRunStepID = State(initialValue: "context")
+            _stepInspectorSection = State(initialValue: .inputs)
+        case .error:
+            _selectedRunID = State(initialValue: 178)
+            _selectedRunStepID = State(initialValue: "unknown")
+            _stepInspectorSection = State(initialValue: .errors)
+        case .llmContext:
+            _selectedRunID = State(initialValue: 179)
+            _selectedRunStepID = State(initialValue: "summarize")
+            _stepInspectorSection = State(initialValue: .context)
+        case .llmMessages:
+            _selectedRunID = State(initialValue: 179)
+            _selectedRunStepID = State(initialValue: "summarize")
+            _stepInspectorSection = State(initialValue: .messages)
+        case .llmTools:
+            _selectedRunID = State(initialValue: 179)
+            _selectedRunStepID = State(initialValue: "summarize")
+            _stepInspectorSection = State(initialValue: .tools)
+        case .automatic:
+            break
+        }
+    }
+
+    private var selectedRun: AutomationRunFixture {
+        runs.first(where: { $0.id == selectedRunID }) ?? runs[0]
+    }
+
+    private var visibleRuns: [AutomationRunFixture] {
+        runs.filter { search.isEmpty || $0.workflow.localizedCaseInsensitiveContains(search) || String($0.id).contains(search) }
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let isCompact = proxy.size.width < 1_050
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(showsRetentionSettings ? "History settings" : "Run history")
+                            .font(.title3.weight(.bold))
+                        Text(showsRetentionSettings
+                            ? "Choose how long settled run data remains available"
+                            : "Every run is pinned to the exact workflow version and evidence it used")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if !showsRetentionSettings {
+                        TextField("Search runs", text: $search)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: isCompact ? 180 : 220)
+                    }
+                    Button(
+                        showsRetentionSettings ? "Back to runs" : "History settings",
+                        systemImage: showsRetentionSettings ? "chevron.left" : "gearshape"
+                    ) {
+                        showsRetentionSettings.toggle()
+                    }
+                    .buttonStyle(.bordered)
+                }
+
+                if showsRetentionSettings {
+                    retentionSettings
+                } else if isCompact {
+                    if compactShowsDetail {
+                        runDetail(isCompact: true)
+                    } else {
+                        runList
+                    }
+                } else {
+                    HStack(alignment: .top, spacing: 12) {
+                        runList
+                            .frame(width: 290)
+                        runDetail(isCompact: false)
+                    }
+                }
+            }
+        }
+        .frame(minHeight: 630)
+    }
+
+    private var runList: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Recent runs").font(.headline)
+                Spacer()
+                Text("\(visibleRuns.count)").font(.caption.weight(.bold)).foregroundStyle(.secondary)
+            }
+            ForEach(visibleRuns) { run in
+                Button {
+                    selectedRunID = run.id
+                    selectedRunStepID = run.pattern.graph.defaultSelectedID
+                    selectedRunEdgeID = nil
+                    let defaultStep = run.pattern.graph.steps.first(where: { $0.id == run.pattern.graph.defaultSelectedID })
+                        ?? run.pattern.graph.steps[0]
+                    stepInspectorSection = defaultStepInspectorSection(for: defaultStep, run: run)
+                    compactShowsDetail = true
+                } label: {
+                    HStack(alignment: .top, spacing: 9) {
+                        Image(systemName: run.state.symbol).foregroundStyle(run.state.tint).frame(width: 16)
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 5) {
+                                Text("#\(run.id)").font(.system(.caption, design: .monospaced).weight(.bold))
+                                Text("v\(run.version)")
+                                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                                    .foregroundStyle(Nord.frost1)
+                            }
+                            Text(run.workflow).font(.caption.weight(.semibold)).lineLimit(1)
+                            Text(run.detail).font(.caption2).foregroundStyle(.secondary)
+                            Text(run.expiry).font(.system(size: 9)).foregroundStyle(.tertiary)
+                        }
+                        Spacer(minLength: 0)
+                        Image(systemName: "chevron.right")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .help("Open run details")
+                    }
+                    .padding(9)
+                    .background(selectedRunID == run.id ? Nord.frost1.opacity(0.15) : Color.clear, in: RoundedRectangle(cornerRadius: 9))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            Spacer(minLength: 0)
+            Divider()
+            Label("History is local and manually deletable", systemImage: "internaldrive")
+                .font(.caption2).foregroundStyle(.secondary)
+        }
+        .padding(13)
+        .frame(minHeight: 590, alignment: .topLeading)
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private func runDetail(isCompact: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                if isCompact {
+                    Button("All runs", systemImage: "chevron.left") {
+                        compactShowsDetail = false
+                    }
+                    .buttonStyle(.bordered)
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("\(selectedRun.workflow) #\(selectedRun.id)").font(.headline)
+                    HStack(spacing: 8) {
+                        Label(selectedRun.state.label, systemImage: selectedRun.state.symbol).foregroundStyle(selectedRun.state.tint)
+                        Text("Workflow v\(selectedRun.version)")
+                            .font(.system(.caption, design: .monospaced).weight(.semibold))
+                            .foregroundStyle(Nord.frost1)
+                        Label("Historical snapshot", systemImage: "lock.doc")
+                            .foregroundStyle(.secondary)
+                    }
+                    .font(.caption)
+                }
+                Spacer()
+                Button("Delete job", systemImage: "trash", role: .destructive) {
+                    showsDeleteJobConfirmation = true
+                }
+                    .buttonStyle(.bordered)
+                    .disabled(!showsJobStorageDesign)
+            }
+
+            HStack {
+                Label("Graph", systemImage: "point.3.connected.trianglepath.dotted").foregroundStyle(Nord.frost1)
+                Label("Settings v\(selectedRun.version)", systemImage: "slider.horizontal.3").foregroundStyle(.secondary)
+                Label("Evidence", systemImage: "doc.text.magnifyingglass").foregroundStyle(.secondary)
+                Spacer()
+                Text("Read-only").font(.caption2.weight(.bold)).foregroundStyle(.secondary)
+            }
+            .font(.caption)
+
+            AutomationNodeCanvas(
+                graph: selectedRun.pattern.graph,
+                selectedStepID: $selectedRunStepID,
+                isSimulating: selectedRun.state == .running || selectedRun.state == .waiting,
+                viewportPreset: showsJobStorageDesign || usesDetailedStepInspector ? .readable : .standard,
+                selectedEdgeID: $selectedRunEdgeID
+            )
+            .frame(minHeight: 315)
+            .onChange(of: selectedRunStepID) { _ in
+                selectedRunEdgeID = nil
+                stepInspectorSection = defaultStepInspectorSection(for: selectedRunStep, run: selectedRun)
+            }
+
+            runDataInspector
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, minHeight: 590, alignment: .topLeading)
+        .background(Nord.polarNight1.opacity(0.45), in: RoundedRectangle(cornerRadius: 14))
+        .overlay {
+            if showsDeleteJobConfirmation {
+                ZStack {
+                    Nord.polarNight0.opacity(0.74)
+                        .clipShape(RoundedRectangle(cornerRadius: 14))
+                    deleteJobConfirmation
+                        .frame(width: 450)
+                }
+            }
+        }
+    }
+
+    private var selectedRunStep: AutomationCanvasStep {
+        selectedRun.pattern.graph.steps.first(where: { $0.id == selectedRunStepID })
+            ?? selectedRun.pattern.graph.steps[0]
+    }
+
+    private var selectedRunEdge: AutomationCanvasEdge? {
+        selectedRun.pattern.graph.edges.first(where: { $0.id == selectedRunEdgeID })
+    }
+
+    private var usesDetailedStepInspector: Bool {
+        !showsJobStorageDesign && selectedRunEdge == nil
+    }
+
+    @ViewBuilder
+    private var runDataInspector: some View {
+        if usesDetailedStepInspector {
+            detailedStepInspector
+        } else {
+            legacyRunDataInspector
+        }
+    }
+
+    private var legacyRunDataInspector: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Image(systemName: selectedRunEdge == nil ? selectedRunStep.symbol : "arrow.right.circle.fill")
+                    .foregroundStyle(selectedRunEdge?.kind.tint ?? selectedRunStep.kind.tint)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(selectedRunEdge.map { "Checkpoint · \($0.label)" } ?? selectedRunStep.title)
+                        .font(.headline)
+                    Text(selectedRunEdge.map { edgeEndpointLabel($0) } ?? "Node attempt · received → produced")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Picker("Inspector", selection: $inspectorTab) {
+                    ForEach(AutomationRunInspectorTab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 300)
+            }
+
+            Divider()
+            runInspectorContent
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, minHeight: 190, alignment: .topLeading)
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var detailedStepInspector: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Image(systemName: selectedRunStep.symbol)
+                    .foregroundStyle(selectedRunStep.kind.tint)
+                    .frame(width: 30, height: 30)
+                    .background(selectedRunStep.kind.tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 7) {
+                        Text(selectedRunStep.title).font(.headline)
+                        Text("Attempt 1")
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                    Text(stepInspectorSubtitle)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                inspectorStatusFact("Status", value: selectedRun.state == .blocked ? "Failed" : "Succeeded", tint: selectedRun.state.tint)
+                inspectorStatusFact("Duration", value: stepIsLLM ? "1.8 s" : "16 ms", tint: Nord.frost1)
+                inspectorStatusFact("Started", value: "22:31:04", tint: .secondary)
+                Label("Read-only trace", systemImage: "lock.doc")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+
+            Divider()
+
+            HStack(alignment: .top, spacing: 12) {
+                VStack(spacing: 3) {
+                    ForEach(stepInspectorSections) { section in
+                        stepInspectorNavigationItem(section)
+                    }
+                }
+                .frame(width: 146)
+
+                Divider()
+
+                detailedStepInspectorContent
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, minHeight: 286, alignment: .topLeading)
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var stepInspectorSubtitle: String {
+        if stepIsLLM {
+            return "LLM execution · context, messages, tools, output, and provider metadata"
+        }
+        if selectedRun.state == .blocked {
+            return "Failed node attempt · preserved input checkpoint and diagnostic evidence"
+        }
+        return "Node execution · exact input boundary → produced output boundary"
+    }
+
+    private var stepIsLLM: Bool {
+        if case .ai = selectedRunStep.kind { return true }
+        return false
+    }
+
+    private var stepInspectorSections: [AutomationStepInspectorSection] {
+        if stepIsLLM {
+            return [.overview, .inputs, .context, .messages, .tools, .outputs, .errors, .usage, .raw]
+        }
+        return [.overview, .inputs, .outputs, .errors, .storage, .logs, .raw]
+    }
+
+    private func defaultStepInspectorSection(
+        for step: AutomationCanvasStep,
+        run: AutomationRunFixture
+    ) -> AutomationStepInspectorSection {
+        if case .ai = step.kind { return .context }
+        if run.state == .blocked { return .errors }
+        return .inputs
+    }
+
+    private func stepInspectorNavigationItem(_ section: AutomationStepInspectorSection) -> some View {
+        Button {
+            stepInspectorSection = section
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: section.symbol).frame(width: 15)
+                Text(section.rawValue).lineLimit(1)
+                Spacer(minLength: 4)
+                if let count = stepInspectorCount(for: section) {
+                    Text(count)
+                        .font(.system(size: 9, weight: .bold, design: .rounded))
+                        .foregroundStyle(section == .errors && count != "0" ? Nord.auroraRed : .secondary)
+                }
+            }
+            .font(.caption.weight(stepInspectorSection == section ? .semibold : .regular))
+            .foregroundStyle(stepInspectorSection == section ? Color.primary : Color.secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(
+                stepInspectorSection == section ? selectedRunStep.kind.tint.opacity(0.13) : Color.clear,
+                in: RoundedRectangle(cornerRadius: 7)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func stepInspectorCount(for section: AutomationStepInspectorSection) -> String? {
+        switch section {
+        case .inputs: stepIsLLM ? "4" : "3"
+        case .context: "5"
+        case .messages: "4"
+        case .tools: "2"
+        case .outputs: stepIsLLM ? "2" : "4"
+        case .errors: selectedRun.state == .blocked ? "1" : "0"
+        case .storage: "2"
+        default: nil
+        }
+    }
+
+    @ViewBuilder
+    private var detailedStepInspectorContent: some View {
+        switch stepInspectorSection {
+        case .overview:
+            stepOverviewContent
+        case .inputs:
+            stepInputsAndOutputsContent
+        case .context:
+            llmContextContent
+        case .messages:
+            llmMessagesContent
+        case .tools:
+            llmToolsAndUsageContent
+        case .outputs:
+            stepOutputContent
+        case .errors:
+            stepErrorsContent
+        case .usage:
+            llmUsageContent
+        case .storage:
+            jobStorageInspector
+        case .logs:
+            VStack(alignment: .leading, spacing: 8) {
+                sectionHeading("Structured logs", detail: "Four events · node-local timestamps")
+                runLogLine("22:31:04.218", "Loaded immutable input checkpoint", Nord.polarNight3)
+                runLogLine("22:31:04.231", "Validated input schema case-context.v3", Nord.auroraGreen)
+                runLogLine("22:31:04.247", "Committed output checkpoint 7d91…a8c2", Nord.frost1)
+                runLogLine("22:31:04.251", "Released job-storage write lease", Nord.auroraPurple)
+            }
+        case .raw:
+            rawStepEvidenceContent
+        }
+    }
+
+    private var stepOverviewContent: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeading("What happened", detail: "A concise summary before opening the underlying records")
+            HStack(spacing: 10) {
+                overviewTile("Input", value: "3 variables · 2.4 KB", symbol: "arrow.down.doc", tint: Nord.frost1)
+                overviewTile("Output", value: selectedRun.state == .blocked ? "No output committed" : "4 values · 6.8 KB", symbol: "arrow.up.doc", tint: selectedRun.state == .blocked ? Nord.auroraRed : Nord.auroraGreen)
+                overviewTile("Storage", value: "2 job values changed", symbol: "shippingbox", tint: Nord.auroraPurple)
+                overviewTile("Evidence", value: "Input + output digests", symbol: "checkmark.seal", tint: Nord.auroraYellow)
+            }
+            Label(
+                selectedRun.state == .blocked
+                    ? "The failed attempt preserved its input checkpoint. No partial output became visible downstream."
+                    : "Downstream nodes received only the committed output checkpoint shown here.",
+                systemImage: selectedRun.state == .blocked ? "exclamationmark.shield" : "checkmark.shield"
+            )
+            .font(.caption)
+            .foregroundStyle(selectedRun.state == .blocked ? Nord.auroraRed : Nord.auroraGreen)
+        }
+    }
+
+    private var stepInputsAndOutputsContent: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionHeading("Variables at this node", detail: "Value, type, and provenance are kept together")
+            HStack(alignment: .top, spacing: 10) {
+                executionDataPanel(
+                    "Variables passed in",
+                    subtitle: "Immutable input checkpoint · b840…19fc",
+                    tint: Nord.frost1,
+                    rows: [
+                        ("case_id", "String", "CASE-184", "Correlate case"),
+                        ("episode", "Integer", "3", "Job storage"),
+                        ("current_reply", "String", "Change the totals…", "Inbound email"),
+                    ]
+                )
+                executionDataPanel(
+                    "Output produced",
+                    subtitle: selectedRun.state == .blocked ? "No checkpoint committed" : "Committed checkpoint · 7d91…a8c2",
+                    tint: selectedRun.state == .blocked ? Nord.auroraRed : Nord.auroraGreen,
+                    rows: selectedRun.state == .blocked ? [
+                        ("—", "—", "No output", "Attempt failed"),
+                    ] : [
+                        ("context_pack", "Object", "5 grouped sections", "This node"),
+                        ("message_count", "Integer", "4", "This node"),
+                        ("artifact_ref", "File", "report-v2.xlsx", "Job storage"),
+                    ]
+                )
+            }
+        }
+    }
+
+    private var stepOutputContent: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionHeading("Committed output", detail: "Only this checkpoint became visible to downstream nodes")
+            executionDataPanel(
+                stepIsLLM ? "Assistant result" : "Produced values",
+                subtitle: selectedRun.state == .blocked ? "No checkpoint committed" : "Schema-valid · digest 7d91…a8c2",
+                tint: selectedRun.state == .blocked ? Nord.auroraRed : Nord.auroraGreen,
+                rows: selectedRun.state == .blocked ? [
+                    ("—", "—", "No output", "Attempt failed"),
+                ] : stepIsLLM ? [
+                    ("summary", "String", "12 mailbox themes…", "Model response"),
+                    ("citations", "Array", "2 source references", "Validated output"),
+                ] : [
+                    ("context_pack", "Object", "5 grouped sections", "This node"),
+                    ("message_count", "Integer", "4", "This node"),
+                    ("artifact_ref", "File", "report-v2.xlsx", "Job storage"),
+                    ("redactions", "Integer", "2", "Privacy policy"),
+                ]
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var stepErrorsContent: some View {
+        if selectedRun.state == .blocked {
+            VStack(alignment: .leading, spacing: 9) {
+                HStack(spacing: 10) {
+                    Image(systemName: "xmark.octagon.fill").foregroundStyle(Nord.auroraRed)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Provider outcome could not be proven").font(.caption.weight(.bold))
+                        Text("The effect may have completed, so Kaname will not retry it automatically.")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Text("UNKNOWN_OUTCOME")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundStyle(Nord.auroraRed)
+                }
+                .padding(9)
+                .background(Nord.auroraRed.opacity(0.09), in: RoundedRectangle(cornerRadius: 8))
+
+                HStack(alignment: .top, spacing: 10) {
+                    diagnosticPanel(
+                        "What failed",
+                        rows: [
+                            ("Stage", "Post-effect reconciliation"),
+                            ("Safe message", "Provider response timed out"),
+                            ("Technical cause", "Transport closed before receipt"),
+                            ("Error ID", "err_01J8…M4Q"),
+                        ],
+                        tint: Nord.auroraRed
+                    )
+                    diagnosticPanel(
+                        "What happens next",
+                        rows: [
+                            ("Retry", "Blocked — outcome is ambiguous"),
+                            ("Input", "Checkpoint retained"),
+                            ("Output", "Nothing committed downstream"),
+                            ("Recovery", "Human reconcile with provider"),
+                        ],
+                        tint: Nord.auroraYellow
+                    )
+                }
+                HStack {
+                    Label("Stack trace and provider payload are available under Technical detail", systemImage: "chevron.right")
+                    Spacer()
+                    Button("Open technical detail") {}
+                        .buttonStyle(.borderless)
+                }
+                .font(.caption2).foregroundStyle(.secondary)
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 10) {
+                sectionHeading("Errors", detail: "No warnings or failures were recorded for this attempt")
+                Label("Succeeded without retries", systemImage: "checkmark.circle.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Nord.auroraGreen)
+            }
+        }
+    }
+
+    private var llmContextContent: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionHeading("Context envelope sent to the model", detail: "Five named groups · 6,240 tokens · two protected fields redacted")
+            HStack(alignment: .top, spacing: 8) {
+                contextEnvelopeCard(
+                    "System policy",
+                    detail: "Mailbox summarizer · no external effects",
+                    provenance: "Kaname policy · 620 tokens",
+                    symbol: "shield.fill",
+                    tint: Nord.auroraYellow
+                )
+                contextEnvelopeCard(
+                    "Workflow instructions",
+                    detail: "Summarize only the declared projection",
+                    provenance: "Workflow v3 · 580 tokens",
+                    symbol: "point.3.connected.trianglepath.dotted",
+                    tint: Nord.auroraPurple
+                )
+                contextEnvelopeCard(
+                    "Current input",
+                    detail: "184 messages · allowed fields only",
+                    provenance: "Fan out · 3,820 tokens",
+                    symbol: "arrow.down.doc",
+                    tint: Nord.frost1
+                )
+            }
+            HStack(alignment: .top, spacing: 8) {
+                contextEnvelopeCard(
+                    "Conversation history",
+                    detail: "3 prior messages · role-separated",
+                    provenance: "Case thread · 1,140 tokens",
+                    symbol: "bubble.left.and.bubble.right",
+                    tint: Nord.frost0
+                )
+                contextEnvelopeCard(
+                    "Attachments & sources",
+                    detail: "2 retrieved excerpts · content digests retained",
+                    provenance: "Job storage · 80 tokens",
+                    symbol: "paperclip",
+                    tint: Nord.auroraGreen
+                )
+                Label("Hidden chain-of-thought is not exposed. Configured reasoning effort and provider-supplied summaries live under Usage.", systemImage: "eye.slash")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .padding(9)
+                    .frame(maxWidth: .infinity, minHeight: 62, alignment: .topLeading)
+                    .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+            }
+        }
+    }
+
+    private var llmMessagesContent: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionHeading("Messages", detail: "Role-separated summaries · expand one record at a time")
+            HStack(alignment: .top, spacing: 10) {
+                VStack(spacing: 5) {
+                    messageRecord("System", index: "01", summary: "Policy and output contract", detail: "1,200 tokens", tint: Nord.auroraYellow)
+                    messageRecord("User", index: "02", summary: "Mailbox projection and requested digest", detail: "3,820 tokens", tint: Nord.frost1)
+                    messageRecord("Assistant", index: "03", summary: "Requested two read-only tools", detail: "146 tokens", tint: Nord.auroraPurple)
+                    messageRecord("Tool", index: "04", summary: "Two linked results · both succeeded", detail: "1,074 tokens", tint: Nord.auroraGreen)
+                }
+                .frame(maxWidth: .infinity)
+
+                VStack(alignment: .leading, spacing: 7) {
+                    Label("Selected · User 02", systemImage: "bubble.left.fill")
+                        .font(.caption.weight(.bold)).foregroundStyle(Nord.frost1)
+                    Text("Summarize this frozen mailbox batch using only sender domain, subject category, received date, and the approved excerpt.")
+                        .font(.caption)
+                        .textSelection(.enabled)
+                    Divider()
+                    HStack {
+                        evidenceFact("Origin", value: "Fan out")
+                        Spacer()
+                        evidenceFact("Content", value: "3,820 tokens")
+                        Spacer()
+                        evidenceFact("Redaction", value: "2 fields")
+                    }
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, minHeight: 152, alignment: .topLeading)
+                .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+            }
+        }
+    }
+
+    private var llmToolsAndUsageContent: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionHeading("Tool calls", detail: "Inputs, results, and the messages they belong to remain linked")
+            HStack(alignment: .top, spacing: 10) {
+                VStack(spacing: 6) {
+                    toolCallRecord(
+                        "lookup_sender_policy",
+                        callID: "call_7K2",
+                        input: "domain: example.co.jp",
+                        result: "matched · protected_sender = false",
+                        duration: "34 ms"
+                    )
+                    toolCallRecord(
+                        "read_job_value",
+                        callID: "call_8F1",
+                        input: "key: digest.allowed_categories",
+                        result: "6 categories · checkpoint 3c91…",
+                        duration: "8 ms"
+                    )
+                }
+                .frame(maxWidth: .infinity)
+
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("Model & usage").font(.caption.weight(.bold))
+                    usageRow("Configured model", value: "Pinned by workflow v3")
+                    usageRow("Reasoning effort", value: "Medium · configured")
+                    usageRow("Tokens", value: "6,240 in · 842 out")
+                    usageRow("Tool calls", value: "2 / 2 succeeded")
+                    usageRow("Provider summary", value: "Not supplied")
+                    usageRow("Cost", value: "Shown when provider reports it")
+                }
+                .padding(10)
+                .frame(width: 260, alignment: .topLeading)
+                .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+            }
+        }
+    }
+
+    private var llmUsageContent: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionHeading("Model & usage", detail: "Configured values are separated from provider-reported values")
+            HStack(alignment: .top, spacing: 10) {
+                diagnosticPanel(
+                    "Configuration",
+                    rows: [
+                        ("Model", "Pinned by workflow v3"),
+                        ("Reasoning effort", "Medium"),
+                        ("Temperature", "Workflow default"),
+                        ("Tool policy", "Two read-only tools"),
+                    ],
+                    tint: Nord.auroraPurple
+                )
+                diagnosticPanel(
+                    "Provider report",
+                    rows: [
+                        ("Input tokens", "6,240"),
+                        ("Output tokens", "842"),
+                        ("Latency", "1.8 s"),
+                        ("Reasoning summary", "Not supplied"),
+                    ],
+                    tint: Nord.frost1
+                )
+            }
+        }
+    }
+
+    private var rawStepEvidenceContent: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionHeading("Raw evidence", detail: "Complete records remain available for export and exact replay diagnostics")
+            codePayload("Execution envelope", text: rawStepEnvelope)
+            Label("Raw evidence is never the default view and retains explicit redaction markers.", systemImage: "eye.slash.fill")
+                .font(.caption2).foregroundStyle(.secondary)
+        }
+    }
+
+    private var rawStepEnvelope: String {
+        "{ \"run_id\": \(selectedRun.id), \"node_id\": \"\(selectedRunStep.id)\", \"attempt\": 1, \"input_digest\": \"b840…19fc\", \"output_digest\": \"7d91…a8c2\" }"
+    }
+
+    private func sectionHeading(_ title: String, detail: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(title).font(.caption.weight(.bold))
+            Text(detail).font(.caption2).foregroundStyle(.secondary)
+            Spacer()
+        }
+    }
+
+    private func inspectorStatusFact(_ label: String, value: String, tint: Color) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(label).font(.caption2).foregroundStyle(.secondary)
+            Text(value).font(.caption.weight(.semibold)).foregroundStyle(tint)
+        }
+    }
+
+    private func overviewTile(_ title: String, value: String, symbol: String, tint: Color) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: symbol).foregroundStyle(tint)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(.caption2).foregroundStyle(.secondary)
+                Text(value).font(.caption.weight(.semibold)).lineLimit(1)
+            }
+        }
+        .padding(9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func executionDataPanel(
+        _ title: String,
+        subtitle: String,
+        tint: Color,
+        rows: [(String, String, String, String)]
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Circle().fill(tint).frame(width: 6, height: 6)
+                Text(title).font(.caption.weight(.bold))
+                Spacer()
+                Text(subtitle).font(.system(size: 9, design: .monospaced)).foregroundStyle(.secondary)
+            }
+            Divider()
+            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                HStack(spacing: 7) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(row.0).font(.system(.caption2, design: .monospaced).weight(.semibold))
+                        Text(row.3).font(.system(size: 9)).foregroundStyle(.secondary)
+                    }
+                    .frame(width: 106, alignment: .leading)
+                    Text(row.1)
+                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(tint)
+                        .frame(width: 58, alignment: .leading)
+                    Text(row.2).font(.caption2).lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+                .padding(.vertical, 2)
+            }
+        }
+        .padding(9)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+        .overlay { RoundedRectangle(cornerRadius: 8).stroke(tint.opacity(0.25), lineWidth: 1) }
+    }
+
+    private func diagnosticPanel(
+        _ title: String,
+        rows: [(String, String)],
+        tint: Color
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.caption.weight(.bold)).foregroundStyle(tint)
+            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                HStack(alignment: .top) {
+                    Text(row.0).foregroundStyle(.secondary)
+                    Spacer(minLength: 12)
+                    Text(row.1).multilineTextAlignment(.trailing)
+                }
+                .font(.caption2)
+            }
+        }
+        .padding(9)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+        .overlay { RoundedRectangle(cornerRadius: 8).stroke(tint.opacity(0.24), lineWidth: 1) }
+    }
+
+    private func contextEnvelopeCard(
+        _ title: String,
+        detail: String,
+        provenance: String,
+        symbol: String,
+        tint: Color
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label(title, systemImage: symbol).font(.caption.weight(.bold)).foregroundStyle(tint)
+            Text(detail).font(.caption2).lineLimit(2)
+            Text(provenance).font(.system(size: 9)).foregroundStyle(.secondary)
+        }
+        .padding(9)
+        .frame(maxWidth: .infinity, minHeight: 62, alignment: .topLeading)
+        .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func messageRecord(
+        _ role: String,
+        index: String,
+        summary: String,
+        detail: String,
+        tint: Color
+    ) -> some View {
+        HStack(spacing: 8) {
+            Text(index)
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundStyle(tint)
+                .frame(width: 20)
+            Text(role).font(.caption2.weight(.bold)).frame(width: 52, alignment: .leading)
+            Text(summary).font(.caption2).lineLimit(1)
+            Spacer(minLength: 4)
+            Text(detail).font(.system(size: 9)).foregroundStyle(.secondary)
+            Image(systemName: "chevron.right").font(.system(size: 8)).foregroundStyle(.secondary)
+        }
+        .padding(7)
+        .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 7))
+    }
+
+    private func toolCallRecord(
+        _ name: String,
+        callID: String,
+        input: String,
+        result: String,
+        duration: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Label(name, systemImage: "wrench.and.screwdriver.fill")
+                    .font(.system(.caption, design: .monospaced).weight(.semibold))
+                    .foregroundStyle(Nord.auroraPurple)
+                Text(callID).font(.system(size: 9, design: .monospaced)).foregroundStyle(.secondary)
+                Spacer()
+                Label("Succeeded", systemImage: "checkmark.circle.fill")
+                    .font(.caption2.weight(.semibold)).foregroundStyle(Nord.auroraGreen)
+                Text(duration).font(.caption2).foregroundStyle(.secondary)
+            }
+            HStack(spacing: 6) {
+                Text("INPUT").font(.system(size: 8, weight: .bold)).foregroundStyle(.secondary)
+                Text(input).font(.system(.caption2, design: .monospaced)).lineLimit(1)
+            }
+            HStack(spacing: 6) {
+                Text("RESULT").font(.system(size: 8, weight: .bold)).foregroundStyle(.secondary)
+                Text(result).font(.system(.caption2, design: .monospaced)).lineLimit(1)
+            }
+        }
+        .padding(9)
+        .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+        .overlay { RoundedRectangle(cornerRadius: 8).stroke(Nord.auroraPurple.opacity(0.22), lineWidth: 1) }
+    }
+
+    private func usageRow(_ label: String, value: String) -> some View {
+        HStack(alignment: .top) {
+            Text(label).foregroundStyle(.secondary)
+            Spacer(minLength: 10)
+            Text(value).multilineTextAlignment(.trailing)
+        }
+        .font(.caption2)
+    }
+
+    @ViewBuilder
+    private var runInspectorContent: some View {
+        switch inspectorTab {
+        case .data:
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text(selectedRunEdge == nil ? "Attempt data" : "Data at this boundary")
+                        .font(.caption.weight(.semibold))
+                    Spacer()
+                    Picker("Data rendering", selection: $dataView) {
+                        ForEach(AutomationRunDataView.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 210)
+                    Text("1 item · 2.4 KB").font(.caption2).foregroundStyle(.secondary)
+                }
+                dataPayload
+            }
+        case .storage:
+            jobStorageInspector
+        case .logs:
+            runLogLine("22:31:04.218", "Loaded immutable input checkpoint", Nord.polarNight3)
+            runLogLine("22:31:04.231", "Validated schema case-context.v3", Nord.auroraGreen)
+            runLogLine("22:31:04.247", "Produced 1 item · digest 7d91…a8c2", Nord.frost1)
+        case .configuration:
+            HStack(spacing: 28) {
+                evidenceFact("Definition", value: "Workflow v\(selectedRun.version)")
+                evidenceFact("Node", value: selectedRunEdge?.sourceID ?? selectedRunStep.id)
+                evidenceFact("Retry", value: "Attempt 1 of 3")
+                evidenceFact("Authority", value: selectedRunStep.authority)
+                evidenceFact("Runtime", value: "Private local capability")
+            }
+        case .evidence:
+            HStack(spacing: 28) {
+                evidenceFact("Input digest", value: "b840…19fc")
+                evidenceFact("Output digest", value: "7d91…a8c2")
+                evidenceFact("Artifact", value: "context-snapshot.json")
+                evidenceFact("Retention", value: selectedRun.expiry)
+                evidenceFact("Redaction", value: "2 protected fields")
+            }
+        }
+    }
+
+    private var jobStorageInspector: some View {
+        HStack(alignment: .top, spacing: 10) {
+            storageInspectorColumn(
+                "Job storage · #\(selectedRun.id)",
+                subtitle: "Private to this job",
+                symbol: "shippingbox.fill",
+                tint: Nord.frost1,
+                rows: [
+                    ("Values", "7 · 182 KB"),
+                    ("Files", "3 · 48.0 MB"),
+                    ("Lifetime", selectedRun.expiry),
+                ]
+            )
+            storageInspectorColumn(
+                "Recent changes",
+                subtitle: "Committed by nodes",
+                symbol: "arrow.triangle.2.circlepath",
+                tint: Nord.auroraGreen,
+                rows: [
+                    ("Run work type", "+ report-v3.xlsx"),
+                    ("Compile context", "~ episode = 3"),
+                    ("Verify all", "+ validation.json"),
+                ]
+            )
+            storageInspectorColumn(
+                "Workflow storage",
+                subtitle: "Not deleted with this job",
+                symbol: "externaldrive.fill",
+                tint: Nord.auroraPurple,
+                rows: [
+                    ("Durable values", "12"),
+                    ("Promoted files", "4 · 86 MB"),
+                    ("Scope", "All workflow versions"),
+                ]
+            )
+        }
+    }
+
+    private func storageInspectorColumn(
+        _ title: String,
+        subtitle: String,
+        symbol: String,
+        tint: Color,
+        rows: [(String, String)]
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 7) {
+                Image(systemName: symbol).foregroundStyle(tint)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title).font(.caption.weight(.bold)).lineLimit(1)
+                    Text(subtitle).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+            Divider()
+            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                HStack(alignment: .top) {
+                    Text(row.0).foregroundStyle(.secondary)
+                    Spacer()
+                    Text(row.1).fontWeight(.semibold).multilineTextAlignment(.trailing)
+                }
+                .font(.caption2)
+            }
+        }
+        .padding(9)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(tint.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
+        .overlay { RoundedRectangle(cornerRadius: 8).stroke(tint.opacity(0.24), lineWidth: 1) }
+    }
+
+    @ViewBuilder
+    private var dataPayload: some View {
+        if selectedRunEdge == nil {
+            nodeDataComparison
+        } else {
+            checkpointDataPayload
+        }
+    }
+
+    @ViewBuilder
+    private var nodeDataComparison: some View {
+        switch dataView {
+        case .table:
+            HStack(alignment: .top, spacing: 10) {
+                comparisonPanel("Received", tint: Nord.polarNight3) {
+                    comparisonRow("episodes", value: "2")
+                    comparisonRow("artifact", value: "report-v2.xlsx")
+                    comparisonRow("instruction", value: "Use monthly totals")
+                }
+                comparisonPanel("Produced", tint: Nord.auroraGreen) {
+                    comparisonRow("episodes", value: "3", changed: true)
+                    comparisonRow("artifact", value: "report-v3.xlsx", changed: true)
+                    comparisonRow("current_intent", value: "correction", changed: true)
+                }
+            }
+        case .json:
+            HStack(alignment: .top, spacing: 10) {
+                codePayload("Received", text: "{ \"episodes\": 2, \"artifact\": \"report-v2.xlsx\" }")
+                codePayload("Produced", text: "{ \"episodes\": 3, \"artifact\": \"report-v3.xlsx\", \"current_intent\": \"correction\" }")
+            }
+        case .schema:
+            HStack(alignment: .top, spacing: 10) {
+                codePayload("Input schema", text: "episodes: [episode]\nartifact: file_reference")
+                codePayload("Output schema", text: "episodes: [episode]\nartifact: file_reference\ncurrent_intent: enum")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var checkpointDataPayload: some View {
+        switch dataView {
+        case .table:
+            HStack(spacing: 0) {
+                dataCell("case_id", value: "CASE-184")
+                dataCell("episode", value: "3")
+                dataCell("intent", value: "correction")
+                dataCell("artifact", value: "report-v3.xlsx")
+                dataCell("status", value: "verified")
+            }
+        case .json:
+            codePayload("Checkpoint JSON", text: "{ \"case_id\": \"CASE-184\", \"episode\": 3, \"intent\": \"correction\", \"artifact\": \"report-v3.xlsx\", \"status\": \"verified\" }")
+        case .schema:
+            codePayload("Checkpoint schema", text: "case_id: string · episode: integer · intent: enum · artifact: file_reference · status: enum")
+        }
+    }
+
+    private func comparisonPanel<Content: View>(
+        _ title: String,
+        tint: Color,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                Circle().fill(tint).frame(width: 6, height: 6)
+                Text(title).font(.caption2.weight(.bold)).foregroundStyle(.secondary)
+            }
+            content()
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func comparisonRow(_ field: String, value: String, changed: Bool = false) -> some View {
+        HStack(spacing: 8) {
+            Text(field).foregroundStyle(.secondary)
+            Spacer()
+            if changed {
+                Image(systemName: "plus.circle.fill").foregroundStyle(Nord.auroraGreen)
+            }
+            Text(value).lineLimit(1)
+        }
+        .font(.system(.caption2, design: .monospaced))
+    }
+
+    private func codePayload(_ title: String, text: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.caption2.weight(.bold)).foregroundStyle(.secondary)
+            Text(text)
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(Nord.frost1)
+                .textSelection(.enabled)
+        }
+        .padding(9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func dataCell(_ field: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(field).font(.caption2.weight(.bold)).foregroundStyle(.secondary)
+            Text(value).font(.system(.caption, design: .monospaced)).lineLimit(1)
+        }
+        .padding(9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Nord.polarNight0)
+        .overlay { Rectangle().stroke(Nord.polarNight3.opacity(0.8), lineWidth: 0.5) }
+    }
+
+    private func runLogLine(_ time: String, _ message: String, _ tint: Color) -> some View {
+        HStack(spacing: 10) {
+            Text(time).font(.system(.caption2, design: .monospaced)).foregroundStyle(.secondary)
+            Circle().fill(tint).frame(width: 5, height: 5)
+            Text(message).font(.system(.caption, design: .monospaced))
+        }
+    }
+
+    private func edgeEndpointLabel(_ edge: AutomationCanvasEdge) -> String {
+        let graph = selectedRun.pattern.graph
+        let source = graph.steps.first(where: { $0.id == edge.sourceID })?.title ?? edge.sourceID
+        let target = graph.steps.first(where: { $0.id == edge.targetID })?.title ?? edge.targetID
+        return "\(source) → \(target) · immutable checkpoint"
+    }
+
+    private var retentionSettings: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Label("History retention", systemImage: "clock.arrow.circlepath")
+                .font(.title3.weight(.semibold))
+            Text("Default for new runs of this workflow")
+                .font(.caption).foregroundStyle(.secondary)
+            Picker("Retention", selection: $retention) {
+                ForEach(AutomationRunRetention.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.radioGroup)
+            Divider()
+            retentionExplanation
+            Divider()
+            Label("Unresolved runs are protected", systemImage: "shield.fill")
+                .foregroundStyle(Nord.auroraYellow)
+            Text("Waiting, failed, or unknown outcomes remain until resolved or manually deleted, even when successful runs are removed immediately.")
+                .font(.caption2).foregroundStyle(.secondary)
+            Spacer(minLength: 24)
+            Text("Storage estimate").font(.caption2.weight(.bold)).foregroundStyle(.secondary)
+            Text("18 runs · 42 MB").font(.caption.weight(.semibold))
+            Button("Delete selected…", systemImage: "trash", role: .destructive) {}
+                .buttonStyle(.bordered)
+                .disabled(true)
+        }
+        .padding(20)
+        .frame(maxWidth: 720, minHeight: 520, alignment: .topLeading)
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+        .frame(maxWidth: .infinity, alignment: .center)
+    }
+
+    @ViewBuilder
+    private var retentionExplanation: some View {
+        switch retention {
+        case .thirtyDays:
+            Text("Successful and settled runs are deleted 30 days after completion.")
+        case .deleteAfterSuccess:
+            Text("Successful run detail is deleted after its final receipt is reconciled.")
+        case .forever:
+            Text("Run history remains until you delete it manually.")
+        }
+    }
+
+    private var deleteJobConfirmation: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                Image(systemName: "trash.fill")
+                    .foregroundStyle(Nord.auroraRed)
+                    .frame(width: 34, height: 34)
+                    .background(Nord.auroraRed.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Delete job #\(selectedRun.id)?").font(.title3.weight(.bold))
+                    Text("This cannot be undone").font(.caption).foregroundStyle(Nord.auroraRed)
+                }
+                Spacer()
+                Button("Close", systemImage: "xmark") {
+                    showsDeleteJobConfirmation = false
+                }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.plain)
+            }
+
+            Text("The job record and everything isolated inside its storage boundary will be removed together.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            VStack(spacing: 0) {
+                deletionRow("Run history and trace", value: "1 job", deleted: true)
+                Divider()
+                deletionRow("Job values", value: "7 · 182 KB", deleted: true)
+                Divider()
+                deletionRow("Job files", value: "3 · 48.0 MB", deleted: true)
+                Divider()
+                deletionRow("Workflow storage", value: "4 files · 86 MB", deleted: false)
+            }
+            .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 9))
+
+            Label(
+                "Promoted files and long-term values remain in workflow storage.",
+                systemImage: "externaldrive.fill.badge.checkmark"
+            )
+            .font(.caption)
+            .foregroundStyle(Nord.auroraPurple)
+
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    showsDeleteJobConfirmation = false
+                }
+                .buttonStyle(.bordered)
+                Button("Delete job and job storage", role: .destructive) {}
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(18)
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+        .overlay { RoundedRectangle(cornerRadius: 14).stroke(Nord.auroraRed.opacity(0.45), lineWidth: 1) }
+        .shadow(color: .black.opacity(0.35), radius: 24, y: 12)
+    }
+
+    private func deletionRow(_ label: String, value: String, deleted: Bool) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: deleted ? "trash" : "lock.shield.fill")
+                .foregroundStyle(deleted ? Nord.auroraRed : Nord.auroraPurple)
+                .frame(width: 18)
+            Text(label).font(.caption.weight(.semibold))
+            Spacer()
+            Text(deleted ? "Delete · \(value)" : "Keep · \(value)")
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(deleted ? Nord.auroraRed : Nord.auroraPurple)
+        }
+        .padding(10)
+    }
+
+    private func evidenceFact(_ label: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label).font(.caption2).foregroundStyle(.secondary)
+            Text(value).font(.caption.weight(.medium))
+        }
+    }
+}

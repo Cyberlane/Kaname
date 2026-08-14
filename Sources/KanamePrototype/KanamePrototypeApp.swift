@@ -238,8 +238,10 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
     private func ensureVisibleWindow(allowCreation: Bool) -> Bool {
         if let existing = NSApplication.shared.windows.first(where: { $0.canBecomeMain }) {
             existing.sharingType = .readOnly
+            existing.styleMask.insert(.resizable)
             existing.minSize = NSSize(width: 1_080, height: 700)
             existing.setFrameAutosaveName("KanameDesktopWindow-\(KanameDesktopEnvironment.current.channel.rawValue)")
+            KanameWindowResizeCursorOverlay.install(in: existing)
             applyRequestedWindowSize(to: existing)
             if existing.isMiniaturized { existing.deminiaturize(nil) }
             existing.makeKeyAndOrderFront(nil)
@@ -257,10 +259,12 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
         let window = NSWindow(contentViewController: controller)
         window.title = KanameDesktopEnvironment.current.displayName
         window.sharingType = .readOnly
+        window.styleMask.insert(.resizable)
         window.setContentSize(requestedWindowSize ?? NSSize(width: 1_520, height: 940))
         window.minSize = NSSize(width: 1_080, height: 700)
         window.center()
         window.setFrameAutosaveName("KanameDesktopWindow-\(KanameDesktopEnvironment.current.channel.rawValue)")
+        KanameWindowResizeCursorOverlay.install(in: window)
         window.makeKeyAndOrderFront(nil)
         fallbackWindow = window
         NSApplication.shared.activate(ignoringOtherApps: true)
@@ -401,6 +405,214 @@ private func finishSnapshotCapture(_ png: Data?, at outputURL: URL) -> Never {
     } catch {
         fputs("Kaname could not write the requested snapshot.\n", stderr)
         Darwin.exit(EXIT_FAILURE)
+    }
+}
+
+/// SwiftUI can replace the cursor rectangles owned by its hosting hierarchy.
+/// Keep a hit-test-transparent layer on the native window frame so macOS still
+/// advertises the standard resize cursors at every edge and corner.
+final class KanameWindowResizeCursorOverlay: NSView {
+    private enum ResizePosition {
+        case top
+        case bottom
+        case left
+        case right
+        case topLeft
+        case topRight
+        case bottomLeft
+        case bottomRight
+    }
+
+    private static let identifier = NSUserInterfaceItemIdentifier("KanameWindowResizeCursorOverlay")
+    private static let edgeThickness: CGFloat = 8
+    private static let cornerLength: CGFloat = 18
+    private var cursorTrackingArea: NSTrackingArea?
+
+    static func install(in window: NSWindow) {
+        guard window.styleMask.contains(.resizable),
+              let frameView = window.contentView?.superview else { return }
+        if let existing = frameView.subviews.first(where: { $0.identifier == identifier }) {
+            existing.frame = frameView.bounds
+            window.invalidateCursorRects(for: existing)
+            return
+        }
+
+        let overlay = KanameWindowResizeCursorOverlay(frame: frameView.bounds)
+        overlay.identifier = identifier
+        overlay.autoresizingMask = [.width, .height]
+        frameView.addSubview(overlay, positioned: .above, relativeTo: nil)
+        window.invalidateCursorRects(for: overlay)
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        resizePosition(at: point) == nil ? nil : self
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let window,
+              let position = resizePosition(at: convert(event.locationInWindow, from: nil)) else { return }
+        let initialFrame = window.frame
+        let initialPointer = NSEvent.mouseLocation
+
+        while let nextEvent = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+            if nextEvent.type == .leftMouseUp { break }
+            let pointer = NSEvent.mouseLocation
+            let deltaX = pointer.x - initialPointer.x
+            let deltaY = pointer.y - initialPointer.y
+            var frame = resizedFrame(
+                initialFrame,
+                position: position,
+                deltaX: deltaX,
+                deltaY: deltaY
+            )
+            constrain(&frame, position: position, window: window, initialFrame: initialFrame)
+            window.setFrame(frame, display: true)
+        }
+    }
+
+    override func updateTrackingAreas() {
+        if let cursorTrackingArea {
+            removeTrackingArea(cursorTrackingArea)
+        }
+        let trackingArea = NSTrackingArea(
+            rect: bounds,
+            options: [.activeInKeyWindow, .cursorUpdate, .mouseMoved, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(trackingArea)
+        cursorTrackingArea = trackingArea
+        super.updateTrackingAreas()
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        updateCursor(for: event)
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        updateCursor(for: event)
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        guard window?.styleMask.contains(.resizable) == true,
+              bounds.width > Self.cornerLength * 2,
+              bounds.height > Self.cornerLength * 2 else { return }
+
+        let edge = Self.edgeThickness
+        let corner = Self.cornerLength
+        let middleWidth = bounds.width - corner * 2
+        let middleHeight = bounds.height - corner * 2
+
+        addCursorRect(NSRect(x: corner, y: bounds.maxY - edge, width: middleWidth, height: edge), cursor: resizeCursor(at: .top))
+        addCursorRect(NSRect(x: corner, y: bounds.minY, width: middleWidth, height: edge), cursor: resizeCursor(at: .bottom))
+        addCursorRect(NSRect(x: bounds.minX, y: corner, width: edge, height: middleHeight), cursor: resizeCursor(at: .left))
+        addCursorRect(NSRect(x: bounds.maxX - edge, y: corner, width: edge, height: middleHeight), cursor: resizeCursor(at: .right))
+
+        addCursorRect(NSRect(x: bounds.minX, y: bounds.maxY - corner, width: corner, height: corner), cursor: resizeCursor(at: .topLeft))
+        addCursorRect(NSRect(x: bounds.maxX - corner, y: bounds.maxY - corner, width: corner, height: corner), cursor: resizeCursor(at: .topRight))
+        addCursorRect(NSRect(x: bounds.minX, y: bounds.minY, width: corner, height: corner), cursor: resizeCursor(at: .bottomLeft))
+        addCursorRect(NSRect(x: bounds.maxX - corner, y: bounds.minY, width: corner, height: corner), cursor: resizeCursor(at: .bottomRight))
+    }
+
+    private func resizeCursor(at position: ResizePosition) -> NSCursor {
+        if #available(macOS 15.0, *) {
+            let nativePosition: NSCursor.FrameResizePosition = switch position {
+            case .top: .top
+            case .bottom: .bottom
+            case .left: .left
+            case .right: .right
+            case .topLeft: .topLeft
+            case .topRight: .topRight
+            case .bottomLeft: .bottomLeft
+            case .bottomRight: .bottomRight
+            }
+            return NSCursor.frameResize(position: nativePosition, directions: .all)
+        }
+        switch position {
+        case .top, .bottom:
+            return .resizeUpDown
+        default:
+            return .resizeLeftRight
+        }
+    }
+
+    private func updateCursor(for event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        if let position = resizePosition(at: point) {
+            resizeCursor(at: position).set()
+        }
+    }
+
+    private func resizePosition(at point: NSPoint) -> ResizePosition? {
+        let edge = Self.edgeThickness
+        let left = point.x <= bounds.minX + edge
+        let right = point.x >= bounds.maxX - edge
+        let bottom = point.y <= bounds.minY + edge
+        let top = point.y >= bounds.maxY - edge
+        if top && left { return .topLeft }
+        if top && right { return .topRight }
+        if bottom && left { return .bottomLeft }
+        if bottom && right { return .bottomRight }
+        if top { return .top }
+        if bottom { return .bottom }
+        if left { return .left }
+        if right { return .right }
+        return nil
+    }
+
+    private func resizedFrame(
+        _ initialFrame: NSRect,
+        position: ResizePosition,
+        deltaX: CGFloat,
+        deltaY: CGFloat
+    ) -> NSRect {
+        var frame = initialFrame
+        switch position {
+        case .left, .topLeft, .bottomLeft:
+            frame.origin.x += deltaX
+            frame.size.width -= deltaX
+        case .right, .topRight, .bottomRight:
+            frame.size.width += deltaX
+        case .top, .bottom:
+            break
+        }
+        switch position {
+        case .bottom, .bottomLeft, .bottomRight:
+            frame.origin.y += deltaY
+            frame.size.height -= deltaY
+        case .top, .topLeft, .topRight:
+            frame.size.height += deltaY
+        case .left, .right:
+            break
+        }
+        return frame
+    }
+
+    private func constrain(
+        _ frame: inout NSRect,
+        position: ResizePosition,
+        window: NSWindow,
+        initialFrame: NSRect
+    ) {
+        let minimum = window.minSize
+        let maximum = window.maxSize
+        let constrainedWidth = min(max(frame.width, minimum.width), maximum.width)
+        let constrainedHeight = min(max(frame.height, minimum.height), maximum.height)
+
+        switch position {
+        case .left, .topLeft, .bottomLeft:
+            frame.origin.x = initialFrame.maxX - constrainedWidth
+        default:
+            break
+        }
+        switch position {
+        case .bottom, .bottomLeft, .bottomRight:
+            frame.origin.y = initialFrame.maxY - constrainedHeight
+        default:
+            break
+        }
+        frame.size = NSSize(width: constrainedWidth, height: constrainedHeight)
     }
 }
 #endif
