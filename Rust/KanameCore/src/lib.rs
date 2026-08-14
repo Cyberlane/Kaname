@@ -13,6 +13,7 @@ pub mod mobile;
 pub mod policy;
 pub mod workflow_canonical;
 pub mod workflow_compiler;
+pub mod workflow_drafts;
 pub mod workflow_library;
 pub mod workflow_match;
 pub mod workflow_protocol;

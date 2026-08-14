@@ -154,6 +154,12 @@ pub enum WorkflowLibraryError {
     Integrity(String),
     UnsafePath(&'static str),
     InjectedMigrationInterruption,
+    DraftNotFound,
+    DraftAlreadyExists,
+    DraftConflict { expected: i64, actual: i64 },
+    InvalidDraft(&'static str),
+    CorruptDraft(String),
+    InjectedDraftInterruption,
 }
 
 impl fmt::Display for WorkflowLibraryError {
@@ -171,6 +177,15 @@ impl fmt::Display for WorkflowLibraryError {
             Self::InjectedMigrationInterruption => {
                 formatter.write_str("workflow_library_migration_interrupted")
             }
+            Self::DraftNotFound => formatter.write_str("workflow_draft_not_found"),
+            Self::DraftAlreadyExists => formatter.write_str("workflow_draft_already_exists"),
+            Self::DraftConflict { expected, actual } => write!(
+                formatter,
+                "workflow_draft_conflict: expected {expected}, actual {actual}"
+            ),
+            Self::InvalidDraft(code) => write!(formatter, "workflow draft invalid: {code}"),
+            Self::CorruptDraft(code) => write!(formatter, "workflow draft corrupt: {code}"),
+            Self::InjectedDraftInterruption => formatter.write_str("workflow_draft_interrupted"),
         }
     }
 }
@@ -208,8 +223,8 @@ pub enum WorkflowLibraryMigrationFault {
 }
 
 pub struct WorkflowLibraryStore {
-    connection: Connection,
-    database_path: Option<PathBuf>,
+    pub(crate) connection: Connection,
+    pub(crate) database_path: Option<PathBuf>,
 }
 
 impl WorkflowLibraryStore {
@@ -254,7 +269,7 @@ impl WorkflowLibraryStore {
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
         )?;
-        protect_database_file(path)?;
+        protect_private_path(path, PrivatePathKind::File)?;
         Self::initialize(connection, Some(path.to_path_buf()), fault)
     }
 
@@ -433,26 +448,34 @@ fn prepare_database_path(path: &Path) -> Result<()> {
         .parent()
         .ok_or(WorkflowLibraryError::UnsafePath("database_parent_missing"))?;
     fs::create_dir_all(parent)?;
-    let parent_metadata = fs::symlink_metadata(parent)?;
-    if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
-        return Err(WorkflowLibraryError::UnsafePath(
-            "database_parent_must_be_directory",
-        ));
-    }
-    #[cfg(unix)]
-    fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
-    Ok(())
+    protect_private_path(parent, PrivatePathKind::Directory)
 }
 
-fn protect_database_file(path: &Path) -> Result<()> {
+#[derive(Clone, Copy)]
+pub(crate) enum PrivatePathKind {
+    File,
+    Directory,
+}
+
+pub(crate) fn protect_private_path(path: &Path, kind: PrivatePathKind) -> Result<()> {
     let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
+    let expected_type = match kind {
+        PrivatePathKind::File => metadata.is_file(),
+        PrivatePathKind::Directory => metadata.is_dir(),
+    };
+    if metadata.file_type().is_symlink() || !expected_type {
         return Err(WorkflowLibraryError::UnsafePath(
-            "database_must_be_regular_file",
+            "private_path_type_mismatch",
         ));
     }
     #[cfg(unix)]
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    fs::set_permissions(
+        path,
+        fs::Permissions::from_mode(match kind {
+            PrivatePathKind::File => 0o600,
+            PrivatePathKind::Directory => 0o700,
+        }),
+    )?;
     Ok(())
 }
 
