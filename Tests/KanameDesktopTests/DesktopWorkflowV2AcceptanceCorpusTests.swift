@@ -59,6 +59,8 @@ struct DesktopWorkflowV2AcceptanceCorpusTests {
             root.appendingPathComponent("Fixtures/workflow-v2/README.md"),
             root.appendingPathComponent("Fixtures/workflow-v2/corpus-manifest.json"),
             root.appendingPathComponent("Fixtures/workflow-v2/scenarios.json"),
+            root.appendingPathComponent("Fixtures/workflow-v2/visual-manifest.json"),
+            root.appendingPathComponent("Scripts/capture-workflow-v2-visual-fixtures.sh"),
         ]
         let prohibitedFragments = [
             "justin@", "cyber-lane", "simplykay", "smbc", "gmail.com",
@@ -71,6 +73,28 @@ struct DesktopWorkflowV2AcceptanceCorpusTests {
                 #expect(!contents.contains(fragment), "\(file.lastPathComponent) contains prohibited fragment \(fragment)")
             }
         }
+    }
+
+    @Test
+    func visualManifestCoversEveryScenarioRouteAndCompactLayouts() throws {
+        let root = repositoryRoot
+        let scenarioData = try Data(contentsOf: root.appendingPathComponent("Fixtures/workflow-v2/scenarios.json"))
+        let scenarioDocument = try #require(try JSONSerialization.jsonObject(with: scenarioData) as? [String: Any])
+        let scenarios = try #require(scenarioDocument["scenarios"] as? [[String: Any]])
+        let requiredRoutes = Set(scenarios.flatMap { $0["visualRoutes"] as? [String] ?? [] })
+
+        let visualData = try Data(contentsOf: root.appendingPathComponent("Fixtures/workflow-v2/visual-manifest.json"))
+        let visualDocument = try #require(try JSONSerialization.jsonObject(with: visualData) as? [String: Any])
+        let captures = try #require(visualDocument["captures"] as? [[String: Any]])
+        let coveredRoutes = Set(captures.flatMap { $0["routes"] as? [String] ?? [] })
+        let names = try captures.map { try #require($0["name"] as? String) }
+
+        #expect(visualDocument["manifestVersion"] as? Int == 1)
+        #expect(visualDocument["privacyClass"] as? String == "synthetic-public")
+        #expect(Set(names).count == names.count)
+        #expect(requiredRoutes.isSubset(of: coveredRoutes))
+        #expect(captures.contains { ($0["width"] as? Int) == 1_080 && ($0["height"] as? Int) == 700 })
+        #expect(captures.contains { ($0["width"] as? Int) == 1_520 && ($0["height"] as? Int) == 940 })
     }
 
     private var repositoryRoot: URL {
