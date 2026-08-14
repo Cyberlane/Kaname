@@ -6,7 +6,7 @@ use kaname_core::{
         Scope, SignalWorkflowWait, WorkflowInputBinding, WorkflowRunTokenCreated,
         WorkflowValueReference, WorkflowWaitCorrelation,
     },
-    workflow_drafts::CreateWorkflowDraft,
+    workflow_drafts::{CreateWorkflowDraft, SaveWorkflowDraft},
     workflow_executor::{
         self, DurableRunOutcome, WorkflowExecutionError, WorkflowExecutionFault,
         WorkflowStorageExecutionAuthority,
@@ -52,6 +52,10 @@ const WAIT_WORKFLOW_ID: &str = "018f6000-0001-7000-8000-000000000001";
 const WAIT_REVISION_ID: &str = "revision-wait-001";
 const CASE_WORKFLOW_ID: &str = "018f6300-0001-7000-8000-000000000001";
 const CASE_REVISION_ID: &str = "revision-case-001";
+const SUBFLOW_CHILD_WORKFLOW_ID: &str = "018f6600-0001-7000-8000-000000000001";
+const SUBFLOW_CHILD_REVISION_ID: &str = "revision-subflow-child-001";
+const SUBFLOW_PARENT_WORKFLOW_ID: &str = "018f6700-0001-7000-8000-000000000001";
+const SUBFLOW_PARENT_REVISION_ID: &str = "revision-subflow-parent-001";
 
 #[test]
 fn bounded_iteration_limits_concurrency_collects_failures_and_is_crash_exact() {
@@ -738,6 +742,404 @@ fn correction_episode_resumes_at_every_new_journal_boundary_with_identical_conte
             expected
         );
     }
+}
+
+#[test]
+fn pinned_subflow_runs_as_a_child_and_survives_later_child_publication() {
+    let directory = tempdir().unwrap();
+    let (mut library, child_v1, parent) = published_subflow_library(directory.path());
+    let child_v2 = library
+        .publish_revision(PublishWorkflowRevision {
+            workflow_id: SUBFLOW_CHILD_WORKFLOW_ID.into(),
+            expected_draft_sequence: 0,
+            revision_id: "revision-subflow-child-002".into(),
+            registration_id: "registration-subflow-child-002".into(),
+            release_version: "2.0.0".into(),
+            schema_bundle_json: br#"{"bundleVersion":1,"schemas":[]}"#.to_vec(),
+            dependency_lock_json: br#"{"lockVersion":1,"dependencies":[]}"#.to_vec(),
+            configuration_contract_json: br#"{"type":"object"}"#.to_vec(),
+            published_at_unix_millis: 120,
+        })
+        .unwrap();
+    assert_ne!(child_v1.package_digest, child_v2.package_digest);
+
+    let command = control_run_command(
+        "run-subflow-parent-001",
+        &parent,
+        SUBFLOW_PARENT_WORKFLOW_ID,
+        SUBFLOW_PARENT_REVISION_ID,
+        json!({"message": "keep the original child pin"}),
+    );
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    assert_eq!(
+        workflow_executor::execute(&mut journal, &library, &command)
+            .unwrap()
+            .outcome,
+        DurableRunOutcome::Succeeded
+    );
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    projection.catch_up(&journal).unwrap();
+    assert_eq!(projection.row_count("subflows").unwrap(), 1);
+    let parent_run = projection
+        .inspect_runs(None, Some("run-subflow-parent-001"), 1)
+        .unwrap()
+        .pop()
+        .unwrap();
+    let invocation = parent_run.subflows.first().unwrap();
+    assert_eq!(invocation.status, "settled");
+    assert_eq!(invocation.outcome, "succeeded");
+    assert_eq!(invocation.child_revision_id, SUBFLOW_CHILD_REVISION_ID);
+    assert_eq!(invocation.child_package_digest, child_v1.package_digest);
+    assert_ne!(invocation.child_package_digest, child_v2.package_digest);
+    assert_eq!(
+        invocation.output.as_ref().unwrap().inline_canonical_json,
+        invocation.input.as_ref().unwrap().inline_canonical_json
+    );
+    let child_run = projection
+        .inspect_runs(None, Some(&invocation.child_run_id), 1)
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(child_run.revision_id, SUBFLOW_CHILD_REVISION_ID);
+    assert_eq!(child_run.package_digest, child_v1.package_digest);
+}
+
+#[test]
+fn subflow_nodes_share_the_parent_job_storage_boundary() {
+    let directory = tempdir().unwrap();
+    let (library, parent) = published_subflow_storage_library(directory.path());
+    let mut storage = test_scoped_storage(directory.path());
+    let mut command = control_run_command(
+        "run-subflow-storage-parent",
+        &parent,
+        SUBFLOW_PARENT_WORKFLOW_ID,
+        SUBFLOW_PARENT_REVISION_ID,
+        json!({"draft": {"message": "shared across the whole job"}}),
+    );
+    let mut request =
+        RequestWorkflowRun::decode(command.payload.as_ref().unwrap().value.as_slice()).unwrap();
+    request.installation_id = "installation-storage-001".into();
+    command.payload.as_mut().unwrap().value = request.encode_to_vec();
+
+    assert_eq!(
+        workflow_executor::execute_with_storage(
+            &mut Journal::open_in_memory(&CURSOR_KEY).unwrap(),
+            &library,
+            &mut storage,
+            &storage_authority(),
+            &command,
+        )
+        .unwrap()
+        .outcome,
+        DurableRunOutcome::Succeeded
+    );
+
+    let parent_access = WorkflowStorageAccessContext {
+        run_id: Some("run-subflow-storage-parent".into()),
+        case_id: None,
+        installation_id: "installation-storage-001".into(),
+        account_binding_ids: Default::default(),
+    };
+    let namespace = WorkflowStorageNamespace {
+        kind: WorkflowStorageScopeKind::Job,
+        owner_id: "run-subflow-storage-parent".into(),
+        installation_id: Some("installation-storage-001".into()),
+    };
+    let handles = storage
+        .list_current(&parent_access, &namespace, Some("shared-draft"), 10)
+        .unwrap();
+    assert_eq!(handles.len(), 1);
+    assert_eq!(handles[0].logical_key, "shared-draft");
+}
+
+#[test]
+fn pinned_subflow_parent_is_crash_exact_at_every_parent_boundary() {
+    let directory = tempdir().unwrap();
+    let (library, _, parent) = published_subflow_library(directory.path());
+    let command = control_run_command(
+        "run-subflow-crash-001",
+        &parent,
+        SUBFLOW_PARENT_WORKFLOW_ID,
+        SUBFLOW_PARENT_REVISION_ID,
+        json!({"message": "resume the exact child"}),
+    );
+    let expected = {
+        let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+        workflow_executor::execute(&mut journal, &library, &command).unwrap();
+        run_wires(&journal, "run-subflow-crash-001")
+    };
+    for boundary in 1..=expected.len() {
+        let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+        assert!(matches!(
+            workflow_executor::execute_with_fault_for_test(
+                &mut journal,
+                &library,
+                &command,
+                WorkflowExecutionFault::AfterNewEvent(boundary),
+            ),
+            Err(WorkflowExecutionError::InjectedInterruption)
+        ));
+        assert_eq!(
+            workflow_executor::execute(&mut journal, &library, &command)
+                .unwrap()
+                .outcome,
+            DurableRunOutcome::Succeeded
+        );
+        assert_eq!(run_wires(&journal, "run-subflow-crash-001"), expected);
+    }
+}
+
+#[test]
+fn cancelling_a_parent_cascades_to_its_waiting_child_and_records_both_outcomes() {
+    let directory = tempdir().unwrap();
+    let (mut library, _, _) = published_subflow_library(directory.path());
+    library
+        .save_draft(SaveWorkflowDraft {
+            workflow_id: SUBFLOW_CHILD_WORKFLOW_ID.into(),
+            expected_head_sequence: 0,
+            edit_id: "edit-subflow-wait-child".into(),
+            session_id: "executor-tests".into(),
+            workflow_source: serde_json::to_vec(&subflow_wait_child_source()).unwrap(),
+            layout_source: br#"{"nodes":[]}"#.to_vec(),
+            recorded_at_unix_millis: 150,
+        })
+        .unwrap();
+    let child = library
+        .publish_revision(PublishWorkflowRevision {
+            workflow_id: SUBFLOW_CHILD_WORKFLOW_ID.into(),
+            expected_draft_sequence: 1,
+            revision_id: "revision-subflow-wait-child".into(),
+            registration_id: "registration-subflow-wait-child".into(),
+            release_version: "2.0.0".into(),
+            schema_bundle_json: br#"{"bundleVersion":1,"schemas":[]}"#.to_vec(),
+            dependency_lock_json: br#"{"lockVersion":1,"dependencies":[]}"#.to_vec(),
+            configuration_contract_json: br#"{"type":"object"}"#.to_vec(),
+            published_at_unix_millis: 151,
+        })
+        .unwrap();
+    library
+        .save_draft(SaveWorkflowDraft {
+            workflow_id: SUBFLOW_PARENT_WORKFLOW_ID.into(),
+            expected_head_sequence: 0,
+            edit_id: "edit-subflow-wait-parent".into(),
+            session_id: "executor-tests".into(),
+            workflow_source: serde_json::to_vec(&subflow_parent_source(&format!(
+                "sha256:{}",
+                child.package_digest
+            )))
+            .unwrap(),
+            layout_source: br#"{"nodes":[]}"#.to_vec(),
+            recorded_at_unix_millis: 152,
+        })
+        .unwrap();
+    let parent = library
+        .publish_revision(PublishWorkflowRevision {
+            workflow_id: SUBFLOW_PARENT_WORKFLOW_ID.into(),
+            expected_draft_sequence: 1,
+            revision_id: "revision-subflow-wait-parent".into(),
+            registration_id: "registration-subflow-wait-parent".into(),
+            release_version: "2.0.0".into(),
+            schema_bundle_json: br#"{"bundleVersion":1,"schemas":[]}"#.to_vec(),
+            dependency_lock_json: serde_json::to_vec(&json!({
+                "lockVersion": 1,
+                "dependencies": [{
+                    "kind": "subflow",
+                    "id": "dev.kaname.subflow-child",
+                    "digest": format!("sha256:{}", child.package_digest)
+                }]
+            }))
+            .unwrap(),
+            configuration_contract_json: br#"{"type":"object"}"#.to_vec(),
+            published_at_unix_millis: 153,
+        })
+        .unwrap();
+    let command = control_run_command(
+        "run-subflow-cancel-parent",
+        &parent,
+        SUBFLOW_PARENT_WORKFLOW_ID,
+        "revision-subflow-wait-parent",
+        json!({"caseId": "case-cancel"}),
+    );
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    assert_eq!(
+        workflow_executor::execute_at_unix_millis(
+            &mut journal,
+            &library,
+            &command,
+            1_786_220_100_000,
+        )
+        .unwrap()
+        .outcome,
+        DurableRunOutcome::Waiting
+    );
+    let token = run_token(&journal, "run-subflow-cancel-parent");
+    workflow_executor::request_cancellation(
+        &mut journal,
+        &cancel_command("run-subflow-cancel-parent", &token.run_token_id),
+    )
+    .unwrap();
+    assert_eq!(
+        workflow_executor::execute_at_unix_millis(
+            &mut journal,
+            &library,
+            &command,
+            1_786_220_100_100,
+        )
+        .unwrap()
+        .outcome,
+        DurableRunOutcome::Cancelled
+    );
+
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    projection.catch_up(&journal).unwrap();
+    let parent_run = projection
+        .inspect_runs(None, Some("run-subflow-cancel-parent"), 1)
+        .unwrap()
+        .pop()
+        .unwrap();
+    let invocation = parent_run.subflows.first().unwrap();
+    assert_eq!(invocation.status, "settled");
+    assert_eq!(invocation.outcome, "cancelled");
+    let child_run = projection
+        .inspect_runs(None, Some(&invocation.child_run_id), 1)
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(child_run.outcome, "cancelled");
+}
+
+#[test]
+fn subflow_publication_rejects_incompatible_interfaces_and_package_cycles() {
+    let incompatible_directory = tempdir().unwrap();
+    let (mut incompatible_library, child, _) =
+        published_subflow_library(incompatible_directory.path());
+    let mut incompatible_child = subflow_child_source();
+    incompatible_child["workflowId"] = json!("018f6800-0001-7000-8000-000000000001");
+    incompatible_child["packageId"] = json!("dev.kaname.incompatible-child");
+    incompatible_child["interfaces"]["start"] = json!([subflow_interface()[0].clone()]);
+    incompatible_library
+        .create_draft(CreateWorkflowDraft {
+            workflow_id: "018f6800-0001-7000-8000-000000000001".into(),
+            package_id: "dev.kaname.incompatible-child".into(),
+            name: "Incompatible child".into(),
+            summary: "Missing its required success interface".into(),
+            edit_id: "edit-incompatible-child".into(),
+            session_id: "executor-tests".into(),
+            workflow_source: serde_json::to_vec(&incompatible_child).unwrap(),
+            layout_source: br#"{"nodes":[]}"#.to_vec(),
+            recorded_at_unix_millis: 130,
+        })
+        .unwrap();
+    let incompatible_revision = incompatible_library
+        .publish_revision(PublishWorkflowRevision {
+            workflow_id: "018f6800-0001-7000-8000-000000000001".into(),
+            expected_draft_sequence: 0,
+            revision_id: "revision-incompatible-child".into(),
+            registration_id: "registration-incompatible-child".into(),
+            release_version: "1.0.0".into(),
+            schema_bundle_json: br#"{"bundleVersion":1,"schemas":[]}"#.to_vec(),
+            dependency_lock_json: br#"{"lockVersion":1,"dependencies":[]}"#.to_vec(),
+            configuration_contract_json: br#"{"type":"object"}"#.to_vec(),
+            published_at_unix_millis: 131,
+        })
+        .unwrap();
+    let incompatible_digest = format!("sha256:{}", incompatible_revision.package_digest);
+    let mut incompatible_parent = subflow_parent_source(&incompatible_digest);
+    incompatible_parent["workflowId"] = json!("018f6900-0001-7000-8000-000000000001");
+    incompatible_parent["packageId"] = json!("dev.kaname.incompatible-parent");
+    incompatible_parent["graph"]["nodes"][1]["config"]["packageId"] =
+        json!("dev.kaname.incompatible-child");
+    incompatible_library
+        .create_draft(CreateWorkflowDraft {
+            workflow_id: "018f6900-0001-7000-8000-000000000001".into(),
+            package_id: "dev.kaname.incompatible-parent".into(),
+            name: "Incompatible parent".into(),
+            summary: "Must fail closed at publication".into(),
+            edit_id: "edit-incompatible-parent".into(),
+            session_id: "executor-tests".into(),
+            workflow_source: serde_json::to_vec(&incompatible_parent).unwrap(),
+            layout_source: br#"{"nodes":[]}"#.to_vec(),
+            recorded_at_unix_millis: 132,
+        })
+        .unwrap();
+    assert!(matches!(
+        incompatible_library.publish_revision(PublishWorkflowRevision {
+            workflow_id: "018f6900-0001-7000-8000-000000000001".into(),
+            expected_draft_sequence: 0,
+            revision_id: "revision-incompatible-parent".into(),
+            registration_id: "registration-incompatible-parent".into(),
+            release_version: "1.0.0".into(),
+            schema_bundle_json: br#"{"bundleVersion":1,"schemas":[]}"#.to_vec(),
+            dependency_lock_json: serde_json::to_vec(&json!({
+                "lockVersion": 1,
+                "dependencies": [{
+                    "kind": "subflow",
+                    "id": "dev.kaname.incompatible-child",
+                    "digest": incompatible_digest
+                }]
+            }))
+            .unwrap(),
+            configuration_contract_json: br#"{"type":"object"}"#.to_vec(),
+            published_at_unix_millis: 133,
+        }),
+        Err(kaname_core::workflow_library::WorkflowLibraryError::WorkflowCompilationFailed(codes))
+            if codes == ["dependency.subflow.interface-incompatible"]
+    ));
+    assert_ne!(child.package_digest, incompatible_revision.package_digest);
+
+    let cycle_directory = tempdir().unwrap();
+    let (mut cycle_library, child_a, parent_b) = published_subflow_library(cycle_directory.path());
+    let parent_b_digest = format!("sha256:{}", parent_b.package_digest);
+    let mut child_a_v2_source = subflow_parent_source(&parent_b_digest);
+    child_a_v2_source["workflowId"] = json!(SUBFLOW_CHILD_WORKFLOW_ID);
+    child_a_v2_source["packageId"] = json!("dev.kaname.subflow-child");
+    child_a_v2_source["graph"]["nodes"][1]["config"]["packageId"] =
+        json!("dev.kaname.subflow-parent");
+    cycle_library
+        .save_draft(SaveWorkflowDraft {
+            workflow_id: SUBFLOW_CHILD_WORKFLOW_ID.into(),
+            expected_head_sequence: 0,
+            edit_id: "edit-subflow-cycle-a2".into(),
+            session_id: "executor-tests".into(),
+            workflow_source: serde_json::to_vec(&child_a_v2_source).unwrap(),
+            layout_source: br#"{"nodes":[]}"#.to_vec(),
+            recorded_at_unix_millis: 140,
+        })
+        .unwrap();
+    assert!(matches!(
+        cycle_library.publish_revision(PublishWorkflowRevision {
+            workflow_id: SUBFLOW_CHILD_WORKFLOW_ID.into(),
+            expected_draft_sequence: 1,
+            revision_id: "revision-subflow-cycle-a2".into(),
+            registration_id: "registration-subflow-cycle-a2".into(),
+            release_version: "2.0.0".into(),
+            schema_bundle_json: br#"{"bundleVersion":1,"schemas":[]}"#.to_vec(),
+            dependency_lock_json: serde_json::to_vec(&json!({
+                "lockVersion": 1,
+                "dependencies": [{
+                    "kind": "subflow",
+                    "id": "dev.kaname.subflow-parent",
+                    "digest": parent_b_digest
+                }]
+            }))
+            .unwrap(),
+            configuration_contract_json: br#"{"type":"object"}"#.to_vec(),
+            published_at_unix_millis: 141,
+        }),
+        Err(kaname_core::workflow_library::WorkflowLibraryError::WorkflowCompilationFailed(codes))
+            if codes == ["dependency.subflow.cycle"]
+    ));
+    assert_eq!(
+        cycle_library
+            .load_workflow_revision_by_package_digest(
+                "dev.kaname.subflow-child",
+                &child_a.package_digest,
+            )
+            .unwrap()
+            .summary
+            .revision_id,
+        SUBFLOW_CHILD_REVISION_ID
+    );
 }
 
 #[test]
@@ -1489,6 +1891,108 @@ fn published_case_library(
     )
 }
 
+fn published_subflow_library(
+    application_support: &std::path::Path,
+) -> (
+    kaname_core::workflow_library::WorkflowLibraryStore,
+    PublishedWorkflowRevision,
+    PublishedWorkflowRevision,
+) {
+    publish_subflow_pair(
+        application_support,
+        subflow_child_source(),
+        subflow_parent_source,
+    )
+}
+
+fn published_subflow_storage_library(
+    application_support: &std::path::Path,
+) -> (
+    kaname_core::workflow_library::WorkflowLibraryStore,
+    PublishedWorkflowRevision,
+) {
+    let (library, _, parent) = publish_subflow_pair(
+        application_support,
+        subflow_storage_child_source(),
+        subflow_storage_parent_source,
+    );
+    (library, parent)
+}
+
+fn publish_subflow_pair(
+    application_support: &std::path::Path,
+    child_source: Value,
+    parent_source: fn(&str) -> Value,
+) -> (
+    kaname_core::workflow_library::WorkflowLibraryStore,
+    PublishedWorkflowRevision,
+    PublishedWorkflowRevision,
+) {
+    let mut library = open_workflow_library(application_support).unwrap();
+    library
+        .create_draft(CreateWorkflowDraft {
+            workflow_id: SUBFLOW_CHILD_WORKFLOW_ID.into(),
+            package_id: "dev.kaname.subflow-child".into(),
+            name: "Pinned child".into(),
+            summary: "Synthetic child with a stable data interface".into(),
+            edit_id: "edit-subflow-child-001".into(),
+            session_id: "executor-tests".into(),
+            workflow_source: serde_json::to_vec(&child_source).unwrap(),
+            layout_source: br#"{"nodes":[]}"#.to_vec(),
+            recorded_at_unix_millis: 90,
+        })
+        .unwrap();
+    let child = library
+        .publish_revision(PublishWorkflowRevision {
+            workflow_id: SUBFLOW_CHILD_WORKFLOW_ID.into(),
+            expected_draft_sequence: 0,
+            revision_id: SUBFLOW_CHILD_REVISION_ID.into(),
+            registration_id: "registration-subflow-child-001".into(),
+            release_version: "1.0.0".into(),
+            schema_bundle_json: br#"{"bundleVersion":1,"schemas":[]}"#.to_vec(),
+            dependency_lock_json: br#"{"lockVersion":1,"dependencies":[]}"#.to_vec(),
+            configuration_contract_json: br#"{"type":"object"}"#.to_vec(),
+            published_at_unix_millis: 100,
+        })
+        .unwrap();
+    let digest = format!("sha256:{}", child.package_digest);
+    library
+        .create_draft(CreateWorkflowDraft {
+            workflow_id: SUBFLOW_PARENT_WORKFLOW_ID.into(),
+            package_id: "dev.kaname.subflow-parent".into(),
+            name: "Pinned parent".into(),
+            summary: "Synthetic parent pinned to one child revision".into(),
+            edit_id: "edit-subflow-parent-001".into(),
+            session_id: "executor-tests".into(),
+            workflow_source: serde_json::to_vec(&parent_source(&digest)).unwrap(),
+            layout_source: br#"{"nodes":[]}"#.to_vec(),
+            recorded_at_unix_millis: 101,
+        })
+        .unwrap();
+    let parent = library
+        .publish_revision(PublishWorkflowRevision {
+            workflow_id: SUBFLOW_PARENT_WORKFLOW_ID.into(),
+            expected_draft_sequence: 0,
+            revision_id: SUBFLOW_PARENT_REVISION_ID.into(),
+            registration_id: "registration-subflow-parent-001".into(),
+            release_version: "1.0.0".into(),
+            schema_bundle_json: br#"{"bundleVersion":1,"schemas":[]}"#.to_vec(),
+            dependency_lock_json: serde_json::to_vec(&json!({
+                "lockVersion": 1,
+                "dependencies": [{
+                    "kind": "subflow",
+                    "id": "dev.kaname.subflow-child",
+                    "digest": digest
+                }]
+            }))
+            .unwrap(),
+            configuration_contract_json: br#"{"type":"object"}"#.to_vec(),
+            published_at_unix_millis: 110,
+        })
+        .unwrap();
+    (library, child, parent)
+}
+
 fn publish_control_library(
     application_support: &std::path::Path,
     workflow_id: &str,
@@ -1735,6 +2239,219 @@ fn case_workflow_source() -> Value {
             ((1, "success"), (2, "input")),
         ],
     )
+}
+
+fn subflow_child_source() -> Value {
+    let ids = [
+        "018f6600-0002-7000-8000-000000000002",
+        "018f6600-0003-7000-8000-000000000003",
+    ];
+    let mut source = control_graph_source(
+        SUBFLOW_CHILD_WORKFLOW_ID,
+        "dev.kaname.subflow-child",
+        &ids,
+        vec![
+            ("manual", "trigger.manual", json!({})),
+            ("complete", "terminal.complete", json!({})),
+        ],
+        vec![((0, "success"), (1, "input"))],
+    );
+    source["graph"]["entrypoints"][0]["key"] = json!("start");
+    source["interfaces"] = json!({"start": subflow_interface()});
+    source
+}
+
+fn subflow_wait_child_source() -> Value {
+    let ids = [
+        "018f6610-0002-7000-8000-000000000002",
+        "018f6610-0003-7000-8000-000000000003",
+        "018f6610-0004-7000-8000-000000000004",
+        "018f6610-0005-7000-8000-000000000005",
+    ];
+    let mut source = control_graph_source(
+        SUBFLOW_CHILD_WORKFLOW_ID,
+        "dev.kaname.subflow-child",
+        &ids,
+        vec![
+            ("manual", "trigger.manual", json!({})),
+            (
+                "wait",
+                "control.wait",
+                json!({
+                    "kind": "reply",
+                    "correlation": [{"root": "input", "pointer": "/caseId"}],
+                    "expirySeconds": 5
+                }),
+            ),
+            ("complete-resumed", "terminal.complete", json!({})),
+            ("complete-expired", "terminal.complete", json!({})),
+        ],
+        vec![
+            ((0, "success"), (1, "input")),
+            ((1, "resumed"), (2, "input")),
+            ((1, "expired"), (3, "input")),
+        ],
+    );
+    source["graph"]["entrypoints"][0]["key"] = json!("start");
+    source["interfaces"] = json!({"start": subflow_interface()});
+    source
+}
+
+fn subflow_parent_source(child_digest: &str) -> Value {
+    let ids = [
+        "018f6700-0002-7000-8000-000000000002",
+        "018f6700-0003-7000-8000-000000000003",
+        "018f6700-0004-7000-8000-000000000004",
+    ];
+    let mut source = control_graph_source(
+        SUBFLOW_PARENT_WORKFLOW_ID,
+        "dev.kaname.subflow-parent",
+        &ids,
+        vec![
+            ("manual", "trigger.manual", json!({})),
+            (
+                "child",
+                "control.subflow",
+                json!({
+                    "packageId": "dev.kaname.subflow-child",
+                    "revisionDigest": child_digest,
+                    "entrypoint": "start",
+                    "input": {"whole": true}
+                }),
+            ),
+            ("complete", "terminal.complete", json!({})),
+        ],
+        vec![
+            ((0, "success"), (1, "input")),
+            ((1, "success"), (2, "input")),
+        ],
+    );
+    source["graph"]["entrypoints"][0]["key"] = json!("start");
+    source["interfaces"] = json!({"start": subflow_interface()});
+    source
+}
+
+fn subflow_storage_child_source() -> Value {
+    let ids = [
+        "018f6620-0002-7000-8000-000000000002",
+        "018f6620-0003-7000-8000-000000000003",
+        "018f6620-0004-7000-8000-000000000004",
+    ];
+    let mut source = control_graph_source(
+        SUBFLOW_CHILD_WORKFLOW_ID,
+        "dev.kaname.subflow-child",
+        &ids,
+        vec![
+            ("manual", "trigger.manual", json!({})),
+            (
+                "write-shared-draft",
+                "storage.write",
+                json!({
+                    "scope": "job",
+                    "key": "shared-draft",
+                    "value": {"root": "input", "pointer": "/draft"},
+                    "conflictPolicy": "fail"
+                }),
+            ),
+            ("complete", "terminal.complete", json!({})),
+        ],
+        vec![
+            ((0, "success"), (1, "input")),
+            ((1, "success"), (2, "input")),
+        ],
+    );
+    source["graph"]["entrypoints"][0]["key"] = json!("start");
+    source["interfaces"] = json!({"start": subflow_interface()});
+    source["storage"] = json!({
+        "shared-draft": {
+            "key": "shared-draft",
+            "scope": "job",
+            "kind": "value",
+            "schemaRef": "dev.kaname.storage/draft-v1",
+            "maximumBytes": 65536,
+            "classification": "private"
+        }
+    });
+    source
+}
+
+fn subflow_storage_parent_source(child_digest: &str) -> Value {
+    let ids = [
+        "018f6720-0002-7000-8000-000000000002",
+        "018f6720-0003-7000-8000-000000000003",
+        "018f6720-0004-7000-8000-000000000004",
+        "018f6720-0005-7000-8000-000000000005",
+    ];
+    let mut source = control_graph_source(
+        SUBFLOW_PARENT_WORKFLOW_ID,
+        "dev.kaname.subflow-parent",
+        &ids,
+        vec![
+            ("manual", "trigger.manual", json!({})),
+            (
+                "child",
+                "control.subflow",
+                json!({
+                    "packageId": "dev.kaname.subflow-child",
+                    "revisionDigest": child_digest,
+                    "entrypoint": "start",
+                    "input": {"whole": true}
+                }),
+            ),
+            (
+                "read-shared-draft",
+                "storage.read",
+                json!({
+                    "operation": "read",
+                    "scope": "job",
+                    "key": "shared-draft",
+                    "required": true
+                }),
+            ),
+            ("complete", "terminal.complete", json!({})),
+        ],
+        vec![
+            ((0, "success"), (1, "input")),
+            ((1, "success"), (2, "input")),
+            ((2, "success"), (3, "input")),
+        ],
+    );
+    source["graph"]["entrypoints"][0]["key"] = json!("start");
+    source["interfaces"] = json!({"start": subflow_interface()});
+    source["storage"] = json!({
+        "shared-draft": {
+            "key": "shared-draft",
+            "scope": "job",
+            "kind": "value",
+            "schemaRef": "dev.kaname.storage/draft-v1",
+            "maximumBytes": 65536,
+            "classification": "private"
+        }
+    });
+    source
+}
+
+fn subflow_interface() -> Value {
+    json!([
+        {
+            "id": "input",
+            "key": "input",
+            "label": "Input",
+            "direction": "input",
+            "cardinality": "one",
+            "schemaRef": "dev.kaname.workflow.data/v1",
+            "required": true
+        },
+        {
+            "id": "success",
+            "key": "success",
+            "label": "Success",
+            "direction": "output",
+            "cardinality": "one",
+            "schemaRef": "dev.kaname.workflow.data/v1",
+            "required": true
+        }
+    ])
 }
 
 type ControlEdge<'a> = ((usize, &'a str), (usize, &'a str));

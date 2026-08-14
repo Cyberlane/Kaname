@@ -49,6 +49,7 @@ struct DesktopDurableWorkflowRunsView: View {
         case storage = "Storage"
         case tokens = "Tokens"
         case control = "Control flow"
+        case subflow = "Child workflow"
         case caseContext = "Case context"
         case configuration = "Configuration"
         case matchTrace = "Match trace"
@@ -254,7 +255,9 @@ struct DesktopDurableWorkflowRunsView: View {
                             inspectorGroup = node.type.hasPrefix("storage.")
                                 ? .storage
                                 : (node.type == "data.case-context" ? .caseContext
+                                : (node.type == "control.subflow" ? .subflow
                                 : (run.attempt(for: node.id)?.errorCode == nil ? .inputs : .error)
+                                )
                                 )
                         } label: {
                             VStack(alignment: .leading, spacing: 5) {
@@ -427,6 +430,8 @@ struct DesktopDurableWorkflowRunsView: View {
                     }
                 }
             }
+        case .subflow:
+            subflowInspector(run.subflows.filter { $0.nodeID == node.id })
         case .caseContext:
             caseContextInspector(run.episode)
         case .configuration:
@@ -460,6 +465,54 @@ struct DesktopDurableWorkflowRunsView: View {
                     }
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private func subflowInspector(_ subflows: [DesktopWorkflowProjectedSubflow]) -> some View {
+        if subflows.isEmpty {
+            explainedEmpty("This node has no recorded child-workflow invocation.")
+        } else {
+            VStack(alignment: .leading, spacing: 7) {
+                ForEach(subflows) { subflow in
+                    subflowEvidence(subflow)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func subflowEvidence(_ subflow: DesktopWorkflowProjectedSubflow) -> some View {
+        let settledPosition = subflow.settledStorePosition.map(String.init) ?? "active"
+        let settledTime = subflow.settledAtUnixMillis.map(String.init) ?? "active"
+        let identity = """
+        Child run \(subflow.childRunID)
+        Child command \(subflow.childCommandID)
+        Workflow \(subflow.childWorkflowID)
+        Revision \(subflow.childRevisionID)
+        Package \(subflow.childPackageID)
+        Digest \(subflow.childPackageDigest)
+        Entrypoint \(subflow.entrypoint)
+        Called at \(subflow.calledAtUnixMillis)
+        Settled at \(settledTime)
+        Journal \(subflow.calledStorePosition)…\(settledPosition)
+        """
+        evidenceCard(
+            title: "\(subflow.status.capitalized) · \(subflow.outcome?.capitalized ?? "waiting")",
+            detail: identity
+        )
+        evidenceCard(title: "Input", detail: valueText(subflow.input))
+        if let output = subflow.output {
+            evidenceCard(
+                title: "Output · \(subflow.childFinalEmissionIDs.count) child emission(s)",
+                detail: valueText(output)
+            )
+        }
+        if let error = subflow.error {
+            evidenceCard(
+                title: subflow.errorCode ?? "Child workflow error",
+                detail: valueText(error)
+            )
         }
     }
 

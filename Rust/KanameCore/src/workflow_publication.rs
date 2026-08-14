@@ -90,6 +90,73 @@ struct PreparedPublication {
     validation_digest: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PublishedCompiledContract {
+    compiled_format_version: u32,
+    workflow_id: String,
+    package_id: String,
+    definition_digest: String,
+    layout_digest: String,
+    schema_bundle_digest: String,
+    dependency_lock_digest: String,
+    configuration_contract_digest: String,
+    entrypoints: Vec<PublishedCompiledEntrypoint>,
+    #[serde(default)]
+    interfaces: BTreeMap<String, Vec<PublishedInterfacePort>>,
+    nodes: Vec<PublishedCompiledNode>,
+    edges: Vec<Value>,
+    resources: BTreeMap<String, String>,
+    policies: BTreeMap<String, Value>,
+    storage: BTreeMap<String, Value>,
+    dependencies: Vec<PublishedDependency>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PublishedCompiledEntrypoint {
+    id: String,
+    node_id: String,
+    #[serde(default)]
+    key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PublishedCompiledNode {
+    id: String,
+    key: String,
+    name: String,
+    #[serde(rename = "type")]
+    node_type: String,
+    type_version: u32,
+    execution_availability: String,
+    config: Value,
+    ports: Vec<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PublishedDependency {
+    kind: String,
+    id: String,
+    #[serde(default)]
+    version: Option<String>,
+    digest: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PublishedInterfacePort {
+    id: String,
+    key: String,
+    label: String,
+    direction: String,
+    cardinality: String,
+    schema_ref: String,
+    required: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RevisionBundleManifest {
@@ -200,6 +267,7 @@ impl WorkflowLibraryStore {
             });
         }
         let prepared = prepare_publication(&request, &draft.workflow_source, &draft.layout_source)?;
+        validate_pinned_subflows(self, &prepared)?;
         let workflow_root = self.workflow_root()?;
         let revisions = workflow_root.join("Revisions").join(&request.workflow_id);
         let staging_root = workflow_root.join("Staging").join("Revisions");
@@ -314,6 +382,193 @@ impl WorkflowLibraryStore {
                 "file_backing_required".into(),
             ))
     }
+}
+
+fn validate_pinned_subflows(
+    library: &WorkflowLibraryStore,
+    prepared: &PreparedPublication,
+) -> Result<()> {
+    let compiled = parse_compiled_contract(
+        prepared
+            .files
+            .get("compiled.json")
+            .ok_or_else(|| workflow_compilation_error("dependency.subflow.compiled-missing"))?,
+    )?;
+    if compiled.package_id != prepared.package_id || compiled.workflow_id != prepared.workflow_id {
+        return Err(workflow_compilation_error(
+            "dependency.subflow.parent-identity",
+        ));
+    }
+    let mut package_stack = BTreeSet::from([prepared.package_id.clone()]);
+    let mut visited = BTreeSet::new();
+    validate_compiled_subflows(library, &compiled, &mut package_stack, &mut visited, 0)
+}
+
+fn validate_compiled_subflows(
+    library: &WorkflowLibraryStore,
+    compiled: &PublishedCompiledContract,
+    package_stack: &mut BTreeSet<String>,
+    visited: &mut BTreeSet<String>,
+    depth: usize,
+) -> Result<()> {
+    if depth > 16 {
+        return Err(workflow_compilation_error("dependency.subflow.depth"));
+    }
+    for node in compiled
+        .nodes
+        .iter()
+        .filter(|node| node.node_type == "control.subflow")
+    {
+        let package_id = node
+            .config
+            .get("packageId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| workflow_compilation_error("dependency.subflow.package"))?;
+        let digest = node
+            .config
+            .get("revisionDigest")
+            .and_then(Value::as_str)
+            .ok_or_else(|| workflow_compilation_error("dependency.subflow.digest"))?;
+        let entrypoint = node
+            .config
+            .get("entrypoint")
+            .and_then(Value::as_str)
+            .ok_or_else(|| workflow_compilation_error("dependency.subflow.entrypoint"))?;
+        if node.config.get("input") != Some(&serde_json::json!({"whole": true})) {
+            return Err(workflow_compilation_error(
+                "dependency.subflow.input-mapping",
+            ));
+        }
+        let pins = compiled
+            .dependencies
+            .iter()
+            .filter(|dependency| {
+                dependency.kind == "subflow"
+                    && dependency.id == package_id
+                    && dependency.digest == digest
+            })
+            .count();
+        if pins != 1 {
+            return Err(workflow_compilation_error("dependency.subflow.lock"));
+        }
+        if !package_stack.insert(package_id.to_owned()) {
+            return Err(workflow_compilation_error("dependency.subflow.cycle"));
+        }
+        let child = library
+            .load_workflow_revision_by_package_digest(package_id, digest)
+            .map_err(|_| workflow_compilation_error("dependency.subflow.unresolved"))?;
+        let child_compiled = parse_compiled_contract(&child.compiled_source)?;
+        if child_compiled.package_id != package_id
+            || child_compiled.workflow_id != child.summary.workflow_id
+            || child.summary.package_digest
+                != digest
+                    .strip_prefix("sha256:")
+                    .unwrap_or(digest)
+                    .to_ascii_lowercase()
+        {
+            return Err(workflow_compilation_error(
+                "dependency.subflow.pin-mismatch",
+            ));
+        }
+        validate_subflow_interface(&child_compiled, entrypoint)?;
+        let visit_key = format!("{}:{}", package_id, child.summary.package_digest);
+        if visited.insert(visit_key) {
+            validate_compiled_subflows(
+                library,
+                &child_compiled,
+                package_stack,
+                visited,
+                depth + 1,
+            )?;
+        }
+        package_stack.remove(package_id);
+    }
+    Ok(())
+}
+
+fn validate_subflow_interface(
+    child: &PublishedCompiledContract,
+    requested_entrypoint: &str,
+) -> Result<()> {
+    let entrypoints = child
+        .entrypoints
+        .iter()
+        .filter(|entrypoint| entrypoint.key.as_deref() == Some(requested_entrypoint))
+        .collect::<Vec<_>>();
+    if entrypoints.len() != 1 {
+        return Err(workflow_compilation_error(
+            "dependency.subflow.entrypoint-missing",
+        ));
+    }
+    let ports = child
+        .interfaces
+        .get(requested_entrypoint)
+        .ok_or_else(|| workflow_compilation_error("dependency.subflow.interface-missing"))?;
+    let compatible = |id: &str, direction: &str, required: bool| {
+        ports.iter().any(|port| {
+            port.id == id
+                && port.key == id
+                && !port.label.is_empty()
+                && port.direction == direction
+                && port.cardinality == "one"
+                && port.schema_ref == "dev.kaname.workflow.data/v1"
+                && port.required == required
+        })
+    };
+    if ports.len() != 2
+        || !compatible("input", "input", true)
+        || !compatible("success", "output", true)
+    {
+        return Err(workflow_compilation_error(
+            "dependency.subflow.interface-incompatible",
+        ));
+    }
+    Ok(())
+}
+
+fn parse_compiled_contract(bytes: &[u8]) -> Result<PublishedCompiledContract> {
+    let compiled: PublishedCompiledContract = serde_json::from_slice(bytes)
+        .map_err(|_| workflow_compilation_error("dependency.subflow.compiled-contract"))?;
+    if compiled.compiled_format_version != 1
+        || compiled.definition_digest.is_empty()
+        || compiled.layout_digest.is_empty()
+        || compiled.schema_bundle_digest.is_empty()
+        || compiled.dependency_lock_digest.is_empty()
+        || compiled.configuration_contract_digest.is_empty()
+        || compiled.entrypoints.is_empty()
+        || compiled.edges.len() > 4096
+        || compiled.resources.len() > 1024
+        || compiled.policies.len() > 1024
+        || compiled.storage.len() > 1024
+        || compiled.dependencies.len() > 1024
+        || compiled.nodes.iter().any(|node| {
+            node.id.is_empty()
+                || node.key.is_empty()
+                || node.name.is_empty()
+                || node.type_version == 0
+                || node.execution_availability.is_empty()
+                || node.ports.is_empty()
+        })
+        || compiled
+            .entrypoints
+            .iter()
+            .any(|entrypoint| entrypoint.id.is_empty() || entrypoint.node_id.is_empty())
+        || compiled.dependencies.iter().any(|dependency| {
+            dependency.kind.is_empty()
+                || dependency.id.is_empty()
+                || dependency.digest.is_empty()
+                || dependency.version.as_deref() == Some("")
+        })
+    {
+        return Err(workflow_compilation_error(
+            "dependency.subflow.compiled-contract",
+        ));
+    }
+    Ok(compiled)
+}
+
+fn workflow_compilation_error(code: &str) -> WorkflowLibraryError {
+    WorkflowLibraryError::WorkflowCompilationFailed(vec![code.into()])
 }
 
 fn prepare_publication(

@@ -121,6 +121,39 @@ message WorkflowCaseEpisodeStarted {
   reserved 18 to 30;
 }
 
+// One immutable parent-to-child call. The child revision is resolved from the
+// parent's published dependency lock before this fact is admitted.
+message WorkflowSubflowCalled {
+  string run_id = 1;
+  string run_token_id = 2;
+  string invocation_id = 3;
+  string attempt_id = 4;
+  string execution_token_id = 5;
+  string node_id = 6;
+  string child_run_id = 7;
+  string child_command_id = 8;
+  string child_workflow_id = 9;
+  string child_revision_id = 10;
+  string child_package_id = 11;
+  string child_package_digest = 12;
+  string entrypoint = 13;
+  WorkflowValueReference input = 14;
+  reserved 15 to 30;
+}
+
+message WorkflowSubflowSettled {
+  string run_id = 1;
+  string run_token_id = 2;
+  string invocation_id = 3;
+  string child_run_id = 4;
+  WorkflowRunOutcome outcome = 5;
+  WorkflowValueReference output = 6;
+  string error_code = 7;
+  WorkflowValueReference error = 8;
+  repeated string child_final_emission_ids = 9;
+  reserved 10 to 25;
+}
+
 // One durable path through the graph. The run token pins the immutable run;
 // execution tokens make fan-out, join, and cancellation replayable without
 // relying on worker memory or scheduling order.
@@ -642,6 +675,32 @@ message WorkflowProjectedCaseEpisode {
   reserved 14 to 25;
 }
 
+message WorkflowProjectedSubflow {
+  string invocation_id = 1;
+  string attempt_id = 2;
+  string execution_token_id = 3;
+  string node_id = 4;
+  string child_run_id = 5;
+  string child_workflow_id = 6;
+  string child_revision_id = 7;
+  string child_package_id = 8;
+  string child_package_digest = 9;
+  string entrypoint = 10;
+  WorkflowProjectedValue input = 11;
+  string status = 12;
+  string outcome = 13;
+  WorkflowProjectedValue output = 14;
+  string error_code = 15;
+  WorkflowProjectedValue error = 16;
+  repeated string child_final_emission_ids = 17;
+  uint64 called_store_position = 18;
+  uint64 settled_store_position = 19;
+  string child_command_id = 20;
+  int64 called_at_unix_millis = 21;
+  int64 settled_at_unix_millis = 22;
+  reserved 23 to 30;
+}
+
 message WorkflowProjectedMatchTrace {
   string event_id = 1;
   string attempt_id = 2;
@@ -696,7 +755,8 @@ message WorkflowProjectedRun {
   repeated WorkflowProjectedWait waits = 28;
   repeated WorkflowProjectedWaitSignal wait_signals = 29;
   WorkflowProjectedCaseEpisode episode = 30;
-  reserved 31 to 35;
+  repeated WorkflowProjectedSubflow subflows = 31;
+  reserved 32 to 35;
 }
 
 message WorkflowRunInspectionResponse {

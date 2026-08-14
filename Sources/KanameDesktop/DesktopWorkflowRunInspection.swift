@@ -303,6 +303,32 @@ public struct DesktopWorkflowProjectedCaseEpisode: Identifiable, Equatable, Send
     public let startedStorePosition: UInt64
 }
 
+public struct DesktopWorkflowProjectedSubflow: Identifiable, Equatable, Sendable {
+    public var id: String { invocationID }
+    public let invocationID: String
+    public let attemptID: String
+    public let executionTokenID: String
+    public let nodeID: String
+    public let childRunID: String
+    public let childWorkflowID: String
+    public let childRevisionID: String
+    public let childPackageID: String
+    public let childPackageDigest: String
+    public let entrypoint: String
+    public let input: DesktopWorkflowProjectedValue
+    public let status: String
+    public let outcome: String?
+    public let output: DesktopWorkflowProjectedValue?
+    public let errorCode: String?
+    public let error: DesktopWorkflowProjectedValue?
+    public let childFinalEmissionIDs: [String]
+    public let childCommandID: String
+    public let calledAtUnixMillis: Int64
+    public let settledAtUnixMillis: Int64?
+    public let calledStorePosition: UInt64
+    public let settledStorePosition: UInt64?
+}
+
 public struct DesktopWorkflowProjectedMatchTrace: Identifiable, Equatable, Sendable {
     public var id: String { eventID }
     public let eventID: String
@@ -353,6 +379,7 @@ public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
     public let waits: [DesktopWorkflowProjectedWait]
     public let waitSignals: [DesktopWorkflowProjectedWaitSignal]
     public let episode: DesktopWorkflowProjectedCaseEpisode?
+    public let subflows: [DesktopWorkflowProjectedSubflow]
 
     public init(
         runID: String, workflowID: String, revisionID: String, packageDigest: String,
@@ -368,7 +395,8 @@ public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
         retries: [DesktopWorkflowProjectedRetry] = [],
         waits: [DesktopWorkflowProjectedWait] = [],
         waitSignals: [DesktopWorkflowProjectedWaitSignal] = [],
-        episode: DesktopWorkflowProjectedCaseEpisode? = nil
+        episode: DesktopWorkflowProjectedCaseEpisode? = nil,
+        subflows: [DesktopWorkflowProjectedSubflow] = []
     ) {
         self.runID = runID
         self.workflowID = workflowID
@@ -395,6 +423,7 @@ public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
         self.waits = waits
         self.waitSignals = waitSignals
         self.episode = episode
+        self.subflows = subflows
     }
 
     public func attempt(for nodeID: String) -> DesktopWorkflowProjectedAttempt? {
@@ -662,7 +691,66 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
             retries: try run.retries.map(retry),
             waits: try run.waits.map(wait),
             waitSignals: try run.waitSignals.map(waitSignal),
-            episode: try run.hasEpisode ? episode(run.episode) : nil
+            episode: try run.hasEpisode ? episode(run.episode) : nil,
+            subflows: try run.subflows.map(subflow)
+        )
+    }
+
+    private static func subflow(
+        _ item: Kaname_V1_WorkflowProjectedSubflow
+    ) throws -> DesktopWorkflowProjectedSubflow {
+        guard !item.invocationID.isEmpty, !item.attemptID.isEmpty,
+              !item.executionTokenID.isEmpty, !item.nodeID.isEmpty,
+              !item.childRunID.isEmpty, !item.childWorkflowID.isEmpty,
+              !item.childRevisionID.isEmpty, !item.childPackageID.isEmpty,
+              item.childPackageDigest.count == 64, !item.entrypoint.isEmpty,
+              !item.childCommandID.isEmpty, item.calledAtUnixMillis >= 0,
+              item.hasInput, ["called", "settled"].contains(item.status),
+              item.calledStorePosition > 0 else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        let settled = item.status == "settled"
+        guard settled == !item.outcome.isEmpty,
+              settled == (item.settledStorePosition > 0),
+              settled == (item.settledAtUnixMillis > 0),
+              !settled || ["succeeded", "failed", "cancelled"].contains(item.outcome) else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        if item.outcome == "succeeded" {
+            guard item.hasOutput, item.errorCode.isEmpty, !item.hasError else {
+                throw DesktopWorkflowRunInspectionError.malformedResponse
+            }
+        } else if settled {
+            guard !item.hasOutput, !item.errorCode.isEmpty, item.hasError else {
+                throw DesktopWorkflowRunInspectionError.malformedResponse
+            }
+        } else if item.hasOutput || !item.errorCode.isEmpty || item.hasError
+                    || !item.childFinalEmissionIds.isEmpty {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        return DesktopWorkflowProjectedSubflow(
+            invocationID: item.invocationID,
+            attemptID: item.attemptID,
+            executionTokenID: item.executionTokenID,
+            nodeID: item.nodeID,
+            childRunID: item.childRunID,
+            childWorkflowID: item.childWorkflowID,
+            childRevisionID: item.childRevisionID,
+            childPackageID: item.childPackageID,
+            childPackageDigest: item.childPackageDigest,
+            entrypoint: item.entrypoint,
+            input: try value(item.input),
+            status: item.status,
+            outcome: item.outcome.nilIfEmpty,
+            output: try item.hasOutput ? value(item.output) : nil,
+            errorCode: item.errorCode.nilIfEmpty,
+            error: try item.hasError ? value(item.error) : nil,
+            childFinalEmissionIDs: item.childFinalEmissionIds,
+            childCommandID: item.childCommandID,
+            calledAtUnixMillis: item.calledAtUnixMillis,
+            settledAtUnixMillis: item.settledAtUnixMillis > 0 ? item.settledAtUnixMillis : nil,
+            calledStorePosition: item.calledStorePosition,
+            settledStorePosition: item.settledStorePosition > 0 ? item.settledStorePosition : nil
         )
     }
 

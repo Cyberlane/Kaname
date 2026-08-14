@@ -68,6 +68,7 @@
     "dependencyLockDigest",
     "configurationContractDigest",
     "entrypoints",
+    "interfaces",
     "nodes",
     "edges",
     "resources",
@@ -102,6 +103,17 @@
     },
     "entrypoints": {
       "$ref": "graph.schema.json#/$defs/entrypoints"
+    },
+    "interfaces": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "$ref": "port.schema.json"
+        },
+        "maxItems": 128
+      },
+      "maxProperties": 64
     },
     "nodes": {
       "type": "array",

@@ -23,7 +23,7 @@ use std::{
     time::Duration,
 };
 
-const PROJECTION_SCHEMA_VERSION: i64 = 7;
+const PROJECTION_SCHEMA_VERSION: i64 = 8;
 const DEFAULT_BATCH_SIZE: u32 = 250;
 
 const INITIAL_SCHEMA: &str = r#"
@@ -359,6 +359,34 @@ CREATE TABLE workflow_episode_inputs (
     PRIMARY KEY(episode_id, port_id),
     UNIQUE(episode_id, ordinal)
 ) STRICT;
+
+CREATE TABLE workflow_subflows (
+    invocation_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+    attempt_id TEXT NOT NULL UNIQUE REFERENCES workflow_attempts(attempt_id) ON DELETE CASCADE,
+    execution_token_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    child_run_id TEXT NOT NULL UNIQUE,
+    child_command_id TEXT NOT NULL,
+    child_workflow_id TEXT NOT NULL,
+    child_revision_id TEXT NOT NULL,
+    child_package_id TEXT NOT NULL,
+    child_package_digest TEXT NOT NULL CHECK (length(child_package_digest) = 64),
+    entrypoint TEXT NOT NULL,
+    input_value_id TEXT NOT NULL REFERENCES workflow_values(value_id) ON DELETE RESTRICT,
+    status TEXT NOT NULL CHECK (status IN ('called', 'settled')),
+    outcome TEXT CHECK (outcome IN ('succeeded', 'failed', 'cancelled')),
+    output_value_id TEXT REFERENCES workflow_values(value_id) ON DELETE RESTRICT,
+    error_code TEXT,
+    error_value_id TEXT REFERENCES workflow_values(value_id) ON DELETE RESTRICT,
+    child_final_emission_ids_json TEXT,
+    called_at_unix_millis INTEGER NOT NULL CHECK (called_at_unix_millis >= 0),
+    settled_at_unix_millis INTEGER,
+    called_store_position INTEGER NOT NULL UNIQUE CHECK (called_store_position > 0),
+    settled_store_position INTEGER UNIQUE
+) STRICT;
+CREATE INDEX workflow_subflows_run_position
+    ON workflow_subflows(run_id, called_store_position, invocation_id);
 
 CREATE TABLE workflow_projected_events (
     event_id TEXT PRIMARY KEY,
@@ -740,6 +768,36 @@ CREATE TABLE IF NOT EXISTS workflow_episode_inputs (
 ) STRICT;
 "#;
 
+const PROJECTION_MIGRATION_8: &str = r#"
+CREATE TABLE IF NOT EXISTS workflow_subflows (
+    invocation_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+    attempt_id TEXT NOT NULL UNIQUE REFERENCES workflow_attempts(attempt_id) ON DELETE CASCADE,
+    execution_token_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    child_run_id TEXT NOT NULL UNIQUE,
+    child_command_id TEXT NOT NULL,
+    child_workflow_id TEXT NOT NULL,
+    child_revision_id TEXT NOT NULL,
+    child_package_id TEXT NOT NULL,
+    child_package_digest TEXT NOT NULL CHECK (length(child_package_digest) = 64),
+    entrypoint TEXT NOT NULL,
+    input_value_id TEXT NOT NULL REFERENCES workflow_values(value_id) ON DELETE RESTRICT,
+    status TEXT NOT NULL CHECK (status IN ('called', 'settled')),
+    outcome TEXT CHECK (outcome IN ('succeeded', 'failed', 'cancelled')),
+    output_value_id TEXT REFERENCES workflow_values(value_id) ON DELETE RESTRICT,
+    error_code TEXT,
+    error_value_id TEXT REFERENCES workflow_values(value_id) ON DELETE RESTRICT,
+    child_final_emission_ids_json TEXT,
+    called_at_unix_millis INTEGER NOT NULL CHECK (called_at_unix_millis >= 0),
+    settled_at_unix_millis INTEGER,
+    called_store_position INTEGER NOT NULL UNIQUE CHECK (called_store_position > 0),
+    settled_store_position INTEGER UNIQUE
+) STRICT;
+CREATE INDEX IF NOT EXISTS workflow_subflows_run_position
+    ON workflow_subflows(run_id, called_store_position, invocation_id);
+"#;
+
 #[derive(Debug)]
 pub enum WorkflowProjectionError {
     Database(rusqlite::Error),
@@ -934,6 +992,7 @@ impl WorkflowRunProjection {
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             transaction.execute_batch(PROJECTION_MIGRATION_6)?;
             transaction.execute_batch(PROJECTION_MIGRATION_7)?;
+            transaction.execute_batch(PROJECTION_MIGRATION_8)?;
             transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
             refresh_state_digest(&transaction)?;
             transaction.commit()?;
@@ -943,6 +1002,16 @@ impl WorkflowRunProjection {
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             transaction.execute_batch(PROJECTION_MIGRATION_7)?;
+            transaction.execute_batch(PROJECTION_MIGRATION_8)?;
+            transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
+            refresh_state_digest(&transaction)?;
+            transaction.commit()?;
+        }
+        let found: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if found == 7 {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(PROJECTION_MIGRATION_8)?;
             transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
             refresh_state_digest(&transaction)?;
             transaction.commit()?;
@@ -1041,6 +1110,31 @@ impl WorkflowRunProjection {
         if invalid_case_chain.is_some() {
             return Err(WorkflowProjectionError::Integrity(
                 "case_episode_chain_invalid".into(),
+            ));
+        }
+        let invalid_subflow = self
+            .connection
+            .query_row(
+                "SELECT 1 FROM workflow_subflows s
+                 JOIN workflow_runs parent ON parent.run_id = s.run_id
+                 LEFT JOIN workflow_runs child ON child.run_id = s.child_run_id
+                 WHERE (s.status = 'called' AND parent.status != 'running')
+                    OR (s.status = 'settled' AND (
+                        child.run_id IS NULL
+                        OR child.status = 'running'
+                        OR child.workflow_id != s.child_workflow_id
+                        OR child.revision_id != s.child_revision_id
+                        OR child.package_digest != s.child_package_digest
+                        OR child.outcome != s.outcome
+                        OR s.settled_store_position IS NULL))
+                 LIMIT 1",
+                [],
+                |_| Ok(()),
+            )
+            .optional()?;
+        if invalid_subflow.is_some() {
+            return Err(WorkflowProjectionError::Integrity(
+                "subflow_projection_invalid".into(),
             ));
         }
         let stored: String = self.connection.query_row(
@@ -1169,6 +1263,7 @@ impl WorkflowRunProjection {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute_batch(
             "DELETE FROM workflow_projected_events;
+             DELETE FROM workflow_subflows;
              DELETE FROM workflow_episode_inputs;
              DELETE FROM workflow_episodes;
              DELETE FROM workflow_cases;
@@ -1209,6 +1304,7 @@ impl WorkflowRunProjection {
             "cases" => "SELECT COUNT(*) FROM workflow_cases",
             "episodes" => "SELECT COUNT(*) FROM workflow_episodes",
             "episode_inputs" => "SELECT COUNT(*) FROM workflow_episode_inputs",
+            "subflows" => "SELECT COUNT(*) FROM workflow_subflows",
             "events" => "SELECT COUNT(*) FROM workflow_projected_events",
             "values" => "SELECT COUNT(*) FROM workflow_values",
             _ => return Err(WorkflowProjectionError::Integrity("unknown_table".into())),
@@ -1357,6 +1453,7 @@ impl WorkflowRunProjection {
             waits: self.inspect_waits(run_id)?,
             wait_signals: self.inspect_wait_signals(run_id)?,
             episode: self.inspect_episode(run_id)?,
+            subflows: self.inspect_subflows(run_id)?,
         })
     }
 
@@ -2249,6 +2346,97 @@ impl WorkflowRunProjection {
         }))
     }
 
+    fn inspect_subflows(&self, run_id: &str) -> Result<Vec<v1::WorkflowProjectedSubflow>> {
+        type SubflowRow = (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            String,
+            i64,
+            Option<i64>,
+            i64,
+            Option<i64>,
+        );
+        let mut statement = self.connection.prepare(
+            "SELECT invocation_id, attempt_id, execution_token_id, node_id, child_run_id,
+                    child_workflow_id, child_revision_id, child_package_id, child_package_digest,
+                    entrypoint, input_value_id, status, outcome, output_value_id, error_code,
+                    error_value_id, child_final_emission_ids_json, child_command_id,
+                    called_at_unix_millis, settled_at_unix_millis, called_store_position,
+                    settled_store_position
+             FROM workflow_subflows WHERE run_id = ?1
+             ORDER BY called_store_position, invocation_id",
+        )?;
+        let rows = statement.query_map([run_id], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+                row.get(9)?,
+                row.get(10)?,
+                row.get(11)?,
+                row.get(12)?,
+                row.get(13)?,
+                row.get(14)?,
+                row.get(15)?,
+                row.get(16)?,
+                row.get(17)?,
+                row.get(18)?,
+                row.get(19)?,
+                row.get(20)?,
+                row.get(21)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let row: SubflowRow = row?;
+            Ok(v1::WorkflowProjectedSubflow {
+                invocation_id: row.0,
+                attempt_id: row.1,
+                execution_token_id: row.2,
+                node_id: row.3,
+                child_run_id: row.4,
+                child_workflow_id: row.5,
+                child_revision_id: row.6,
+                child_package_id: row.7,
+                child_package_digest: row.8,
+                entrypoint: row.9,
+                input: Some(self.inspect_value(&row.10)?),
+                status: row.11.unwrap_or_default(),
+                outcome: row.12.unwrap_or_default(),
+                output: self.inspect_optional_value(row.13.as_deref())?,
+                error_code: row.14.unwrap_or_default(),
+                error: self.inspect_optional_value(row.15.as_deref())?,
+                child_final_emission_ids: decode_optional_string_list(row.16.as_deref())?,
+                child_command_id: row.17,
+                called_at_unix_millis: row.18,
+                settled_at_unix_millis: row.19.unwrap_or_default(),
+                called_store_position: projected_u64(row.20)?,
+                settled_store_position: row.21.map(projected_u64).transpose()?.unwrap_or_default(),
+            })
+        })
+        .collect()
+    }
+
     #[doc(hidden)]
     pub fn corrupt_first_run_for_test(&self) -> Result<()> {
         self.connection.execute(
@@ -2450,6 +2638,136 @@ fn apply_event(transaction: &Transaction<'_>, event: &v1::EventEnvelope) -> Resu
                     ],
                 )?;
             }
+            touch_run(transaction, &payload.run_id, event.store_position)?;
+        }
+        WorkflowRuntimeEvent::SubflowCalled(payload) => {
+            require_active_attempt(
+                transaction,
+                &payload.run_id,
+                &payload.run_token_id,
+                &payload.attempt_id,
+                &payload.node_id,
+                None,
+                Some(&payload.execution_token_id),
+            )?;
+            let input = payload.input.as_ref().ok_or_else(|| {
+                WorkflowProjectionError::Lifecycle("subflow_input_missing".into())
+            })?;
+            insert_value(transaction, input)?;
+            transaction.execute(
+                "INSERT INTO workflow_subflows
+                 (invocation_id, run_id, attempt_id, execution_token_id, node_id, child_run_id,
+                  child_command_id, child_workflow_id, child_revision_id, child_package_id,
+                  child_package_digest, entrypoint, input_value_id, status, called_at_unix_millis,
+                  called_store_position)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                         'called', ?14, ?15)",
+                params![
+                    payload.invocation_id,
+                    payload.run_id,
+                    payload.attempt_id,
+                    payload.execution_token_id,
+                    payload.node_id,
+                    payload.child_run_id,
+                    payload.child_command_id,
+                    payload.child_workflow_id,
+                    payload.child_revision_id,
+                    payload.child_package_id,
+                    payload.child_package_digest,
+                    payload.entrypoint,
+                    input.value_id,
+                    event.occurred_at_unix_millis,
+                    sql_u64(event.store_position)?,
+                ],
+            )?;
+            touch_run(transaction, &payload.run_id, event.store_position)?;
+        }
+        WorkflowRuntimeEvent::SubflowSettled(payload) => {
+            require_active_run(transaction, &payload.run_id, &payload.run_token_id)?;
+            let called: Option<(String, String, String, String, String)> = transaction
+                .query_row(
+                    "SELECT child_run_id, child_workflow_id, child_revision_id,
+                            child_package_digest, status
+                     FROM workflow_subflows WHERE invocation_id = ?1 AND run_id = ?2",
+                    params![payload.invocation_id, payload.run_id],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((child_run_id, child_workflow_id, child_revision_id, child_digest, status)) =
+                called
+            else {
+                return lifecycle("subflow_call_missing");
+            };
+            if status != "called" || child_run_id != payload.child_run_id {
+                return lifecycle("subflow_settled_mismatch");
+            }
+            let child: Option<(String, String, String, String, Option<String>, String)> =
+                transaction
+                    .query_row(
+                        "SELECT workflow_id, revision_id, package_digest, status, outcome,
+                            final_emission_ids_json
+                     FROM workflow_runs WHERE run_id = ?1",
+                        [&payload.child_run_id],
+                        |row| {
+                            Ok((
+                                row.get(0)?,
+                                row.get(1)?,
+                                row.get(2)?,
+                                row.get(3)?,
+                                row.get(4)?,
+                                row.get(5)?,
+                            ))
+                        },
+                    )
+                    .optional()?;
+            let Some((
+                workflow_id,
+                revision_id,
+                package_digest,
+                child_status,
+                child_outcome,
+                child_final_ids,
+            )) = child
+            else {
+                return lifecycle("subflow_child_run_missing");
+            };
+            let (outcome, _) = settled_outcome(payload.outcome, OutcomeDomain::Run)?;
+            if workflow_id != child_workflow_id
+                || revision_id != child_revision_id
+                || package_digest != child_digest
+                || child_status == "running"
+                || child_outcome.as_deref() != Some(outcome)
+                || child_final_ids != string_list_json(&payload.child_final_emission_ids)?
+            {
+                return lifecycle("subflow_child_run_mismatch");
+            }
+            let output_id = insert_optional_value(transaction, payload.output.as_ref())?;
+            let error_id = insert_optional_value(transaction, payload.error.as_ref())?;
+            transaction.execute(
+                "UPDATE workflow_subflows
+                 SET status = 'settled', outcome = ?1, output_value_id = ?2, error_code = NULLIF(?3, ''),
+                     error_value_id = ?4, child_final_emission_ids_json = ?5,
+                     settled_at_unix_millis = ?6, settled_store_position = ?7
+                 WHERE invocation_id = ?8",
+                params![
+                    outcome,
+                    output_id,
+                    payload.error_code,
+                    error_id,
+                    string_list_json(&payload.child_final_emission_ids)?,
+                    event.occurred_at_unix_millis,
+                    sql_u64(event.store_position)?,
+                    payload.invocation_id,
+                ],
+            )?;
             touch_run(transaction, &payload.run_id, event.store_position)?;
         }
         WorkflowRuntimeEvent::RunTokenCreated(payload) => {
@@ -3582,6 +3900,12 @@ fn canonical_state_bytes(connection: &Connection) -> Result<Vec<u8>> {
                 "episode_inputs",
                 "SELECT episode_id, port_id, value_id, ordinal FROM workflow_episode_inputs ORDER BY episode_id, ordinal, port_id",
                 4,
+            )?,
+            table_rows(
+                connection,
+                "subflows",
+                "SELECT invocation_id, run_id, attempt_id, execution_token_id, node_id, child_run_id, child_command_id, child_workflow_id, child_revision_id, child_package_id, child_package_digest, entrypoint, input_value_id, status, outcome, output_value_id, error_code, error_value_id, child_final_emission_ids_json, called_at_unix_millis, settled_at_unix_millis, called_store_position, settled_store_position FROM workflow_subflows ORDER BY run_id, called_store_position, invocation_id",
+                23,
             )?,
             table_rows(
                 connection,

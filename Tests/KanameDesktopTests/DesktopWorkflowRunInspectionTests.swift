@@ -19,6 +19,7 @@ struct DesktopWorkflowRunInspectionTests {
         #expect(history.runs.map { $0.revision?.summary.revisionNumber } == [2, 1])
         #expect(history.runs.map { $0.graph?.name } == ["Version two", "Version one"])
         #expect(history.runs[1].graph?.nodes.first?.name == "Original trigger")
+        #expect(history.runs[1].run.subflows.first?.status == "called")
     }
 
     @Test("node evidence stays grouped and absent values are explained")
@@ -56,6 +57,13 @@ struct DesktopWorkflowRunInspectionTests {
         #expect(run.episode?.priorEpisodeID == "episode-run-v1")
         #expect(run.episode?.inputs.first?.portID == "input")
         #expect(run.episode?.compiledContext.id == "context-run-v2")
+        #expect(run.subflows.first?.nodeID == "trigger")
+        #expect(run.subflows.first?.childWorkflowID == "workflow-child")
+        #expect(run.subflows.first?.childRevisionID == "revision-child-v1")
+        #expect(run.subflows.first?.childPackageDigest == String(repeating: "f", count: 64))
+        #expect(run.subflows.first?.childCommandID == "command-child-run-v2")
+        #expect(run.subflows.first?.outcome == "succeeded")
+        #expect(run.subflows.first?.output?.id == "value-run-v2")
         #expect(run.events.map(\.storePosition) == [11, 12, 13, 14, 15])
     }
 }
@@ -291,6 +299,30 @@ private actor HistoricalRunTransport:
         projected.retries = [retry]
         projected.waits = [wait]
         projected.waitSignals = [waitSignal]
+        var subflow = Kaname_V1_WorkflowProjectedSubflow()
+        subflow.invocationID = "subflow-\(id)"
+        subflow.attemptID = attempt.attemptID
+        subflow.executionTokenID = token.executionTokenID
+        subflow.nodeID = "trigger"
+        subflow.childRunID = "child-\(id)"
+        subflow.childWorkflowID = "workflow-child"
+        subflow.childRevisionID = "revision-child-v1"
+        subflow.childPackageID = "dev.kaname.workflow.child"
+        subflow.childPackageDigest = String(repeating: "f", count: 64)
+        subflow.entrypoint = "start"
+        subflow.input = value
+        subflow.status = id == "run-v2" ? "settled" : "called"
+        if id == "run-v2" {
+            subflow.outcome = "succeeded"
+            subflow.output = value
+            subflow.childFinalEmissionIds = [emission.emissionID]
+            subflow.settledStorePosition = 15
+            subflow.settledAtUnixMillis = 1_705_000_000_015
+        }
+        subflow.childCommandID = "command-child-\(id)"
+        subflow.calledAtUnixMillis = 1_705_000_000_012
+        subflow.calledStorePosition = 12
+        projected.subflows = [subflow]
         if id == "run-v2" {
             var context = Kaname_V1_WorkflowProjectedValue()
             context.valueID = "context-run-v2"

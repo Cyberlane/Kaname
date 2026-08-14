@@ -11,7 +11,7 @@ struct DesktopWorkflowNodeRegistryTests {
         let records = try #require(manifest["nodeTypes"] as? [[String: Any]])
         let schemaTypes = Set(records.compactMap { $0["type"] as? String })
 
-        #expect(registry.registrations.count == 25)
+        #expect(registry.registrations.count == 26)
         #expect(Set(registry.registrations.map(\.type)) == schemaTypes)
         #expect(registry.registrations.allSatisfy {
             $0.typeVersion == 1 && $0.availability == .schemaOnly

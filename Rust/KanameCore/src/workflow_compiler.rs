@@ -184,6 +184,7 @@ struct CompiledArtifact<'a> {
     dependency_lock_digest: &'a str,
     configuration_contract_digest: &'a str,
     entrypoints: Vec<&'a Entrypoint>,
+    interfaces: &'a Value,
     nodes: Vec<CompiledNode<'a>>,
     edges: Vec<&'a Edge>,
     resources: &'a BTreeMap<String, String>,
@@ -381,6 +382,7 @@ fn emit_compiled_artifact(
         dependency_lock_digest: &digests.dependency_lock_digest,
         configuration_contract_digest: &digests.configuration_contract_digest,
         entrypoints,
+        interfaces: &manifest.workflow.interfaces,
         nodes: compiled_nodes,
         edges,
         resources: &manifest.workflow.resources,
@@ -401,6 +403,14 @@ fn execution_availability(node: &Node) -> &'static str {
             "executable"
         }
         "data.validate" | "data.case-context" => "executable",
+        "control.subflow"
+            if string_field(&node.config, "packageId").is_some()
+                && string_field(&node.config, "revisionDigest").is_some()
+                && string_field(&node.config, "entrypoint").is_some()
+                && node.config.get("input") == Some(&serde_json::json!({"whole": true})) =>
+        {
+            "executable"
+        }
         "storage.read" => "executable",
         "storage.promote" => "executable",
         "storage.write"

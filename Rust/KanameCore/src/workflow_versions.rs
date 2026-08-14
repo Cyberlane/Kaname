@@ -225,6 +225,47 @@ impl WorkflowLibraryStore {
         })
     }
 
+    /// Resolves an immutable package pin without consulting an activation
+    /// alias. Subflow callers use this path so a later child activation cannot
+    /// change an already-published parent revision.
+    pub fn load_workflow_revision_by_package_digest(
+        &self,
+        package_id: &str,
+        package_digest: &str,
+    ) -> Result<WorkflowRevisionContent> {
+        if package_id.is_empty()
+            || package_id.len() > 255
+            || package_id.chars().any(char::is_control)
+        {
+            return Err(WorkflowLibraryError::RevisionHistory("package_id".into()));
+        }
+        let package_digest = package_digest
+            .strip_prefix("sha256:")
+            .unwrap_or(package_digest);
+        if package_digest.len() != 64
+            || !package_digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(WorkflowLibraryError::RevisionHistory(
+                "package_digest".into(),
+            ));
+        }
+        let revision_id: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT r.revision_id
+                 FROM workflow_revisions r
+                 JOIN workflow_identities w ON w.workflow_id = r.workflow_id
+                 WHERE w.package_id = ?1 AND r.package_digest = ?2",
+                params![package_id, package_digest.to_ascii_lowercase()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let revision_id = revision_id.ok_or_else(|| {
+            WorkflowLibraryError::RevisionHistory("package_revision_not_found".into())
+        })?;
+        self.load_workflow_revision(&revision_id, "active")
+    }
+
     pub fn compare_workflow_revisions(
         &self,
         from_revision_id: &str,

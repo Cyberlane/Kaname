@@ -124,7 +124,8 @@ public struct DesktopWorkflowNodeRegistry: Sendable {
     public static func builtInSchemaOnlyV1() throws -> Self {
         let configurationDefinitions = [
             "trigger.manual": "manual", "trigger.event": "event", "trigger.schedule": "schedule",
-            "data.map": "map", "data.validate": "validate", "data.register-artifact": "registerArtifact",
+            "data.map": "map", "data.validate": "validate", "data.case-context": "empty",
+            "data.register-artifact": "registerArtifact",
             "storage.read": "storageRead", "storage.write": "storageWrite", "storage.promote": "storagePromote",
             "compute.capability": "capability", "compute.llm": "llm", "control.decision": "decision",
             "control.match": "match", "control.for-each": "forEach", "control.parallel": "parallel",

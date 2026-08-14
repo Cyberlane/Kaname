@@ -14,6 +14,8 @@ pub const WORKFLOW_RUN_REQUEST_KIND: &str = "workflow.run.request";
 pub const WORKFLOW_RUN_CANCEL_KIND: &str = "workflow.run.cancel";
 pub const WORKFLOW_WAIT_SIGNAL_KIND: &str = "workflow.wait.signal";
 pub const WORKFLOW_CASE_EPISODE_STARTED_KIND: &str = "workflow.case.episode-started";
+pub const WORKFLOW_SUBFLOW_CALLED_KIND: &str = "workflow.subflow.called";
+pub const WORKFLOW_SUBFLOW_SETTLED_KIND: &str = "workflow.subflow.settled";
 pub const WORKFLOW_RUN_TOKEN_CREATED_KIND: &str = "workflow.run.token-created";
 pub const WORKFLOW_EXECUTION_TOKEN_CREATED_KIND: &str = "workflow.execution-token.created";
 pub const WORKFLOW_EXECUTION_TOKEN_SETTLED_KIND: &str = "workflow.execution-token.settled";
@@ -36,6 +38,8 @@ pub const WORKFLOW_RUN_REQUEST_TYPE: &str = "kaname.workflow.run-request.v1";
 pub const WORKFLOW_RUN_CANCEL_TYPE: &str = "kaname.workflow.run-cancel.v1";
 pub const WORKFLOW_WAIT_SIGNAL_TYPE: &str = "kaname.workflow.wait-signal.v1";
 pub const WORKFLOW_CASE_EPISODE_STARTED_TYPE: &str = "kaname.workflow.case-episode-started.v1";
+pub const WORKFLOW_SUBFLOW_CALLED_TYPE: &str = "kaname.workflow.subflow-called.v1";
+pub const WORKFLOW_SUBFLOW_SETTLED_TYPE: &str = "kaname.workflow.subflow-settled.v1";
 pub const WORKFLOW_RUN_TOKEN_CREATED_TYPE: &str = "kaname.workflow.run-token-created.v1";
 pub const WORKFLOW_EXECUTION_TOKEN_CREATED_TYPE: &str =
     "kaname.workflow.execution-token-created.v1";
@@ -84,6 +88,8 @@ pub enum WorkflowRuntimeCommand {
 #[allow(clippy::large_enum_variant)]
 pub enum WorkflowRuntimeEvent {
     CaseEpisodeStarted(v1::WorkflowCaseEpisodeStarted),
+    SubflowCalled(v1::WorkflowSubflowCalled),
+    SubflowSettled(v1::WorkflowSubflowSettled),
     RunTokenCreated(v1::WorkflowRunTokenCreated),
     ExecutionTokenCreated(v1::WorkflowExecutionTokenCreated),
     ExecutionTokenSettled(v1::WorkflowExecutionTokenSettled),
@@ -107,6 +113,8 @@ impl WorkflowRuntimeEvent {
     pub fn run_id(&self) -> &str {
         match self {
             Self::CaseEpisodeStarted(payload) => &payload.run_id,
+            Self::SubflowCalled(payload) => &payload.run_id,
+            Self::SubflowSettled(payload) => &payload.run_id,
             Self::RunTokenCreated(payload) => &payload.run_id,
             Self::ExecutionTokenCreated(payload) => &payload.run_id,
             Self::ExecutionTokenSettled(payload) => &payload.run_id,
@@ -141,6 +149,7 @@ pub fn is_workflow_runtime_kind(kind: &str) -> bool {
         "workflow.retry.",
         "workflow.wait.",
         "workflow.case.",
+        "workflow.subflow.",
     ]
     .iter()
     .any(|prefix| kind.starts_with(prefix))
@@ -187,6 +196,20 @@ pub fn decode_workflow_event(event: &v1::EventEnvelope) -> Result<WorkflowRuntim
             validate_case_episode_started(&payload)?;
             validate_event_context(event, &payload.run_id)?;
             Ok(WorkflowRuntimeEvent::CaseEpisodeStarted(payload))
+        }
+        WORKFLOW_SUBFLOW_CALLED_KIND => {
+            let payload: v1::WorkflowSubflowCalled =
+                decode_payload(event.payload.as_ref(), WORKFLOW_SUBFLOW_CALLED_TYPE)?;
+            validate_subflow_called(&payload)?;
+            validate_event_context(event, &payload.run_id)?;
+            Ok(WorkflowRuntimeEvent::SubflowCalled(payload))
+        }
+        WORKFLOW_SUBFLOW_SETTLED_KIND => {
+            let payload: v1::WorkflowSubflowSettled =
+                decode_payload(event.payload.as_ref(), WORKFLOW_SUBFLOW_SETTLED_TYPE)?;
+            validate_subflow_settled(&payload)?;
+            validate_event_context(event, &payload.run_id)?;
+            Ok(WorkflowRuntimeEvent::SubflowSettled(payload))
         }
         WORKFLOW_RUN_TOKEN_CREATED_KIND => {
             let payload: v1::WorkflowRunTokenCreated =
@@ -451,6 +474,55 @@ fn validate_episode_kind(kind: &str) -> Result<()> {
     } else {
         invalid("episode_kind")
     }
+}
+
+fn validate_subflow_called(payload: &v1::WorkflowSubflowCalled) -> Result<()> {
+    validate_run_and_token(&payload.run_id, &payload.run_token_id)?;
+    for (value, code) in [
+        (&payload.invocation_id, "subflow_invocation_id"),
+        (&payload.attempt_id, "attempt_id"),
+        (&payload.execution_token_id, "execution_token_id"),
+        (&payload.node_id, "node_id"),
+        (&payload.child_run_id, "child_run_id"),
+        (&payload.child_command_id, "child_command_id"),
+        (&payload.child_workflow_id, "child_workflow_id"),
+        (&payload.child_revision_id, "child_revision_id"),
+        (&payload.entrypoint, "subflow_entrypoint"),
+    ] {
+        validate_identifier(value, 128, code)?;
+    }
+    validate_text(&payload.child_package_id, 255, "child_package_id")?;
+    validate_digest(&payload.child_package_digest, "child_package_digest")?;
+    validate_value(payload.input.as_ref())
+}
+
+fn validate_subflow_settled(payload: &v1::WorkflowSubflowSettled) -> Result<()> {
+    validate_run_and_token(&payload.run_id, &payload.run_token_id)?;
+    validate_identifier(&payload.invocation_id, 128, "subflow_invocation_id")?;
+    validate_identifier(&payload.child_run_id, 128, "child_run_id")?;
+    let outcome = v1::WorkflowRunOutcome::try_from(payload.outcome)
+        .map_err(|_| invalid_error("subflow_outcome"))?;
+    match outcome {
+        v1::WorkflowRunOutcome::Succeeded => {
+            validate_value(payload.output.as_ref())?;
+            if !payload.error_code.is_empty() || payload.error.is_some() {
+                return invalid("subflow_success_contract");
+            }
+        }
+        v1::WorkflowRunOutcome::Failed | v1::WorkflowRunOutcome::Cancelled => {
+            validate_identifier(&payload.error_code, 128, "subflow_error_code")?;
+            validate_value(payload.error.as_ref())?;
+            if payload.output.is_some() {
+                return invalid("subflow_failure_contract");
+            }
+        }
+        v1::WorkflowRunOutcome::Unspecified => return invalid("subflow_outcome"),
+    }
+    validate_identifier_list(
+        &payload.child_final_emission_ids,
+        256,
+        "child_final_emission_id",
+    )
 }
 
 fn validate_cancel_request(request: &v1::CancelWorkflowRun) -> Result<()> {

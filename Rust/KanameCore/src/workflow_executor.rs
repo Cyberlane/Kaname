@@ -20,7 +20,7 @@ use crate::{
         WorkflowStorageReadRequest, WorkflowStorageScopeKind, WorkflowStorageValueInput,
         WorkflowStorageWriteRequest,
     },
-    workflow_versions::WorkflowExecutionSupport,
+    workflow_versions::{WorkflowExecutionSupport, WorkflowRevisionContent},
 };
 use prost::Message;
 use serde::Deserialize;
@@ -36,6 +36,7 @@ const MAXIMUM_EXECUTOR_TRANSITIONS: usize = 1_024;
 const RUN_REPLAY_PAGE: u32 = 500;
 const CASE_HISTORY_PAGE: u32 = 500;
 const MAXIMUM_CASE_EPISODES: usize = 64;
+const MAXIMUM_SUBFLOW_DEPTH: usize = 16;
 const MAXIMUM_INLINE_STORAGE_SUMMARY_BYTES: usize = 60 * 1024;
 
 #[derive(Debug)]
@@ -153,12 +154,24 @@ struct CompiledWorkflow {
     dependency_lock_digest: String,
     configuration_contract_digest: String,
     entrypoints: Vec<CompiledEntrypoint>,
+    #[serde(default)]
+    interfaces: BTreeMap<String, Vec<Value>>,
     nodes: Vec<CompiledNode>,
     edges: Vec<CompiledEdge>,
     resources: BTreeMap<String, String>,
     policies: BTreeMap<String, Value>,
     storage: BTreeMap<String, CompiledStorageDeclaration>,
-    dependencies: Vec<Value>,
+    dependencies: Vec<CompiledDependency>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompiledDependency {
+    kind: String,
+    id: String,
+    #[serde(default)]
+    version: Option<String>,
+    digest: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -230,15 +243,26 @@ struct CompiledStorageDeclaration {
     conflict_policy: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SubflowConfig {
+    package_id: String,
+    revision_digest: String,
+    entrypoint: String,
+    input: Value,
+}
+
 struct ExecutionPackage {
     compiled: CompiledWorkflow,
     schemas: BTreeMap<String, Value>,
+    requires_storage: bool,
 }
 
 #[derive(Default)]
 struct RecordedRun {
     events: Vec<v1::EventEnvelope>,
     episode: Option<v1::WorkflowCaseEpisodeStarted>,
+    subflows: BTreeMap<String, RecordedSubflow>,
     token: Option<v1::WorkflowRunTokenCreated>,
     execution_tokens: BTreeMap<String, RecordedExecutionToken>,
     joins: Vec<RecordedJoin>,
@@ -251,6 +275,11 @@ struct RecordedRun {
     edges: Vec<RecordedEdge>,
     cancellation: Option<v1::WorkflowRunCancellationRequested>,
     settled: Option<v1::WorkflowRunSettled>,
+}
+
+struct RecordedSubflow {
+    called: v1::WorkflowSubflowCalled,
+    settled: Option<v1::WorkflowSubflowSettled>,
 }
 
 struct RecordedExecutionToken {
@@ -359,6 +388,8 @@ pub fn execute(
         command,
         current_unix_millis(),
         None,
+        0,
+        None,
     )
 }
 
@@ -368,7 +399,17 @@ pub fn execute_at_unix_millis(
     command: &v1::CommandEnvelope,
     now_unix_millis: i64,
 ) -> Result<WorkflowExecutionResult> {
-    execute_internal(journal, library, None, None, command, now_unix_millis, None)
+    execute_internal(
+        journal,
+        library,
+        None,
+        None,
+        command,
+        now_unix_millis,
+        None,
+        0,
+        None,
+    )
 }
 
 pub fn execute_with_storage(
@@ -385,6 +426,8 @@ pub fn execute_with_storage(
         Some(authority),
         command,
         current_unix_millis(),
+        None,
+        0,
         None,
     )
 }
@@ -404,6 +447,8 @@ pub fn execute_with_fault_for_test(
         command,
         current_unix_millis(),
         Some(fault),
+        0,
+        None,
     )
 }
 
@@ -424,9 +469,12 @@ pub fn execute_with_storage_fault_for_test(
         command,
         current_unix_millis(),
         Some(fault),
+        0,
+        None,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_internal(
     journal: &mut Journal,
     library: &WorkflowLibraryStore,
@@ -435,7 +483,14 @@ fn execute_internal(
     command: &v1::CommandEnvelope,
     now_unix_millis: i64,
     fault: Option<WorkflowExecutionFault>,
+    subflow_depth: usize,
+    job_run_id: Option<&str>,
 ) -> Result<WorkflowExecutionResult> {
+    if subflow_depth > MAXIMUM_SUBFLOW_DEPTH {
+        return Err(WorkflowExecutionError::Lifecycle(
+            "subflow_depth_exceeded".into(),
+        ));
+    }
     let request = match workflow_runtime::decode_workflow_command(command)
         .map_err(|_| WorkflowExecutionError::InvalidCommand("request_contract"))?
     {
@@ -451,6 +506,7 @@ fn execute_internal(
             ));
         }
     };
+    let job_run_id = job_run_id.unwrap_or(&request.run_id).to_owned();
     let package = load_execution_package(library, &request)?;
     validate_storage_authority(&package, &request, storage.is_some(), authority)?;
     let token_id = stable_id("token", &[&request.run_id, &command.command_id]);
@@ -478,14 +534,19 @@ fn execute_internal(
         }
 
         let candidates = match next_events(
+            journal,
+            library,
             &package,
             storage.as_deref_mut(),
+            authority,
             command,
             &request,
             &token_id,
             &state,
             now_unix_millis,
             prepared_episode.as_ref(),
+            subflow_depth,
+            &job_run_id,
         ) {
             Ok(events) => events,
             Err(WorkflowExecutionError::WaitingUntil(deadline)) => {
@@ -659,7 +720,6 @@ fn load_execution_package(
         || compiled.entrypoints.len() != 1
         || !compiled.resources.is_empty()
         || !compiled.policies.is_empty()
-        || !compiled.dependencies.is_empty()
         || compiled.definition_digest.is_empty()
         || compiled.layout_digest.is_empty()
         || compiled.schema_bundle_digest.is_empty()
@@ -671,18 +731,27 @@ fn load_execution_package(
             "compiled_subset".into(),
         ));
     }
+    if compiled.dependencies.len() > 1_024
+        || compiled.dependencies.iter().any(|dependency| {
+            dependency.kind.is_empty()
+                || dependency.id.is_empty()
+                || dependency.digest.is_empty()
+                || dependency.version.as_deref() == Some("")
+        })
+    {
+        return Err(WorkflowExecutionError::Integrity(
+            "compiled_dependency_contract".into(),
+        ));
+    }
     validate_compiled_subset(&compiled)?;
-    if !compiled.storage.is_empty() && request.installation_id.is_empty() {
+    let (requires_storage, requires_case) =
+        compiled_storage_requirements(library, &compiled, &mut BTreeSet::new(), 0)?;
+    if requires_storage && request.installation_id.is_empty() {
         return Err(WorkflowExecutionError::InvalidCommand(
             "installation_id_required",
         ));
     }
-    if compiled
-        .storage
-        .values()
-        .any(|declaration| declaration.scope == "case")
-        && request.case_id.is_empty()
-    {
+    if requires_case && request.case_id.is_empty() {
         return Err(WorkflowExecutionError::InvalidCommand("case_id_required"));
     }
     if compiled
@@ -811,6 +880,9 @@ fn load_execution_package(
                 return Err(WorkflowExecutionError::Unsupported("wait_contract".into()));
             }
         }
+        if node.node_type == "control.subflow" {
+            resolve_subflow_revision(library, &compiled, node)?;
+        }
     }
     for (key, declaration) in &compiled.storage {
         if key != &declaration.key
@@ -843,7 +915,11 @@ fn load_execution_package(
             "single_inline_manual_input_required".into(),
         ));
     }
-    Ok(ExecutionPackage { compiled, schemas })
+    Ok(ExecutionPackage {
+        compiled,
+        schemas,
+        requires_storage,
+    })
 }
 
 fn validate_storage_authority(
@@ -852,7 +928,7 @@ fn validate_storage_authority(
     storage_available: bool,
     authority: Option<&WorkflowStorageExecutionAuthority>,
 ) -> Result<()> {
-    if package.compiled.storage.is_empty() {
+    if !package.requires_storage {
         return Ok(());
     }
     if !storage_available {
@@ -871,6 +947,43 @@ fn validate_storage_authority(
         ));
     }
     Ok(())
+}
+
+fn compiled_storage_requirements(
+    library: &WorkflowLibraryStore,
+    compiled: &CompiledWorkflow,
+    visited: &mut BTreeSet<String>,
+    depth: usize,
+) -> Result<(bool, bool)> {
+    if depth > MAXIMUM_SUBFLOW_DEPTH {
+        return Err(WorkflowExecutionError::Lifecycle(
+            "subflow_depth_exceeded".into(),
+        ));
+    }
+    let mut requires_storage = !compiled.storage.is_empty();
+    let mut requires_case = compiled
+        .storage
+        .values()
+        .any(|declaration| declaration.scope == "case");
+    for node in compiled
+        .nodes
+        .iter()
+        .filter(|node| node.node_type == "control.subflow")
+    {
+        let (_, revision, child) = resolve_subflow_revision(library, compiled, node)?;
+        let identity = format!("{}:{}", child.package_id, revision.summary.package_digest);
+        if !visited.insert(identity.clone()) {
+            return Err(WorkflowExecutionError::Integrity(
+                "subflow_dependency_cycle".into(),
+            ));
+        }
+        let child_requirements =
+            compiled_storage_requirements(library, &child, visited, depth + 1)?;
+        visited.remove(&identity);
+        requires_storage |= child_requirements.0;
+        requires_case |= child_requirements.1;
+    }
+    Ok((requires_storage, requires_case))
 }
 
 fn validate_compiled_subset(compiled: &CompiledWorkflow) -> Result<()> {
@@ -915,6 +1028,7 @@ fn validate_compiled_subset(compiled: &CompiledWorkflow) -> Result<()> {
                     | "control.for-each"
                     | "control.retry"
                     | "control.wait"
+                    | "control.subflow"
                     | "storage.read"
                     | "storage.write"
                     | "storage.promote"
@@ -945,6 +1059,80 @@ fn validate_compiled_subset(compiled: &CompiledWorkflow) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn resolve_subflow_revision(
+    library: &WorkflowLibraryStore,
+    parent: &CompiledWorkflow,
+    node: &CompiledNode,
+) -> Result<(SubflowConfig, WorkflowRevisionContent, CompiledWorkflow)> {
+    let config: SubflowConfig = serde_json::from_value(node.config.clone())
+        .map_err(|_| WorkflowExecutionError::Integrity("subflow_config".into()))?;
+    if config.input != json!({"whole": true}) {
+        return Err(WorkflowExecutionError::Unsupported(
+            "subflow_input_mapping".into(),
+        ));
+    }
+    let pins = parent
+        .dependencies
+        .iter()
+        .filter(|dependency| {
+            dependency.kind == "subflow"
+                && dependency.id == config.package_id
+                && dependency.digest == config.revision_digest
+        })
+        .count();
+    if pins != 1 {
+        return Err(WorkflowExecutionError::Integrity(
+            "subflow_dependency_lock".into(),
+        ));
+    }
+    let revision = library
+        .load_workflow_revision_by_package_digest(&config.package_id, &config.revision_digest)?;
+    if revision.summary.execution_support != WorkflowExecutionSupport::Executable {
+        return Err(WorkflowExecutionError::Unsupported(
+            "subflow_revision_not_executable".into(),
+        ));
+    }
+    let child: CompiledWorkflow = serde_json::from_slice(&revision.compiled_source)
+        .map_err(|_| WorkflowExecutionError::Integrity("subflow_compiled_contract".into()))?;
+    let digest = config
+        .revision_digest
+        .strip_prefix("sha256:")
+        .unwrap_or(&config.revision_digest);
+    if child.compiled_format_version != 1
+        || child.package_id != config.package_id
+        || child.workflow_id != revision.summary.workflow_id
+        || revision.summary.package_digest != digest.to_ascii_lowercase()
+        || child.entrypoints.len() != 1
+        || child.entrypoints[0].key.as_deref() != Some(config.entrypoint.as_str())
+        || child.entrypoints[0].id.is_empty()
+        || child.entrypoints[0].node_id.is_empty()
+        || !subflow_interface_is_compatible(&child, &config.entrypoint)
+    {
+        return Err(WorkflowExecutionError::Integrity(
+            "subflow_pin_or_interface_mismatch".into(),
+        ));
+    }
+    Ok((config, revision, child))
+}
+
+fn subflow_interface_is_compatible(compiled: &CompiledWorkflow, entrypoint: &str) -> bool {
+    let Some(ports) = compiled.interfaces.get(entrypoint) else {
+        return false;
+    };
+    let compatible = |id: &str, direction: &str, required: bool| {
+        ports.iter().any(|port| {
+            port.get("id").and_then(Value::as_str) == Some(id)
+                && port.get("key").and_then(Value::as_str) == Some(id)
+                && port.get("direction").and_then(Value::as_str) == Some(direction)
+                && port.get("cardinality").and_then(Value::as_str) == Some("one")
+                && port.get("schemaRef").and_then(Value::as_str)
+                    == Some("dev.kaname.workflow.data/v1")
+                && port.get("required").and_then(Value::as_bool) == Some(required)
+        })
+    };
+    ports.len() == 2 && compatible("input", "input", true) && compatible("success", "output", true)
 }
 
 fn compile_case_episode_event(
@@ -1279,14 +1467,19 @@ fn validate_recorded_episode(
 
 #[allow(clippy::too_many_arguments)]
 fn next_events(
+    journal: &mut Journal,
+    library: &WorkflowLibraryStore,
     package: &ExecutionPackage,
-    storage: Option<&mut WorkflowScopedStorage>,
+    mut storage: Option<&mut WorkflowScopedStorage>,
+    authority: Option<&WorkflowStorageExecutionAuthority>,
     command: &v1::CommandEnvelope,
     request: &v1::RequestWorkflowRun,
     token_id: &str,
     state: &RecordedRun,
     now_unix_millis: i64,
     prepared_episode: Option<&v1::EventEnvelope>,
+    subflow_depth: usize,
+    job_run_id: &str,
 ) -> Result<Vec<v1::EventEnvelope>> {
     if state.token.is_none() {
         return Ok(vec![runtime_event(
@@ -1356,6 +1549,36 @@ fn next_events(
 
     if let Some(cancellation) = state.cancellation.as_ref() {
         if let Some(active) = active_attempt(state)? {
+            let invocation_id = stable_id(
+                "subflow",
+                &[
+                    &request.run_id,
+                    &active.started.attempt_id,
+                    &active.started.node_id,
+                ],
+            );
+            if let Some(recorded) = state
+                .subflows
+                .get(&invocation_id)
+                .filter(|recorded| recorded.settled.is_none())
+            {
+                cascade_subflow_cancellation(
+                    journal,
+                    library,
+                    storage.as_deref_mut(),
+                    authority,
+                    command,
+                    request,
+                    recorded,
+                    cancellation,
+                    now_unix_millis,
+                    subflow_depth,
+                    job_run_id,
+                )?;
+                return Ok(vec![subflow_settled_event(
+                    journal, command, request, token_id, recorded,
+                )?]);
+            }
             if let Some(wait) = state.waits.values().find(|wait| {
                 wait.subscribed.controller_attempt_id == active.started.attempt_id
                     && wait.resolved.is_none()
@@ -1447,14 +1670,19 @@ fn next_events(
 
     if let Some(active) = active_attempt(state)? {
         return node_event_sequence(
+            journal,
+            library,
             package,
             storage,
+            authority,
             command,
             request,
             token_id,
             state,
             active,
             now_unix_millis,
+            subflow_depth,
+            job_run_id,
         );
     }
 
@@ -1536,14 +1764,19 @@ fn next_events(
 
 #[allow(clippy::too_many_arguments)]
 fn node_event_sequence(
+    journal: &mut Journal,
+    library: &WorkflowLibraryStore,
     package: &ExecutionPackage,
-    storage: Option<&mut WorkflowScopedStorage>,
+    mut storage: Option<&mut WorkflowScopedStorage>,
+    authority: Option<&WorkflowStorageExecutionAuthority>,
     command: &v1::CommandEnvelope,
     request: &v1::RequestWorkflowRun,
     token_id: &str,
     state: &RecordedRun,
     attempt: &RecordedAttempt,
     now_unix_millis: i64,
+    subflow_depth: usize,
+    job_run_id: &str,
 ) -> Result<Vec<v1::EventEnvelope>> {
     let node = compiled_node(&package.compiled, &attempt.started.node_id)?;
     let inputs = node_inputs(
@@ -1552,6 +1785,27 @@ fn node_event_sequence(
         &node.id,
         &attempt.started.execution_token_id,
     )?;
+    if node.node_type == "control.subflow"
+        && let Some(events) = pending_subflow_event_sequence(
+            journal,
+            library,
+            package,
+            storage.as_deref_mut(),
+            authority,
+            command,
+            request,
+            token_id,
+            state,
+            attempt,
+            node,
+            &inputs,
+            now_unix_millis,
+            subflow_depth,
+            job_run_id,
+        )?
+    {
+        return Ok(events);
+    }
     if node.node_type == "control.for-each"
         && !state.iterations.iter().any(|iteration| {
             iteration.evaluated.as_ref().is_some_and(|evaluated| {
@@ -1589,7 +1843,9 @@ fn node_event_sequence(
             now_unix_millis,
         );
     }
-    let execution = if node.node_type == "control.join" {
+    let execution = if node.node_type == "control.subflow" {
+        execute_settled_subflow_node(request, state, attempt, node)?
+    } else if node.node_type == "control.join" {
         execute_join_node(
             request,
             node,
@@ -1615,6 +1871,7 @@ fn node_event_sequence(
                 &attempt.started.attempt_id,
                 command.submitted_at_unix_millis,
                 &input,
+                job_run_id,
             )?
         }
     };
@@ -2708,6 +2965,422 @@ fn single_outgoing_edge<'a>(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn pending_subflow_event_sequence(
+    journal: &mut Journal,
+    library: &WorkflowLibraryStore,
+    package: &ExecutionPackage,
+    storage: Option<&mut WorkflowScopedStorage>,
+    authority: Option<&WorkflowStorageExecutionAuthority>,
+    command: &v1::CommandEnvelope,
+    request: &v1::RequestWorkflowRun,
+    run_token_id: &str,
+    state: &RecordedRun,
+    attempt: &RecordedAttempt,
+    node: &CompiledNode,
+    inputs: &[(
+        Option<&v1::WorkflowEdgeCheckpointed>,
+        v1::WorkflowValueReference,
+    )],
+    now_unix_millis: i64,
+    subflow_depth: usize,
+    job_run_id: &str,
+) -> Result<Option<Vec<v1::EventEnvelope>>> {
+    let invocation_id = stable_id(
+        "subflow",
+        &[&request.run_id, &attempt.started.attempt_id, &node.id],
+    );
+    let Some(recorded) = state.subflows.get(&invocation_id) else {
+        let input = inputs
+            .last()
+            .ok_or_else(|| WorkflowExecutionError::Lifecycle("subflow_input_missing".into()))?
+            .1
+            .clone();
+        let (config, child_revision, _) =
+            resolve_subflow_revision(library, &package.compiled, node)?;
+        let child_run_id = stable_id("run", &[&request.run_id, &invocation_id, "child"]);
+        let child_command_id = stable_id("command", &[&child_run_id, "request"]);
+        let event_id = stable_id(
+            "event",
+            &[&request.run_id, "subflow-called", &invocation_id],
+        );
+        return Ok(Some(vec![runtime_event(
+            command.submitted_at_unix_millis,
+            &event_id,
+            workflow_runtime::WORKFLOW_SUBFLOW_CALLED_KIND,
+            workflow_runtime::WORKFLOW_SUBFLOW_CALLED_TYPE,
+            v1::WorkflowSubflowCalled {
+                run_id: request.run_id.clone(),
+                run_token_id: run_token_id.to_owned(),
+                invocation_id,
+                attempt_id: attempt.started.attempt_id.clone(),
+                execution_token_id: attempt.started.execution_token_id.clone(),
+                node_id: node.id.clone(),
+                child_run_id,
+                child_command_id,
+                child_workflow_id: child_revision.summary.workflow_id,
+                child_revision_id: child_revision.summary.revision_id,
+                child_package_id: config.package_id,
+                child_package_digest: child_revision.summary.package_digest,
+                entrypoint: config.entrypoint,
+                input: Some(input),
+            },
+            &attempt.started_event_id,
+            &request.run_id,
+        )]));
+    };
+    validate_recorded_subflow_call(request, run_token_id, attempt, node, recorded)?;
+    if recorded.settled.is_some() {
+        return Ok(None);
+    }
+
+    let child_command = subflow_child_command(command, request, &recorded.called)?;
+    let child_result = execute_internal(
+        journal,
+        library,
+        storage,
+        authority,
+        &child_command,
+        now_unix_millis,
+        None,
+        subflow_depth + 1,
+        Some(job_run_id),
+    )?;
+    if child_result.outcome == DurableRunOutcome::Waiting {
+        return Err(WorkflowExecutionError::WaitingUntil(
+            child_result
+                .next_attempt_at_unix_millis
+                .ok_or_else(|| WorkflowExecutionError::Integrity("subflow_wait_deadline".into()))?,
+        ));
+    }
+    if child_result.outcome == DurableRunOutcome::Running {
+        return Err(WorkflowExecutionError::Lifecycle(
+            "subflow_transition_limit".into(),
+        ));
+    }
+    Ok(Some(vec![subflow_settled_event(
+        journal,
+        command,
+        request,
+        run_token_id,
+        recorded,
+    )?]))
+}
+
+fn subflow_settled_event(
+    journal: &Journal,
+    command: &v1::CommandEnvelope,
+    request: &v1::RequestWorkflowRun,
+    run_token_id: &str,
+    recorded: &RecordedSubflow,
+) -> Result<v1::EventEnvelope> {
+    let child_state = recorded_run(journal, &recorded.called.child_run_id)?;
+    let child_settled = child_state
+        .settled
+        .as_ref()
+        .ok_or_else(|| WorkflowExecutionError::Lifecycle("subflow_child_not_settled".into()))?;
+    let outcome = v1::WorkflowRunOutcome::try_from(child_settled.outcome)
+        .map_err(|_| WorkflowExecutionError::Integrity("subflow_child_outcome".into()))?;
+    let (output, error_code, error) = match outcome {
+        v1::WorkflowRunOutcome::Succeeded => (
+            Some(subflow_success_value(&child_state, child_settled)?),
+            String::new(),
+            None,
+        ),
+        v1::WorkflowRunOutcome::Failed | v1::WorkflowRunOutcome::Cancelled => {
+            let error_code = if child_settled.error_code.is_empty() {
+                "subflow.cancelled".to_owned()
+            } else {
+                child_settled.error_code.clone()
+            };
+            let error = child_settled.error.clone().or_else(|| {
+                value_from_json(
+                    &stable_id(
+                        "value",
+                        &[&request.run_id, &recorded.called.invocation_id, "error"],
+                    ),
+                    &json!({
+                        "code": error_code,
+                        "childRunId": recorded.called.child_run_id,
+                        "childRevisionId": recorded.called.child_revision_id
+                    }),
+                )
+                .ok()
+            });
+            (None, error_code, error)
+        }
+        v1::WorkflowRunOutcome::Unspecified => {
+            return Err(WorkflowExecutionError::Integrity(
+                "subflow_child_outcome".into(),
+            ));
+        }
+    };
+    let error = if outcome == v1::WorkflowRunOutcome::Succeeded {
+        None
+    } else {
+        Some(error.ok_or_else(|| WorkflowExecutionError::Encoding("subflow_error"))?)
+    };
+    let event_id = stable_id(
+        "event",
+        &[
+            &request.run_id,
+            "subflow-settled",
+            &recorded.called.invocation_id,
+        ],
+    );
+    Ok(runtime_event(
+        command.submitted_at_unix_millis,
+        &event_id,
+        workflow_runtime::WORKFLOW_SUBFLOW_SETTLED_KIND,
+        workflow_runtime::WORKFLOW_SUBFLOW_SETTLED_TYPE,
+        v1::WorkflowSubflowSettled {
+            run_id: request.run_id.clone(),
+            run_token_id: run_token_id.to_owned(),
+            invocation_id: recorded.called.invocation_id.clone(),
+            child_run_id: recorded.called.child_run_id.clone(),
+            outcome: outcome as i32,
+            output,
+            error_code,
+            error,
+            child_final_emission_ids: child_settled.final_emission_ids.clone(),
+        },
+        child_state
+            .events
+            .last()
+            .map(|event| event.event_id.as_str())
+            .ok_or_else(|| WorkflowExecutionError::Lifecycle("subflow_child_event".into()))?,
+        &request.run_id,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cascade_subflow_cancellation(
+    journal: &mut Journal,
+    library: &WorkflowLibraryStore,
+    mut storage: Option<&mut WorkflowScopedStorage>,
+    authority: Option<&WorkflowStorageExecutionAuthority>,
+    parent_command: &v1::CommandEnvelope,
+    parent_request: &v1::RequestWorkflowRun,
+    recorded: &RecordedSubflow,
+    cancellation: &v1::WorkflowRunCancellationRequested,
+    now_unix_millis: i64,
+    subflow_depth: usize,
+    job_run_id: &str,
+) -> Result<()> {
+    let child_command = subflow_child_command(parent_command, parent_request, &recorded.called)?;
+    let mut child_state = recorded_run(journal, &recorded.called.child_run_id)?;
+    if child_state.token.is_none() {
+        execute_internal(
+            journal,
+            library,
+            storage.as_deref_mut(),
+            authority,
+            &child_command,
+            now_unix_millis,
+            None,
+            subflow_depth + 1,
+            Some(job_run_id),
+        )?;
+        child_state = recorded_run(journal, &recorded.called.child_run_id)?;
+    }
+    if child_state.settled.is_some() {
+        return Ok(());
+    }
+    let child_token_id = child_state
+        .token
+        .as_ref()
+        .map(|token| token.run_token_id.clone())
+        .ok_or_else(|| WorkflowExecutionError::Lifecycle("subflow_child_token_missing".into()))?;
+    if child_state.cancellation.is_none() {
+        request_cancellation(
+            journal,
+            &subflow_child_cancel_command(
+                parent_command,
+                &recorded.called,
+                &child_token_id,
+                cancellation,
+            ),
+        )?;
+    }
+    let result = execute_internal(
+        journal,
+        library,
+        storage,
+        authority,
+        &child_command,
+        now_unix_millis,
+        None,
+        subflow_depth + 1,
+        Some(job_run_id),
+    )?;
+    if matches!(
+        result.outcome,
+        DurableRunOutcome::Running | DurableRunOutcome::Waiting
+    ) {
+        return Err(WorkflowExecutionError::Lifecycle(
+            "subflow_child_cancellation_incomplete".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn subflow_child_cancel_command(
+    parent_command: &v1::CommandEnvelope,
+    called: &v1::WorkflowSubflowCalled,
+    child_token_id: &str,
+    cancellation: &v1::WorkflowRunCancellationRequested,
+) -> v1::CommandEnvelope {
+    let command_id = stable_id(
+        "command",
+        &[
+            &called.child_run_id,
+            "cancel",
+            &cancellation.cancel_command_id,
+        ],
+    );
+    v1::CommandEnvelope {
+        schema_version: Some(v1::SchemaVersion { major: 1, minor: 0 }),
+        command_id: command_id.clone(),
+        idempotency_key: stable_id("idempotency", &[&command_id]),
+        kind: workflow_runtime::WORKFLOW_RUN_CANCEL_KIND.into(),
+        payload: Some(v1::OpaqueTypedPayload {
+            type_url: workflow_runtime::WORKFLOW_RUN_CANCEL_TYPE.into(),
+            content_type: "application/x-protobuf".into(),
+            value: v1::CancelWorkflowRun {
+                run_id: called.child_run_id.clone(),
+                run_token_id: child_token_id.to_owned(),
+                reason_code: cancellation.reason_code.clone(),
+            }
+            .encode_to_vec(),
+            payload_version: 1,
+        }),
+        scope: parent_command.scope.clone(),
+        actor_id: parent_command.actor_id.clone(),
+        expected_revision: 0,
+        submitted_at_unix_millis: parent_command.submitted_at_unix_millis,
+    }
+}
+
+fn validate_recorded_subflow_call(
+    request: &v1::RequestWorkflowRun,
+    run_token_id: &str,
+    attempt: &RecordedAttempt,
+    node: &CompiledNode,
+    recorded: &RecordedSubflow,
+) -> Result<()> {
+    if recorded.called.run_id != request.run_id
+        || recorded.called.run_token_id != run_token_id
+        || recorded.called.attempt_id != attempt.started.attempt_id
+        || recorded.called.execution_token_id != attempt.started.execution_token_id
+        || recorded.called.node_id != node.id
+        || recorded.called.input.is_none()
+    {
+        return Err(WorkflowExecutionError::Integrity(
+            "recorded_subflow_call_mismatch".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn subflow_child_command(
+    parent_command: &v1::CommandEnvelope,
+    parent_request: &v1::RequestWorkflowRun,
+    called: &v1::WorkflowSubflowCalled,
+) -> Result<v1::CommandEnvelope> {
+    let input = called
+        .input
+        .clone()
+        .ok_or_else(|| WorkflowExecutionError::Integrity("subflow_input_missing".into()))?;
+    Ok(v1::CommandEnvelope {
+        schema_version: Some(v1::SchemaVersion { major: 1, minor: 0 }),
+        command_id: called.child_command_id.clone(),
+        idempotency_key: stable_id("idempotency", &[&called.child_command_id]),
+        kind: workflow_runtime::WORKFLOW_RUN_REQUEST_KIND.into(),
+        payload: Some(v1::OpaqueTypedPayload {
+            type_url: workflow_runtime::WORKFLOW_RUN_REQUEST_TYPE.into(),
+            content_type: "application/x-protobuf".into(),
+            value: v1::RequestWorkflowRun {
+                run_id: called.child_run_id.clone(),
+                workflow_id: called.child_workflow_id.clone(),
+                revision_id: called.child_revision_id.clone(),
+                package_digest: called.child_package_digest.clone(),
+                trigger_kind: "workflow.subflow".into(),
+                trigger_event_id: called.invocation_id.clone(),
+                inputs: vec![v1::WorkflowInputBinding {
+                    port_id: "input".into(),
+                    value: Some(input),
+                }],
+                installation_id: parent_request.installation_id.clone(),
+                case_id: parent_request.case_id.clone(),
+                episode_id: String::new(),
+                episode_kind: String::new(),
+                prior_episode_id: String::new(),
+            }
+            .encode_to_vec(),
+            payload_version: 1,
+        }),
+        scope: parent_command.scope.clone(),
+        actor_id: parent_command.actor_id.clone(),
+        expected_revision: 0,
+        submitted_at_unix_millis: parent_command.submitted_at_unix_millis,
+    })
+}
+
+fn subflow_success_value(
+    child_state: &RecordedRun,
+    settled: &v1::WorkflowRunSettled,
+) -> Result<v1::WorkflowValueReference> {
+    if settled.final_emission_ids.len() != 1 {
+        return Err(WorkflowExecutionError::Integrity(
+            "subflow_output_cardinality".into(),
+        ));
+    }
+    child_state
+        .emissions
+        .get(&settled.final_emission_ids[0])
+        .and_then(|emission| emission.payload.value.clone())
+        .ok_or_else(|| WorkflowExecutionError::Integrity("subflow_output_missing".into()))
+}
+
+fn execute_settled_subflow_node(
+    request: &v1::RequestWorkflowRun,
+    state: &RecordedRun,
+    attempt: &RecordedAttempt,
+    node: &CompiledNode,
+) -> Result<NodeExecution> {
+    let invocation_id = stable_id(
+        "subflow",
+        &[&request.run_id, &attempt.started.attempt_id, &node.id],
+    );
+    let settled = state
+        .subflows
+        .get(&invocation_id)
+        .and_then(|recorded| recorded.settled.as_ref())
+        .ok_or_else(|| WorkflowExecutionError::Lifecycle("subflow_not_settled".into()))?;
+    match v1::WorkflowRunOutcome::try_from(settled.outcome)
+        .map_err(|_| WorkflowExecutionError::Integrity("subflow_outcome".into()))?
+    {
+        v1::WorkflowRunOutcome::Succeeded => Ok(success_output(
+            "success",
+            settled
+                .output
+                .clone()
+                .ok_or_else(|| WorkflowExecutionError::Integrity("subflow_output".into()))?,
+        )),
+        v1::WorkflowRunOutcome::Failed | v1::WorkflowRunOutcome::Cancelled => Ok(failure_output(
+            "error",
+            &settled.error_code,
+            settled
+                .error
+                .clone()
+                .ok_or_else(|| WorkflowExecutionError::Integrity("subflow_error".into()))?,
+        )),
+        v1::WorkflowRunOutcome::Unspecified => {
+            Err(WorkflowExecutionError::Integrity("subflow_outcome".into()))
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn execute_node(
     package: &ExecutionPackage,
     storage: Option<&mut WorkflowScopedStorage>,
@@ -2717,6 +3390,7 @@ fn execute_node(
     attempt_id: &str,
     occurred_at_unix_millis: i64,
     input: &v1::WorkflowValueReference,
+    job_run_id: &str,
 ) -> Result<NodeExecution> {
     match node.node_type.as_str() {
         "trigger.manual" => Ok(success_output("success", input.clone())),
@@ -2845,6 +3519,7 @@ fn execute_node(
             attempt_id,
             occurred_at_unix_millis,
             input,
+            job_run_id,
         ),
         "terminal.complete" => Ok(NodeExecution {
             match_trace: None,
@@ -3062,6 +3737,7 @@ const fn default_true() -> bool {
     true
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_storage_node(
     package: &ExecutionPackage,
     storage: &mut WorkflowScopedStorage,
@@ -3070,11 +3746,17 @@ fn execute_storage_node(
     attempt_id: &str,
     occurred_at_unix_millis: i64,
     input: &v1::WorkflowValueReference,
+    job_run_id: &str,
 ) -> Result<NodeExecution> {
     let operation = match node.node_type.as_str() {
-        "storage.read" => {
-            execute_storage_read(package, storage, request, node, occurred_at_unix_millis)
-        }
+        "storage.read" => execute_storage_read(
+            package,
+            storage,
+            request,
+            node,
+            occurred_at_unix_millis,
+            job_run_id,
+        ),
         "storage.write" => execute_storage_write(
             package,
             storage,
@@ -3083,6 +3765,7 @@ fn execute_storage_node(
             attempt_id,
             occurred_at_unix_millis,
             input,
+            job_run_id,
         ),
         "storage.promote" => execute_storage_promote(
             package,
@@ -3092,6 +3775,7 @@ fn execute_storage_node(
             attempt_id,
             occurred_at_unix_millis,
             input,
+            job_run_id,
         ),
         _ => Err(WorkflowExecutionError::Integrity(
             "storage_node_type".into(),
@@ -3120,11 +3804,12 @@ fn execute_storage_read(
     request: &v1::RequestWorkflowRun,
     node: &CompiledNode,
     occurred_at_unix_millis: i64,
+    job_run_id: &str,
 ) -> Result<v1::WorkflowValueReference> {
     let config: StorageReadConfig = serde_json::from_value(node.config.clone())
         .map_err(|_| WorkflowExecutionError::Integrity("storage_read_config".into()))?;
     let declaration = storage_declaration(package, &config.scope, &config.key)?;
-    let (access, namespace) = storage_access(request, &config.scope)?;
+    let (access, namespace) = storage_access(request, &config.scope, job_run_id)?;
     storage.ensure_namespace_capacity(
         namespace.clone(),
         storage_quota(package, &config.scope)?,
@@ -3210,6 +3895,7 @@ fn execute_storage_write(
     attempt_id: &str,
     occurred_at_unix_millis: i64,
     input: &v1::WorkflowValueReference,
+    job_run_id: &str,
 ) -> Result<v1::WorkflowValueReference> {
     let config: StorageWriteConfig = serde_json::from_value(node.config.clone())
         .map_err(|_| WorkflowExecutionError::Integrity("storage_write_config".into()))?;
@@ -3223,7 +3909,7 @@ fn execute_storage_write(
             "storage_conflict_policy".into(),
         ));
     }
-    let (access, namespace) = storage_access(request, &config.scope)?;
+    let (access, namespace) = storage_access(request, &config.scope, job_run_id)?;
     storage.ensure_namespace_capacity(
         namespace.clone(),
         storage_quota(package, &config.scope)?,
@@ -3319,6 +4005,7 @@ fn execute_storage_promote(
     attempt_id: &str,
     occurred_at_unix_millis: i64,
     input: &v1::WorkflowValueReference,
+    job_run_id: &str,
 ) -> Result<v1::WorkflowValueReference> {
     let config: StoragePromoteConfig = serde_json::from_value(node.config.clone())
         .map_err(|_| WorkflowExecutionError::Integrity("storage_promote_config".into()))?;
@@ -3341,8 +4028,8 @@ fn execute_storage_promote(
             "storage_promotion_input".into(),
         ));
     }
-    let (access, source_namespace) = storage_access(request, &config.from)?;
-    let (_, destination_namespace) = storage_access(request, &config.to)?;
+    let (access, source_namespace) = storage_access(request, &config.from, job_run_id)?;
+    let (_, destination_namespace) = storage_access(request, &config.to, job_run_id)?;
     storage.ensure_namespace_capacity(
         source_namespace.clone(),
         storage_quota(package, &config.from)?,
@@ -3460,9 +4147,10 @@ fn storage_quota(package: &ExecutionPackage, scope: &str) -> Result<WorkflowStor
 fn storage_access(
     request: &v1::RequestWorkflowRun,
     scope: &str,
+    job_run_id: &str,
 ) -> Result<(WorkflowStorageAccessContext, WorkflowStorageNamespace)> {
     let access = WorkflowStorageAccessContext {
-        run_id: Some(request.run_id.clone()),
+        run_id: Some(job_run_id.to_owned()),
         case_id: (!request.case_id.is_empty()).then(|| request.case_id.clone()),
         installation_id: request.installation_id.clone(),
         account_binding_ids: BTreeSet::new(),
@@ -3470,7 +4158,7 @@ fn storage_access(
     let namespace = match scope {
         "job" => WorkflowStorageNamespace {
             kind: WorkflowStorageScopeKind::Job,
-            owner_id: request.run_id.clone(),
+            owner_id: job_run_id.to_owned(),
             installation_id: Some(request.installation_id.clone()),
         },
         "case" => WorkflowStorageNamespace {
@@ -4677,6 +5365,38 @@ fn recorded_run(journal: &Journal, run_id: &str) -> Result<RecordedRun> {
                 if state.episode.replace(payload).is_some() {
                     return Err(WorkflowExecutionError::Lifecycle(
                         "duplicate_case_episode".into(),
+                    ));
+                }
+            }
+            WorkflowRuntimeEvent::SubflowCalled(payload) => {
+                if state
+                    .subflows
+                    .insert(
+                        payload.invocation_id.clone(),
+                        RecordedSubflow {
+                            called: payload,
+                            settled: None,
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(WorkflowExecutionError::Lifecycle(
+                        "duplicate_subflow_call".into(),
+                    ));
+                }
+            }
+            WorkflowRuntimeEvent::SubflowSettled(payload) => {
+                let subflow = state
+                    .subflows
+                    .get_mut(&payload.invocation_id)
+                    .ok_or_else(|| {
+                        WorkflowExecutionError::Lifecycle("subflow_call_missing".into())
+                    })?;
+                if subflow.called.child_run_id != payload.child_run_id
+                    || subflow.settled.replace(payload).is_some()
+                {
+                    return Err(WorkflowExecutionError::Lifecycle(
+                        "subflow_settled_mismatch".into(),
                     ));
                 }
             }
