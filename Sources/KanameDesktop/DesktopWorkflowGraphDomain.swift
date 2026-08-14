@@ -121,6 +121,11 @@ public enum DesktopWorkflowGraphPortDirection: String, Codable, Sendable {
     case output
 }
 
+public enum DesktopWorkflowGraphPortCardinality: String, Codable, Sendable {
+    case one
+    case many
+}
+
 public struct DesktopWorkflowGraphNodeIdentity: Codable, Equatable, Sendable {
     public var id: DesktopWorkflowNodeID
     public var key: String
@@ -143,7 +148,9 @@ public struct DesktopWorkflowGraphPortIdentity: Codable, Equatable, Sendable {
     public var nodeID: DesktopWorkflowNodeID
     public var id: DesktopWorkflowPortID
     public var direction: DesktopWorkflowGraphPortDirection
+    public var cardinality: DesktopWorkflowGraphPortCardinality
     public var schemaRef: String
+    public var required: Bool
 
     public static func define(
         nodeID: DesktopWorkflowNodeID,
@@ -151,7 +158,28 @@ public struct DesktopWorkflowGraphPortIdentity: Codable, Equatable, Sendable {
         direction: DesktopWorkflowGraphPortDirection,
         schemaRef: String
     ) -> Self {
-        Self(nodeID: nodeID, id: id, direction: direction, schemaRef: schemaRef)
+        Self(
+            nodeID: nodeID,
+            id: id,
+            direction: direction,
+            cardinality: .one,
+            schemaRef: schemaRef,
+            required: true
+        )
+    }
+
+    public static func define(
+        nodeID: DesktopWorkflowNodeID,
+        id: DesktopWorkflowPortID,
+        direction: DesktopWorkflowGraphPortDirection,
+        cardinality: DesktopWorkflowGraphPortCardinality,
+        schemaRef: String,
+        required: Bool
+    ) -> Self {
+        var port = define(nodeID: nodeID, id: id, direction: direction, schemaRef: schemaRef)
+        port.cardinality = cardinality
+        port.required = required
+        return port
     }
 }
 
