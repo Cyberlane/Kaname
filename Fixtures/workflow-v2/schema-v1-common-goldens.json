@@ -1,0 +1,318 @@
+[
+  {
+    "schema": "value-reference.schema.json",
+    "valid": {
+      "root": "input",
+      "pointer": "/customer/address"
+    },
+    "invalid": {
+      "root": "input",
+      "pointer": "not-a-pointer"
+    }
+  },
+  {
+    "schema": "artifact-reference.schema.json",
+    "valid": {
+      "artifactId": "018f0000-0001-7000-8000-000000000001",
+      "objectDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "mediaType": "application/pdf",
+      "byteCount": 12
+    },
+    "invalid": {
+      "artifactId": "not-a-uuid",
+      "objectDigest": "sha256:00",
+      "mediaType": "application/pdf",
+      "byteCount": 12
+    }
+  },
+  {
+    "schema": "port.schema.json",
+    "valid": {
+      "id": "success",
+      "key": "success",
+      "label": "Success",
+      "direction": "output",
+      "cardinality": "one",
+      "schemaRef": "dev.kaname.success/v1",
+      "required": true
+    },
+    "invalid": {
+      "id": "success",
+      "key": "success",
+      "label": "Success",
+      "direction": "sideways",
+      "cardinality": "one",
+      "schemaRef": "dev.kaname.success/v1",
+      "required": true
+    }
+  },
+  {
+    "schema": "mapping.schema.json",
+    "valid": {
+      "object": {
+        "name": {
+          "select": {
+            "root": "input",
+            "pointer": "/name"
+          }
+        },
+        "state": {
+          "literal": {
+            "type": "string",
+            "value": "ready"
+          }
+        }
+      }
+    },
+    "invalid": {
+      "script": "return input"
+    }
+  },
+  {
+    "schema": "data-envelope.schema.json",
+    "valid": {
+      "schemaRef": "dev.kaname.result/v1",
+      "schemaDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "value": {
+        "ready": true
+      },
+      "artifacts": [],
+      "provenance": {
+        "runId": "018f0000-0001-7000-8000-000000000001",
+        "attemptId": "018f0000-0002-7000-8000-000000000002",
+        "nodeId": "018f0000-0003-7000-8000-000000000003",
+        "portId": "success"
+      },
+      "classification": "private"
+    },
+    "invalid": {
+      "schemaRef": "dev.kaname.result/v1",
+      "schemaDigest": "bad",
+      "value": {},
+      "artifacts": [],
+      "provenance": {},
+      "classification": "private"
+    }
+  },
+  {
+    "schema": "error-envelope.schema.json",
+    "valid": {
+      "code": "CONNECTOR_TIMEOUT",
+      "category": "timeout",
+      "message": "The operation timed out.",
+      "retryability": "safe",
+      "outcome": "known-failure",
+      "details": {}
+    },
+    "invalid": {
+      "code": "bad",
+      "category": "timeout",
+      "message": "",
+      "retryability": "maybe",
+      "outcome": "known-failure",
+      "details": {}
+    }
+  },
+  {
+    "schema": "storage-declaration.schema.json",
+    "valid": {
+      "key": "case-context",
+      "scope": "case",
+      "kind": "value",
+      "schemaRef": "dev.kaname.case/v1",
+      "maximumBytes": 1048576,
+      "classification": "private",
+      "conflictPolicy": "compare-and-swap"
+    },
+    "invalid": {
+      "key": "case-context",
+      "scope": "global",
+      "kind": "value",
+      "schemaRef": "dev.kaname.case/v1",
+      "maximumBytes": 0,
+      "classification": "private"
+    }
+  },
+  {
+    "schema": "retention-policy.schema.json",
+    "valid": {
+      "mode": "duration",
+      "days": 30
+    },
+    "invalid": {
+      "mode": "duration",
+      "days": 0
+    }
+  },
+  {
+    "schema": "policies/retry-policy.schema.json",
+    "valid": {
+      "maximumAttempts": 3,
+      "backoff": {
+        "mode": "exponential",
+        "initialSeconds": 1,
+        "maximumSeconds": 60,
+        "jitter": "deterministic"
+      },
+      "retryOn": [
+        "TRANSIENT"
+      ]
+    },
+    "invalid": {
+      "maximumAttempts": 0,
+      "backoff": {
+        "mode": "exponential",
+        "initialSeconds": 1,
+        "maximumSeconds": 60
+      },
+      "retryOn": []
+    }
+  },
+  {
+    "schema": "policies/timeout-policy.schema.json",
+    "valid": {
+      "seconds": 30,
+      "onTimeout": "emit-error"
+    },
+    "invalid": {
+      "seconds": 0,
+      "onTimeout": "ignore"
+    }
+  },
+  {
+    "schema": "policies/concurrency-policy.schema.json",
+    "valid": {
+      "maximum": 4,
+      "overflow": "queue"
+    },
+    "invalid": {
+      "maximum": 0,
+      "overflow": "queue"
+    }
+  },
+  {
+    "schema": "policies/authority-policy.schema.json",
+    "valid": {
+      "authorityClass": "local-user",
+      "approval": "always",
+      "reversible": true
+    },
+    "invalid": {
+      "authorityClass": "",
+      "approval": "sometimes",
+      "reversible": true
+    }
+  },
+  {
+    "schema": "policy.schema.json",
+    "valid": {
+      "key": "ordinary-retry",
+      "type": "retry",
+      "typeVersion": 1,
+      "config": {
+        "maximumAttempts": 3,
+        "backoff": {"mode": "fixed", "initialSeconds": 1, "maximumSeconds": 1},
+        "retryOn": ["TRANSIENT"]
+      }
+    },
+    "invalid": {"key": "ordinary-retry", "type": "unknown", "typeVersion": 1, "config": {}}
+  },
+  {
+    "schema": "condition.schema.json",
+    "valid": {
+      "all": [
+        {
+          "exists": {
+            "root": "value",
+            "pointer": "/address"
+          }
+        },
+        {
+          "isNull": {
+            "root": "value",
+            "pointer": "/address/country"
+          }
+        }
+      ]
+    },
+    "invalid": {
+      "all": []
+    }
+  },
+  {
+    "schema": "edge.schema.json",
+    "valid": {
+      "id": "018f0000-0001-7000-8000-000000000001",
+      "from": {
+        "nodeId": "018f0000-0002-7000-8000-000000000002",
+        "portId": "success"
+      },
+      "to": {
+        "nodeId": "018f0000-0003-7000-8000-000000000003",
+        "portId": "input"
+      },
+      "mapping": {
+        "whole": true
+      }
+    },
+    "invalid": {
+      "id": "bad",
+      "from": {},
+      "to": {},
+      "mapping": {
+        "whole": true
+      }
+    }
+  },
+  {
+    "schema": "diagnostics.schema.json",
+    "valid": {
+      "code": "KANAME_GRAPH_001",
+      "severity": "error",
+      "message": "Entrypoint missing.",
+      "documentUri": "kaname-workflow://fixture/workflow.json",
+      "jsonPointer": "/graph/entrypoints",
+      "related": [],
+      "fixes": []
+    },
+    "invalid": {
+      "code": "bad",
+      "severity": "fatal",
+      "message": "",
+      "documentUri": "",
+      "jsonPointer": "bad",
+      "related": [],
+      "fixes": []
+    }
+  },
+  {
+    "schema": "manifest.schema.json",
+    "valid": {
+      "manifestVersion": 1,
+      "packageId": "dev.kaname.example",
+      "releaseVersion": "1.0.0",
+      "files": [
+        {
+          "path": "workflow.json",
+          "mediaType": "application/json",
+          "role": "workflow",
+          "byteCount": 1,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "path": "layout.json",
+          "mediaType": "application/json",
+          "role": "layout",
+          "byteCount": 1,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    "invalid": {
+      "manifestVersion": 2,
+      "packageId": "invalid",
+      "releaseVersion": "one",
+      "files": []
+    }
+  }
+]

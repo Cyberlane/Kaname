@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.kaname.dev/workflow/v1/nodes/effect.connector.schema.json",
+  "allOf": [
+    {
+      "$ref": "../node-envelope.schema.json"
+    },
+    {
+      "properties": {
+        "type": {
+          "const": "effect.connector"
+        },
+        "typeVersion": {
+          "const": 1
+        },
+        "config": {
+          "$ref": "../node-config.schema.json#/$defs/connectorEffect"
+        }
+      }
+    }
+  ],
+  "unevaluatedProperties": false
+}

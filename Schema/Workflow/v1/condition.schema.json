@@ -1,0 +1,225 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.kaname.dev/workflow/v1/condition.schema.json",
+  "$defs": {
+    "operand": {
+      "oneOf": [
+        {
+          "$ref": "value-reference.schema.json"
+        },
+        {
+          "type": "object",
+          "required": [
+            "literal"
+          ],
+          "properties": {
+            "literal": {
+              "$ref": "mapping.schema.json#/$defs/literal"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "condition": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "all"
+          ],
+          "properties": {
+            "all": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/condition"
+              },
+              "minItems": 1,
+              "maxItems": 64
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "any"
+          ],
+          "properties": {
+            "any": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/condition"
+              },
+              "minItems": 1,
+              "maxItems": 64
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "not"
+          ],
+          "properties": {
+            "not": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "compare"
+          ],
+          "properties": {
+            "compare": {
+              "type": "object",
+              "required": [
+                "left",
+                "operator",
+                "right"
+              ],
+              "properties": {
+                "left": {
+                  "$ref": "#/$defs/operand"
+                },
+                "operator": {
+                  "enum": [
+                    "equal",
+                    "notEqual",
+                    "lessThan",
+                    "lessThanOrEqual",
+                    "greaterThan",
+                    "greaterThanOrEqual",
+                    "contains",
+                    "startsWith",
+                    "endsWith",
+                    "matchesSafePattern",
+                    "in"
+                  ]
+                },
+                "right": {
+                  "$ref": "#/$defs/operand"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "exists"
+          ],
+          "properties": {
+            "exists": {
+              "$ref": "value-reference.schema.json"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "missing"
+          ],
+          "properties": {
+            "missing": {
+              "$ref": "value-reference.schema.json"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "isNull"
+          ],
+          "properties": {
+            "isNull": {
+              "$ref": "value-reference.schema.json"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "isType"
+          ],
+          "properties": {
+            "isType": {
+              "type": "object",
+              "required": [
+                "value",
+                "type"
+              ],
+              "properties": {
+                "value": {
+                  "$ref": "value-reference.schema.json"
+                },
+                "type": {
+                  "enum": [
+                    "null",
+                    "boolean",
+                    "number",
+                    "string",
+                    "array",
+                    "object"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "$ref": "#/$defs/arrayQuantifier"
+        }
+      ]
+    },
+    "arrayQuantifier": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 1,
+      "properties": {
+        "arrayAny": {
+          "$ref": "#/$defs/arrayCondition"
+        },
+        "arrayAll": {
+          "$ref": "#/$defs/arrayCondition"
+        },
+        "arrayNone": {
+          "$ref": "#/$defs/arrayCondition"
+        }
+      },
+      "additionalProperties": false
+    },
+    "arrayCondition": {
+      "type": "object",
+      "required": [
+        "value",
+        "as",
+        "where"
+      ],
+      "properties": {
+        "value": {
+          "$ref": "value-reference.schema.json"
+        },
+        "as": {
+          "const": "item"
+        },
+        "where": {
+          "$ref": "#/$defs/condition"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "$ref": "#/$defs/condition"
+}

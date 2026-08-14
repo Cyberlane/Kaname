@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.kaname.dev/workflow/v1/edge.schema.json",
+  "$defs": {
+    "endpoint": {
+      "type": "object",
+      "required": [
+        "nodeId",
+        "portId"
+      ],
+      "properties": {
+        "nodeId": {
+          "$ref": "identifiers.schema.json#/$defs/uuidV7"
+        },
+        "portId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "type": "object",
+  "required": [
+    "id",
+    "from",
+    "to",
+    "mapping"
+  ],
+  "properties": {
+    "id": {
+      "$ref": "identifiers.schema.json#/$defs/uuidV7"
+    },
+    "from": {
+      "$ref": "#/$defs/endpoint"
+    },
+    "to": {
+      "$ref": "#/$defs/endpoint"
+    },
+    "mapping": {
+      "$ref": "mapping.schema.json"
+    },
+    "ignored": {
+      "type": "boolean"
+    }
+  },
+  "additionalProperties": false
+}

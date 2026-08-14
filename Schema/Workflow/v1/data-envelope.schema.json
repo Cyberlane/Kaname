@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.kaname.dev/workflow/v1/data-envelope.schema.json",
+  "type": "object",
+  "required": [
+    "schemaRef",
+    "schemaDigest",
+    "value",
+    "artifacts",
+    "provenance",
+    "classification"
+  ],
+  "properties": {
+    "schemaRef": {
+      "$ref": "identifiers.schema.json#/$defs/schemaRef"
+    },
+    "schemaDigest": {
+      "$ref": "identifiers.schema.json#/$defs/sha256"
+    },
+    "value": true,
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "$ref": "artifact-reference.schema.json"
+      },
+      "maxItems": 256
+    },
+    "provenance": {
+      "type": "object",
+      "required": [
+        "runId",
+        "attemptId",
+        "nodeId",
+        "portId"
+      ],
+      "properties": {
+        "runId": {
+          "$ref": "identifiers.schema.json#/$defs/uuidV7"
+        },
+        "attemptId": {
+          "$ref": "identifiers.schema.json#/$defs/uuidV7"
+        },
+        "nodeId": {
+          "$ref": "identifiers.schema.json#/$defs/uuidV7"
+        },
+        "portId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      },
+      "additionalProperties": false
+    },
+    "classification": {
+      "enum": [
+        "public",
+        "internal",
+        "private",
+        "restricted"
+      ]
+    },
+    "redactionProfile": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    }
+  },
+  "additionalProperties": false
+}

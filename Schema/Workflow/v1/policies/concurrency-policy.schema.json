@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.kaname.dev/workflow/v1/policies/concurrency-policy.schema.json",
+  "type": "object",
+  "required": [
+    "maximum",
+    "overflow"
+  ],
+  "properties": {
+    "maximum": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1024
+    },
+    "overflow": {
+      "enum": [
+        "queue",
+        "reject"
+      ]
+    }
+  },
+  "additionalProperties": false
+}

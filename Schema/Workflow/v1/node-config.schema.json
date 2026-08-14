@@ -1,0 +1,649 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.kaname.dev/workflow/v1/node-config.schema.json",
+  "$defs": {
+    "empty": {
+      "type": "object",
+      "additionalProperties": false
+    },
+    "manual": {
+      "type": "object",
+      "properties": {
+        "inputSchemaRef": {
+          "$ref": "identifiers.schema.json#/$defs/schemaRef"
+        }
+      },
+      "additionalProperties": false
+    },
+    "event": {
+      "type": "object",
+      "required": [
+        "eventContract",
+        "deduplication"
+      ],
+      "properties": {
+        "eventContract": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "deduplication": {
+          "enum": [
+            "event-id",
+            "contract-key"
+          ]
+        },
+        "correlation": {
+          "type": "array",
+          "items": {
+            "$ref": "value-reference.schema.json"
+          },
+          "maxItems": 16
+        }
+      },
+      "additionalProperties": false
+    },
+    "schedule": {
+      "type": "object",
+      "required": [
+        "scheduleKey"
+      ],
+      "properties": {
+        "scheduleKey": {
+          "$ref": "identifiers.schema.json#/$defs/key"
+        },
+        "misfirePolicy": {
+          "enum": [
+            "skip",
+            "run-once"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "map": {
+      "type": "object",
+      "required": [
+        "mapping"
+      ],
+      "properties": {
+        "mapping": {
+          "$ref": "mapping.schema.json"
+        }
+      },
+      "additionalProperties": false
+    },
+    "validate": {
+      "type": "object",
+      "required": [
+        "schemaRef"
+      ],
+      "properties": {
+        "schemaRef": {
+          "$ref": "identifiers.schema.json#/$defs/schemaRef"
+        }
+      },
+      "additionalProperties": false
+    },
+    "registerArtifact": {
+      "type": "object",
+      "required": [
+        "role",
+        "mediaTypes"
+      ],
+      "properties": {
+        "role": {
+          "$ref": "identifiers.schema.json#/$defs/key"
+        },
+        "mediaTypes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          },
+          "minItems": 1,
+          "maxItems": 32
+        }
+      },
+      "additionalProperties": false
+    },
+    "storageRead": {
+      "type": "object",
+      "required": [
+        "scope",
+        "key"
+      ],
+      "properties": {
+        "scope": {
+          "enum": [
+            "job",
+            "case",
+            "workflow"
+          ]
+        },
+        "key": {
+          "$ref": "identifiers.schema.json#/$defs/key"
+        },
+        "required": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "storageWrite": {
+      "type": "object",
+      "required": [
+        "scope",
+        "key",
+        "value",
+        "conflictPolicy"
+      ],
+      "properties": {
+        "scope": {
+          "enum": [
+            "job",
+            "case",
+            "workflow"
+          ]
+        },
+        "key": {
+          "$ref": "identifiers.schema.json#/$defs/key"
+        },
+        "value": {
+          "$ref": "value-reference.schema.json"
+        },
+        "conflictPolicy": {
+          "enum": [
+            "fail",
+            "compare-and-swap",
+            "replace"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "storagePromote": {
+      "type": "object",
+      "required": [
+        "from",
+        "to",
+        "sourceKey",
+        "destinationKey",
+        "conflictPolicy"
+      ],
+      "properties": {
+        "from": {
+          "enum": [
+            "job",
+            "case"
+          ]
+        },
+        "to": {
+          "enum": [
+            "case",
+            "workflow"
+          ]
+        },
+        "sourceKey": {
+          "$ref": "identifiers.schema.json#/$defs/key"
+        },
+        "destinationKey": {
+          "$ref": "identifiers.schema.json#/$defs/key"
+        },
+        "conflictPolicy": {
+          "enum": [
+            "fail",
+            "compare-and-swap",
+            "replace"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "capability": {
+      "type": "object",
+      "required": [
+        "capabilityId",
+        "version",
+        "input",
+        "outputSchemaRef"
+      ],
+      "properties": {
+        "capabilityId": {
+          "$ref": "identifiers.schema.json#/$defs/packageId"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+        },
+        "input": {
+          "$ref": "mapping.schema.json"
+        },
+        "outputSchemaRef": {
+          "$ref": "identifiers.schema.json#/$defs/schemaRef"
+        }
+      },
+      "additionalProperties": false
+    },
+    "llm": {
+      "type": "object",
+      "required": [
+        "modelClass",
+        "prompt",
+        "context",
+        "tools",
+        "outputSchemaRef"
+      ],
+      "properties": {
+        "modelClass": {
+          "enum": [
+            "fast",
+            "balanced",
+            "reasoning"
+          ]
+        },
+        "prompt": {
+          "$ref": "mapping.schema.json"
+        },
+        "context": {
+          "type": "array",
+          "items": {
+            "$ref": "value-reference.schema.json"
+          },
+          "maxItems": 64
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "$ref": "identifiers.schema.json#/$defs/packageId"
+          },
+          "maxItems": 64,
+          "uniqueItems": true
+        },
+        "outputSchemaRef": {
+          "$ref": "identifiers.schema.json#/$defs/schemaRef"
+        },
+        "conversationScope": {
+          "enum": [
+            "job",
+            "case"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "decision": {
+      "type": "object",
+      "required": [
+        "when"
+      ],
+      "properties": {
+        "when": {
+          "$ref": "condition.schema.json"
+        }
+      },
+      "additionalProperties": false
+    },
+    "match": {
+      "type": "object",
+      "required": [
+        "value",
+        "hitPolicy",
+        "cases"
+      ],
+      "properties": {
+        "value": {
+          "$ref": "value-reference.schema.json"
+        },
+        "hitPolicy": {
+          "enum": [
+            "first",
+            "unique"
+          ]
+        },
+        "cases": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "items": {
+            "$ref": "#/$defs/matchCase"
+          }
+        },
+        "otherwise": {
+          "$ref": "#/$defs/casePort"
+        }
+      },
+      "additionalProperties": false
+    },
+    "matchCase": {
+      "type": "object",
+      "required": [
+        "id",
+        "key",
+        "label",
+        "when"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "identifiers.schema.json#/$defs/uuidV7"
+        },
+        "key": {
+          "$ref": "identifiers.schema.json#/$defs/key"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "when": {
+          "$ref": "condition.schema.json"
+        }
+      },
+      "additionalProperties": false
+    },
+    "casePort": {
+      "type": "object",
+      "required": [
+        "id",
+        "key",
+        "label"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "identifiers.schema.json#/$defs/uuidV7"
+        },
+        "key": {
+          "$ref": "identifiers.schema.json#/$defs/key"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        }
+      },
+      "additionalProperties": false
+    },
+    "forEach": {
+      "type": "object",
+      "required": [
+        "items",
+        "as",
+        "maximumConcurrency",
+        "failurePolicy"
+      ],
+      "properties": {
+        "items": {
+          "$ref": "value-reference.schema.json"
+        },
+        "as": {
+          "const": "item"
+        },
+        "maximumConcurrency": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        },
+        "failurePolicy": {
+          "enum": [
+            "fail-fast",
+            "collect"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "parallel": {
+      "type": "object",
+      "required": [
+        "branches"
+      ],
+      "properties": {
+        "branches": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/casePort"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "join": {
+      "type": "object",
+      "required": [
+        "policy",
+        "cancelRemaining"
+      ],
+      "properties": {
+        "policy": {
+          "enum": [
+            "all",
+            "any",
+            "quorum",
+            "named"
+          ]
+        },
+        "quorum": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "requiredBranches": {
+          "type": "array",
+          "items": {
+            "$ref": "identifiers.schema.json#/$defs/uuidV7"
+          },
+          "uniqueItems": true,
+          "maxItems": 64
+        },
+        "cancelRemaining": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "retry": {
+      "type": "object",
+      "required": [
+        "maximumAttempts",
+        "retryOn",
+        "backoff"
+      ],
+      "properties": {
+        "maximumAttempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "retryOn": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "minItems": 1,
+          "maxItems": 64
+        },
+        "backoff": {
+          "$ref": "policies/retry-policy.schema.json#/$defs/backoff"
+        }
+      },
+      "additionalProperties": false
+    },
+    "reconcile": {
+      "type": "object",
+      "required": [
+        "effect",
+        "maximumChecks"
+      ],
+      "properties": {
+        "effect": {
+          "$ref": "value-reference.schema.json"
+        },
+        "maximumChecks": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        }
+      },
+      "additionalProperties": false
+    },
+    "wait": {
+      "type": "object",
+      "required": [
+        "kind",
+        "correlation",
+        "expirySeconds"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "timer",
+            "event",
+            "reply"
+          ]
+        },
+        "correlation": {
+          "type": "array",
+          "items": {
+            "$ref": "value-reference.schema.json"
+          },
+          "minItems": 1,
+          "maxItems": 16
+        },
+        "expirySeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 31536000
+        }
+      },
+      "additionalProperties": false
+    },
+    "subflow": {
+      "type": "object",
+      "required": [
+        "packageId",
+        "revisionDigest",
+        "entrypoint",
+        "input"
+      ],
+      "properties": {
+        "packageId": {
+          "$ref": "identifiers.schema.json#/$defs/packageId"
+        },
+        "revisionDigest": {
+          "$ref": "identifiers.schema.json#/$defs/sha256"
+        },
+        "entrypoint": {
+          "$ref": "identifiers.schema.json#/$defs/key"
+        },
+        "input": {
+          "$ref": "mapping.schema.json"
+        }
+      },
+      "additionalProperties": false
+    },
+    "humanReview": {
+      "type": "object",
+      "required": [
+        "proposal",
+        "authorityPolicy",
+        "expirySeconds",
+        "staleCheck"
+      ],
+      "properties": {
+        "proposal": {
+          "$ref": "mapping.schema.json"
+        },
+        "authorityPolicy": {
+          "$ref": "identifiers.schema.json#/$defs/key"
+        },
+        "expirySeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2592000
+        },
+        "staleCheck": {
+          "enum": [
+            "revision",
+            "digest"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "connectorEffect": {
+      "type": "object",
+      "required": [
+        "connectorClass",
+        "action",
+        "input",
+        "previewContract",
+        "reconciliationContract",
+        "idempotency"
+      ],
+      "properties": {
+        "connectorClass": {
+          "$ref": "identifiers.schema.json#/$defs/packageId"
+        },
+        "action": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "input": {
+          "$ref": "mapping.schema.json"
+        },
+        "previewContract": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "reconciliationContract": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "idempotency": {
+          "enum": [
+            "required",
+            "reconcile-only"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "complete": {
+      "type": "object",
+      "properties": {
+        "output": {
+          "$ref": "mapping.schema.json"
+        }
+      },
+      "additionalProperties": false
+    },
+    "fail": {
+      "type": "object",
+      "required": [
+        "error"
+      ],
+      "properties": {
+        "error": {
+          "$ref": "mapping.schema.json"
+        }
+      },
+      "additionalProperties": false
+    },
+    "cancel": {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "$ref": "mapping.schema.json"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

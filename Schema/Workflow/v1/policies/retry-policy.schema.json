@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.kaname.dev/workflow/v1/policies/retry-policy.schema.json",
+  "$defs": {
+    "backoff": {
+      "type": "object",
+      "required": [
+        "mode",
+        "initialSeconds",
+        "maximumSeconds"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "fixed",
+            "exponential"
+          ]
+        },
+        "initialSeconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 86400
+        },
+        "maximumSeconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 604800
+        },
+        "jitter": {
+          "enum": [
+            "none",
+            "deterministic"
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "type": "object",
+  "required": [
+    "maximumAttempts",
+    "backoff",
+    "retryOn"
+  ],
+  "properties": {
+    "maximumAttempts": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100
+    },
+    "backoff": {
+      "$ref": "#/$defs/backoff"
+    },
+    "retryOn": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "minItems": 1,
+      "maxItems": 64
+    }
+  },
+  "additionalProperties": false
+}

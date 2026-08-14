@@ -1,0 +1,140 @@
+{
+  "$schema": "https://schemas.kaname.dev/workflow/v1/registry.schema.json",
+  "registryVersion": 1,
+  "draft": "2020-12",
+  "baseURI": "https://schemas.kaname.dev/workflow/v1/",
+  "rootSchemas": [
+    "manifest.schema.json",
+    "workflow.schema.json",
+    "graph.schema.json",
+    "node.schema.json"
+  ],
+  "executionStatus": "schema-only",
+  "nodeTypes": [
+    {
+      "type": "trigger.manual",
+      "typeVersion": 1,
+      "executable": false
+    },
+    {
+      "type": "trigger.event",
+      "typeVersion": 1,
+      "executable": false
+    },
+    {
+      "type": "trigger.schedule",
+      "typeVersion": 1,
+      "executable": false
+    },
+    {
+      "type": "data.map",
+      "typeVersion": 1,
+      "executable": false
+    },
+    {
+      "type": "data.validate",
+      "typeVersion": 1,
+      "executable": false
+    },
+    {
+      "type": "data.register-artifact",
+      "typeVersion": 1,
+      "executable": false
+    },
+    {
+      "type": "storage.read",
+      "typeVersion": 1,
+      "executable": false
+    },
+    {
+      "type": "storage.write",
+      "typeVersion": 1,
+      "executable": false
+    },
+    {
+      "type": "storage.promote",
+      "typeVersion": 1,
+      "executable": false
+    },
+    {
+      "type": "compute.capability",
+      "typeVersion": 1,
+      "executable": false
+    },
+    {
+      "type": "compute.llm",
+      "typeVersion": 1,
+      "executable": false
+    },
+    {
+      "type": "control.decision",
+      "typeVersion": 1,
+      "executable": false
+    },
+    {
+      "type": "control.match",
+      "typeVersion": 1,
+      "executable": false
+    },
+    {
+      "type": "control.for-each",
+      "typeVersion": 1,
+      "executable": false
+    },
+    {
+      "type": "control.parallel",
+      "typeVersion": 1,
+      "executable": false
+    },
+    {
+      "type": "control.join",
+      "typeVersion": 1,
+      "executable": false
+    },
+    {
+      "type": "control.retry",
+      "typeVersion": 1,
+      "executable": false
+    },
+    {
+      "type": "control.reconcile",
+      "typeVersion": 1,
+      "executable": false
+    },
+    {
+      "type": "control.wait",
+      "typeVersion": 1,
+      "executable": false
+    },
+    {
+      "type": "control.subflow",
+      "typeVersion": 1,
+      "executable": false
+    },
+    {
+      "type": "control.human-review",
+      "typeVersion": 1,
+      "executable": false
+    },
+    {
+      "type": "effect.connector",
+      "typeVersion": 1,
+      "executable": false
+    },
+    {
+      "type": "terminal.complete",
+      "typeVersion": 1,
+      "executable": false
+    },
+    {
+      "type": "terminal.fail",
+      "typeVersion": 1,
+      "executable": false
+    },
+    {
+      "type": "terminal.cancel",
+      "typeVersion": 1,
+      "executable": false
+    }
+  ]
+}

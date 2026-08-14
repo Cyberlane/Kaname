@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.kaname.dev/workflow/v1/artifact-reference.schema.json",
+  "type": "object",
+  "required": [
+    "artifactId",
+    "objectDigest",
+    "mediaType",
+    "byteCount"
+  ],
+  "properties": {
+    "artifactId": {
+      "$ref": "identifiers.schema.json#/$defs/uuidV7"
+    },
+    "objectDigest": {
+      "$ref": "identifiers.schema.json#/$defs/sha256"
+    },
+    "mediaType": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255
+    },
+    "byteCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "fileName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255
+    }
+  },
+  "additionalProperties": false
+}

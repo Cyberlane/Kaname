@@ -1,0 +1,212 @@
+{
+  "trigger.manual": {},
+  "trigger.event": {
+    "eventContract": "email.reply.received.v1",
+    "deduplication": "event-id",
+    "correlation": [
+      {
+        "root": "input",
+        "pointer": "/caseId"
+      }
+    ]
+  },
+  "trigger.schedule": {
+    "scheduleKey": "weekday-review",
+    "misfirePolicy": "run-once"
+  },
+  "data.map": {
+    "mapping": {
+      "whole": true
+    }
+  },
+  "data.validate": {
+    "schemaRef": "dev.kaname.schema/input/v1"
+  },
+  "data.register-artifact": {
+    "role": "result",
+    "mediaTypes": [
+      "application/pdf"
+    ]
+  },
+  "storage.read": {
+    "scope": "job",
+    "key": "draft",
+    "required": true
+  },
+  "storage.write": {
+    "scope": "job",
+    "key": "draft",
+    "value": {
+      "root": "input",
+      "pointer": "/draft"
+    },
+    "conflictPolicy": "compare-and-swap"
+  },
+  "storage.promote": {
+    "from": "job",
+    "to": "workflow",
+    "sourceKey": "draft",
+    "destinationKey": "latest-result",
+    "conflictPolicy": "compare-and-swap"
+  },
+  "compute.capability": {
+    "capabilityId": "dev.kaname.document.check",
+    "version": "1.0.0",
+    "input": {
+      "whole": true
+    },
+    "outputSchemaRef": "dev.kaname.schema/result/v1"
+  },
+  "compute.llm": {
+    "modelClass": "reasoning",
+    "prompt": {
+      "whole": true
+    },
+    "context": [
+      {
+        "root": "case",
+        "pointer": "/conversation"
+      }
+    ],
+    "tools": [
+      "dev.kaname.document.check"
+    ],
+    "outputSchemaRef": "dev.kaname.schema/result/v1",
+    "conversationScope": "case"
+  },
+  "control.decision": {
+    "when": {
+      "exists": {
+        "root": "input",
+        "pointer": "/approved"
+      }
+    }
+  },
+  "control.match": {
+    "value": {
+      "root": "input",
+      "pointer": ""
+    },
+    "hitPolicy": "first",
+    "cases": [
+      {
+        "id": "018f0000-0001-7000-8000-000000000001",
+        "key": "approved",
+        "label": "Approved",
+        "when": {
+          "compare": {
+            "left": {
+              "root": "value",
+              "pointer": "/status"
+            },
+            "operator": "equal",
+            "right": {
+              "literal": {
+                "type": "string",
+                "value": "approved"
+              }
+            }
+          }
+        }
+      }
+    ],
+    "otherwise": {
+      "id": "018f0000-0002-7000-8000-000000000002",
+      "key": "otherwise",
+      "label": "Otherwise"
+    }
+  },
+  "control.for-each": {
+    "items": {
+      "root": "input",
+      "pointer": "/items"
+    },
+    "as": "item",
+    "maximumConcurrency": 4,
+    "failurePolicy": "collect"
+  },
+  "control.parallel": {
+    "branches": [
+      {
+        "id": "018f0000-0003-7000-8000-000000000003",
+        "key": "left",
+        "label": "Left"
+      },
+      {
+        "id": "018f0000-0004-7000-8000-000000000004",
+        "key": "right",
+        "label": "Right"
+      }
+    ]
+  },
+  "control.join": {
+    "policy": "all",
+    "cancelRemaining": false
+  },
+  "control.retry": {
+    "maximumAttempts": 3,
+    "retryOn": [
+      "TRANSIENT"
+    ],
+    "backoff": {
+      "mode": "exponential",
+      "initialSeconds": 1,
+      "maximumSeconds": 60,
+      "jitter": "deterministic"
+    }
+  },
+  "control.reconcile": {
+    "effect": {
+      "root": "error",
+      "pointer": "/effect"
+    },
+    "maximumChecks": 5
+  },
+  "control.wait": {
+    "kind": "reply",
+    "correlation": [
+      {
+        "root": "input",
+        "pointer": "/caseId"
+      }
+    ],
+    "expirySeconds": 86400
+  },
+  "control.subflow": {
+    "packageId": "dev.kaname.review.child",
+    "revisionDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "entrypoint": "start",
+    "input": {
+      "whole": true
+    }
+  },
+  "control.human-review": {
+    "proposal": {
+      "whole": true
+    },
+    "authorityPolicy": "reviewer",
+    "expirySeconds": 86400,
+    "staleCheck": "digest"
+  },
+  "effect.connector": {
+    "connectorClass": "dev.kaname.email",
+    "action": "draft-reply",
+    "input": {
+      "whole": true
+    },
+    "previewContract": "email.draft.preview.v1",
+    "reconciliationContract": "email.draft.reconcile.v1",
+    "idempotency": "required"
+  },
+  "terminal.complete": {
+    "output": {
+      "whole": true
+    }
+  },
+  "terminal.fail": {
+    "error": {
+      "whole": true
+    }
+  },
+  "terminal.cancel": {}
+}

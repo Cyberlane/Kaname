@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.kaname.dev/workflow/v1/node.schema.json",
+  "oneOf": [
+    {
+      "$ref": "nodes/trigger.manual.schema.json"
+    },
+    {
+      "$ref": "nodes/trigger.event.schema.json"
+    },
+    {
+      "$ref": "nodes/trigger.schedule.schema.json"
+    },
+    {
+      "$ref": "nodes/data.map.schema.json"
+    },
+    {
+      "$ref": "nodes/data.validate.schema.json"
+    },
+    {
+      "$ref": "nodes/data.register-artifact.schema.json"
+    },
+    {
+      "$ref": "nodes/storage.read.schema.json"
+    },
+    {
+      "$ref": "nodes/storage.write.schema.json"
+    },
+    {
+      "$ref": "nodes/storage.promote.schema.json"
+    },
+    {
+      "$ref": "nodes/compute.capability.schema.json"
+    },
+    {
+      "$ref": "nodes/compute.llm.schema.json"
+    },
+    {
+      "$ref": "nodes/control.decision.schema.json"
+    },
+    {
+      "$ref": "nodes/control.match.schema.json"
+    },
+    {
+      "$ref": "nodes/control.for-each.schema.json"
+    },
+    {
+      "$ref": "nodes/control.parallel.schema.json"
+    },
+    {
+      "$ref": "nodes/control.join.schema.json"
+    },
+    {
+      "$ref": "nodes/control.retry.schema.json"
+    },
+    {
+      "$ref": "nodes/control.reconcile.schema.json"
+    },
+    {
+      "$ref": "nodes/control.wait.schema.json"
+    },
+    {
+      "$ref": "nodes/control.subflow.schema.json"
+    },
+    {
+      "$ref": "nodes/control.human-review.schema.json"
+    },
+    {
+      "$ref": "nodes/effect.connector.schema.json"
+    },
+    {
+      "$ref": "nodes/terminal.complete.schema.json"
+    },
+    {
+      "$ref": "nodes/terminal.fail.schema.json"
+    },
+    {
+      "$ref": "nodes/terminal.cancel.schema.json"
+    }
+  ]
+}

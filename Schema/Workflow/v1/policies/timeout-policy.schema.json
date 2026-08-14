@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.kaname.dev/workflow/v1/policies/timeout-policy.schema.json",
+  "type": "object",
+  "required": [
+    "seconds",
+    "onTimeout"
+  ],
+  "properties": {
+    "seconds": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 31536000
+    },
+    "onTimeout": {
+      "enum": [
+        "fail",
+        "cancel",
+        "emit-error"
+      ]
+    }
+  },
+  "additionalProperties": false
+}

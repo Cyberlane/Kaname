@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.kaname.dev/workflow/v1/workflow.schema.json",
+  "type": "object",
+  "required": [
+    "formatVersion",
+    "workflowId",
+    "packageId",
+    "name",
+    "summary",
+    "graph",
+    "interfaces",
+    "resources",
+    "policies",
+    "storage",
+    "metadata"
+  ],
+  "properties": {
+    "formatVersion": {
+      "const": 1
+    },
+    "workflowId": {
+      "$ref": "identifiers.schema.json#/$defs/uuidV7"
+    },
+    "packageId": {
+      "$ref": "identifiers.schema.json#/$defs/packageId"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 1000
+    },
+    "graph": {
+      "$ref": "graph.schema.json"
+    },
+    "interfaces": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "$ref": "port.schema.json"
+        },
+        "maxItems": 128
+      },
+      "maxProperties": 64
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "identifiers.schema.json#/$defs/schemaRef"
+      },
+      "maxProperties": 1024
+    },
+    "policies": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "policy.schema.json"
+      },
+      "maxProperties": 256
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "storage-declaration.schema.json"
+      },
+      "maxProperties": 256
+    },
+    "retention": {
+      "$ref": "retention-policy.schema.json"
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true,
+      "maxProperties": 128
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.kaname.dev/workflow/v1/graph.schema.json",
+  "type": "object",
+  "required": [
+    "entrypoints",
+    "nodes",
+    "edges"
+  ],
+  "properties": {
+    "entrypoints": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "required": [
+          "nodeId"
+        ],
+        "properties": {
+          "nodeId": {
+            "$ref": "identifiers.schema.json#/$defs/uuidV7"
+          },
+          "key": {
+            "$ref": "identifiers.schema.json#/$defs/key"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4096,
+      "items": {
+        "$ref": "node.schema.json"
+      }
+    },
+    "edges": {
+      "type": "array",
+      "maxItems": 16384,
+      "items": {
+        "$ref": "edge.schema.json"
+      }
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.kaname.dev/workflow/v1/retention-policy.schema.json",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "mode",
+        "days"
+      ],
+      "properties": {
+        "mode": {
+          "const": "duration"
+        },
+        "days": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3650
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "mode": {
+          "const": "delete-after-success"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "mode": {
+          "const": "forever"
+        }
+      },
+      "additionalProperties": false
+    }
+  ]
+}

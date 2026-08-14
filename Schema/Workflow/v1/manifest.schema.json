@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.kaname.dev/workflow/v1/manifest.schema.json",
+  "type": "object",
+  "required": [
+    "manifestVersion",
+    "packageId",
+    "releaseVersion",
+    "files"
+  ],
+  "properties": {
+    "manifestVersion": {
+      "const": 1
+    },
+    "packageId": {
+      "$ref": "identifiers.schema.json#/$defs/packageId"
+    },
+    "releaseVersion": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$"
+    },
+    "files": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 4096,
+      "items": {
+        "type": "object",
+        "required": [
+          "path",
+          "mediaType",
+          "role",
+          "byteCount",
+          "digest"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$",
+            "maxLength": 1024
+          },
+          "mediaType": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          },
+          "role": {
+            "enum": [
+              "workflow",
+              "layout",
+              "schema",
+              "fixture-input",
+              "fixture-expected",
+              "asset",
+              "documentation",
+              "compiled",
+              "lock",
+              "receipt",
+              "signature"
+            ]
+          },
+          "byteCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "digest": {
+            "$ref": "identifiers.schema.json#/$defs/sha256"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

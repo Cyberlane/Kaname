@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.kaname.dev/workflow/v1/policies/authority-policy.schema.json",
+  "type": "object",
+  "required": [
+    "authorityClass",
+    "approval",
+    "reversible"
+  ],
+  "properties": {
+    "authorityClass": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "approval": {
+      "enum": [
+        "always",
+        "standing-grant-eligible",
+        "none"
+      ]
+    },
+    "reversible": {
+      "type": "boolean"
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.kaname.dev/workflow/v1/value-reference.schema.json",
+  "type": "object",
+  "required": [
+    "root",
+    "pointer"
+  ],
+  "properties": {
+    "root": {
+      "type": "string",
+      "enum": [
+        "input",
+        "value",
+        "item",
+        "error",
+        "job",
+        "case",
+        "workflow"
+      ]
+    },
+    "pointer": {
+      "$ref": "identifiers.schema.json#/$defs/jsonPointer"
+    }
+  },
+  "additionalProperties": false
+}

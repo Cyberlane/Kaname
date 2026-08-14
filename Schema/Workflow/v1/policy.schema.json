@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.kaname.dev/workflow/v1/policy.schema.json",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "key",
+        "type",
+        "typeVersion",
+        "config"
+      ],
+      "properties": {
+        "key": {
+          "$ref": "identifiers.schema.json#/$defs/key"
+        },
+        "type": {
+          "const": "retry"
+        },
+        "typeVersion": {
+          "const": 1
+        },
+        "config": {
+          "$ref": "policies/retry-policy.schema.json"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "key",
+        "type",
+        "typeVersion",
+        "config"
+      ],
+      "properties": {
+        "key": {
+          "$ref": "identifiers.schema.json#/$defs/key"
+        },
+        "type": {
+          "const": "timeout"
+        },
+        "typeVersion": {
+          "const": 1
+        },
+        "config": {
+          "$ref": "policies/timeout-policy.schema.json"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "key",
+        "type",
+        "typeVersion",
+        "config"
+      ],
+      "properties": {
+        "key": {
+          "$ref": "identifiers.schema.json#/$defs/key"
+        },
+        "type": {
+          "const": "concurrency"
+        },
+        "typeVersion": {
+          "const": 1
+        },
+        "config": {
+          "$ref": "policies/concurrency-policy.schema.json"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "key",
+        "type",
+        "typeVersion",
+        "config"
+      ],
+      "properties": {
+        "key": {
+          "$ref": "identifiers.schema.json#/$defs/key"
+        },
+        "type": {
+          "const": "authority"
+        },
+        "typeVersion": {
+          "const": 1
+        },
+        "config": {
+          "$ref": "policies/authority-policy.schema.json"
+        }
+      },
+      "additionalProperties": false
+    }
+  ]
+}

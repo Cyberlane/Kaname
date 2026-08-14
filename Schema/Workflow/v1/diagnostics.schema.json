@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.kaname.dev/workflow/v1/diagnostics.schema.json",
+  "type": "object",
+  "required": [
+    "code",
+    "severity",
+    "message",
+    "documentUri",
+    "jsonPointer",
+    "related",
+    "fixes"
+  ],
+  "properties": {
+    "code": {
+      "type": "string",
+      "pattern": "^KANAME_[A-Z0-9_]{3,64}$"
+    },
+    "severity": {
+      "enum": [
+        "error",
+        "warning",
+        "information",
+        "hint"
+      ]
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "documentUri": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048
+    },
+    "jsonPointer": {
+      "$ref": "identifiers.schema.json#/$defs/jsonPointer"
+    },
+    "nodeId": {
+      "$ref": "identifiers.schema.json#/$defs/uuidV7"
+    },
+    "edgeId": {
+      "$ref": "identifiers.schema.json#/$defs/uuidV7"
+    },
+    "range": {
+      "type": "object",
+      "required": [
+        "start",
+        "end"
+      ],
+      "properties": {
+        "start": {
+          "$ref": "#/$defs/position"
+        },
+        "end": {
+          "$ref": "#/$defs/position"
+        }
+      },
+      "additionalProperties": false
+    },
+    "related": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      },
+      "maxItems": 64
+    },
+    "fixes": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      },
+      "maxItems": 32
+    }
+  },
+  "$defs": {
+    "position": {
+      "type": "object",
+      "required": [
+        "line",
+        "character"
+      ],
+      "properties": {
+        "line": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "character": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
