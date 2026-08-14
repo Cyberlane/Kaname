@@ -190,6 +190,9 @@ impl WorkflowLibraryStore {
     ) -> Result<PublishedWorkflowRevision> {
         validate_request(&request)?;
         let draft = self.load_draft(&request.workflow_id)?;
+        if draft.state != "editable" {
+            return Err(WorkflowLibraryError::InvalidDraft("draft_not_publishable"));
+        }
         if draft.head_sequence != request.expected_draft_sequence {
             return Err(WorkflowLibraryError::DraftConflict {
                 expected: request.expected_draft_sequence,

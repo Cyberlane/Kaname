@@ -20,6 +20,14 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
+pub(crate) fn is_workflow_identifier(value: &str, maximum: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= maximum
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
 const INITIAL_MIGRATION_NAME: &str = "0001_initial";
 const INITIAL_MIGRATION_SQL: &str = r#"
 CREATE TABLE workflow_library_migrations (
@@ -170,6 +178,8 @@ pub enum WorkflowLibraryError {
     RevisionHistory(String),
     ActivationConflict { expected: i64, actual: i64 },
     InjectedActivationInterruption,
+    InvalidImport(&'static str),
+    ImportConflict(String),
 }
 
 impl fmt::Display for WorkflowLibraryError {
@@ -220,6 +230,8 @@ impl fmt::Display for WorkflowLibraryError {
             Self::InjectedActivationInterruption => {
                 formatter.write_str("workflow_activation_interrupted")
             }
+            Self::InvalidImport(code) => write!(formatter, "workflow import invalid: {code}"),
+            Self::ImportConflict(code) => write!(formatter, "workflow import conflict: {code}"),
         }
     }
 }

@@ -175,9 +175,19 @@ private final class LocalControlService: NSObject, LocalCoreControlService {
         runWorkflowLibraryOperation("workflow-library-activate", request: request, reply: reply)
     }
 
+    func importFrozenWorkspace(_ request: Data, reply: @escaping (Data?, String) -> Void) {
+        runWorkflowLibraryOperation(
+            "workflow-library-import-frozen",
+            request: request,
+            maximumRequestBytes: LocalCoreRunner.maximumWorkflowLibraryRequestBytes,
+            reply: reply
+        )
+    }
+
     private func runWorkflowLibraryOperation(
         _ operation: String,
         request: Data,
+        maximumRequestBytes: Int = LocalCoreRunner.maximumResponseBytes,
         reply: @escaping (Data?, String) -> Void
     ) {
         let applicationSupportRoot = journalDirectory
@@ -186,6 +196,7 @@ private final class LocalControlService: NSObject, LocalCoreControlService {
         runWireOperation(
             operation,
             request: request,
+            maximumRequestBytes: maximumRequestBytes,
             storageArgument: applicationSupportRoot,
             permissionTarget: applicationSupportRoot
                 .appendingPathComponent("Workflows", isDirectory: true)
@@ -198,11 +209,12 @@ private final class LocalControlService: NSObject, LocalCoreControlService {
         _ operation: String,
         request: Data,
         extraArguments: [String] = [],
+        maximumRequestBytes: Int = LocalCoreRunner.maximumResponseBytes,
         storageArgument: URL? = nil,
         permissionTarget: URL? = nil,
         reply: @escaping (Data?, String) -> Void
     ) {
-        guard !request.isEmpty, request.count <= LocalCoreRunner.maximumResponseBytes else {
+        guard !request.isEmpty, request.count <= maximumRequestBytes else {
             reply(nil, "invalid_request")
             return
         }

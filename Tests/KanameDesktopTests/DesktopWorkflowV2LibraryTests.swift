@@ -141,6 +141,18 @@ private actor WorkflowLibraryFixtureTransport: DesktopWorkflowLibraryTransport {
         return response
     }
 
+    func importFrozenWorkspace(
+        _ request: Kaname_V1_ImportFrozenWorkspaceRequest,
+        timeout _: TimeInterval
+    ) async throws -> Kaname_V1_ImportFrozenWorkspaceResponse {
+        var response = Kaname_V1_ImportFrozenWorkspaceResponse()
+        response.schemaVersion = schemaVersion
+        response.requestID = request.requestID
+        response.sourceDigest = request.sourceDigest
+        response.outcome = .created
+        return response
+    }
+
     func recordedQueries() -> [Kaname_V1_WorkflowLibraryQueryRequest] { queries }
     func recordedActivations() -> [Kaname_V1_SetWorkflowActivationRequest] { activations }
     func returnMismatchedRequestID() { mismatchesRequestID = true }

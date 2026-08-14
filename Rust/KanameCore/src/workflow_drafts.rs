@@ -267,6 +267,9 @@ impl WorkflowLibraryStore {
     ) -> Result<WorkflowDraftSaveResult> {
         validate_save_request(&request)?;
         let current = self.load_draft(&request.workflow_id)?;
+        if current.state != "editable" {
+            return Err(WorkflowLibraryError::InvalidDraft("draft_read_only"));
+        }
         if request.expected_head_sequence != current.head_sequence {
             if let Some(record) = self.change_record(&request.workflow_id, current.head_sequence)?
                 && record.edit_id == request.edit_id

@@ -1,8 +1,8 @@
 use kaname_core::{
     v1::{
-        CompileWorkflowRequest, SchemaVersion, SetWorkflowActivationRequest,
-        ValidateWorkflowRequest, WorkflowLibraryQueryRequest, WorkflowPortfolioQuery,
-        workflow_library_query_request,
+        CompileWorkflowRequest, FrozenWorkflowDraftImport, ImportFrozenWorkspaceRequest,
+        SchemaVersion, SetWorkflowActivationRequest, ValidateWorkflowRequest,
+        WorkflowLibraryQueryRequest, WorkflowPortfolioQuery, workflow_library_query_request,
     },
     workflow_protocol::{self, WorkflowProtocolError},
 };
@@ -76,6 +76,27 @@ fn library_queries_and_activation_decode_without_accepting_storage_paths() {
     assert_eq!(
         workflow_protocol::decode_activation_request(&activation.encode_to_vec()).unwrap(),
         activation
+    );
+    let frozen = ImportFrozenWorkspaceRequest {
+        schema_version: version(),
+        request_id: "library:import-001".into(),
+        receipt_id: "workspace-receipt".into(),
+        source_digest: "a".repeat(64),
+        imported_at_unix_millis: 60,
+        drafts: vec![FrozenWorkflowDraftImport {
+            workflow_id: "workflow-one".into(),
+            package_id: "dev.kaname.one".into(),
+            name: "One".into(),
+            summary: String::new(),
+            workflow_json: b"{}".to_vec(),
+            layout_json: b"{}".to_vec(),
+            comparison_json: b"{}".to_vec(),
+            blocked: true,
+        }],
+    };
+    assert_eq!(
+        workflow_protocol::decode_frozen_workspace_import_request(&frozen.encode_to_vec()).unwrap(),
+        frozen
     );
 
     let mut missing = query;

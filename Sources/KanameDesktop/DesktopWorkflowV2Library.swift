@@ -12,6 +12,11 @@ public protocol DesktopWorkflowLibraryTransport: Sendable {
         _ request: Kaname_V1_SetWorkflowActivationRequest,
         timeout: TimeInterval
     ) async throws -> Kaname_V1_SetWorkflowActivationResponse
+
+    func importFrozenWorkspace(
+        _ request: Kaname_V1_ImportFrozenWorkspaceRequest,
+        timeout: TimeInterval
+    ) async throws -> Kaname_V1_ImportFrozenWorkspaceResponse
 }
 
 extension LocalCoreRunner: DesktopWorkflowLibraryTransport {}

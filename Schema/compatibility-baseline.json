@@ -48,6 +48,11 @@
       "5": "SYNC_RECEIPT_STATE_REJECTED",
       "6": "SYNC_RECEIPT_STATE_RESYNC_REQUIRED"
     },
+    "workflow.FrozenWorkspaceImportOutcome": {
+      "0": "FROZEN_WORKSPACE_IMPORT_OUTCOME_UNSPECIFIED",
+      "1": "FROZEN_WORKSPACE_IMPORT_OUTCOME_CREATED",
+      "2": "FROZEN_WORKSPACE_IMPORT_OUTCOME_BLOCKED"
+    },
     "workflow.WorkflowCheckOutcome": {
       "0": "WORKFLOW_CHECK_OUTCOME_UNSPECIFIED",
       "1": "WORKFLOW_CHECK_OUTCOME_VALID",
@@ -335,6 +340,39 @@
       "5": "bool diagnostics_truncated",
       "6": "bytes compiled_artifact",
       "7": "WorkflowArtifactDigests digests"
+    },
+    "workflow.FrozenWorkflowDraftImport": {
+      "1": "string workflow_id",
+      "2": "string package_id",
+      "3": "string name",
+      "4": "string summary",
+      "5": "bytes workflow_json",
+      "6": "bytes layout_json",
+      "7": "bytes comparison_json",
+      "8": "bool blocked"
+    },
+    "workflow.ImportFrozenWorkspaceRequest": {
+      "1": "SchemaVersion schema_version",
+      "2": "string request_id",
+      "3": "string receipt_id",
+      "4": "string source_digest",
+      "5": "int64 imported_at_unix_millis",
+      "6": "FrozenWorkflowDraftImport drafts"
+    },
+    "workflow.ImportFrozenWorkspaceResponse": {
+      "1": "SchemaVersion schema_version",
+      "2": "string request_id",
+      "3": "string source_digest",
+      "4": "FrozenWorkspaceImportOutcome outcome",
+      "5": "string comparison_digest",
+      "6": "bool duplicate",
+      "7": "ImportedFrozenWorkflow workflows"
+    },
+    "workflow.ImportedFrozenWorkflow": {
+      "1": "string workflow_id",
+      "2": "int64 generation",
+      "3": "bool blocked",
+      "4": "string comparison_digest"
     },
     "workflow.SetWorkflowActivationRequest": {
       "1": "SchemaVersion schema_version",

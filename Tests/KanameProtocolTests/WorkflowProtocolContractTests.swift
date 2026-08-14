@@ -102,6 +102,32 @@ struct WorkflowProtocolContractTests {
     }
 
     @Test
+    func frozenWorkspaceImportCarriesSanitizedDraftsWithoutAFilePath() throws {
+        var draft = Kaname_V1_FrozenWorkflowDraftImport()
+        draft.workflowID = "workflow-one"
+        draft.packageID = "dev.kaname.one"
+        draft.name = "One"
+        draft.workflowJson = Data(#"{"workflowId":"workflow-one"}"#.utf8)
+        draft.layoutJson = Data(#"{"nodes":[]}"#.utf8)
+        draft.comparisonJson = Data(#"{"blocking":true}"#.utf8)
+        draft.blocked = true
+        var request = Kaname_V1_ImportFrozenWorkspaceRequest()
+        request.schemaVersion = schemaVersion()
+        request.requestID = "library:import-001"
+        request.receiptID = "workspace-receipt"
+        request.sourceDigest = String(repeating: "a", count: 64)
+        request.importedAtUnixMillis = 100
+        request.drafts = [draft]
+
+        let decoded = try Kaname_V1_ImportFrozenWorkspaceRequest(
+            serializedBytes: request.serializedData()
+        )
+        #expect(decoded == request)
+        #expect(decoded.drafts[0].blocked)
+        #expect(decoded.drafts[0].workflowJson == draft.workflowJson)
+    }
+
+    @Test
     func malformedWireFailsWithoutProducingAPartialRequest() {
         #expect(throws: (any Error).self) {
             _ = try Kaname_V1_CompileWorkflowRequest(serializedBytes: [0x0a])

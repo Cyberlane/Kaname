@@ -65,6 +65,7 @@ public protocol LocalCoreControlService {
     func recordAuthenticatedMobileSync(_ request: Data, reply: @escaping (Data?, String) -> Void)
     func queryWorkflowLibrary(_ request: Data, reply: @escaping (Data?, String) -> Void)
     func setWorkflowActivation(_ request: Data, reply: @escaping (Data?, String) -> Void)
+    func importFrozenWorkspace(_ request: Data, reply: @escaping (Data?, String) -> Void)
 }
 #endif
 
@@ -72,6 +73,7 @@ public struct LocalCoreRunner: Sendable {
     public static let maximumFixtureIDLength = 4
     public static let maximumResponseBytes = 64 * 1024
     public static let maximumWorkflowLibraryResponseBytes = 3 * 1024 * 1024
+    public static let maximumWorkflowLibraryRequestBytes = 2 * 1024 * 1024
 
     public let machService: String
     public let serviceRequirement: String
@@ -217,6 +219,23 @@ public struct LocalCoreRunner: Sendable {
         )
     }
 
+    public func importFrozenWorkspace(
+        _ request: Kaname_V1_ImportFrozenWorkspaceRequest,
+        timeout: TimeInterval = 15
+    ) async throws -> Kaname_V1_ImportFrozenWorkspaceResponse {
+        let wire = try request.serializedData()
+        guard wire.count <= Self.maximumWorkflowLibraryRequestBytes else {
+            throw LocalCoreRunnerError.malformedReport
+        }
+        return try await workflowLibraryResponse(
+            request: wire,
+            requestID: request.requestID,
+            timeout: timeout,
+            operation: .importFrozenWorkspace,
+            as: Kaname_V1_ImportFrozenWorkspaceResponse.self
+        )
+    }
+
     private func serviceResponse(
         request: Data,
         timeout: TimeInterval,
@@ -351,6 +370,7 @@ private protocol WorkflowLibraryWireResponse: Message {
 
 extension Kaname_V1_WorkflowLibraryQueryResponse: WorkflowLibraryWireResponse {}
 extension Kaname_V1_SetWorkflowActivationResponse: WorkflowLibraryWireResponse {}
+extension Kaname_V1_ImportFrozenWorkspaceResponse: WorkflowLibraryWireResponse {}
 
 #if os(macOS)
 private enum LocalCoreServiceOperation {
@@ -364,10 +384,12 @@ private enum LocalCoreServiceOperation {
     case recordAuthenticatedMobileSync
     case queryWorkflowLibrary
     case setWorkflowActivation
+    case importFrozenWorkspace
 
     var maximumResponseBytes: Int {
         switch self {
-        case .queryWorkflowLibrary: LocalCoreRunner.maximumWorkflowLibraryResponseBytes
+        case .queryWorkflowLibrary, .importFrozenWorkspace:
+            LocalCoreRunner.maximumWorkflowLibraryResponseBytes
         default: LocalCoreRunner.maximumResponseBytes
         }
     }
@@ -420,6 +442,7 @@ private func runBoundedService(
     case .recordAuthenticatedMobileSync: service.recordAuthenticatedMobileSync(request, reply: reply)
     case .queryWorkflowLibrary: service.queryWorkflowLibrary(request, reply: reply)
     case .setWorkflowActivation: service.setWorkflowActivation(request, reply: reply)
+    case .importFrozenWorkspace: service.importFrozenWorkspace(request, reply: reply)
     }
     guard completion.wait(timeout: .now() + timeout) == .success else {
         connection.invalidate()

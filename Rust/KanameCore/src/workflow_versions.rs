@@ -5,7 +5,8 @@
 //! second graph interpreter, and changes only the activation alias row.
 
 use crate::workflow_library::{
-    Result, WorkflowLibraryError, WorkflowLibraryStore, read_bounded_private_file,
+    Result, WorkflowLibraryError, WorkflowLibraryStore, is_workflow_identifier,
+    read_bounded_private_file,
 };
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -121,17 +122,25 @@ impl WorkflowLibraryStore {
         for row in rows {
             let identity = row?;
             let workflow_id = identity.workflow_id;
-            let has_draft = self.connection.query_row(
-                "SELECT EXISTS(SELECT 1 FROM workflow_drafts WHERE workflow_id = ?1)",
-                [&workflow_id],
-                |record| record.get(0),
-            )?;
+            let draft_state: Option<String> = self
+                .connection
+                .query_row(
+                    "SELECT state FROM workflow_drafts WHERE workflow_id = ?1",
+                    [&workflow_id],
+                    |record| record.get(0),
+                )
+                .optional()?;
+            let has_draft = draft_state.is_some();
             let latest = latest_revision_row(&self.connection, &workflow_id)?;
             let alias = activation_row(&self.connection, &workflow_id, alias_key)?;
             let execution_support = latest
                 .as_ref()
                 .map(|row| self.revision_execution_support(&row.revision_id))
-                .transpose()?;
+                .transpose()?
+                .or_else(|| {
+                    (draft_state.as_deref() == Some("unsupported"))
+                        .then_some(WorkflowExecutionSupport::Unsupported)
+                });
             let active_revision_id = alias.as_ref().and_then(|row| row.revision_id.clone());
             let state = if active_revision_id.is_some() {
                 WorkflowPortfolioState::Active
@@ -669,12 +678,7 @@ fn validate_activation_request(request: &SetWorkflowActivation) -> Result<()> {
 }
 
 fn validate_identifier(value: &str, code: &str) -> Result<()> {
-    if value.is_empty()
-        || value.len() > 128
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-    {
+    if !is_workflow_identifier(value, 128) {
         return Err(WorkflowLibraryError::RevisionHistory(code.into()));
     }
     Ok(())

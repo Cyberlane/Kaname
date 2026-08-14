@@ -1,8 +1,8 @@
 use crate::{
     SCHEMA_MAJOR,
     v1::{
-        CompileWorkflowRequest, SetWorkflowActivationRequest, ValidateWorkflowRequest,
-        WorkflowLibraryQueryRequest,
+        CompileWorkflowRequest, ImportFrozenWorkspaceRequest, SetWorkflowActivationRequest,
+        ValidateWorkflowRequest, WorkflowLibraryQueryRequest,
     },
 };
 use prost::Message;
@@ -60,11 +60,7 @@ pub fn decode_compile_request(
 pub fn decode_library_query_request(
     wire: &[u8],
 ) -> Result<WorkflowLibraryQueryRequest, WorkflowProtocolError> {
-    let request: WorkflowLibraryQueryRequest = decode_bounded(wire)?;
-    validate_envelope(
-        request.schema_version.as_ref().map(|version| version.major),
-        &request.request_id,
-    )?;
+    let request: WorkflowLibraryQueryRequest = decode_enveloped(wire)?;
     if request.query.is_none() {
         return Err(WorkflowProtocolError::MissingOperation);
     }
@@ -74,11 +70,44 @@ pub fn decode_library_query_request(
 pub fn decode_activation_request(
     wire: &[u8],
 ) -> Result<SetWorkflowActivationRequest, WorkflowProtocolError> {
-    let request: SetWorkflowActivationRequest = decode_bounded(wire)?;
-    validate_envelope(
-        request.schema_version.as_ref().map(|version| version.major),
-        &request.request_id,
-    )?;
+    decode_enveloped(wire)
+}
+
+pub fn decode_frozen_workspace_import_request(
+    wire: &[u8],
+) -> Result<ImportFrozenWorkspaceRequest, WorkflowProtocolError> {
+    decode_enveloped(wire)
+}
+
+trait WorkflowEnvelope {
+    fn schema_major(&self) -> Option<u32>;
+    fn request_id(&self) -> &str;
+}
+
+macro_rules! workflow_envelope {
+    ($message:ty) => {
+        impl WorkflowEnvelope for $message {
+            fn schema_major(&self) -> Option<u32> {
+                self.schema_version.as_ref().map(|version| version.major)
+            }
+
+            fn request_id(&self) -> &str {
+                &self.request_id
+            }
+        }
+    };
+}
+
+workflow_envelope!(WorkflowLibraryQueryRequest);
+workflow_envelope!(SetWorkflowActivationRequest);
+workflow_envelope!(ImportFrozenWorkspaceRequest);
+
+fn decode_enveloped<M>(wire: &[u8]) -> Result<M, WorkflowProtocolError>
+where
+    M: Message + Default + WorkflowEnvelope,
+{
+    let request: M = decode_bounded(wire)?;
+    validate_envelope(request.schema_major(), request.request_id())?;
     Ok(request)
 }
 

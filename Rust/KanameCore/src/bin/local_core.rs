@@ -6,6 +6,7 @@ use kaname_core::{
     policy::{ApprovalResolutionResult, LocalPolicyCore, approval_fingerprint},
     v1::{self, EventEnvelope},
     workflow_canonical, workflow_compiler,
+    workflow_import::{ImportFrozenWorkflowDraft, ImportFrozenWorkspace},
     workflow_schema::{self, WorkflowSchemaCheckRequest},
     workflow_versions::{
         SetWorkflowActivation, WorkflowExecutionSupport, WorkflowPortfolioState,
@@ -68,7 +69,10 @@ fn main() {
         [operation, application_support] if operation == "workflow-library-activate" => {
             workflow_library_activate(application_support)
         }
-        _ => Err("usage: kaname-local-core scenario <F-01..F-14> | scenario-store <F-01..F-14> <journal-path> | append-event <journal-path> < event-envelope.bin | authorize-action <journal-path> < approval-command.bin | record-review <journal-path> < command-envelope.bin | replay <journal-path> < replay-request.bin | mobile-propose <journal-path> < enrollment-challenge.bin | mobile-decide <journal-path> < enrollment-decision.bin | mobile-admit <journal-path> <recipient-device-id> <recipient-key-id> < encrypted-envelope.bin | scale <S-01..S-04> | workflow-schema-check < request.json | workflow-canonicalize < value.json | workflow-compile < compile-request.bin | workflow-library-query <application-support-root> < query-request.bin | workflow-library-activate <application-support-root> < activation-request.bin".to_owned()),
+        [operation, application_support] if operation == "workflow-library-import-frozen" => {
+            workflow_library_import_frozen(application_support)
+        }
+        _ => Err("usage: kaname-local-core scenario <F-01..F-14> | scenario-store <F-01..F-14> <journal-path> | append-event <journal-path> < event-envelope.bin | authorize-action <journal-path> < approval-command.bin | record-review <journal-path> < command-envelope.bin | replay <journal-path> < replay-request.bin | mobile-propose <journal-path> < enrollment-challenge.bin | mobile-decide <journal-path> < enrollment-decision.bin | mobile-admit <journal-path> <recipient-device-id> <recipient-key-id> < encrypted-envelope.bin | scale <S-01..S-04> | workflow-schema-check < request.json | workflow-canonicalize < value.json | workflow-compile < compile-request.bin | workflow-library-query <application-support-root> < query-request.bin | workflow-library-activate <application-support-root> < activation-request.bin | workflow-library-import-frozen <application-support-root> < import-request.bin".to_owned()),
     };
     match result {
         Ok(json) => println!("{json}"),
@@ -220,6 +224,71 @@ fn workflow_library_activate_wire(
             revision_id: outcome.revision_id.unwrap_or_default(),
             generation: outcome.generation,
             duplicate: outcome.duplicate,
+        }
+        .encode_to_vec(),
+    ))
+}
+
+fn workflow_library_import_frozen(application_support: &str) -> Result<String, String> {
+    let wire = read_standard_input()?;
+    workflow_library_import_frozen_wire(application_support, &wire)
+}
+
+fn workflow_library_import_frozen_wire(
+    application_support: &str,
+    wire: &[u8],
+) -> Result<String, String> {
+    let request = kaname_core::workflow_protocol::decode_frozen_workspace_import_request(wire)
+        .map_err(|_| "workflow_import_request_rejected".to_owned())?;
+    let mut store = open_workflow_library(application_support)
+        .map_err(|_| "workflow_library_unavailable".to_owned())?;
+    let outcome = store
+        .import_frozen_workspace(ImportFrozenWorkspace {
+            receipt_id: request.receipt_id,
+            source_digest: request.source_digest,
+            imported_at_unix_millis: request.imported_at_unix_millis,
+            drafts: request
+                .drafts
+                .into_iter()
+                .map(|draft| ImportFrozenWorkflowDraft {
+                    workflow_id: draft.workflow_id,
+                    package_id: draft.package_id,
+                    name: draft.name,
+                    summary: draft.summary,
+                    workflow_source: draft.workflow_json,
+                    layout_source: draft.layout_json,
+                    comparison_source: draft.comparison_json,
+                    blocked: draft.blocked,
+                })
+                .collect(),
+        })
+        .map_err(|_| "workflow_import_failed".to_owned())?;
+    let import_outcome = match outcome.outcome.as_str() {
+        "created" => v1::FrozenWorkspaceImportOutcome::Created as i32,
+        "blocked" => v1::FrozenWorkspaceImportOutcome::Blocked as i32,
+        _ => return Err("workflow_import_outcome_invalid".into()),
+    };
+    Ok(hex::encode(
+        v1::ImportFrozenWorkspaceResponse {
+            schema_version: Some(v1::SchemaVersion {
+                major: kaname_core::SCHEMA_MAJOR,
+                minor: 0,
+            }),
+            request_id: request.request_id,
+            source_digest: outcome.source_digest,
+            outcome: import_outcome,
+            comparison_digest: outcome.comparison_digest,
+            duplicate: outcome.duplicate,
+            workflows: outcome
+                .workflows
+                .into_iter()
+                .map(|item| v1::ImportedFrozenWorkflow {
+                    workflow_id: item.workflow_id,
+                    generation: item.generation,
+                    blocked: item.blocked,
+                    comparison_digest: item.comparison_digest,
+                })
+                .collect(),
         }
         .encode_to_vec(),
     ))
@@ -772,9 +841,10 @@ mod tests {
         CommandEnvelope, CompileWorkflowRequest, CompileWorkflowResponse,
         DeviceEnrollmentChallenge, DeviceEnrollmentDecision, DeviceEnrollmentReceipt,
         DeviceEnrollmentState, DevicePublicIdentity, EncryptedSyncEnvelope, EventProvenance,
-        EvidenceRetentionClass, OpaqueTypedPayload, ReplayRequest, ReviewDecision, SchemaVersion,
-        Scope, SyncAuthenticatedHeader, SyncReceipt, SyncReceiptState, WorkflowLibraryQueryRequest,
-        WorkflowLibraryQueryResponse, WorkflowPortfolioQuery,
+        EvidenceRetentionClass, FrozenWorkflowDraftImport, ImportFrozenWorkspaceRequest,
+        ImportFrozenWorkspaceResponse, OpaqueTypedPayload, ReplayRequest, ReviewDecision,
+        SchemaVersion, Scope, SyncAuthenticatedHeader, SyncReceipt, SyncReceiptState,
+        WorkflowLibraryQueryRequest, WorkflowLibraryQueryResponse, WorkflowPortfolioQuery,
     };
     use tempfile::tempdir;
 
@@ -871,6 +941,60 @@ mod tests {
             ),
             Err("workflow_library_query_rejected".into())
         );
+    }
+
+    #[test]
+    fn frozen_workspace_import_wire_is_path_free_and_idempotent() {
+        let directory = tempdir().unwrap();
+        let source_digest = "a".repeat(64);
+        let request = ImportFrozenWorkspaceRequest {
+            schema_version: Some(SchemaVersion { major: 1, minor: 0 }),
+            request_id: "import:frozen-wire-001".into(),
+            receipt_id: "workspace-aaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            source_digest: source_digest.clone(),
+            imported_at_unix_millis: 100,
+            drafts: vec![FrozenWorkflowDraftImport {
+                workflow_id: "workflow-wire".into(),
+                package_id: "dev.kaname.workflow-wire".into(),
+                name: "Wire import".into(),
+                summary: "Sanitized frozen workflow".into(),
+                workflow_json: br#"{"workflowId":"workflow-wire","packageId":"dev.kaname.workflow-wire","name":"Wire import","summary":"Sanitized frozen workflow"}"#.to_vec(),
+                layout_json: br#"{"nodes":[]}"#.to_vec(),
+                comparison_json: format!(
+                    "{{\"workspaceSourceDigest\":\"{source_digest}\",\"workflowId\":\"workflow-wire\",\"blocking\":true}}"
+                )
+                .into_bytes(),
+                blocked: true,
+            }],
+        };
+
+        let first = workflow_library_import_frozen_wire(
+            directory.path().to_str().unwrap(),
+            &request.encode_to_vec(),
+        )
+        .unwrap();
+        let first =
+            ImportFrozenWorkspaceResponse::decode(hex::decode(first).unwrap().as_slice()).unwrap();
+        assert_eq!(first.request_id, request.request_id);
+        assert_eq!(first.source_digest, source_digest);
+        assert_eq!(
+            first.outcome,
+            v1::FrozenWorkspaceImportOutcome::Blocked as i32
+        );
+        assert!(!first.duplicate);
+        assert_eq!(first.workflows.len(), 1);
+        assert_eq!(first.workflows[0].workflow_id, "workflow-wire");
+
+        let second = workflow_library_import_frozen_wire(
+            directory.path().to_str().unwrap(),
+            &request.encode_to_vec(),
+        )
+        .unwrap();
+        let second =
+            ImportFrozenWorkspaceResponse::decode(hex::decode(second).unwrap().as_slice()).unwrap();
+        assert!(second.duplicate);
+        assert_eq!(second.comparison_digest, first.comparison_digest);
+        assert_eq!(second.workflows, first.workflows);
     }
 
     #[test]
