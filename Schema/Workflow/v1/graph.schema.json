@@ -15,9 +15,13 @@
       "items": {
         "type": "object",
         "required": [
+          "id",
           "nodeId"
         ],
         "properties": {
+          "id": {
+            "$ref": "identifiers.schema.json#/$defs/uuidV7"
+          },
           "nodeId": {
             "$ref": "identifiers.schema.json#/$defs/uuidV7"
           },

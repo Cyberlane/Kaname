@@ -26,6 +26,7 @@
     "id",
     "from",
     "to",
+    "mappingId",
     "mapping"
   ],
   "properties": {
@@ -37,6 +38,9 @@
     },
     "to": {
       "$ref": "#/$defs/endpoint"
+    },
+    "mappingId": {
+      "$ref": "identifiers.schema.json#/$defs/uuidV7"
     },
     "mapping": {
       "$ref": "mapping.schema.json"

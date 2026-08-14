@@ -272,8 +272,14 @@ fn workflow_graph_and_node_envelope_are_closed_at_their_boundaries() {
     let documents = schema_documents();
     let registry = prepared_registry(&documents);
     let manual = node("trigger.manual", json!({}));
-    let graph =
-        json!({"entrypoints": [{"nodeId": NODE_ID}], "nodes": [manual.clone()], "edges": []});
+    let graph = json!({
+        "entrypoints": [{
+            "id": "018f0000-0004-7000-8000-000000000004",
+            "nodeId": NODE_ID
+        }],
+        "nodes": [manual.clone()],
+        "edges": []
+    });
     let workflow = json!({
         "formatVersion": 1,
         "workflowId": "018f0000-0002-7000-8000-000000000002",
