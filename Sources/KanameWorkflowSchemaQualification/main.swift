@@ -1,5 +1,6 @@
 import Foundation
 import KanameDesktop
+import KanameToolchainQualificationSupport
 
 private struct ScenarioCorpus: Decodable {
     let scenarios: [Scenario]
@@ -75,8 +76,8 @@ private struct QualificationReport: Encodable {
 @main
 private enum KanameWorkflowSchemaQualification {
     static func main() throws {
-        guard let corePath = value(after: "--core"),
-              let corpusPath = value(after: "--corpus") else {
+        guard let corePath = KanameToolchainQualificationProcess.argumentValue(after: "--core"),
+              let corpusPath = KanameToolchainQualificationProcess.argumentValue(after: "--corpus") else {
             throw QualificationError.usage
         }
         let core = URL(fileURLWithPath: corePath)
@@ -143,32 +144,13 @@ private enum KanameWorkflowSchemaQualification {
 
     private static func invoke(core: URL, request: CheckerRequest) throws -> CheckerReport {
         let input = try JSONEncoder().encode(request)
-        guard !input.isEmpty, input.count <= 512 * 1024 else { throw QualificationError.requestTooLarge }
-        let process = Process()
-        let standardInput = Pipe()
-        let standardOutput = Pipe()
-        let standardError = Pipe()
-        process.executableURL = core
-        process.arguments = ["workflow-schema-check"]
-        process.standardInput = standardInput
-        process.standardOutput = standardOutput
-        process.standardError = standardError
-        try process.run()
-        try standardInput.fileHandleForWriting.write(contentsOf: input)
-        try standardInput.fileHandleForWriting.close()
-        process.waitUntilExit()
-        let output = standardOutput.fileHandleForReading.readDataToEndOfFile()
-        let error = standardError.fileHandleForReading.readDataToEndOfFile()
-        guard process.terminationStatus == 0, output.count <= 64 * 1024 else {
-            throw QualificationError.coreFailed(String(decoding: error.prefix(512), as: UTF8.self))
-        }
+        let output = try KanameToolchainQualificationProcess.invoke(
+            executable: core,
+            operation: "workflow-schema-check",
+            input: input,
+            maximumResponseBytes: 64 * 1024
+        )
         return try JSONDecoder().decode(CheckerReport.self, from: output)
-    }
-
-    private static func value(after flag: String) -> String? {
-        guard let index = CommandLine.arguments.firstIndex(of: flag),
-              CommandLine.arguments.indices.contains(index + 1) else { return nil }
-        return CommandLine.arguments[index + 1]
     }
 
     private static let schemaJSON = #"""
@@ -194,8 +176,6 @@ private enum KanameWorkflowSchemaQualification {
 private enum QualificationError: Error {
     case usage
     case emptyCorpus
-    case requestTooLarge
-    case coreFailed(String)
     case checkFailed
 }
 

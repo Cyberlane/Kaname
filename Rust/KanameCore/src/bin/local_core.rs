@@ -4,6 +4,7 @@ use kaname_core::{
     mobile::{EnrollmentAdmission, SyncAdmission},
     policy::{ApprovalResolutionResult, LocalPolicyCore, approval_fingerprint},
     v1::{self, EventEnvelope},
+    workflow_canonical,
     workflow_schema::{self, WorkflowSchemaCheckRequest},
 };
 use prost::Message;
@@ -52,7 +53,8 @@ fn main() {
         }
         [operation, fixture_id] if operation == "scale" => scale(fixture_id),
         [operation] if operation == "workflow-schema-check" => workflow_schema_check(),
-        _ => Err("usage: kaname-local-core scenario <F-01..F-14> | scenario-store <F-01..F-14> <journal-path> | append-event <journal-path> < event-envelope.bin | authorize-action <journal-path> < approval-command.bin | record-review <journal-path> < command-envelope.bin | replay <journal-path> < replay-request.bin | mobile-propose <journal-path> < enrollment-challenge.bin | mobile-decide <journal-path> < enrollment-decision.bin | mobile-admit <journal-path> <recipient-device-id> <recipient-key-id> < encrypted-envelope.bin | scale <S-01..S-04> | workflow-schema-check < request.json".to_owned()),
+        [operation] if operation == "workflow-canonicalize" => workflow_canonicalize(),
+        _ => Err("usage: kaname-local-core scenario <F-01..F-14> | scenario-store <F-01..F-14> <journal-path> | append-event <journal-path> < event-envelope.bin | authorize-action <journal-path> < approval-command.bin | record-review <journal-path> < command-envelope.bin | replay <journal-path> < replay-request.bin | mobile-propose <journal-path> < enrollment-challenge.bin | mobile-decide <journal-path> < enrollment-decision.bin | mobile-admit <journal-path> <recipient-device-id> <recipient-key-id> < encrypted-envelope.bin | scale <S-01..S-04> | workflow-schema-check < request.json | workflow-canonicalize < value.json".to_owned()),
     };
     match result {
         Ok(json) => println!("{json}"),
@@ -61,6 +63,30 @@ fn main() {
             std::process::exit(64);
         }
     }
+}
+
+fn workflow_canonicalize() -> Result<String, String> {
+    let wire = read_standard_input()?;
+    workflow_canonicalize_wire(&wire)
+}
+
+fn workflow_canonicalize_wire(wire: &[u8]) -> Result<String, String> {
+    let report = workflow_canonical::canonicalize(&wire).map_err(|error| match error {
+        workflow_canonical::WorkflowCanonicalError::InputOutOfBounds => {
+            "workflow_canonical_input_out_of_bounds"
+        }
+        workflow_canonical::WorkflowCanonicalError::InvalidIJson => {
+            "workflow_canonical_input_invalid"
+        }
+        workflow_canonical::WorkflowCanonicalError::EncodingFailed => {
+            "workflow_canonical_encoding_failed"
+        }
+    })?;
+    serde_json::to_string(&serde_json::json!({
+        "canonical_hex": hex::encode(report.canonical_bytes),
+        "sha256": report.sha256,
+    }))
+    .map_err(|_| "workflow_canonical_report_encoding_failed".into())
 }
 
 fn read_standard_input() -> Result<Vec<u8>, String> {
@@ -559,6 +585,22 @@ mod tests {
         SyncReceiptState,
     };
     use tempfile::tempdir;
+
+    #[test]
+    fn workflow_canonicalize_returns_bounded_bytes_and_digest() {
+        let response = workflow_canonicalize_wire(br#"{"b":2,"a":1}"#).unwrap();
+        let report: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(report["canonical_hex"], "7b2261223a312c2262223a327d");
+        assert_eq!(
+            report["sha256"],
+            "sha256:43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777"
+        );
+        let oversized = vec![b' '; workflow_canonical::MAXIMUM_CANONICAL_INPUT_BYTES + 1];
+        assert_eq!(
+            workflow_canonicalize_wire(&oversized).unwrap_err(),
+            "workflow_canonical_input_out_of_bounds"
+        );
+    }
 
     #[test]
     fn workflow_schema_check_rejects_malformed_and_oversized_requests() {

@@ -30,9 +30,17 @@ let package = Package(
         .executable(name: "KanameWorkflowWorker", targets: ["KanameWorkflowWorker"]),
         .executable(name: "KanameProtocolFixtureTool", targets: ["KanameProtocolFixtureTool"]),
         .executable(name: "KanamePhase3Qualification", targets: ["KanamePhase3Qualification"]),
+        .library(
+            name: "KanameToolchainQualificationSupport",
+            targets: ["KanameToolchainQualificationSupport"]
+        ),
         .executable(
             name: "KanameWorkflowSchemaQualification",
             targets: ["KanameWorkflowSchemaQualification"]
+        ),
+        .executable(
+            name: "KanameWorkflowCanonicalQualification",
+            targets: ["KanameWorkflowCanonicalQualification"]
         ),
     ],
     dependencies: [
@@ -140,8 +148,13 @@ let package = Package(
         ),
         .executableTarget(
             name: "KanameWorkflowSchemaQualification",
-            dependencies: ["KanameDesktop"]
+            dependencies: ["KanameDesktop", "KanameToolchainQualificationSupport"]
         ),
+        .executableTarget(
+            name: "KanameWorkflowCanonicalQualification",
+            dependencies: ["KanameToolchainQualificationSupport"]
+        ),
+        .target(name: "KanameToolchainQualificationSupport"),
         .testTarget(
             name: "KanameDomainTests",
             dependencies: ["KanameDomain", "KanameFixtures", "KanameConnectivity", "KanameLocalCore", "KanameProtocol"]

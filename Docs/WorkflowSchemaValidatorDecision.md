@@ -12,7 +12,7 @@ The crate is MIT-licensed, supports Rust 1.85 or newer, builds on the repository
 
 ## Qualification result
 
-`Scripts/qualify-workflow-schema-toolchain.sh` performs a locked offline Cargo build, builds the Swift qualification client, and sends every WFP-000 acceptance scenario through bounded JSON stdin/stdout into the Rust checker. It also sends an invalid instance twice and requires the structured diagnostic reports to be identical and masked.
+`Scripts/qualify-workflow-toolchain.sh schema` performs a locked offline Cargo build, builds the Swift qualification client, and sends every WFP-000 acceptance scenario through bounded JSON stdin/stdout into the Rust checker. It also sends an invalid instance twice and requires the structured diagnostic reports to be identical and masked.
 
 The final local debug qualification passed all 25 scenarios. The deliberate invalid call was rejected. Median one-process-per-call latency was about 73 ms and p95 about 74 ms. The unoptimized `kaname-local-core` binary was 21,834,928 bytes; the optimized release binary was 8,885,440 bytes. These are spike baselines; the production signed-XPC service will keep a stable boundary and WFP-001D will replace this temporary JSON qualification envelope with versioned Protobuf.
 

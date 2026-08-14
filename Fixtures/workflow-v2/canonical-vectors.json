@@ -1,0 +1,55 @@
+{
+  "contract": "RFC 8785",
+  "vectors": [
+    {
+      "id": "semantic-graph",
+      "role": "definitionDigest",
+      "input": "{\"summary\":\"Synthetic\",\"name\":\"Review\",\"formatVersion\":1}",
+      "canonical": "{\"formatVersion\":1,\"name\":\"Review\",\"summary\":\"Synthetic\"}",
+      "sha256": "sha256:548868dce5f4806aa57279ecdb05c5090c4394f5f4a5983b594a4bb372a9f9c9"
+    },
+    {
+      "id": "layout",
+      "role": "layoutDigest",
+      "input": "{\"nodes\":{\"😀\":{\"y\":2,\"x\":1},\"a\":{\"x\":0,\"y\":0}},\"viewport\":{\"zoom\":1.0}}",
+      "canonical": "{\"nodes\":{\"a\":{\"x\":0,\"y\":0},\"😀\":{\"x\":1,\"y\":2}},\"viewport\":{\"zoom\":1}}",
+      "sha256": "sha256:bd71891d2ace42427aee6254475875301bbbc8dc3936cfa9b83fb8b55436ff9b"
+    },
+    {
+      "id": "schema-lock",
+      "role": "schemaBundleDigest",
+      "input": "{\"schemas\":[{\"digest\":\"sha256:00\",\"id\":\"z\"},{\"id\":\"a\",\"digest\":\"sha256:11\"}],\"version\":1}",
+      "canonical": "{\"schemas\":[{\"digest\":\"sha256:00\",\"id\":\"z\"},{\"digest\":\"sha256:11\",\"id\":\"a\"}],\"version\":1}",
+      "sha256": "sha256:a01e1aaf679a7f1ac26db347a8839a233ac2cf54cf1773d45b208750c01a57a0"
+    },
+    {
+      "id": "dependency-lock",
+      "role": "dependencyLockDigest",
+      "input": "{\"dependencies\":{\"z\":\"2.0.0\",\"a\":\"1.0.0\"},\"version\":1}",
+      "canonical": "{\"dependencies\":{\"a\":\"1.0.0\",\"z\":\"2.0.0\"},\"version\":1}",
+      "sha256": "sha256:a5258cbcf05de6e69347e0d6f8ab1a23ea498082012902acb4ba8f8868ccaf80"
+    },
+    {
+      "id": "configuration-contract",
+      "role": "configurationContractDigest",
+      "input": "{\"optional\":null,\"present\":true,\"nested\":{\"b\":2,\"a\":1}}",
+      "canonical": "{\"nested\":{\"a\":1,\"b\":2},\"optional\":null,\"present\":true}",
+      "sha256": "sha256:a1fecb4414b8b02f1d782494e6a8500d5a6a4805f51ded6d7cab0a1577ad98e4"
+    },
+    {
+      "id": "compiled-artifact",
+      "role": "compiledArtifactDigest",
+      "input": "{\"numbers\":[333333333.33333329,1E30,4.50,2e-3,0.000000000000000000000000001],\"string\":\"\\u20ac$\\u000F\\nA\\u0022\\\\/\",\"literals\":[null,true,false]}",
+      "canonical": "{\"literals\":[null,true,false],\"numbers\":[333333333.3333333,1e+30,4.5,0.002,1e-27],\"string\":\"€$\\u000f\\nA\\\"\\\\/\"}",
+      "sha256": "sha256:ba269f1315ab81599d78ad131d709a7f22f9af6a8a383645350833ade8f9e1bb"
+    }
+  ],
+  "rejected": [
+    {"id":"duplicate-key","input":"{\"a\":1,\"a\":2}","error":"workflow_canonical_input_invalid"},
+    {"id":"unsafe-integer","input":"9007199254740992","error":"workflow_canonical_input_invalid"},
+    {"id":"lone-surrogate","input":"\"\\ud800\"","error":"workflow_canonical_input_invalid"},
+    {"id":"non-finite","input":"NaN","error":"workflow_canonical_input_invalid"},
+    {"id":"trailing-data","input":"{} {}","error":"workflow_canonical_input_invalid"},
+    {"id":"empty","input":"","error":"workflow_canonical_input_out_of_bounds"}
+  ]
+}

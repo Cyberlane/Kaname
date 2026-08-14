@@ -11,6 +11,7 @@ pub mod fake_provider;
 pub mod journal;
 pub mod mobile;
 pub mod policy;
+pub mod workflow_canonical;
 pub mod workflow_schema;
 
 pub const SCHEMA_MAJOR: u32 = 1;
