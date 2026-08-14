@@ -247,6 +247,7 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
             existing.makeKeyAndOrderFront(nil)
             NSApplication.shared.activate(ignoringOtherApps: true)
             postMouseBackEventIfRequested(to: existing)
+            verifyResizeCursorsIfRequested(window: existing)
             captureSnapshotIfRequested(window: existing)
             return true
         }
@@ -269,6 +270,7 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
         fallbackWindow = window
         NSApplication.shared.activate(ignoringOtherApps: true)
         postMouseBackEventIfRequested(to: window)
+        verifyResizeCursorsIfRequested(window: window)
         captureSnapshotIfRequested(window: window)
         return true
     }
@@ -309,9 +311,8 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func captureSnapshotIfRequested(window: NSWindow) {
-        guard let flagIndex = CommandLine.arguments.firstIndex(of: "--snapshot"),
-              CommandLine.arguments.indices.contains(flagIndex + 1) else { return }
-        let outputURL = URL(fileURLWithPath: CommandLine.arguments[flagIndex + 1])
+        guard let outputPath = commandLineValue(after: "--snapshot") else { return }
+        let outputURL = URL(fileURLWithPath: outputPath)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
             self?.applyRequestedWindowSize(to: window)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
@@ -340,6 +341,21 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
                 )
             }
         }
+    }
+
+    private func verifyResizeCursorsIfRequested(window: NSWindow) {
+        guard let outputPath = commandLineValue(after: "--desktop-verify-resize-cursors") else { return }
+        let outputURL = URL(fileURLWithPath: outputPath)
+        guard let overlay = KanameWindowResizeCursorOverlay.installed(in: window) else {
+            finishResizeCursorQualification(nil, at: outputURL)
+        }
+        let checks = overlay.qualificationChecks()
+        let receipt: [String: Any] = [
+            "schemaVersion": 1,
+            "resizable": window.styleMask.contains(.resizable),
+            "checks": checks,
+        ]
+        finishResizeCursorQualification(receipt, at: outputURL)
     }
 }
 
@@ -408,6 +424,25 @@ private func finishSnapshotCapture(_ png: Data?, at outputURL: URL) -> Never {
     }
 }
 
+private func finishResizeCursorQualification(_ receipt: [String: Any]?, at outputURL: URL) -> Never {
+    guard let receipt,
+          JSONSerialization.isValidJSONObject(receipt),
+          let checks = receipt["checks"] as? [String: Bool],
+          !checks.isEmpty,
+          checks.values.allSatisfy({ $0 }) else {
+        fputs("Kaname resize-cursor qualification failed.\n", stderr)
+        Darwin.exit(EXIT_FAILURE)
+    }
+    do {
+        let data = try JSONSerialization.data(withJSONObject: receipt, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: outputURL, options: .atomic)
+        Darwin.exit(EXIT_SUCCESS)
+    } catch {
+        fputs("Kaname could not write the resize-cursor qualification receipt.\n", stderr)
+        Darwin.exit(EXIT_FAILURE)
+    }
+}
+
 /// SwiftUI can replace the cursor rectangles owned by its hosting hierarchy.
 /// Keep a hit-test-transparent layer on the native window frame so macOS still
 /// advertises the standard resize cursors at every edge and corner.
@@ -442,6 +477,12 @@ final class KanameWindowResizeCursorOverlay: NSView {
         overlay.autoresizingMask = [.width, .height]
         frameView.addSubview(overlay, positioned: .above, relativeTo: nil)
         window.invalidateCursorRects(for: overlay)
+    }
+
+    static func installed(in window: NSWindow) -> KanameWindowResizeCursorOverlay? {
+        window.contentView?.superview?.subviews.first {
+            $0.identifier == identifier
+        } as? KanameWindowResizeCursorOverlay
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
@@ -542,6 +583,39 @@ final class KanameWindowResizeCursorOverlay: NSView {
         if let position = resizePosition(at: point) {
             resizeCursor(at: position).set()
         }
+    }
+
+    func qualificationChecks() -> [String: Bool] {
+        updateTrackingAreas()
+        resetCursorRects()
+        let inset = Self.edgeThickness / 2
+        let samples: [(String, NSPoint, ResizePosition)] = [
+            ("top", NSPoint(x: bounds.midX, y: bounds.maxY - inset), .top),
+            ("bottom", NSPoint(x: bounds.midX, y: bounds.minY + inset), .bottom),
+            ("left", NSPoint(x: bounds.minX + inset, y: bounds.midY), .left),
+            ("right", NSPoint(x: bounds.maxX - inset, y: bounds.midY), .right),
+            ("topLeft", NSPoint(x: bounds.minX + inset, y: bounds.maxY - inset), .topLeft),
+            ("topRight", NSPoint(x: bounds.maxX - inset, y: bounds.maxY - inset), .topRight),
+            ("bottomLeft", NSPoint(x: bounds.minX + inset, y: bounds.minY + inset), .bottomLeft),
+            ("bottomRight", NSPoint(x: bounds.maxX - inset, y: bounds.minY + inset), .bottomRight),
+        ]
+        var checks: [String: Bool] = [
+            "overlayCoversFrame": frame == superview?.bounds,
+            "centerPassesThrough": hitTest(NSPoint(x: bounds.midX, y: bounds.midY)) == nil,
+            "trackingAreaInstalled": cursorTrackingArea != nil,
+        ]
+        for (name, point, expectedPosition) in samples {
+            checks["\(name)HitTarget"] = hitTest(point) === self
+            let cursor = resizeCursor(at: expectedPosition)
+            cursor.set()
+            checks["\(name)CursorSet"] = NSCursor.current === cursor
+        }
+        let initial = NSRect(x: 100, y: 100, width: 1_200, height: 800)
+        let left = resizedFrame(initial, position: .left, deltaX: 40, deltaY: 0)
+        let top = resizedFrame(initial, position: .top, deltaX: 0, deltaY: 40)
+        checks["horizontalResizeGeometry"] = left.origin.x == 140 && left.width == 1_160
+        checks["verticalResizeGeometry"] = top.origin.y == 100 && top.height == 840
+        return checks
     }
 
     private func resizePosition(at point: NSPoint) -> ResizePosition? {
