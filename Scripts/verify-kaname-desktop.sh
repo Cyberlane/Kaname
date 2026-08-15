@@ -118,18 +118,16 @@ run_qualified_app \
 run_qualified_app --desktop-destination localCore --load-local-core --snapshot "$output_directory/local-core.png"
 run_qualified_app --desktop-destination email --snapshot "$output_directory/email.png"
 run_qualified_app \
-    --desktop-destination email \
-    --desktop-email-workflows \
+    --desktop-destination automations \
     --desktop-workflow-fixture "$PWD/Examples/Workflows/generic-case-review.workflow.json" \
     --snapshot "$output_directory/workflow-work.png"
 run_qualified_app \
-    --desktop-destination email \
-    --desktop-email-workflows \
+    --desktop-destination automations \
     --desktop-workflow-definitions \
     --desktop-workflow-fixture "$PWD/Examples/Workflows/generic-case-review.workflow.json" \
     --snapshot "$output_directory/workflow-definitions.png"
 run_qualified_app --desktop-destination calendar --snapshot "$output_directory/calendar.png"
-run_qualified_app --desktop-destination automations --snapshot "$output_directory/automations.png"
+run_qualified_app --desktop-destination automations --desktop-automation-schedules --snapshot "$output_directory/automations.png"
 run_qualified_app --desktop-destination projects --snapshot "$output_directory/projects.png"
 run_qualified_app --desktop-new-conversation --snapshot "$output_directory/new-conversation.png"
 run_qualified_app --desktop-destination projects --desktop-project-id project-kaname --snapshot "$output_directory/project-overview.png"

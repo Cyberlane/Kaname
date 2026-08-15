@@ -874,12 +874,18 @@ struct KanameDesktopWorkspace: View {
                 DesktopEmailView(
                     model: model,
                     integrations: personalIntegrations,
-                    allowsAutomaticInitialRead: searchNavigationRequest?.target.kind != .emailThread
+                    allowsAutomaticInitialRead: searchNavigationRequest?.target.kind != .emailThread,
+                    workflowManagementOnly: false,
+                    openAutomations: { navigate(to: .automations) }
                 )
             case .calendar:
                 DesktopCalendarView(model: model, integrations: personalIntegrations)
             case .automations:
-                DesktopAutomationsView(model: model, scheduler: automationScheduler)
+                DesktopAutomationsView(
+                    model: model,
+                    scheduler: automationScheduler,
+                    integrations: personalIntegrations
+                )
             case .github:
                 DesktopGitHubView(model: model, integrations: personalIntegrations)
             case .skills:
@@ -6353,9 +6359,11 @@ private struct DesktopEmailView: View {
     @ObservedObject var model: DesktopAppModel
     @ObservedObject var integrations: DesktopPersonalIntegrationViewModel
     let allowsAutomaticInitialRead: Bool
+    let workflowManagementOnly: Bool
+    let openAutomations: () -> Void
     @StateObject private var mail = DesktopMailViewModel()
     @State private var showsComposer = false
-    @State private var section = CommandLine.arguments.contains("--desktop-email-workflows") ? MailSection.workflows : MailSection.inbox
+    @State private var section = MailSection.inbox
     @State private var selectedAccountID: String?
     @State private var pendingMutation: GmailThreadMutation?
     @State private var pendingOutboundDraftID: String?
@@ -6390,57 +6398,11 @@ private struct DesktopEmailView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            SurfaceHeader(
-                title: "Email",
-                detail: "Account-isolated Gmail search, complete threads, local drafts, and reconciled actions",
-                symbol: DesktopDestination.email.symbol
-            )
-            .padding(24)
-
-            HStack {
-                Text("View").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
-                Picker("", selection: $section) {
-                    ForEach(MailSection.allCases, id: \.self) { Text($0.label).tag($0) }
-                }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-                .frame(width: 280)
-                Spacer()
-                Text("Account").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
-                Picker("", selection: $selectedAccountID) {
-                    Text("All accounts").tag(String?.none)
-                    ForEach(integrations.googleAccounts) { Text($0.identity).tag(Optional($0.id)) }
-                }
-                .labelsHidden()
-                .frame(maxWidth: 300)
-                Menu {
-                    Button("New local draft", systemImage: "square.and.pencil") { showsComposer = true }
-                    Button("Refresh current search", systemImage: "arrow.clockwise") {
-                        mail.search(accounts: googleAccounts, model: model)
-                    }
-                    .disabled(mail.isBusy || googleAccounts.isEmpty)
-                    Button("New standing rule", systemImage: "checklist") { showsRuleSheet = true }
-                        .disabled(integrations.googleAccounts.isEmpty)
-                    Button("Check workflow triggers", systemImage: "arrow.triangle.2.circlepath") {
-                        mail.checkWorkflowTriggers(model: model)
-                    }
-                    .disabled(!model.workflowTriggerBindings().contains(where: { $0.enabled && $0.trigger == .email }))
-                    Button("Install workflow package…", systemImage: "shippingbox") { installWorkflowPackage() }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                        .accessibilityLabel("Email actions")
-                }
-            }
-            .padding(.horizontal, 24)
-            .padding(.bottom, 16)
-
-            Divider()
-
-            switch section {
-            case .inbox: inboxWorkspace
-            case .drafts: draftsWorkspace
-            case .workflows: workflowsWorkspace
+        Group {
+            if workflowManagementOnly {
+                workflowsWorkspace
+            } else {
+                emailWorkspace
             }
         }
         .background(Nord.polarNight0)
@@ -6492,10 +6454,63 @@ private struct DesktopEmailView: View {
             WorkflowConnectorBindingSheet(model: model, connector: connector)
         }
         .onAppear {
-            if allowsAutomaticInitialRead,
+            if !workflowManagementOnly,
+               allowsAutomaticInitialRead,
                mail.threads.isEmpty,
                !integrations.googleAccounts.isEmpty {
                 mail.search(accounts: googleAccounts, model: model)
+            }
+        }
+    }
+
+    private var emailWorkspace: some View {
+        VStack(spacing: 0) {
+            SurfaceHeader(
+                title: "Email",
+                detail: "Account-isolated Gmail search, complete threads, local drafts, and reconciled actions",
+                symbol: DesktopDestination.email.symbol
+            )
+            .padding(24)
+
+            HStack {
+                Text("View").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                Picker("", selection: $section) {
+                    ForEach(MailSection.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .frame(width: 190)
+                Spacer()
+                Text("Account").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                Picker("", selection: $selectedAccountID) {
+                    Text("All accounts").tag(String?.none)
+                    ForEach(integrations.googleAccounts) { Text($0.identity).tag(Optional($0.id)) }
+                }
+                .labelsHidden()
+                .frame(maxWidth: 300)
+                Menu {
+                    Button("New local draft", systemImage: "square.and.pencil") { showsComposer = true }
+                    Button("Refresh current search", systemImage: "arrow.clockwise") {
+                        mail.search(accounts: googleAccounts, model: model)
+                    }
+                    .disabled(mail.isBusy || googleAccounts.isEmpty)
+                    Divider()
+                    Button("Open Automations", systemImage: DesktopDestination.automations.symbol) {
+                        openAutomations()
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .accessibilityLabel("Email actions")
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 16)
+
+            Divider()
+
+            switch section {
+            case .inbox: inboxWorkspace
+            case .drafts: draftsWorkspace
             }
         }
     }
@@ -6716,6 +6731,19 @@ private struct DesktopEmailView: View {
     private var workflowsWorkspace: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Workflow operations").font(.headline)
+                        Text("Manual checks and package operations stay visible under Automations.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Check triggers", systemImage: "arrow.triangle.2.circlepath") {
+                        mail.checkWorkflowTriggers(model: model)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(!model.workflowTriggerBindings().contains(where: { $0.enabled && $0.trigger == .email }))
+                }
                 BoundaryCallout(
                     title: "Generic workflows, private behavior",
                     detail: "Kaname supplies durable work, context, checks, approvals, effects, and observability. Installed packages supply domain behavior; email content can never broaden their authority."
@@ -6926,6 +6954,17 @@ private struct DesktopEmailView: View {
 
     @ViewBuilder
     private var simpleRuleList: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Simple rules").font(.headline)
+                Text("Narrow Gmail rules remain workflow definitions managed from Automations.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("New simple rule", systemImage: "plus") { showsRuleSheet = true }
+                .buttonStyle(.borderedProminent)
+                .disabled(integrations.googleAccounts.isEmpty)
+        }
         BoundaryCallout(
             title: "Visible, narrow standing authority",
             detail: "Simple rules bind one Gmail account, one saved query, and one reversible action. Trash and send always require an exact approval."
@@ -6974,20 +7013,22 @@ private struct DesktopEmailView: View {
                 LabeledContent {
                     Text(items.count, format: .number).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                 } label: {
-                    Label("Associated workflow work", systemImage: "point.3.connected.trianglepath.dotted").font(.headline)
+                    Label("Associated automation", systemImage: "point.3.connected.trianglepath.dotted").font(.headline)
                 }
                 ForEach(items) { item in
-                    WorkflowWorkItemCard(
-                        model: model,
-                        item: item,
-                        expanded: selectedWorkflowWorkItemID == item.id,
-                        requestEffectApproval: { mail.requestWorkflowEffectApproval(model: model, effect: $0) },
-                        executeEffect: { mail.executeWorkflowEffect(model: model, effect: $0) },
-                        completeHumanReview: { mail.completeWorkflowHumanReview(model: model, runID: $0, stepID: $1) },
-                        toggleExpanded: {
-                            selectedWorkflowWorkItemID = selectedWorkflowWorkItemID == item.id ? nil : item.id
+                    HStack(alignment: .top, spacing: 12) {
+                        Image(systemName: "arrow.triangle.branch")
+                            .foregroundStyle(Nord.frost1)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(item.title).font(.subheadline.weight(.semibold))
+                            Text(item.nextAction).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                            Text(item.state.label).font(.caption2).foregroundStyle(Nord.frost0)
                         }
-                    )
+                        Spacer()
+                        Button("Open in Automations") { openAutomations() }
+                            .buttonStyle(.bordered)
+                    }
+                    .panelStyle()
                 }
             }
         }
@@ -7182,7 +7223,6 @@ private struct DesktopEmailView: View {
 private enum MailSection: String, CaseIterable {
     case inbox
     case drafts
-    case workflows
 
     var label: String { rawValue.capitalized }
 }
@@ -9277,9 +9317,20 @@ private struct CalendarEventMutationSheet: View {
     }
 }
 
+private enum AutomationManagementSection: String, CaseIterable {
+    case workflows
+    case schedules
+
+    var label: String { rawValue.capitalized }
+}
+
 private struct DesktopAutomationsView: View {
     @ObservedObject var model: DesktopAppModel
     @ObservedObject var scheduler: DesktopAutomationSchedulerViewModel
+    @ObservedObject var integrations: DesktopPersonalIntegrationViewModel
+    @State private var section = CommandLine.arguments.contains("--desktop-automation-schedules")
+        ? AutomationManagementSection.schedules
+        : AutomationManagementSection.workflows
     @State private var showsNewAutomation = false
     @State private var editingAutomation: DesktopAutomationRule?
     @State private var automationPendingDeletion: DesktopAutomationRule?
@@ -9289,23 +9340,59 @@ private struct DesktopAutomationsView: View {
             if CommandLine.arguments.contains("--desktop-automation-workflows-prototype") {
                 AutomationWorkflowDesignPreview()
             } else {
-                productionWorkspace
+                automationWorkspace
             }
         }
     }
 
-    private var productionWorkspace: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                SurfaceHeader(
-                    title: "Automations",
-                    detail: "Inspectable schedules, dry runs, missed-run policy, and durable history",
-                    symbol: DesktopDestination.automations.symbol
-                ) {
-                    Button("New automation", systemImage: "plus.circle") { showsNewAutomation = true }
+    private var automationWorkspace: some View {
+        VStack(spacing: 0) {
+            SurfaceHeader(
+                title: "Automations",
+                detail: "Design, test, run, and understand repeatable work in one place",
+                symbol: DesktopDestination.automations.symbol
+            ) {
+                if section == .schedules {
+                    Button("New scheduled rule", systemImage: "plus.circle") { showsNewAutomation = true }
                         .buttonStyle(.borderedProminent)
                 }
+            }
+            .padding(24)
 
+            HStack {
+                Text("View").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                Picker("", selection: $section) {
+                    ForEach(AutomationManagementSection.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .frame(width: 260)
+                Spacer()
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 16)
+
+            Divider()
+
+            switch section {
+            case .workflows:
+                DesktopEmailView(
+                    model: model,
+                    integrations: integrations,
+                    allowsAutomaticInitialRead: false,
+                    workflowManagementOnly: true,
+                    openAutomations: {}
+                )
+            case .schedules:
+                scheduleWorkspace
+            }
+        }
+        .background(Nord.polarNight0)
+    }
+
+    private var scheduleWorkspace: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
                 BoundaryCallout(
                     title: "Safe default: skip missed runs",
                     detail: model.snapshot.preferences.safeMode
@@ -13958,7 +14045,7 @@ private extension DesktopDestination {
         case .knowledge: "Private Obsidian context and repository knowledge with visible provenance."
         case .email: "Account-isolated drafts and externally reconciled communication."
         case .calendar: "Source-aware event proposals with time zones and consequence review."
-        case .automations: "Inspectable schedules, missed-run rules, and durable run history."
+        case .automations: "Workflow design, runs, components, readiness, schedules, and durable evidence."
         case .github: "Local and remote repository state, checks, reviews, and stack relationships."
         case .skills: "Capability provenance, scope, permissions, compatibility, and updates."
         case .devices: "Encrypted reachability and recovery without silently widening authority."
