@@ -50,6 +50,9 @@ fn reply_draft_has_exact_destinations_attachments_and_no_send_authority() {
     assert_eq!(draft.preview.destinations, ["recipient@example.test"]);
     assert_eq!(draft.preview.attachment_handle_ids, ["artifact-report-v2"]);
     assert_eq!(draft.preview.attachment_byte_count, 42);
+    let digest = draft.preview.draft_digest.strip_prefix("sha256:").unwrap();
+    assert_eq!(digest.len(), 64);
+    assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
     assert!(!draft.preview.send_authority);
     assert_eq!(draft.preview.external_operation_count, 0);
 }

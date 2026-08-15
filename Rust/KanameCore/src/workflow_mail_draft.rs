@@ -169,7 +169,7 @@ pub fn compose_draft(
         .ok_or(WorkflowMailDraftError::InvalidAttachment)?;
     Ok(WorkflowMailComposedDraft {
         preview: WorkflowMailDraftPreview {
-            draft_digest: format!("sha256:{}", canonical.sha256),
+            draft_digest: canonical.sha256,
             destination_fingerprint,
             destinations,
             attachment_handle_ids,
