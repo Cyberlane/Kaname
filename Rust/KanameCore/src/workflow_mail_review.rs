@@ -236,7 +236,7 @@ pub fn freeze_read_only_review(
         purge_eligible_at_unix_millis,
         items,
         shadow_mismatches,
-        frozen_digest: format!("sha256:{}", canonical.sha256),
+        frozen_digest: canonical.sha256,
     })
 }
 

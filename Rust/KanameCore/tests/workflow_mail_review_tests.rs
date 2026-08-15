@@ -46,7 +46,9 @@ fn paged_review_deduplicates_correlates_retains_and_proposes_no_effects() {
     assert_eq!(receipt.unique_message_count, 2);
     assert_eq!(receipt.duplicate_message_count, 1);
     assert_eq!(receipt.proposed_effect_count, 0);
-    assert!(receipt.frozen_digest.starts_with("sha256:"));
+    let digest = receipt.frozen_digest.strip_prefix("sha256:").unwrap();
+    assert_eq!(digest.len(), 64);
+    assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
     assert_eq!(receipt.purge_eligible_at_unix_millis, 10_000);
 }
 
