@@ -9,7 +9,7 @@ use crate::v1;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WorkflowLlmProviderDefinition {
     pub provider_id: String,
     pub model_id: String,
@@ -18,6 +18,19 @@ pub struct WorkflowLlmProviderDefinition {
     pub timeout_milliseconds: u64,
     pub maximum_context_bytes: u64,
     pub idempotent: bool,
+    pub tools: Vec<WorkflowLlmProviderToolDefinition>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkflowLlmProviderToolDefinition {
+    pub tool_id: String,
+    pub version: String,
+    pub package_digest: String,
+    pub description: String,
+    pub input_schema_ref: String,
+    pub input_schema: Value,
+    pub output_schema_ref: String,
+    pub output_schema: Value,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -32,8 +45,57 @@ pub struct WorkflowLlmInvocation {
     pub messages: Vec<v1::WorkflowLlmMessage>,
     pub prior_episode_ids: Vec<String>,
     pub attachments: Vec<v1::WorkflowCapabilityArtifactHandle>,
+    pub tool_definitions: Vec<v1::WorkflowLlmToolDefinition>,
     pub output_schema: Value,
     pub timeout_milliseconds: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum WorkflowLlmProviderToolResult {
+    Succeeded(Value),
+    Failed { code: String, error: Value },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkflowLlmProviderToolCall {
+    pub call_id: String,
+    pub tool_id: String,
+    pub input: Value,
+    pub result: WorkflowLlmProviderToolResult,
+    pub duration_milliseconds: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkflowLlmProviderResponseMessage {
+    pub message_id: String,
+    pub role: String,
+    pub kind: String,
+    pub summary: String,
+    pub content: Value,
+    pub tool_call_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkflowLlmProviderUsage {
+    pub input_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub output_tokens: u64,
+    pub reasoning_tokens: u64,
+    pub cost_currency: String,
+    pub input_cost_micros: u64,
+    pub output_cost_micros: u64,
+    pub reasoning_cost_micros: u64,
+    pub tool_cost_micros: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct WorkflowLlmProviderTrace {
+    pub request_id: String,
+    pub response_id: String,
+    pub receipt_metadata: Value,
+    pub tool_calls: Vec<WorkflowLlmProviderToolCall>,
+    pub response_messages: Vec<WorkflowLlmProviderResponseMessage>,
+    pub usage: WorkflowLlmProviderUsage,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -43,20 +105,24 @@ pub enum WorkflowLlmProviderResult {
         elapsed_milliseconds: u64,
         receipt_id: String,
         provider_run_reference: String,
+        trace: WorkflowLlmProviderTrace,
     },
     TimedOut {
         elapsed_milliseconds: u64,
         receipt_id: String,
+        trace: WorkflowLlmProviderTrace,
     },
     MalformedResult {
         summary: String,
         elapsed_milliseconds: u64,
         receipt_id: String,
+        trace: WorkflowLlmProviderTrace,
     },
     Crashed {
         summary: String,
         elapsed_milliseconds: u64,
         receipt_id: String,
+        trace: WorkflowLlmProviderTrace,
     },
 }
 
@@ -106,6 +172,7 @@ pub struct DeterministicWorkflowLlmProvider {
     completed: BTreeMap<String, WorkflowLlmProviderResult>,
     invocation_counts: BTreeMap<String, usize>,
     observed: BTreeMap<String, WorkflowLlmInvocation>,
+    traces: BTreeMap<String, WorkflowLlmProviderTrace>,
 }
 
 impl DeterministicWorkflowLlmProvider {
@@ -117,6 +184,10 @@ impl DeterministicWorkflowLlmProvider {
         self.plans.insert(definition.model_class.clone(), plan);
         self.registrations
             .insert(definition.model_class.clone(), definition);
+    }
+
+    pub fn register_trace(&mut self, model_class: &str, trace: WorkflowLlmProviderTrace) {
+        self.traces.insert(model_class.to_owned(), trace);
     }
 
     pub fn invocation_count(&self, invocation_id: &str) -> usize {
@@ -155,21 +226,48 @@ impl WorkflowLlmProvider for DeterministicWorkflowLlmProvider {
                 elapsed_milliseconds: 0,
             });
         let receipt_id = format!("receipt-{}", invocation.invocation_id);
+        let mut trace = self
+            .traces
+            .get(&invocation.settings.model_class)
+            .cloned()
+            .unwrap_or_default();
+        if trace.request_id.is_empty() {
+            trace.request_id = format!("request-{}", invocation.invocation_id);
+        }
+        if trace.response_id.is_empty() {
+            trace.response_id = format!("response-{}", invocation.invocation_id);
+        }
         let result = match plan {
             DeterministicLlmPlan::Succeed {
                 output,
                 elapsed_milliseconds,
-            } => WorkflowLlmProviderResult::Succeeded {
-                output,
-                elapsed_milliseconds,
-                receipt_id,
-                provider_run_reference: format!("fake-{}", invocation.invocation_id),
-            },
+            } => {
+                if trace.response_messages.is_empty() {
+                    trace
+                        .response_messages
+                        .push(WorkflowLlmProviderResponseMessage {
+                            message_id: format!("message-{}", invocation.invocation_id),
+                            role: "assistant".into(),
+                            kind: "final".into(),
+                            summary: "Final structured response".into(),
+                            content: output.clone(),
+                            tool_call_id: None,
+                        });
+                }
+                WorkflowLlmProviderResult::Succeeded {
+                    output,
+                    elapsed_milliseconds,
+                    receipt_id,
+                    provider_run_reference: format!("fake-{}", invocation.invocation_id),
+                    trace,
+                }
+            }
             DeterministicLlmPlan::TimeOut {
                 elapsed_milliseconds,
             } => WorkflowLlmProviderResult::TimedOut {
                 elapsed_milliseconds,
                 receipt_id,
+                trace,
             },
             DeterministicLlmPlan::Malformed {
                 summary,
@@ -178,6 +276,7 @@ impl WorkflowLlmProvider for DeterministicWorkflowLlmProvider {
                 summary,
                 elapsed_milliseconds,
                 receipt_id,
+                trace,
             },
             DeterministicLlmPlan::Crash {
                 summary,
@@ -186,6 +285,7 @@ impl WorkflowLlmProvider for DeterministicWorkflowLlmProvider {
                 summary,
                 elapsed_milliseconds,
                 receipt_id,
+                trace,
             },
         };
         self.completed

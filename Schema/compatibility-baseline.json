@@ -779,6 +779,11 @@
       "10": "string receipt_id",
       "11": "string provider_run_reference",
       "12": "string idempotency_key",
+      "13": "WorkflowLlmToolCall tool_calls",
+      "14": "WorkflowLlmResponseMessage response_messages",
+      "15": "WorkflowLlmUsage usage",
+      "16": "WorkflowLlmResponseValidation validation",
+      "17": "WorkflowLlmProviderReceipt provider_receipt",
       "2": "string run_token_id",
       "3": "string invocation_id",
       "4": "string attempt_id",
@@ -799,6 +804,7 @@
       "16": "WorkflowValueReference input",
       "17": "uint64 timeout_milliseconds",
       "18": "int64 deadline_unix_millis",
+      "19": "WorkflowLlmToolDefinition tool_definitions",
       "2": "string run_token_id",
       "3": "string invocation_id",
       "4": "string attempt_id",
@@ -851,6 +857,64 @@
       "7": "uint64 maximum_context_bytes",
       "8": "uint32 maximum_output_tokens",
       "9": "string conversation_scope"
+    },
+    "workflow_runtime.WorkflowLlmProviderReceipt": {
+      "1": "string request_id",
+      "2": "string response_id",
+      "3": "string receipt_id",
+      "4": "string provider_run_reference",
+      "5": "string metadata_digest"
+    },
+    "workflow_runtime.WorkflowLlmResponseMessage": {
+      "1": "string message_id",
+      "2": "uint32 sequence",
+      "3": "string role",
+      "4": "string kind",
+      "5": "string summary",
+      "6": "WorkflowValueReference content",
+      "7": "string tool_call_id"
+    },
+    "workflow_runtime.WorkflowLlmResponseValidation": {
+      "1": "string status",
+      "2": "string schema_ref",
+      "3": "string schema_digest",
+      "4": "string diagnostics",
+      "5": "bool diagnostics_truncated"
+    },
+    "workflow_runtime.WorkflowLlmToolCall": {
+      "1": "string call_id",
+      "2": "uint32 sequence",
+      "3": "string tool_id",
+      "4": "string status",
+      "5": "WorkflowValueReference input",
+      "6": "WorkflowValueReference output",
+      "7": "string error_code",
+      "8": "WorkflowValueReference error",
+      "9": "uint64 duration_milliseconds"
+    },
+    "workflow_runtime.WorkflowLlmToolDefinition": {
+      "1": "string tool_id",
+      "2": "string version",
+      "3": "string package_digest",
+      "4": "string description",
+      "5": "string input_schema_ref",
+      "6": "string input_schema_digest",
+      "7": "string output_schema_ref",
+      "8": "string output_schema_digest"
+    },
+    "workflow_runtime.WorkflowLlmUsage": {
+      "1": "uint64 input_tokens",
+      "10": "uint64 reasoning_cost_micros",
+      "11": "uint64 tool_cost_micros",
+      "12": "uint64 total_cost_micros",
+      "2": "uint64 cached_input_tokens",
+      "3": "uint64 output_tokens",
+      "4": "uint64 reasoning_tokens",
+      "5": "uint64 total_tokens",
+      "6": "uint32 tool_call_count",
+      "7": "string cost_currency",
+      "8": "uint64 input_cost_micros",
+      "9": "uint64 output_cost_micros"
     },
     "workflow_runtime.WorkflowMatchTraceRecorded": {
       "1": "string run_id",
@@ -1057,6 +1121,12 @@
       "28": "uint64 started_store_position",
       "29": "uint64 settled_store_position",
       "3": "string execution_token_id",
+      "30": "WorkflowLlmToolDefinition tool_definitions",
+      "31": "WorkflowProjectedLlmToolCall tool_calls",
+      "32": "WorkflowProjectedLlmResponseMessage response_messages",
+      "33": "WorkflowLlmUsage usage",
+      "34": "WorkflowLlmResponseValidation validation",
+      "35": "WorkflowLlmProviderReceipt provider_receipt",
       "4": "string node_id",
       "5": "WorkflowLlmModelSettings settings",
       "6": "string context_digest",
@@ -1086,6 +1156,26 @@
       "7": "uint64 estimated_tokens",
       "8": "uint32 redaction_count",
       "9": "bool truncated"
+    },
+    "workflow_runtime.WorkflowProjectedLlmResponseMessage": {
+      "1": "string message_id",
+      "2": "uint32 sequence",
+      "3": "string role",
+      "4": "string kind",
+      "5": "string summary",
+      "6": "WorkflowProjectedValue content",
+      "7": "string tool_call_id"
+    },
+    "workflow_runtime.WorkflowProjectedLlmToolCall": {
+      "1": "string call_id",
+      "2": "uint32 sequence",
+      "3": "string tool_id",
+      "4": "string status",
+      "5": "WorkflowProjectedValue input",
+      "6": "WorkflowProjectedValue output",
+      "7": "string error_code",
+      "8": "WorkflowProjectedValue error",
+      "9": "uint64 duration_milliseconds"
     },
     "workflow_runtime.WorkflowProjectedMatchTrace": {
       "1": "string event_id",

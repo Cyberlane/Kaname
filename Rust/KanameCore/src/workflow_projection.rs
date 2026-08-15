@@ -24,7 +24,7 @@ use std::{
     time::Duration,
 };
 
-const PROJECTION_SCHEMA_VERSION: i64 = 10;
+const PROJECTION_SCHEMA_VERSION: i64 = 11;
 const DEFAULT_BATCH_SIZE: u32 = 250;
 
 const INITIAL_SCHEMA: &str = r#"
@@ -456,7 +456,13 @@ CREATE TABLE workflow_llm_attempts (
     started_at_unix_millis INTEGER NOT NULL CHECK (started_at_unix_millis >= 0),
     settled_at_unix_millis INTEGER,
     started_store_position INTEGER NOT NULL UNIQUE CHECK (started_store_position > 0),
-    settled_store_position INTEGER UNIQUE
+    settled_store_position INTEGER UNIQUE,
+    tool_definitions_json TEXT NOT NULL,
+    tool_calls_json TEXT,
+    response_messages_json TEXT,
+    usage_wire BLOB,
+    validation_wire BLOB,
+    provider_receipt_wire BLOB
 ) STRICT;
 CREATE INDEX workflow_llm_attempts_run_position
     ON workflow_llm_attempts(run_id, started_store_position, invocation_id);
@@ -1062,6 +1068,42 @@ struct LlmMessageRecord {
     truncated: bool,
 }
 
+#[derive(Deserialize, Serialize)]
+struct LlmToolDefinitionRecord {
+    tool_id: String,
+    version: String,
+    package_digest: String,
+    description: String,
+    input_schema_ref: String,
+    input_schema_digest: String,
+    output_schema_ref: String,
+    output_schema_digest: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct LlmToolCallRecord {
+    call_id: String,
+    sequence: u32,
+    tool_id: String,
+    status: String,
+    input_value_id: String,
+    output_value_id: Option<String>,
+    error_code: String,
+    error_value_id: Option<String>,
+    duration_milliseconds: u64,
+}
+
+#[derive(Deserialize, Serialize)]
+struct LlmResponseMessageRecord {
+    message_id: String,
+    sequence: u32,
+    role: String,
+    kind: String,
+    summary: String,
+    content_value_id: String,
+    tool_call_id: String,
+}
+
 pub struct WorkflowRunProjection {
     connection: Connection,
 }
@@ -1186,6 +1228,7 @@ impl WorkflowRunProjection {
             transaction.execute_batch(PROJECTION_MIGRATION_8)?;
             transaction.execute_batch(PROJECTION_MIGRATION_9)?;
             transaction.execute_batch(PROJECTION_MIGRATION_10)?;
+            apply_projection_migration_11(&transaction)?;
             transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
             refresh_state_digest(&transaction)?;
             transaction.commit()?;
@@ -1198,6 +1241,7 @@ impl WorkflowRunProjection {
             transaction.execute_batch(PROJECTION_MIGRATION_8)?;
             transaction.execute_batch(PROJECTION_MIGRATION_9)?;
             transaction.execute_batch(PROJECTION_MIGRATION_10)?;
+            apply_projection_migration_11(&transaction)?;
             transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
             refresh_state_digest(&transaction)?;
             transaction.commit()?;
@@ -1209,6 +1253,7 @@ impl WorkflowRunProjection {
             transaction.execute_batch(PROJECTION_MIGRATION_8)?;
             transaction.execute_batch(PROJECTION_MIGRATION_9)?;
             transaction.execute_batch(PROJECTION_MIGRATION_10)?;
+            apply_projection_migration_11(&transaction)?;
             transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
             refresh_state_digest(&transaction)?;
             transaction.commit()?;
@@ -1219,6 +1264,7 @@ impl WorkflowRunProjection {
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             transaction.execute_batch(PROJECTION_MIGRATION_9)?;
             transaction.execute_batch(PROJECTION_MIGRATION_10)?;
+            apply_projection_migration_11(&transaction)?;
             transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
             refresh_state_digest(&transaction)?;
             transaction.commit()?;
@@ -1228,6 +1274,16 @@ impl WorkflowRunProjection {
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             transaction.execute_batch(PROJECTION_MIGRATION_10)?;
+            apply_projection_migration_11(&transaction)?;
+            transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
+            refresh_state_digest(&transaction)?;
+            transaction.commit()?;
+        }
+        let found: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if found == 10 {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            apply_projection_migration_11(&transaction)?;
             transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
             refresh_state_digest(&transaction)?;
             transaction.commit()?;
@@ -2893,6 +2949,12 @@ impl WorkflowRunProjection {
             Option<i64>,
             i64,
             Option<i64>,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
         );
         let mut statement = self.connection.prepare(
             "SELECT invocation_id, attempt_id, execution_token_id, node_id, settings_wire,
@@ -2902,7 +2964,8 @@ impl WorkflowRunProjection {
                     error_code, error_value_id, timeout_milliseconds, deadline_unix_millis,
                     elapsed_milliseconds, receipt_id, provider_run_reference, idempotency_key,
                     started_at_unix_millis, settled_at_unix_millis, started_store_position,
-                    settled_store_position
+                    settled_store_position, tool_definitions_json, tool_calls_json,
+                    response_messages_json, usage_wire, validation_wire, provider_receipt_wire
              FROM workflow_llm_attempts WHERE run_id = ?1
              ORDER BY started_store_position, invocation_id",
         )?;
@@ -2937,6 +3000,12 @@ impl WorkflowRunProjection {
                 row.get(26)?,
                 row.get(27)?,
                 row.get(28)?,
+                row.get(29)?,
+                row.get(30)?,
+                row.get(31)?,
+                row.get(32)?,
+                row.get(33)?,
+                row.get(34)?,
             ))
         })?;
         rows.map(|row| {
@@ -2977,6 +3046,16 @@ impl WorkflowRunProjection {
                 settled_at_unix_millis: row.26.unwrap_or_default(),
                 started_store_position: projected_u64(row.27)?,
                 settled_store_position: row.28.map(projected_u64).transpose()?.unwrap_or_default(),
+                tool_definitions: decode_llm_tool_definitions(&row.29)?,
+                tool_calls: self.inspect_llm_tool_calls(row.30.as_deref().unwrap_or("[]"))?,
+                response_messages: self
+                    .inspect_llm_response_messages(row.31.as_deref().unwrap_or("[]"))?,
+                usage: decode_optional_message(row.32.as_deref(), "llm_usage_decode")?,
+                validation: decode_optional_message(row.33.as_deref(), "llm_validation_decode")?,
+                provider_receipt: decode_optional_message(
+                    row.34.as_deref(),
+                    "llm_provider_receipt_decode",
+                )?,
             })
         })
         .collect()
@@ -3023,6 +3102,50 @@ impl WorkflowRunProjection {
                     estimated_tokens: record.estimated_tokens,
                     redaction_count: record.redaction_count,
                     truncated: record.truncated,
+                })
+            })
+            .collect()
+    }
+
+    fn inspect_llm_tool_calls(&self, value: &str) -> Result<Vec<v1::WorkflowProjectedLlmToolCall>> {
+        let records: Vec<LlmToolCallRecord> = serde_json::from_str(value)
+            .map_err(|_| WorkflowProjectionError::Integrity("llm_tool_calls_decode".into()))?;
+        records
+            .into_iter()
+            .map(|record| {
+                Ok(v1::WorkflowProjectedLlmToolCall {
+                    call_id: record.call_id,
+                    sequence: record.sequence,
+                    tool_id: record.tool_id,
+                    status: record.status,
+                    input: Some(self.inspect_value(&record.input_value_id)?),
+                    output: self.inspect_optional_value(record.output_value_id.as_deref())?,
+                    error_code: record.error_code,
+                    error: self.inspect_optional_value(record.error_value_id.as_deref())?,
+                    duration_milliseconds: record.duration_milliseconds,
+                })
+            })
+            .collect()
+    }
+
+    fn inspect_llm_response_messages(
+        &self,
+        value: &str,
+    ) -> Result<Vec<v1::WorkflowProjectedLlmResponseMessage>> {
+        let records: Vec<LlmResponseMessageRecord> = serde_json::from_str(value).map_err(|_| {
+            WorkflowProjectionError::Integrity("llm_response_messages_decode".into())
+        })?;
+        records
+            .into_iter()
+            .map(|record| {
+                Ok(v1::WorkflowProjectedLlmResponseMessage {
+                    message_id: record.message_id,
+                    sequence: record.sequence,
+                    role: record.role,
+                    kind: record.kind,
+                    summary: record.summary,
+                    content: Some(self.inspect_value(&record.content_value_id)?),
+                    tool_call_id: record.tool_call_id,
                 })
             })
             .collect()
@@ -4009,15 +4132,17 @@ fn apply_event(transaction: &Transaction<'_>, event: &v1::EventEnvelope) -> Resu
             let context_groups = llm_context_groups_json(transaction, &payload.context_groups)?;
             let messages = llm_messages_json(transaction, &payload.messages)?;
             let attachments = capability_artifacts_json(transaction, &payload.attachments)?;
+            let tool_definitions = llm_tool_definitions_json(&payload.tool_definitions)?;
             transaction.execute(
                 "INSERT INTO workflow_llm_attempts
                  (invocation_id, run_id, attempt_id, execution_token_id, node_id, settings_wire,
                   context_digest, context_groups_json, messages_json, prior_episode_ids_json,
                   attachments_json, compilation_report_wire, output_schema_ref,
                   output_schema_digest, input_value_id, status, timeout_milliseconds,
-                  deadline_unix_millis, started_at_unix_millis, started_store_position)
+                  deadline_unix_millis, started_at_unix_millis, started_store_position,
+                  tool_definitions_json)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                         ?14, ?15, 'running', ?16, ?17, ?18, ?19)",
+                         ?14, ?15, 'running', ?16, ?17, ?18, ?19, ?20)",
                 params![
                     payload.invocation_id,
                     payload.run_id,
@@ -4038,6 +4163,7 @@ fn apply_event(transaction: &Transaction<'_>, event: &v1::EventEnvelope) -> Resu
                     payload.deadline_unix_millis,
                     event.occurred_at_unix_millis,
                     sql_u64(event.store_position)?,
+                    tool_definitions,
                 ],
             )?;
             touch_run(transaction, &payload.run_id, event.store_position)?;
@@ -4060,14 +4186,19 @@ fn apply_event(transaction: &Transaction<'_>, event: &v1::EventEnvelope) -> Resu
             }
             let output_value_id = insert_optional_value(transaction, payload.output.as_ref())?;
             let error_value_id = insert_optional_value(transaction, payload.error.as_ref())?;
+            let tool_calls = llm_tool_calls_json(transaction, &payload.tool_calls)?;
+            let response_messages =
+                llm_response_messages_json(transaction, &payload.response_messages)?;
             transaction.execute(
                 "UPDATE workflow_llm_attempts SET
                    status = 'settled', outcome = ?1, output_value_id = ?2,
                    error_code = NULLIF(?3, ''), error_value_id = ?4,
                    elapsed_milliseconds = ?5, receipt_id = NULLIF(?6, ''),
                    provider_run_reference = NULLIF(?7, ''), idempotency_key = ?8,
-                   settled_at_unix_millis = ?9, settled_store_position = ?10
-                 WHERE invocation_id = ?11",
+                   settled_at_unix_millis = ?9, settled_store_position = ?10,
+                   tool_calls_json = ?11, response_messages_json = ?12,
+                   usage_wire = ?13, validation_wire = ?14, provider_receipt_wire = ?15
+                 WHERE invocation_id = ?16",
                 params![
                     llm_outcome_name(payload.outcome)?,
                     output_value_id,
@@ -4079,6 +4210,14 @@ fn apply_event(transaction: &Transaction<'_>, event: &v1::EventEnvelope) -> Resu
                     payload.idempotency_key,
                     event.occurred_at_unix_millis,
                     sql_u64(event.store_position)?,
+                    tool_calls,
+                    response_messages,
+                    payload.usage.as_ref().map(Message::encode_to_vec),
+                    payload.validation.as_ref().map(Message::encode_to_vec),
+                    payload
+                        .provider_receipt
+                        .as_ref()
+                        .map(Message::encode_to_vec),
                     payload.invocation_id,
                 ],
             )?;
@@ -4664,6 +4803,107 @@ fn llm_messages_json(
         .map_err(|_| WorkflowProjectionError::Integrity("llm_messages_encode".into()))
 }
 
+fn llm_tool_definitions_json(values: &[v1::WorkflowLlmToolDefinition]) -> Result<String> {
+    let records = values
+        .iter()
+        .map(|value| LlmToolDefinitionRecord {
+            tool_id: value.tool_id.clone(),
+            version: value.version.clone(),
+            package_digest: value.package_digest.clone(),
+            description: value.description.clone(),
+            input_schema_ref: value.input_schema_ref.clone(),
+            input_schema_digest: value.input_schema_digest.clone(),
+            output_schema_ref: value.output_schema_ref.clone(),
+            output_schema_digest: value.output_schema_digest.clone(),
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_string(&records)
+        .map_err(|_| WorkflowProjectionError::Integrity("llm_tool_definitions_encode".into()))
+}
+
+fn decode_llm_tool_definitions(value: &str) -> Result<Vec<v1::WorkflowLlmToolDefinition>> {
+    let records: Vec<LlmToolDefinitionRecord> = serde_json::from_str(value)
+        .map_err(|_| WorkflowProjectionError::Integrity("llm_tool_definitions_decode".into()))?;
+    Ok(records
+        .into_iter()
+        .map(|value| v1::WorkflowLlmToolDefinition {
+            tool_id: value.tool_id,
+            version: value.version,
+            package_digest: value.package_digest,
+            description: value.description,
+            input_schema_ref: value.input_schema_ref,
+            input_schema_digest: value.input_schema_digest,
+            output_schema_ref: value.output_schema_ref,
+            output_schema_digest: value.output_schema_digest,
+        })
+        .collect())
+}
+
+fn decode_optional_message<M: Message + Default>(
+    value: Option<&[u8]>,
+    code: &'static str,
+) -> Result<Option<M>> {
+    value
+        .map(|bytes| M::decode(bytes).map_err(|_| WorkflowProjectionError::Integrity(code.into())))
+        .transpose()
+}
+
+fn llm_tool_calls_json(
+    transaction: &Transaction<'_>,
+    values: &[v1::WorkflowLlmToolCall],
+) -> Result<String> {
+    let records = values
+        .iter()
+        .map(|value| {
+            let input = value.input.as_ref().ok_or_else(|| {
+                WorkflowProjectionError::Lifecycle("llm_tool_call_input_missing".into())
+            })?;
+            insert_value(transaction, input)?;
+            let output_value_id = insert_optional_value(transaction, value.output.as_ref())?;
+            let error_value_id = insert_optional_value(transaction, value.error.as_ref())?;
+            Ok(LlmToolCallRecord {
+                call_id: value.call_id.clone(),
+                sequence: value.sequence,
+                tool_id: value.tool_id.clone(),
+                status: value.status.clone(),
+                input_value_id: input.value_id.clone(),
+                output_value_id,
+                error_code: value.error_code.clone(),
+                error_value_id,
+                duration_milliseconds: value.duration_milliseconds,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    serde_json::to_string(&records)
+        .map_err(|_| WorkflowProjectionError::Integrity("llm_tool_calls_encode".into()))
+}
+
+fn llm_response_messages_json(
+    transaction: &Transaction<'_>,
+    values: &[v1::WorkflowLlmResponseMessage],
+) -> Result<String> {
+    let records = values
+        .iter()
+        .map(|value| {
+            let content = value.content.as_ref().ok_or_else(|| {
+                WorkflowProjectionError::Lifecycle("llm_response_content_missing".into())
+            })?;
+            insert_value(transaction, content)?;
+            Ok(LlmResponseMessageRecord {
+                message_id: value.message_id.clone(),
+                sequence: value.sequence,
+                role: value.role.clone(),
+                kind: value.kind.clone(),
+                summary: value.summary.clone(),
+                content_value_id: content.value_id.clone(),
+                tool_call_id: value.tool_call_id.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    serde_json::to_string(&records)
+        .map_err(|_| WorkflowProjectionError::Integrity("llm_response_messages_encode".into()))
+}
+
 fn llm_outcome_name(value: i32) -> Result<&'static str> {
     match v1::WorkflowLlmAttemptOutcome::try_from(value) {
         Ok(v1::WorkflowLlmAttemptOutcome::Succeeded) => Ok("succeeded"),
@@ -4764,6 +5004,24 @@ fn quick_check(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn apply_projection_migration_11(transaction: &Transaction<'_>) -> Result<()> {
+    for (column, declaration) in [
+        ("tool_definitions_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("tool_calls_json", "TEXT"),
+        ("response_messages_json", "TEXT"),
+        ("usage_wire", "BLOB"),
+        ("validation_wire", "BLOB"),
+        ("provider_receipt_wire", "BLOB"),
+    ] {
+        if !table_has_column(transaction, "workflow_llm_attempts", column)? {
+            transaction.execute_batch(&format!(
+                "ALTER TABLE workflow_llm_attempts ADD COLUMN {column} {declaration};"
+            ))?;
+        }
+    }
+    Ok(())
+}
+
 fn table_has_column(connection: &Connection, table: &str, expected_column: &str) -> Result<bool> {
     let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
     let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
@@ -4841,8 +5099,8 @@ fn canonical_state_bytes(connection: &Connection) -> Result<Vec<u8>> {
             table_rows(
                 connection,
                 "llm_attempts",
-                "SELECT invocation_id, run_id, attempt_id, execution_token_id, node_id, settings_wire, context_digest, context_groups_json, messages_json, prior_episode_ids_json, attachments_json, compilation_report_wire, output_schema_ref, output_schema_digest, input_value_id, status, outcome, output_value_id, error_code, error_value_id, timeout_milliseconds, deadline_unix_millis, elapsed_milliseconds, receipt_id, provider_run_reference, idempotency_key, started_at_unix_millis, settled_at_unix_millis, started_store_position, settled_store_position FROM workflow_llm_attempts ORDER BY run_id, started_store_position, invocation_id",
-                30,
+                "SELECT invocation_id, run_id, attempt_id, execution_token_id, node_id, settings_wire, context_digest, context_groups_json, messages_json, prior_episode_ids_json, attachments_json, compilation_report_wire, output_schema_ref, output_schema_digest, input_value_id, status, outcome, output_value_id, error_code, error_value_id, timeout_milliseconds, deadline_unix_millis, elapsed_milliseconds, receipt_id, provider_run_reference, idempotency_key, started_at_unix_millis, settled_at_unix_millis, started_store_position, settled_store_position, tool_definitions_json, tool_calls_json, response_messages_json, usage_wire, validation_wire, provider_receipt_wire FROM workflow_llm_attempts ORDER BY run_id, started_store_position, invocation_id",
+                36,
             )?,
             table_rows(
                 connection,

@@ -80,6 +80,9 @@ const MAXIMUM_TRACE_IDENTIFIERS: usize = 256;
 const MAXIMUM_CAPABILITY_LOGS: usize = 128;
 const MAXIMUM_LLM_CONTEXT_GROUPS: usize = 64;
 const MAXIMUM_LLM_MESSAGES: usize = 128;
+const MAXIMUM_LLM_TOOLS: usize = 64;
+const MAXIMUM_LLM_TOOL_CALLS: usize = 128;
+const MAXIMUM_LLM_RESPONSE_MESSAGES: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkflowRuntimeContractError {
@@ -1365,6 +1368,7 @@ fn validate_llm_attempt_started(payload: &v1::WorkflowLlmAttemptStarted) -> Resu
     }
     validate_identifier_list(&payload.prior_episode_ids, 64, "llm_prior_episode_id")?;
     validate_capability_artifacts(&payload.attachments)?;
+    validate_llm_tool_definitions(&payload.tool_definitions)?;
     let report = payload
         .compilation_report
         .as_ref()
@@ -1377,6 +1381,28 @@ fn validate_llm_attempt_started(payload: &v1::WorkflowLlmAttemptStarted) -> Resu
         original_bytes,
         redactions,
     )
+}
+
+fn validate_llm_tool_definitions(values: &[v1::WorkflowLlmToolDefinition]) -> Result<()> {
+    if values.len() > MAXIMUM_LLM_TOOLS {
+        return invalid("llm_tool_definition_count");
+    }
+    let mut ids = BTreeSet::new();
+    for value in values {
+        validate_identifier(&value.tool_id, 128, "llm_tool_id")?;
+        validate_identifier(&value.version, 64, "llm_tool_version")?;
+        validate_digest(&value.package_digest, "llm_tool_package_digest")?;
+        validate_text(&value.description, 512, "llm_tool_description")?;
+        validate_llm_safe_text(&value.description, "llm_tool_description")?;
+        validate_text(&value.input_schema_ref, 256, "llm_tool_input_schema_ref")?;
+        validate_digest(&value.input_schema_digest, "llm_tool_input_schema_digest")?;
+        validate_text(&value.output_schema_ref, 256, "llm_tool_output_schema_ref")?;
+        validate_digest(&value.output_schema_digest, "llm_tool_output_schema_digest")?;
+        if !ids.insert(value.tool_id.as_str()) {
+            return invalid("llm_tool_definition_duplicate");
+        }
+    }
+    Ok(())
 }
 
 fn validate_llm_settings(settings: &v1::WorkflowLlmModelSettings) -> Result<()> {
@@ -1466,6 +1492,11 @@ fn validate_llm_attempt_settled(payload: &v1::WorkflowLlmAttemptSettled) -> Resu
     }
     let outcome = v1::WorkflowLlmAttemptOutcome::try_from(payload.outcome)
         .map_err(|_| invalid_error("llm_outcome"))?;
+    validate_llm_tool_calls(&payload.tool_calls, payload.elapsed_milliseconds)?;
+    validate_llm_response_messages(&payload.response_messages, &payload.tool_calls)?;
+    validate_llm_usage(payload.usage.as_ref(), payload.tool_calls.len())?;
+    validate_llm_response_validation(payload.validation.as_ref(), outcome)?;
+    validate_llm_provider_receipt(payload.provider_receipt.as_ref(), payload)?;
     match outcome {
         v1::WorkflowLlmAttemptOutcome::Succeeded => {
             validate_value(payload.output.as_ref())?;
@@ -1502,6 +1533,165 @@ fn validate_llm_attempt_settled(payload: &v1::WorkflowLlmAttemptSettled) -> Resu
             validate_identifier(&payload.receipt_id, 256, "llm_receipt_id")?;
         }
         v1::WorkflowLlmAttemptOutcome::Unspecified => return invalid("llm_outcome"),
+    }
+    Ok(())
+}
+
+fn validate_llm_tool_calls(
+    values: &[v1::WorkflowLlmToolCall],
+    elapsed_milliseconds: u64,
+) -> Result<()> {
+    if values.len() > MAXIMUM_LLM_TOOL_CALLS {
+        return invalid("llm_tool_call_count");
+    }
+    let mut ids = BTreeSet::new();
+    for (index, value) in values.iter().enumerate() {
+        validate_identifier(&value.call_id, 128, "llm_tool_call_id")?;
+        validate_identifier(&value.tool_id, 128, "llm_tool_id")?;
+        validate_value(value.input.as_ref())?;
+        if value.sequence != (index + 1) as u32
+            || value.duration_milliseconds > elapsed_milliseconds
+            || !ids.insert(value.call_id.as_str())
+        {
+            return invalid("llm_tool_call_contract");
+        }
+        match value.status.as_str() {
+            "succeeded" => {
+                validate_value(value.output.as_ref())?;
+                if !value.error_code.is_empty() || value.error.is_some() {
+                    return invalid("llm_tool_call_success");
+                }
+            }
+            "failed" => {
+                validate_identifier(&value.error_code, 128, "llm_tool_error_code")?;
+                validate_value(value.error.as_ref())?;
+                if value.output.is_some() {
+                    return invalid("llm_tool_call_failure");
+                }
+            }
+            _ => return invalid("llm_tool_call_status"),
+        }
+    }
+    Ok(())
+}
+
+fn validate_llm_response_messages(
+    values: &[v1::WorkflowLlmResponseMessage],
+    tool_calls: &[v1::WorkflowLlmToolCall],
+) -> Result<()> {
+    if values.len() > MAXIMUM_LLM_RESPONSE_MESSAGES {
+        return invalid("llm_response_message_count");
+    }
+    let call_ids = tool_calls
+        .iter()
+        .map(|value| value.call_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut message_ids = BTreeSet::new();
+    for (index, value) in values.iter().enumerate() {
+        validate_identifier(&value.message_id, 128, "llm_response_message_id")?;
+        validate_text(&value.summary, 2_048, "llm_response_summary")?;
+        validate_llm_safe_text(&value.summary, "llm_response_summary")?;
+        validate_value(value.content.as_ref())?;
+        if value.sequence != (index + 1) as u32
+            || !matches!(value.role.as_str(), "assistant" | "tool")
+            || !matches!(
+                value.kind.as_str(),
+                "message" | "analysis_summary" | "tool_call" | "tool_result" | "final"
+            )
+            || (!value.tool_call_id.is_empty() && !call_ids.contains(value.tool_call_id.as_str()))
+            || !message_ids.insert(value.message_id.as_str())
+        {
+            return invalid("llm_response_message_contract");
+        }
+    }
+    Ok(())
+}
+
+fn validate_llm_usage(value: Option<&v1::WorkflowLlmUsage>, tool_call_count: usize) -> Result<()> {
+    let Some(value) = value else {
+        if tool_call_count == 0 {
+            return Ok(());
+        }
+        return invalid("llm_usage_missing");
+    };
+    let total_tokens = value
+        .input_tokens
+        .checked_add(value.output_tokens)
+        .and_then(|total| total.checked_add(value.reasoning_tokens));
+    let total_cost = value
+        .input_cost_micros
+        .checked_add(value.output_cost_micros)
+        .and_then(|total| total.checked_add(value.reasoning_cost_micros))
+        .and_then(|total| total.checked_add(value.tool_cost_micros));
+    if value.cached_input_tokens > value.input_tokens
+        || total_tokens != Some(value.total_tokens)
+        || total_cost != Some(value.total_cost_micros)
+        || value.tool_call_count as usize != tool_call_count
+        || (!value.cost_currency.is_empty()
+            && (value.cost_currency.len() != 3
+                || !value
+                    .cost_currency
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase())))
+        || (value.total_cost_micros > 0 && value.cost_currency.is_empty())
+    {
+        return invalid("llm_usage_contract");
+    }
+    Ok(())
+}
+
+fn validate_llm_response_validation(
+    value: Option<&v1::WorkflowLlmResponseValidation>,
+    outcome: v1::WorkflowLlmAttemptOutcome,
+) -> Result<()> {
+    if outcome == v1::WorkflowLlmAttemptOutcome::Cancelled {
+        if value.is_some() {
+            return invalid("llm_cancelled_validation");
+        }
+        return Ok(());
+    }
+    let value = value.ok_or_else(|| invalid_error("llm_response_validation"))?;
+    validate_text(&value.schema_ref, 256, "llm_validation_schema_ref")?;
+    validate_digest(&value.schema_digest, "llm_validation_schema_digest")?;
+    if value.diagnostics.len() > 16
+        || !value
+            .diagnostics
+            .iter()
+            .all(|item| validate_text(item, 2_048, "llm_validation_diagnostic").is_ok())
+        || match outcome {
+            v1::WorkflowLlmAttemptOutcome::Succeeded => value.status != "succeeded",
+            v1::WorkflowLlmAttemptOutcome::OutputValidationFailed => value.status != "failed",
+            _ => value.status != "not_validated",
+        }
+    {
+        return invalid("llm_response_validation_contract");
+    }
+    Ok(())
+}
+
+fn validate_llm_provider_receipt(
+    value: Option<&v1::WorkflowLlmProviderReceipt>,
+    payload: &v1::WorkflowLlmAttemptSettled,
+) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    validate_identifier(&value.request_id, 256, "llm_provider_request_id")?;
+    validate_identifier(&value.response_id, 256, "llm_provider_response_id")?;
+    validate_identifier(&value.receipt_id, 256, "llm_provider_receipt_id")?;
+    validate_digest(&value.metadata_digest, "llm_provider_metadata_digest")?;
+    if !value.provider_run_reference.is_empty() {
+        validate_identifier(
+            &value.provider_run_reference,
+            256,
+            "llm_provider_run_reference",
+        )?;
+    }
+    if value.receipt_id != payload.receipt_id
+        || (!payload.provider_run_reference.is_empty()
+            && value.provider_run_reference != payload.provider_run_reference)
+    {
+        return invalid("llm_provider_receipt_contract");
     }
     Ok(())
 }

@@ -73,7 +73,41 @@ struct DesktopWorkflowRunInspectionTests {
         #expect(run.llmAttempts.first?.messages.map(\.role) == ["system", "developer", "user"])
         #expect(run.llmAttempts.first?.compilationReport.redactionCount == 2)
         #expect(run.llmAttempts.first?.output?.id == "llm-output-run-v2")
+        #expect(run.llmAttempts.first?.toolDefinitions.first?.toolID == "synthetic.search")
+        #expect(run.llmAttempts.first?.toolCalls.first?.durationMilliseconds == 3)
+        #expect(run.llmAttempts.first?.responseMessages.first?.kind == "tool_result")
+        #expect(run.llmAttempts.first?.usage?.totalTokens == 170)
+        #expect(run.llmAttempts.first?.validation?.status == "succeeded")
+        #expect(run.llmAttempts.first?.providerReceipt?.requestID == "provider-request-run-v2")
         #expect(run.events.map(\.storePosition) == [11, 12, 13, 14, 15])
+    }
+
+    @Test("LLM inspection presentation stays collapsed, searchable, bounded, and compact-aware")
+    func llmInspectionPresentationContract() async throws {
+        let client = DesktopWorkflowRunInspectionClient(transport: HistoricalRunTransport())
+        let page = try await client.runs(
+            runID: "run-v2", limit: 1, requestID: "run:llm-presentation"
+        )
+        let llm = try #require(page.runs.first?.llmAttempts.first)
+        let groupID = "\(llm.id):calls"
+
+        #expect(!DesktopWorkflowLlmInspectionPresentation.isGroupExpanded(
+            groupID: groupID, explicitlyExpandedGroupIDs: [], searchText: ""
+        ))
+        #expect(DesktopWorkflowLlmInspectionPresentation.isGroupExpanded(
+            groupID: groupID, explicitlyExpandedGroupIDs: [], searchText: "search"
+        ))
+        #expect(DesktopWorkflowLlmInspectionPresentation.includes(
+            searchText: "bounded", fields: [llm.toolCalls[0].toolID, "Bounded result"]
+        ))
+        #expect(!DesktopWorkflowLlmInspectionPresentation.includes(
+            searchText: "remote secret", fields: [llm.toolCalls[0].toolID]
+        ))
+        #expect(DesktopWorkflowLlmInspectionPresentation
+            .structuredText(llm.responseMessages[0].content)
+            .contains(#""summarized":true"#))
+        #expect(DesktopWorkflowLlmInspectionPresentation.layout(for: 1_049) == .compact)
+        #expect(DesktopWorkflowLlmInspectionPresentation.layout(for: 1_050) == .wide)
     }
 }
 
@@ -467,6 +501,59 @@ private actor HistoricalRunTransport:
             llm.settledAtUnixMillis = 1_007
             llm.startedStorePosition = 14
             llm.settledStorePosition = 15
+            var tool = Kaname_V1_WorkflowLlmToolDefinition()
+            tool.toolID = "synthetic.search"
+            tool.version = "1.0.0"
+            tool.packageDigest = String(repeating: "a", count: 64)
+            tool.description_p = "Search the bounded synthetic fixture"
+            tool.inputSchemaRef = "dev.kaname.tool/search-input-v1"
+            tool.inputSchemaDigest = String(repeating: "b", count: 64)
+            tool.outputSchemaRef = "dev.kaname.tool/search-output-v1"
+            tool.outputSchemaDigest = String(repeating: "c", count: 64)
+            llm.toolDefinitions = [tool]
+            var toolCall = Kaname_V1_WorkflowProjectedLlmToolCall()
+            toolCall.callID = "call-search-run-v2"
+            toolCall.sequence = 1
+            toolCall.toolID = tool.toolID
+            toolCall.status = "succeeded"
+            toolCall.input = llmContent
+            toolCall.output = llmContent
+            toolCall.durationMilliseconds = 3
+            llm.toolCalls = [toolCall]
+            var responseMessage = Kaname_V1_WorkflowProjectedLlmResponseMessage()
+            responseMessage.messageID = "response-message-run-v2"
+            responseMessage.sequence = 1
+            responseMessage.role = "tool"
+            responseMessage.kind = "tool_result"
+            responseMessage.summary = "Bounded tool result"
+            var summarizedContent = Kaname_V1_WorkflowProjectedValue()
+            summarizedContent.valueID = "llm-response-summary-run-v2"
+            summarizedContent.contentType = "application/json"
+            summarizedContent.availability = "inline"
+            summarizedContent.inlineCanonicalJson = Data(
+                #"{"originalByteCount":30000,"sha256":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","summarized":true}"#.utf8
+            )
+            summarizedContent.byteCount = UInt64(summarizedContent.inlineCanonicalJson.count)
+            summarizedContent.sha256 = String(repeating: "9", count: 64)
+            responseMessage.content = summarizedContent
+            responseMessage.toolCallID = toolCall.callID
+            llm.responseMessages = [responseMessage]
+            llm.usage.inputTokens = 120
+            llm.usage.cachedInputTokens = 20
+            llm.usage.outputTokens = 40
+            llm.usage.reasoningTokens = 10
+            llm.usage.totalTokens = 170
+            llm.usage.toolCallCount = 1
+            llm.usage.costCurrency = "USD"
+            llm.usage.totalCostMicros = 235
+            llm.validation.status = "succeeded"
+            llm.validation.schemaRef = llm.outputSchemaRef
+            llm.validation.schemaDigest = llm.outputSchemaDigest
+            llm.providerReceipt.requestID = "provider-request-run-v2"
+            llm.providerReceipt.responseID = "provider-response-run-v2"
+            llm.providerReceipt.receiptID = llm.receiptID
+            llm.providerReceipt.providerRunReference = llm.providerRunReference
+            llm.providerReceipt.metadataDigest = String(repeating: "d", count: 64)
             projected.llmAttempts = [llm]
             var context = Kaname_V1_WorkflowProjectedValue()
             context.valueID = "context-run-v2"

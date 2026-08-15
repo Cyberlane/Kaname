@@ -429,6 +429,105 @@ public struct DesktopWorkflowProjectedLlmCompilationReport: Equatable, Sendable 
     public let redactionReasons: [String]
 }
 
+public struct DesktopWorkflowProjectedLlmToolDefinition: Identifiable, Equatable, Sendable {
+    public var id: String { toolID }
+    public let toolID: String
+    public let version: String
+    public let packageDigest: String
+    public let description: String
+    public let inputSchemaRef: String
+    public let inputSchemaDigest: String
+    public let outputSchemaRef: String
+    public let outputSchemaDigest: String
+}
+
+public struct DesktopWorkflowProjectedLlmToolCall: Identifiable, Equatable, Sendable {
+    public var id: String { callID }
+    public let callID: String
+    public let sequence: UInt32
+    public let toolID: String
+    public let status: String
+    public let input: DesktopWorkflowProjectedValue
+    public let output: DesktopWorkflowProjectedValue?
+    public let errorCode: String?
+    public let error: DesktopWorkflowProjectedValue?
+    public let durationMilliseconds: UInt64
+}
+
+public struct DesktopWorkflowProjectedLlmResponseMessage: Identifiable, Equatable, Sendable {
+    public var id: String { messageID }
+    public let messageID: String
+    public let sequence: UInt32
+    public let role: String
+    public let kind: String
+    public let summary: String
+    public let content: DesktopWorkflowProjectedValue
+    public let toolCallID: String?
+}
+
+public struct DesktopWorkflowProjectedLlmUsage: Equatable, Sendable {
+    public let inputTokens: UInt64
+    public let cachedInputTokens: UInt64
+    public let outputTokens: UInt64
+    public let reasoningTokens: UInt64
+    public let totalTokens: UInt64
+    public let toolCallCount: UInt32
+    public let costCurrency: String?
+    public let inputCostMicros: UInt64
+    public let outputCostMicros: UInt64
+    public let reasoningCostMicros: UInt64
+    public let toolCostMicros: UInt64
+    public let totalCostMicros: UInt64
+}
+
+public struct DesktopWorkflowProjectedLlmResponseValidation: Equatable, Sendable {
+    public let status: String
+    public let schemaRef: String
+    public let schemaDigest: String
+    public let diagnostics: [String]
+    public let diagnosticsTruncated: Bool
+}
+
+public struct DesktopWorkflowProjectedLlmProviderReceipt: Equatable, Sendable {
+    public let requestID: String
+    public let responseID: String
+    public let receiptID: String
+    public let providerRunReference: String?
+    public let metadataDigest: String
+}
+
+public enum DesktopWorkflowLlmInspectionLayout: Equatable, Sendable {
+    case compact
+    case wide
+}
+
+public enum DesktopWorkflowLlmInspectionPresentation {
+    public static let compactWidthThreshold = 1_050.0
+
+    public static func layout(for width: Double) -> DesktopWorkflowLlmInspectionLayout {
+        width < compactWidthThreshold ? .compact : .wide
+    }
+
+    public static func isGroupExpanded(
+        groupID: String,
+        explicitlyExpandedGroupIDs: Set<String>,
+        searchText: String
+    ) -> Bool {
+        !searchText.isEmpty || explicitlyExpandedGroupIDs.contains(groupID)
+    }
+
+    public static func includes(searchText: String, fields: [String]) -> Bool {
+        searchText.isEmpty
+            || fields.joined(separator: " ").localizedCaseInsensitiveContains(searchText)
+    }
+
+    public static func structuredText(_ value: DesktopWorkflowProjectedValue) -> String {
+        value.inlineCanonicalJSON.map { String(decoding: $0, as: UTF8.self) }
+            ?? value.absenceExplanation
+            ?? "Value content unavailable."
+    }
+}
+
 public struct DesktopWorkflowProjectedLlmAttempt: Identifiable, Equatable, Sendable {
     public var id: String { invocationID }
     public let invocationID: String
@@ -460,6 +559,12 @@ public struct DesktopWorkflowProjectedLlmAttempt: Identifiable, Equatable, Senda
     public let settledAtUnixMillis: Int64?
     public let startedStorePosition: UInt64
     public let settledStorePosition: UInt64?
+    public let toolDefinitions: [DesktopWorkflowProjectedLlmToolDefinition]
+    public let toolCalls: [DesktopWorkflowProjectedLlmToolCall]
+    public let responseMessages: [DesktopWorkflowProjectedLlmResponseMessage]
+    public let usage: DesktopWorkflowProjectedLlmUsage?
+    public let validation: DesktopWorkflowProjectedLlmResponseValidation?
+    public let providerReceipt: DesktopWorkflowProjectedLlmProviderReceipt?
 }
 
 public struct DesktopWorkflowProjectedMatchTrace: Identifiable, Equatable, Sendable {
@@ -930,6 +1035,86 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
               report.retainedByteCount <= settings.maximumContextBytes else {
             throw DesktopWorkflowRunInspectionError.malformedResponse
         }
+        let toolDefinitions = try item.toolDefinitions.map { definition in
+            guard !definition.toolID.isEmpty, !definition.version.isEmpty,
+                  definition.packageDigest.count == 64, !definition.description_p.isEmpty,
+                  !definition.inputSchemaRef.isEmpty, definition.inputSchemaDigest.count == 64,
+                  !definition.outputSchemaRef.isEmpty,
+                  definition.outputSchemaDigest.count == 64 else {
+                throw DesktopWorkflowRunInspectionError.malformedResponse
+            }
+            return DesktopWorkflowProjectedLlmToolDefinition(
+                toolID: definition.toolID, version: definition.version,
+                packageDigest: definition.packageDigest, description: definition.description_p,
+                inputSchemaRef: definition.inputSchemaRef,
+                inputSchemaDigest: definition.inputSchemaDigest,
+                outputSchemaRef: definition.outputSchemaRef,
+                outputSchemaDigest: definition.outputSchemaDigest
+            )
+        }
+        let toolIDs = Set(toolDefinitions.map { $0.toolID })
+        let toolCalls = try item.toolCalls.enumerated().map { index, call in
+            guard !call.callID.isEmpty, call.sequence == UInt32(index + 1),
+                  toolIDs.contains(call.toolID), ["succeeded", "failed"].contains(call.status),
+                  call.hasInput,
+                  (call.status == "succeeded") == call.hasOutput,
+                  (call.status == "failed") == call.hasError else {
+                throw DesktopWorkflowRunInspectionError.malformedResponse
+            }
+            return DesktopWorkflowProjectedLlmToolCall(
+                callID: call.callID, sequence: call.sequence, toolID: call.toolID,
+                status: call.status, input: try value(call.input),
+                output: try call.hasOutput ? value(call.output) : nil,
+                errorCode: call.errorCode.nilIfEmpty,
+                error: try call.hasError ? value(call.error) : nil,
+                durationMilliseconds: call.durationMilliseconds
+            )
+        }
+        let callIDs = Set(toolCalls.map { $0.callID })
+        let responseMessages = try item.responseMessages.enumerated().map { index, message in
+            guard !message.messageID.isEmpty, message.sequence == UInt32(index + 1),
+                  ["assistant", "tool"].contains(message.role),
+                  ["message", "analysis_summary", "tool_call", "tool_result", "final"]
+                    .contains(message.kind),
+                  !message.summary.isEmpty, message.hasContent,
+                  message.toolCallID.isEmpty || callIDs.contains(message.toolCallID) else {
+                throw DesktopWorkflowRunInspectionError.malformedResponse
+            }
+            return DesktopWorkflowProjectedLlmResponseMessage(
+                messageID: message.messageID, sequence: message.sequence,
+                role: message.role, kind: message.kind, summary: message.summary,
+                content: try value(message.content), toolCallID: message.toolCallID.nilIfEmpty
+            )
+        }
+        let usage = item.hasUsage ? DesktopWorkflowProjectedLlmUsage(
+            inputTokens: item.usage.inputTokens,
+            cachedInputTokens: item.usage.cachedInputTokens,
+            outputTokens: item.usage.outputTokens,
+            reasoningTokens: item.usage.reasoningTokens,
+            totalTokens: item.usage.totalTokens,
+            toolCallCount: item.usage.toolCallCount,
+            costCurrency: item.usage.costCurrency.nilIfEmpty,
+            inputCostMicros: item.usage.inputCostMicros,
+            outputCostMicros: item.usage.outputCostMicros,
+            reasoningCostMicros: item.usage.reasoningCostMicros,
+            toolCostMicros: item.usage.toolCostMicros,
+            totalCostMicros: item.usage.totalCostMicros
+        ) : nil
+        let validation = item.hasValidation ? DesktopWorkflowProjectedLlmResponseValidation(
+            status: item.validation.status, schemaRef: item.validation.schemaRef,
+            schemaDigest: item.validation.schemaDigest,
+            diagnostics: item.validation.diagnostics,
+            diagnosticsTruncated: item.validation.diagnosticsTruncated
+        ) : nil
+        let providerReceipt = item.hasProviderReceipt
+            ? DesktopWorkflowProjectedLlmProviderReceipt(
+                requestID: item.providerReceipt.requestID,
+                responseID: item.providerReceipt.responseID,
+                receiptID: item.providerReceipt.receiptID,
+                providerRunReference: item.providerReceipt.providerRunReference.nilIfEmpty,
+                metadataDigest: item.providerReceipt.metadataDigest
+            )
+            : nil
         return DesktopWorkflowProjectedLlmAttempt(
             invocationID: item.invocationID, attemptID: item.attemptID,
             executionTokenID: item.executionTokenID, nodeID: item.nodeID,
@@ -970,7 +1155,10 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
             startedAtUnixMillis: item.startedAtUnixMillis,
             settledAtUnixMillis: item.settledAtUnixMillis > 0 ? item.settledAtUnixMillis : nil,
             startedStorePosition: item.startedStorePosition,
-            settledStorePosition: item.settledStorePosition > 0 ? item.settledStorePosition : nil
+            settledStorePosition: item.settledStorePosition > 0 ? item.settledStorePosition : nil,
+            toolDefinitions: toolDefinitions, toolCalls: toolCalls,
+            responseMessages: responseMessages, usage: usage,
+            validation: validation, providerReceipt: providerReceipt
         )
     }
 

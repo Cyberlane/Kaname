@@ -483,6 +483,78 @@ message WorkflowLlmCompilationReport {
   reserved 9 to 20;
 }
 
+message WorkflowLlmToolDefinition {
+  string tool_id = 1;
+  string version = 2;
+  string package_digest = 3;
+  string description = 4;
+  string input_schema_ref = 5;
+  string input_schema_digest = 6;
+  string output_schema_ref = 7;
+  string output_schema_digest = 8;
+  reserved 9 to 20;
+  reserved "credential", "api_key", "endpoint", "host_path", "secret";
+}
+
+message WorkflowLlmToolCall {
+  string call_id = 1;
+  uint32 sequence = 2;
+  string tool_id = 3;
+  string status = 4;
+  WorkflowValueReference input = 5;
+  WorkflowValueReference output = 6;
+  string error_code = 7;
+  WorkflowValueReference error = 8;
+  uint64 duration_milliseconds = 9;
+  reserved 10 to 20;
+}
+
+message WorkflowLlmResponseMessage {
+  string message_id = 1;
+  uint32 sequence = 2;
+  string role = 3;
+  string kind = 4;
+  string summary = 5;
+  WorkflowValueReference content = 6;
+  string tool_call_id = 7;
+  reserved 8 to 20;
+}
+
+message WorkflowLlmUsage {
+  uint64 input_tokens = 1;
+  uint64 cached_input_tokens = 2;
+  uint64 output_tokens = 3;
+  uint64 reasoning_tokens = 4;
+  uint64 total_tokens = 5;
+  uint32 tool_call_count = 6;
+  string cost_currency = 7;
+  uint64 input_cost_micros = 8;
+  uint64 output_cost_micros = 9;
+  uint64 reasoning_cost_micros = 10;
+  uint64 tool_cost_micros = 11;
+  uint64 total_cost_micros = 12;
+  reserved 13 to 25;
+}
+
+message WorkflowLlmResponseValidation {
+  string status = 1;
+  string schema_ref = 2;
+  string schema_digest = 3;
+  repeated string diagnostics = 4;
+  bool diagnostics_truncated = 5;
+  reserved 6 to 15;
+}
+
+message WorkflowLlmProviderReceipt {
+  string request_id = 1;
+  string response_id = 2;
+  string receipt_id = 3;
+  string provider_run_reference = 4;
+  string metadata_digest = 5;
+  reserved 6 to 15;
+  reserved "credential", "api_key", "endpoint", "host_path", "secret";
+}
+
 enum WorkflowLlmAttemptOutcome {
   WORKFLOW_LLM_ATTEMPT_OUTCOME_UNSPECIFIED = 0;
   WORKFLOW_LLM_ATTEMPT_OUTCOME_SUCCEEDED = 1;
@@ -493,9 +565,9 @@ enum WorkflowLlmAttemptOutcome {
   WORKFLOW_LLM_ATTEMPT_OUTCOME_CRASHED = 6;
 }
 
-// The exact bounded context admitted before an idempotent model invocation.
-// Tool definitions and calls are deliberately added by the later tool-trace
-// contract; this message never contains credentials, endpoints, or host paths.
+// The exact bounded context and pinned tool definitions admitted before an
+// idempotent model invocation. This message never contains credentials,
+// endpoints, or host paths.
 message WorkflowLlmAttemptStarted {
   string run_id = 1;
   string run_token_id = 2;
@@ -515,7 +587,8 @@ message WorkflowLlmAttemptStarted {
   WorkflowValueReference input = 16;
   uint64 timeout_milliseconds = 17;
   int64 deadline_unix_millis = 18;
-  reserved 19 to 30;
+  repeated WorkflowLlmToolDefinition tool_definitions = 19;
+  reserved 20 to 30;
   reserved "credential", "api_key", "endpoint", "host_path", "secret";
 }
 
@@ -532,7 +605,12 @@ message WorkflowLlmAttemptSettled {
   string receipt_id = 10;
   string provider_run_reference = 11;
   string idempotency_key = 12;
-  reserved 13 to 25;
+  repeated WorkflowLlmToolCall tool_calls = 13;
+  repeated WorkflowLlmResponseMessage response_messages = 14;
+  WorkflowLlmUsage usage = 15;
+  WorkflowLlmResponseValidation validation = 16;
+  WorkflowLlmProviderReceipt provider_receipt = 17;
+  reserved 18 to 25;
   reserved "credential", "api_key", "endpoint", "host_path", "secret";
 }
 
@@ -745,7 +823,13 @@ message WorkflowProjectedLlmAttempt {
   int64 settled_at_unix_millis = 27;
   uint64 started_store_position = 28;
   uint64 settled_store_position = 29;
-  reserved 30 to 40;
+  repeated WorkflowLlmToolDefinition tool_definitions = 30;
+  repeated WorkflowProjectedLlmToolCall tool_calls = 31;
+  repeated WorkflowProjectedLlmResponseMessage response_messages = 32;
+  WorkflowLlmUsage usage = 33;
+  WorkflowLlmResponseValidation validation = 34;
+  WorkflowLlmProviderReceipt provider_receipt = 35;
+  reserved 36 to 45;
 }
 
 message WorkflowProjectedLlmContextGroup {
@@ -773,6 +857,30 @@ message WorkflowProjectedLlmMessage {
   uint32 redaction_count = 8;
   bool truncated = 9;
   reserved 10 to 20;
+}
+
+message WorkflowProjectedLlmToolCall {
+  string call_id = 1;
+  uint32 sequence = 2;
+  string tool_id = 3;
+  string status = 4;
+  WorkflowProjectedValue input = 5;
+  WorkflowProjectedValue output = 6;
+  string error_code = 7;
+  WorkflowProjectedValue error = 8;
+  uint64 duration_milliseconds = 9;
+  reserved 10 to 20;
+}
+
+message WorkflowProjectedLlmResponseMessage {
+  string message_id = 1;
+  uint32 sequence = 2;
+  string role = 3;
+  string kind = 4;
+  string summary = 5;
+  WorkflowProjectedValue content = 6;
+  string tool_call_id = 7;
+  reserved 8 to 20;
 }
 
 message WorkflowProjectedNodeState {

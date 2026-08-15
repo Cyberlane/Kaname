@@ -419,7 +419,7 @@ fn execution_availability(node: &Node) -> &'static str {
             if string_field(&node.config, "modelClass").is_some()
                 && string_field(&node.config, "instructions").is_some()
                 && node.config.get("prompt") == Some(&serde_json::json!({"whole": true}))
-                && array_field(&node.config, "tools").is_some_and(Vec::is_empty)
+                && array_field(&node.config, "tools").is_some()
                 && string_field(&node.config, "outputSchemaRef").is_some()
                 && string_field(&node.config, "reasoningEffort").is_some()
                 && node

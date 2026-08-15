@@ -18,7 +18,8 @@ use crate::{
     workflow_library::{WorkflowLibraryError, WorkflowLibraryStore},
     workflow_llm::{
         UnavailableWorkflowLlmProvider, WorkflowLlmInvocation, WorkflowLlmProvider,
-        WorkflowLlmProviderDefinition, WorkflowLlmProviderResult,
+        WorkflowLlmProviderDefinition, WorkflowLlmProviderResult, WorkflowLlmProviderToolResult,
+        WorkflowLlmProviderTrace,
     },
     workflow_match::{self, EvaluationOutcome, MatchConfig, MatchRoots, TraceOutcome},
     workflow_runtime::{self, WorkflowRuntimeCommand, WorkflowRuntimeEvent},
@@ -48,6 +49,18 @@ const CASE_HISTORY_PAGE: u32 = 500;
 const MAXIMUM_CASE_EPISODES: usize = 64;
 const MAXIMUM_SUBFLOW_DEPTH: usize = 16;
 const MAXIMUM_INLINE_STORAGE_SUMMARY_BYTES: usize = 60 * 1024;
+const MAXIMUM_LLM_TOOLS: usize = 64;
+const MAXIMUM_LLM_TOOL_CALLS: usize = 128;
+const MAXIMUM_LLM_RESPONSE_MESSAGES: usize = 128;
+const MAXIMUM_LLM_TRACE_VALUE_BYTES: usize = 24 * 1024;
+
+#[derive(Default)]
+struct AdmittedLlmTrace {
+    tool_calls: Vec<v1::WorkflowLlmToolCall>,
+    response_messages: Vec<v1::WorkflowLlmResponseMessage>,
+    usage: Option<v1::WorkflowLlmUsage>,
+    provider_receipt: Option<v1::WorkflowLlmProviderReceipt>,
+}
 
 #[derive(Debug)]
 pub enum WorkflowExecutionError {
@@ -1334,7 +1347,6 @@ fn validate_llm_provider(
             )
             || !matches!(config.conversation_scope.as_str(), "job" | "case")
             || config.prompt != json!({"whole": true})
-            || !config.tools.is_empty()
             || config.instructions.is_empty()
         {
             return Err(WorkflowExecutionError::Unsupported(
@@ -1349,8 +1361,92 @@ fn validate_llm_provider(
             })?;
         require_valid_schema(output_schema, "llm_output_schema")?;
         validate_llm_context_references(&config.context)?;
+        validated_llm_tool_definitions(package, &config, &definition)?;
     }
     Ok(())
+}
+
+fn validated_llm_tool_definitions(
+    package: &ExecutionPackage,
+    config: &LlmConfig,
+    definition: &WorkflowLlmProviderDefinition,
+) -> Result<Vec<v1::WorkflowLlmToolDefinition>> {
+    if config.tools.len() > MAXIMUM_LLM_TOOLS
+        || definition.tools.len() != config.tools.len()
+        || config.tools.iter().collect::<BTreeSet<_>>().len() != config.tools.len()
+    {
+        return Err(WorkflowExecutionError::Unsupported(
+            "llm_tool_definition_set".into(),
+        ));
+    }
+    let mut admitted = Vec::with_capacity(config.tools.len());
+    for tool_id in &config.tools {
+        let tool = definition
+            .tools
+            .iter()
+            .find(|tool| &tool.tool_id == tool_id)
+            .ok_or_else(|| WorkflowExecutionError::Unsupported("llm_tool_not_registered".into()))?;
+        let dependency = package
+            .compiled
+            .dependencies
+            .iter()
+            .find(|item| item.kind == "tool" && item.id == *tool_id)
+            .ok_or_else(|| {
+                WorkflowExecutionError::Integrity("llm_tool_dependency_missing".into())
+            })?;
+        if tool.tool_id.is_empty()
+            || tool.tool_id.len() > 128
+            || tool.version.is_empty()
+            || tool.version.len() > 64
+            || tool.package_digest.len() != 64
+            || dependency.digest != tool.package_digest
+            || dependency
+                .version
+                .as_deref()
+                .is_some_and(|version| version != tool.version)
+            || tool.description.is_empty()
+            || tool.description.len() > 512
+            || llm_string_contains_host_path(&tool.description)
+            || llm_string_contains_secret(&tool.description)
+            || tool.input_schema_ref.is_empty()
+            || tool.input_schema_ref.len() > 256
+            || tool.output_schema_ref.is_empty()
+            || tool.output_schema_ref.len() > 256
+        {
+            return Err(WorkflowExecutionError::Unsupported(
+                "llm_tool_definition_contract".into(),
+            ));
+        }
+        let bundled_input = package.schemas.get(&tool.input_schema_ref).ok_or_else(|| {
+            WorkflowExecutionError::Integrity("llm_tool_input_schema_missing".into())
+        })?;
+        let bundled_output = package
+            .schemas
+            .get(&tool.output_schema_ref)
+            .ok_or_else(|| {
+                WorkflowExecutionError::Integrity("llm_tool_output_schema_missing".into())
+            })?;
+        require_valid_schema(bundled_input, "llm_tool_input_schema")?;
+        require_valid_schema(bundled_output, "llm_tool_output_schema")?;
+        if schema_digest(bundled_input)? != schema_digest(&tool.input_schema)?
+            || schema_digest(bundled_output)? != schema_digest(&tool.output_schema)?
+        {
+            return Err(WorkflowExecutionError::Integrity(
+                "llm_tool_schema_pin".into(),
+            ));
+        }
+        admitted.push(v1::WorkflowLlmToolDefinition {
+            tool_id: tool.tool_id.clone(),
+            version: tool.version.clone(),
+            package_digest: tool.package_digest.clone(),
+            description: tool.description.clone(),
+            input_schema_ref: tool.input_schema_ref.clone(),
+            input_schema_digest: schema_digest(&tool.input_schema)?,
+            output_schema_ref: tool.output_schema_ref.clone(),
+            output_schema_digest: schema_digest(&tool.output_schema)?,
+        });
+    }
+    Ok(admitted)
 }
 
 fn llm_config(node: &CompiledNode) -> Result<LlmConfig> {
@@ -2101,6 +2197,8 @@ fn next_events(
                     elapsed,
                     String::new(),
                     String::new(),
+                    AdmittedLlmTrace::default(),
+                    None,
                 )]);
             }
             if let Some(wait) = state.waits.values().find(|wait| {
@@ -4653,6 +4751,7 @@ fn pending_llm_event_sequence(
         .schemas
         .get(&config.output_schema_ref)
         .ok_or_else(|| WorkflowExecutionError::Unsupported("llm_output_schema_missing".into()))?;
+    let tool_definitions = validated_llm_tool_definitions(package, &config, &definition)?;
     let compiled = compile_llm_context(
         request,
         state.episode.as_ref(),
@@ -4692,6 +4791,7 @@ fn pending_llm_event_sequence(
                 input: Some(input),
                 timeout_milliseconds: definition.timeout_milliseconds,
                 deadline_unix_millis,
+                tool_definitions: tool_definitions.clone(),
             },
             &attempt.started_event_id,
             &request.run_id,
@@ -4707,6 +4807,7 @@ fn pending_llm_event_sequence(
         &definition,
         output_schema,
         &compiled,
+        &tool_definitions,
         recorded,
     )?;
     if recorded.settled.is_some() {
@@ -4724,6 +4825,7 @@ fn pending_llm_event_sequence(
         messages: compiled.messages,
         prior_episode_ids: compiled.prior_episode_ids,
         attachments: compiled.attachments,
+        tool_definitions,
         output_schema: output_schema.clone(),
         timeout_milliseconds: definition.timeout_milliseconds,
     };
@@ -4749,6 +4851,7 @@ fn validate_recorded_llm_attempt(
     definition: &WorkflowLlmProviderDefinition,
     output_schema: &Value,
     compiled: &CompiledLlmContext,
+    tool_definitions: &[v1::WorkflowLlmToolDefinition],
     recorded: &RecordedLlmAttempt,
 ) -> Result<()> {
     let started = &recorded.started;
@@ -4767,6 +4870,7 @@ fn validate_recorded_llm_attempt(
         || started.output_schema_ref != config.output_schema_ref
         || started.output_schema_digest != schema_digest(output_schema)?
         || started.input.as_ref() != Some(input)
+        || started.tool_definitions != tool_definitions
         || started.timeout_milliseconds != definition.timeout_milliseconds
         || started.deadline_unix_millis
             != recorded
@@ -5232,6 +5336,7 @@ fn llm_provider_result_event(
             elapsed_milliseconds,
             receipt_id,
             provider_run_reference,
+            trace,
         } if elapsed_milliseconds <= definition.timeout_milliseconds => {
             if llm_value_contains_private_marker(&output) {
                 return llm_failure_result_event(
@@ -5243,8 +5348,32 @@ fn llm_provider_result_event(
                     "The model returned content that cannot enter durable workflow evidence.",
                     elapsed_milliseconds,
                     receipt_id,
+                    AdmittedLlmTrace::default(),
                 );
             }
+            let admitted_trace = match admit_llm_trace(
+                request,
+                recorded,
+                definition,
+                &receipt_id,
+                &provider_run_reference,
+                trace,
+            ) {
+                Ok(trace) => trace,
+                Err(_) => {
+                    return llm_failure_result_event(
+                        request,
+                        run_token_id,
+                        recorded,
+                        v1::WorkflowLlmAttemptOutcome::MalformedResult,
+                        "llm.trace-invalid",
+                        "The model provider returned invalid tool or response evidence.",
+                        elapsed_milliseconds,
+                        receipt_id,
+                        AdmittedLlmTrace::default(),
+                    );
+                }
+            };
             let output = value_from_json(
                 &stable_id("value", &[&request.run_id, invocation_id, "llm-output"]),
                 &output,
@@ -5275,6 +5404,23 @@ fn llm_provider_result_event(
                     elapsed_milliseconds,
                     normalized_receipt_id(&receipt_id, invocation_id),
                     String::new(),
+                    admitted_trace,
+                    Some(llm_response_validation(
+                        "failed",
+                        &recorded.started.output_schema_ref,
+                        &recorded.started.output_schema_digest,
+                        validation
+                            .diagnostics
+                            .into_iter()
+                            .map(|diagnostic| {
+                                format!(
+                                    "{} at {}: {}",
+                                    diagnostic.code, diagnostic.instance_path, diagnostic.message
+                                )
+                            })
+                            .collect(),
+                        validation.diagnostics_truncated,
+                    )),
                 ));
             }
             Ok(llm_settled_event(
@@ -5288,6 +5434,14 @@ fn llm_provider_result_event(
                 elapsed_milliseconds,
                 normalized_receipt_id(&receipt_id, invocation_id),
                 normalized_optional_identifier(&provider_run_reference, "provider", invocation_id),
+                admitted_trace,
+                Some(llm_response_validation(
+                    "succeeded",
+                    &recorded.started.output_schema_ref,
+                    &recorded.started.output_schema_digest,
+                    Vec::new(),
+                    false,
+                )),
             ))
         }
         WorkflowLlmProviderResult::Succeeded {
@@ -5298,6 +5452,7 @@ fn llm_provider_result_event(
         | WorkflowLlmProviderResult::TimedOut {
             elapsed_milliseconds,
             receipt_id,
+            ..
         } => llm_failure_result_event(
             request,
             run_token_id,
@@ -5307,11 +5462,13 @@ fn llm_provider_result_event(
             "The model exceeded its registered execution deadline.",
             elapsed_milliseconds,
             receipt_id,
+            AdmittedLlmTrace::default(),
         ),
         WorkflowLlmProviderResult::MalformedResult {
             summary,
             elapsed_milliseconds,
             receipt_id,
+            trace,
         } => llm_failure_result_event(
             request,
             run_token_id,
@@ -5320,12 +5477,15 @@ fn llm_provider_result_event(
             "llm.malformed-result",
             &summary,
             elapsed_milliseconds,
-            receipt_id,
+            receipt_id.clone(),
+            admit_llm_trace(request, recorded, definition, &receipt_id, "", trace)
+                .unwrap_or_default(),
         ),
         WorkflowLlmProviderResult::Crashed {
             summary,
             elapsed_milliseconds,
             receipt_id,
+            trace,
         } => llm_failure_result_event(
             request,
             run_token_id,
@@ -5334,8 +5494,273 @@ fn llm_provider_result_event(
             "llm.crashed",
             &summary,
             elapsed_milliseconds,
-            receipt_id,
+            receipt_id.clone(),
+            admit_llm_trace(request, recorded, definition, &receipt_id, "", trace)
+                .unwrap_or_default(),
         ),
+    }
+}
+
+fn admit_llm_trace(
+    request: &v1::RequestWorkflowRun,
+    recorded: &RecordedLlmAttempt,
+    definition: &WorkflowLlmProviderDefinition,
+    receipt_id: &str,
+    provider_run_reference: &str,
+    trace: WorkflowLlmProviderTrace,
+) -> Result<AdmittedLlmTrace> {
+    if trace.tool_calls.len() > MAXIMUM_LLM_TOOL_CALLS
+        || trace.response_messages.len() > MAXIMUM_LLM_RESPONSE_MESSAGES
+        || llm_value_contains_private_marker(&trace.receipt_metadata)
+    {
+        return Err(WorkflowExecutionError::Integrity("llm_trace_bounds".into()));
+    }
+    let invocation_id = recorded.started.invocation_id.as_str();
+    let mut retained_bytes = 0_usize;
+    let mut call_ids = BTreeSet::new();
+    let mut tool_calls = Vec::with_capacity(trace.tool_calls.len());
+    for (index, call) in trace.tool_calls.into_iter().enumerate() {
+        let tool = definition
+            .tools
+            .iter()
+            .find(|tool| tool.tool_id == call.tool_id)
+            .ok_or_else(|| WorkflowExecutionError::Integrity("llm_trace_tool".into()))?;
+        let call_id = normalized_optional_identifier(&call.call_id, "tool-call", invocation_id);
+        if call_id.is_empty()
+            || !call_ids.insert(call_id.clone())
+            || call.duration_milliseconds > 86_400_000
+            || llm_value_contains_private_marker(&call.input)
+            || workflow_schema::check(&WorkflowSchemaCheckRequest {
+                schema: tool.input_schema.clone(),
+                instance: call.input.clone(),
+            })
+            .outcome
+                != WorkflowSchemaCheckOutcome::Valid
+        {
+            return Err(WorkflowExecutionError::Integrity(
+                "llm_trace_tool_input".into(),
+            ));
+        }
+        let input = Some(llm_trace_value(
+            request,
+            invocation_id,
+            &format!("tool-call-{}-input", index + 1),
+            &call.input,
+            &mut retained_bytes,
+        )?);
+        let (status, output, error_code, error) = match call.result {
+            WorkflowLlmProviderToolResult::Succeeded(output) => {
+                if llm_value_contains_private_marker(&output)
+                    || workflow_schema::check(&WorkflowSchemaCheckRequest {
+                        schema: tool.output_schema.clone(),
+                        instance: output.clone(),
+                    })
+                    .outcome
+                        != WorkflowSchemaCheckOutcome::Valid
+                {
+                    return Err(WorkflowExecutionError::Integrity(
+                        "llm_trace_tool_output".into(),
+                    ));
+                }
+                (
+                    "succeeded".to_owned(),
+                    Some(llm_trace_value(
+                        request,
+                        invocation_id,
+                        &format!("tool-call-{}-output", index + 1),
+                        &output,
+                        &mut retained_bytes,
+                    )?),
+                    String::new(),
+                    None,
+                )
+            }
+            WorkflowLlmProviderToolResult::Failed { code, error } => {
+                if llm_value_contains_private_marker(&error) {
+                    return Err(WorkflowExecutionError::Integrity(
+                        "llm_trace_tool_error".into(),
+                    ));
+                }
+                let code = normalized_optional_identifier(&code, "tool-error", invocation_id);
+                if code.is_empty() {
+                    return Err(WorkflowExecutionError::Integrity(
+                        "llm_trace_tool_error_code".into(),
+                    ));
+                }
+                (
+                    "failed".to_owned(),
+                    None,
+                    code,
+                    Some(llm_trace_value(
+                        request,
+                        invocation_id,
+                        &format!("tool-call-{}-error", index + 1),
+                        &error,
+                        &mut retained_bytes,
+                    )?),
+                )
+            }
+        };
+        tool_calls.push(v1::WorkflowLlmToolCall {
+            call_id,
+            sequence: (index + 1) as u32,
+            tool_id: call.tool_id,
+            status,
+            input,
+            output,
+            error_code,
+            error,
+            duration_milliseconds: call.duration_milliseconds,
+        });
+    }
+
+    let mut message_ids = BTreeSet::new();
+    let mut response_messages = Vec::with_capacity(trace.response_messages.len());
+    for (index, message) in trace.response_messages.into_iter().enumerate() {
+        let message_id =
+            normalized_optional_identifier(&message.message_id, "response-message", invocation_id);
+        let tool_call_id = message.tool_call_id.unwrap_or_default();
+        if message_id.is_empty()
+            || !message_ids.insert(message_id.clone())
+            || !matches!(message.role.as_str(), "assistant" | "tool")
+            || !matches!(
+                message.kind.as_str(),
+                "message" | "analysis_summary" | "tool_call" | "tool_result" | "final"
+            )
+            || (!tool_call_id.is_empty() && !call_ids.contains(&tool_call_id))
+            || llm_value_contains_private_marker(&message.content)
+        {
+            return Err(WorkflowExecutionError::Integrity(
+                "llm_trace_response_message".into(),
+            ));
+        }
+        response_messages.push(v1::WorkflowLlmResponseMessage {
+            message_id,
+            sequence: (index + 1) as u32,
+            role: message.role,
+            kind: message.kind,
+            summary: sanitize_capability_text(&message.summary),
+            content: Some(llm_trace_value(
+                request,
+                invocation_id,
+                &format!("response-message-{}", index + 1),
+                &message.content,
+                &mut retained_bytes,
+            )?),
+            tool_call_id,
+        });
+    }
+
+    let usage = trace.usage;
+    let total_tokens = usage
+        .input_tokens
+        .checked_add(usage.output_tokens)
+        .and_then(|value| value.checked_add(usage.reasoning_tokens))
+        .ok_or_else(|| WorkflowExecutionError::Integrity("llm_trace_usage".into()))?;
+    let total_cost_micros = usage
+        .input_cost_micros
+        .checked_add(usage.output_cost_micros)
+        .and_then(|value| value.checked_add(usage.reasoning_cost_micros))
+        .and_then(|value| value.checked_add(usage.tool_cost_micros))
+        .ok_or_else(|| WorkflowExecutionError::Integrity("llm_trace_cost".into()))?;
+    if usage.cached_input_tokens > usage.input_tokens
+        || (!usage.cost_currency.is_empty()
+            && (usage.cost_currency.len() != 3
+                || !usage
+                    .cost_currency
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase())))
+        || (total_cost_micros > 0 && usage.cost_currency.is_empty())
+    {
+        return Err(WorkflowExecutionError::Integrity("llm_trace_usage".into()));
+    }
+    let metadata_bytes = canonical_json_bytes(&trace.receipt_metadata)?;
+    if metadata_bytes.len() > MAXIMUM_LLM_TRACE_VALUE_BYTES {
+        return Err(WorkflowExecutionError::Integrity(
+            "llm_trace_receipt_metadata".into(),
+        ));
+    }
+    Ok(AdmittedLlmTrace {
+        tool_calls,
+        response_messages,
+        usage: Some(v1::WorkflowLlmUsage {
+            input_tokens: usage.input_tokens,
+            cached_input_tokens: usage.cached_input_tokens,
+            output_tokens: usage.output_tokens,
+            reasoning_tokens: usage.reasoning_tokens,
+            total_tokens,
+            tool_call_count: call_ids.len() as u32,
+            cost_currency: usage.cost_currency,
+            input_cost_micros: usage.input_cost_micros,
+            output_cost_micros: usage.output_cost_micros,
+            reasoning_cost_micros: usage.reasoning_cost_micros,
+            tool_cost_micros: usage.tool_cost_micros,
+            total_cost_micros,
+        }),
+        provider_receipt: Some(v1::WorkflowLlmProviderReceipt {
+            request_id: normalized_optional_identifier(
+                &trace.request_id,
+                "provider-request",
+                invocation_id,
+            ),
+            response_id: normalized_optional_identifier(
+                &trace.response_id,
+                "provider-response",
+                invocation_id,
+            ),
+            receipt_id: normalized_receipt_id(receipt_id, invocation_id),
+            provider_run_reference: normalized_optional_identifier(
+                provider_run_reference,
+                "provider",
+                invocation_id,
+            ),
+            metadata_digest: canonical_sha256(&trace.receipt_metadata)?,
+        }),
+    })
+}
+
+fn llm_trace_value(
+    request: &v1::RequestWorkflowRun,
+    invocation_id: &str,
+    role: &str,
+    value: &Value,
+    retained_bytes: &mut usize,
+) -> Result<v1::WorkflowValueReference> {
+    let canonical = canonical_json_bytes(value)?;
+    let admitted =
+        if retained_bytes.saturating_add(canonical.len()) <= MAXIMUM_LLM_TRACE_VALUE_BYTES {
+            value.clone()
+        } else {
+            json!({
+                "summarized": true,
+                "originalByteCount": canonical.len(),
+                "sha256": canonical_sha256(value)?,
+            })
+        };
+    *retained_bytes = retained_bytes.saturating_add(canonical_json_bytes(&admitted)?.len());
+    value_from_json(
+        &stable_id("value", &[&request.run_id, invocation_id, role]),
+        &admitted,
+    )
+}
+
+fn llm_response_validation(
+    status: &str,
+    schema_ref: &str,
+    schema_digest: &str,
+    diagnostics: Vec<String>,
+    diagnostics_truncated: bool,
+) -> v1::WorkflowLlmResponseValidation {
+    v1::WorkflowLlmResponseValidation {
+        status: status.to_owned(),
+        schema_ref: schema_ref.to_owned(),
+        schema_digest: schema_digest.to_owned(),
+        diagnostics: diagnostics
+            .into_iter()
+            .take(16)
+            .map(|value| sanitize_capability_text(&value))
+            .collect(),
+        diagnostics_truncated,
     }
 }
 
@@ -5374,6 +5799,7 @@ fn llm_failure_result_event(
     summary: &str,
     elapsed_milliseconds: u64,
     receipt_id: String,
+    trace: AdmittedLlmTrace,
 ) -> Result<v1::EventEnvelope> {
     let invocation_id = recorded.started.invocation_id.as_str();
     let error = capability_error_value(
@@ -5394,6 +5820,14 @@ fn llm_failure_result_event(
         elapsed_milliseconds.min(86_400_000),
         normalized_receipt_id(&receipt_id, invocation_id),
         String::new(),
+        trace,
+        Some(llm_response_validation(
+            "not_validated",
+            &recorded.started.output_schema_ref,
+            &recorded.started.output_schema_digest,
+            Vec::new(),
+            false,
+        )),
     ))
 }
 
@@ -5409,6 +5843,8 @@ fn llm_settled_event(
     elapsed_milliseconds: u64,
     receipt_id: String,
     provider_run_reference: String,
+    trace: AdmittedLlmTrace,
+    validation: Option<v1::WorkflowLlmResponseValidation>,
 ) -> v1::EventEnvelope {
     let invocation_id = recorded.started.invocation_id.as_str();
     runtime_event(
@@ -5431,6 +5867,11 @@ fn llm_settled_event(
             receipt_id,
             provider_run_reference,
             idempotency_key: invocation_id.to_owned(),
+            tool_calls: trace.tool_calls,
+            response_messages: trace.response_messages,
+            usage: trace.usage,
+            validation,
+            provider_receipt: trace.provider_receipt,
         },
         &recorded.started_event_id,
         &request.run_id,

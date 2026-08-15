@@ -66,6 +66,8 @@ struct DesktopDurableWorkflowRunsView: View {
     @State private var inspectorGroup: InspectorGroup = .inputs
     @State private var compactShowsDetail = false
     @State private var zoom = 1.0
+    @State private var llmSearchText = ""
+    @State private var expandedLlmGroups: Set<String> = []
 
     init(runner: LocalCoreRunner) {
         _viewModel = StateObject(wrappedValue: DesktopDurableWorkflowRunsViewModel(runner: runner))
@@ -104,7 +106,9 @@ struct DesktopDurableWorkflowRunsView: View {
             .panelStyle()
         } else {
             GeometryReader { proxy in
-                let compact = proxy.size.width < 1_050
+                let compact = DesktopWorkflowLlmInspectionPresentation.layout(
+                    for: proxy.size.width
+                ) == .compact
                 Group {
                     if compact {
                         if compactShowsDetail, let run = selectedRun(in: history) {
@@ -525,49 +529,173 @@ struct DesktopDurableWorkflowRunsView: View {
             explainedEmpty("This node has no recorded LLM invocation evidence.")
         } else {
             VStack(alignment: .leading, spacing: 7) {
+                TextField("Search tool calls and responses", text: $llmSearchText)
+                    .textFieldStyle(.roundedBorder)
                 ForEach(attempts) { attempt in
-                    evidenceCard(
-                        title: "Model settings",
-                        detail: "Class \(attempt.settings.modelClass)\nProvider \(attempt.settings.providerID)\nModel \(attempt.settings.modelID) · \(attempt.settings.modelRevision)\nReasoning \(attempt.settings.reasoningEffort) · temperature \(attempt.settings.temperatureMilli)‰\nContext limit \(attempt.settings.maximumContextBytes) bytes · output limit \(attempt.settings.maximumOutputTokens) tokens\nConversation scope \(attempt.settings.conversationScope)\nOutput \(attempt.outputSchemaRef) · \(attempt.outputSchemaDigest)"
-                    )
-                    let report = attempt.compilationReport
-                    evidenceCard(
-                        title: "Context compilation",
-                        detail: "Digest \(attempt.contextDigest)\nGroups \(report.retainedGroupCount)/\(report.originalGroupCount) · bytes \(report.retainedByteCount)/\(report.originalByteCount)\nRedactions \(report.redactionCount) · \(report.redactionReasons.joined(separator: ", ").nilIfBlank ?? "none")\nTruncated \(report.truncatedGroupIDs.joined(separator: ", ").nilIfBlank ?? "none")\nDropped \(report.droppedGroupIDs.joined(separator: ", ").nilIfBlank ?? "none")"
-                    )
-                    ForEach(attempt.contextGroups) { group in
+                    llmDisclosure(
+                        key: "\(attempt.id):request",
+                        title: "Request · model, context, and admitted tools"
+                    ) {
                         evidenceCard(
-                            title: "Context · \(group.title)",
-                            detail: "\(group.kind) · \(group.provenance)\nBytes \(group.retainedByteCount)/\(group.originalByteCount) · redactions \(group.redactionCount)\(group.truncated ? " · truncated" : "")\nPrior episodes \(group.sourceEpisodeIDs.joined(separator: ", ").nilIfBlank ?? "none")\n\(valueText(group.content))"
+                            title: "Model settings",
+                            detail: "Class \(attempt.settings.modelClass)\nProvider \(attempt.settings.providerID)\nModel \(attempt.settings.modelID) · \(attempt.settings.modelRevision)\nReasoning \(attempt.settings.reasoningEffort) · temperature \(attempt.settings.temperatureMilli)‰\nContext limit \(attempt.settings.maximumContextBytes) bytes · output limit \(attempt.settings.maximumOutputTokens) tokens\nConversation scope \(attempt.settings.conversationScope)\nOutput \(attempt.outputSchemaRef) · \(attempt.outputSchemaDigest)"
+                        )
+                        let report = attempt.compilationReport
+                        evidenceCard(
+                            title: "Context compilation",
+                            detail: "Digest \(attempt.contextDigest)\nGroups \(report.retainedGroupCount)/\(report.originalGroupCount) · bytes \(report.retainedByteCount)/\(report.originalByteCount)\nRedactions \(report.redactionCount) · \(report.redactionReasons.joined(separator: ", ").nilIfBlank ?? "none")\nTruncated \(report.truncatedGroupIDs.joined(separator: ", ").nilIfBlank ?? "none")\nDropped \(report.droppedGroupIDs.joined(separator: ", ").nilIfBlank ?? "none")"
+                        )
+                        evidenceCard(title: "Typed input", detail: valueText(attempt.input))
+                        ForEach(attempt.toolDefinitions.filter(llmMatches)) { tool in
+                            evidenceCard(
+                                title: "Tool · \(tool.toolID) \(tool.version)",
+                                detail: "\(tool.description)\nPackage \(tool.packageDigest)\nInput \(tool.inputSchemaRef) · \(tool.inputSchemaDigest)\nOutput \(tool.outputSchemaRef) · \(tool.outputSchemaDigest)"
+                            )
+                        }
+                    }
+
+                    llmDisclosure(
+                        key: "\(attempt.id):calls",
+                        title: "Tool calls · \(attempt.toolCalls.count)"
+                    ) {
+                        let calls = attempt.toolCalls.filter(llmMatches)
+                        if calls.isEmpty {
+                            explainedEmpty(llmSearchText.isEmpty
+                                ? "The model made no tool calls."
+                                : "No tool call matches this search.")
+                        }
+                        ForEach(calls) { call in
+                            evidenceCard(
+                                title: "Call \(call.sequence) · \(call.toolID) · \(call.status.capitalized)",
+                                detail: "ID \(call.callID) · \(call.durationMilliseconds) ms\nInput\n\(valueText(call.input))"
+                            )
+                            if let output = call.output {
+                                codeBlock(valueText(output))
+                            }
+                            if let error = call.error {
+                                evidenceCard(
+                                    title: call.errorCode ?? "Tool error",
+                                    detail: valueText(error)
+                                )
+                            }
+                        }
+                    }
+
+                    llmDisclosure(
+                        key: "\(attempt.id):responses",
+                        title: "Response messages · \(attempt.responseMessages.count)"
+                    ) {
+                        let messages = attempt.responseMessages.filter(llmMatches)
+                        if messages.isEmpty {
+                            explainedEmpty(llmSearchText.isEmpty
+                                ? "No provider response messages were retained."
+                                : "No response message matches this search.")
+                        }
+                        ForEach(messages) { message in
+                            evidenceCard(
+                                title: "\(message.sequence) · \(message.kind.replacingOccurrences(of: "_", with: " ").capitalized)",
+                                detail: "\(message.role.capitalized) · \(message.summary)\nTool call \(message.toolCallID ?? "none")"
+                            )
+                            codeBlock(valueText(message.content))
+                        }
+                    }
+
+                    llmDisclosure(
+                        key: "\(attempt.id):validation",
+                        title: "Usage, validation, and receipt"
+                    ) {
+                        if let usage = attempt.usage {
+                            evidenceCard(
+                                title: "Token and cost usage",
+                                detail: "Input \(usage.inputTokens) · cached \(usage.cachedInputTokens)\nOutput \(usage.outputTokens) · reasoning \(usage.reasoningTokens)\nTotal \(usage.totalTokens) · tool calls \(usage.toolCallCount)\nCost \(usage.totalCostMicros) µ\(usage.costCurrency ?? "currency unspecified")"
+                            )
+                        }
+                        if let validation = attempt.validation {
+                            evidenceCard(
+                                title: "Response validation · \(validation.status.replacingOccurrences(of: "_", with: " ").capitalized)",
+                                detail: "\(validation.schemaRef) · \(validation.schemaDigest)\n\(validation.diagnostics.joined(separator: "\n").nilIfBlank ?? "No diagnostics")\(validation.diagnosticsTruncated ? "\nAdditional diagnostics truncated" : "")"
+                            )
+                        }
+                        if let receipt = attempt.providerReceipt {
+                            evidenceCard(
+                                title: "Provider receipt",
+                                detail: "Request \(receipt.requestID)\nResponse \(receipt.responseID)\nReceipt \(receipt.receiptID)\nProvider run \(receipt.providerRunReference ?? "none")\nMetadata \(receipt.metadataDigest)"
+                            )
+                        }
+                    }
+
+                    llmDisclosure(
+                        key: "\(attempt.id):final",
+                        title: "Final output and lifecycle"
+                    ) {
+                        if let output = attempt.output {
+                            evidenceCard(title: "Validated model output", detail: valueText(output))
+                        }
+                        if let error = attempt.error {
+                            evidenceCard(title: attempt.errorCode ?? "LLM error", detail: valueText(error))
+                        }
+                        evidenceCard(
+                            title: "\(attempt.status.capitalized) · \(attempt.outcome?.replacingOccurrences(of: "_", with: " ").capitalized ?? "running")",
+                            detail: "Invocation \(attempt.invocationID)\nIdempotency \(attempt.idempotencyKey ?? "not settled")\nReceipt \(attempt.receiptID ?? "none")\nProvider run \(attempt.providerRunReference ?? "none")\nDeadline \(attempt.deadlineUnixMillis) · timeout \(attempt.timeoutMilliseconds) ms\nElapsed \(attempt.elapsedMilliseconds.map(String.init) ?? "active") ms\nJournal \(attempt.startedStorePosition)…\(attempt.settledStorePosition.map(String.init) ?? "active")"
                         )
                     }
-                    ForEach(attempt.messages) { message in
-                        evidenceCard(
-                            title: "Message \(message.sequence) · \(message.role.capitalized)",
-                            detail: "\(message.summary)\nContext group \(message.contextGroupID) · about \(message.estimatedTokens) tokens\(message.truncated ? " · truncated" : "")\n\(valueText(message.content))"
-                        )
-                    }
-                    if !attempt.priorEpisodeIDs.isEmpty {
-                        evidenceCard(
-                            title: "Prior case episodes",
-                            detail: attempt.priorEpisodeIDs.joined(separator: "\n")
-                        )
-                    }
-                    capabilityArtifacts(attempt.attachments, title: "Attachment")
-                    evidenceCard(title: "Typed input", detail: valueText(attempt.input))
-                    if let output = attempt.output {
-                        evidenceCard(title: "Validated model output", detail: valueText(output))
-                    }
-                    if let error = attempt.error {
-                        evidenceCard(title: attempt.errorCode ?? "LLM error", detail: valueText(error))
-                    }
-                    evidenceCard(
-                        title: "\(attempt.status.capitalized) · \(attempt.outcome?.replacingOccurrences(of: "_", with: " ").capitalized ?? "running")",
-                        detail: "Invocation \(attempt.invocationID)\nIdempotency \(attempt.idempotencyKey ?? "not settled")\nReceipt \(attempt.receiptID ?? "none")\nProvider run \(attempt.providerRunReference ?? "none")\nDeadline \(attempt.deadlineUnixMillis) · timeout \(attempt.timeoutMilliseconds) ms\nElapsed \(attempt.elapsedMilliseconds.map(String.init) ?? "active") ms\nJournal \(attempt.startedStorePosition)…\(attempt.settledStorePosition.map(String.init) ?? "active")"
-                    )
                 }
             }
         }
+    }
+
+    private func llmDisclosure<Content: View>(
+        key: String,
+        title: String,
+        @ViewBuilder content: @escaping () -> Content
+    ) -> some View {
+        DisclosureGroup(
+            isExpanded: Binding(
+                get: {
+                    DesktopWorkflowLlmInspectionPresentation.isGroupExpanded(
+                        groupID: key,
+                        explicitlyExpandedGroupIDs: expandedLlmGroups,
+                        searchText: llmSearchText
+                    )
+                },
+                set: { expanded in
+                    if expanded { expandedLlmGroups.insert(key) }
+                    else { expandedLlmGroups.remove(key) }
+                }
+            )
+        ) {
+            VStack(alignment: .leading, spacing: 7) { content() }
+                .padding(.top, 7)
+        } label: {
+            Text(title).font(.caption.weight(.bold)).foregroundStyle(Nord.frost1)
+        }
+        .padding(9)
+        .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func llmMatches(_ tool: DesktopWorkflowProjectedLlmToolDefinition) -> Bool {
+        DesktopWorkflowLlmInspectionPresentation.includes(
+            searchText: llmSearchText,
+            fields: [tool.toolID, tool.version, tool.description,
+                     tool.inputSchemaRef, tool.outputSchemaRef]
+        )
+    }
+
+    private func llmMatches(_ call: DesktopWorkflowProjectedLlmToolCall) -> Bool {
+        DesktopWorkflowLlmInspectionPresentation.includes(
+            searchText: llmSearchText,
+            fields: [call.callID, call.toolID, call.status,
+                     call.errorCode ?? "", valueText(call.input),
+                     call.output.map(valueText) ?? "", call.error.map(valueText) ?? ""]
+        )
+    }
+
+    private func llmMatches(_ message: DesktopWorkflowProjectedLlmResponseMessage) -> Bool {
+        DesktopWorkflowLlmInspectionPresentation.includes(
+            searchText: llmSearchText,
+            fields: [message.messageID, message.role, message.kind, message.summary,
+                     message.toolCallID ?? "", valueText(message.content)]
+        )
     }
 
     @ViewBuilder
@@ -680,9 +808,7 @@ struct DesktopDurableWorkflowRunsView: View {
     }
 
     private func valueText(_ value: DesktopWorkflowProjectedValue) -> String {
-        value.inlineCanonicalJSON.map { String(decoding: $0, as: UTF8.self) }
-            ?? value.absenceExplanation
-            ?? "Value content unavailable."
+        DesktopWorkflowLlmInspectionPresentation.structuredText(value)
     }
 
     private func storageCard(

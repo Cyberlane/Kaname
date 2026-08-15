@@ -18,6 +18,9 @@ use kaname_core::{
     },
     workflow_llm::{
         DeterministicLlmPlan, DeterministicWorkflowLlmProvider, WorkflowLlmProviderDefinition,
+        WorkflowLlmProviderResponseMessage, WorkflowLlmProviderToolCall,
+        WorkflowLlmProviderToolDefinition, WorkflowLlmProviderToolResult, WorkflowLlmProviderTrace,
+        WorkflowLlmProviderUsage,
     },
     workflow_object_store::WorkflowObjectStoreQuota,
     workflow_projection::WorkflowRunProjection,
@@ -518,6 +521,58 @@ fn inspectable_llm_context_is_redacted_bounded_and_crash_exact() {
         assert_eq!(llm.context_digest, expected.1);
         assert_eq!(provider.invocation_count(&llm.invocation_id), 1);
     }
+}
+
+#[test]
+fn llm_tool_calls_responses_usage_and_large_payload_summaries_are_inspectable() {
+    let directory = tempdir().unwrap();
+    let (library, published) = published_llm_tool_library(directory.path());
+    let command = control_run_command(
+        "run-llm-tools-001",
+        &published,
+        LLM_WORKFLOW_ID,
+        LLM_REVISION_ID,
+        json!({"request": "Use the admitted synthetic search tool"}),
+    );
+    let mut provider = llm_tool_provider();
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    assert_eq!(
+        workflow_executor::execute_with_llm(&mut journal, &library, &mut provider, &command)
+            .unwrap()
+            .outcome,
+        DurableRunOutcome::Succeeded
+    );
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    projection.catch_up(&journal).unwrap();
+    let run = projection
+        .inspect_runs(None, Some("run-llm-tools-001"), 1)
+        .unwrap()
+        .pop()
+        .unwrap();
+    let llm = &run.llm_attempts[0];
+    assert_eq!(llm.tool_definitions.len(), 1);
+    assert_eq!(llm.tool_definitions[0].tool_id, "synthetic.search");
+    assert_eq!(llm.tool_calls.len(), 2);
+    assert_eq!(llm.tool_calls[0].status, "succeeded");
+    assert!(llm.tool_calls[0].output.is_some());
+    assert_eq!(llm.tool_calls[1].status, "failed");
+    assert_eq!(llm.tool_calls[1].error_code, "tool.synthetic-failure");
+    assert!(llm.tool_calls[1].error.is_some());
+    assert_eq!(llm.response_messages.len(), 2);
+    let summarized = llm.response_messages[0].content.as_ref().unwrap();
+    assert!(
+        String::from_utf8_lossy(&summarized.inline_canonical_json).contains("\"summarized\":true")
+    );
+    let usage = llm.usage.as_ref().unwrap();
+    assert_eq!(usage.total_tokens, 170);
+    assert_eq!(usage.tool_call_count, 2);
+    assert_eq!(usage.total_cost_micros, 235);
+    assert_eq!(llm.validation.as_ref().unwrap().status, "succeeded");
+    assert_eq!(
+        llm.provider_receipt.as_ref().unwrap().request_id,
+        "provider-request-tools-001"
+    );
+    assert!(llm.output.is_some());
 }
 
 #[test]
@@ -2779,8 +2834,195 @@ fn llm_provider(plan: DeterministicLlmPlan) -> DeterministicWorkflowLlmProvider 
             timeout_milliseconds: 100,
             maximum_context_bytes: 49_152,
             idempotent: true,
+            tools: Vec::new(),
         },
         plan,
+    );
+    provider
+}
+
+fn published_llm_tool_library(
+    application_support: &std::path::Path,
+) -> (
+    kaname_core::workflow_library::WorkflowLibraryStore,
+    PublishedWorkflowRevision,
+) {
+    let mut source = llm_workflow_source("job", 32_768);
+    *source
+        .pointer_mut("/graph/nodes/1/config/tools")
+        .expect("LLM tool configuration") = json!(["synthetic.search"]);
+    let mut library = open_workflow_library(application_support).unwrap();
+    library
+        .create_draft(CreateWorkflowDraft {
+            workflow_id: LLM_WORKFLOW_ID.into(),
+            package_id: "dev.kaname.llm-runtime".into(),
+            name: "Inspectable LLM tool runtime".into(),
+            summary: "Synthetic bounded LLM tool evidence fixture".into(),
+            edit_id: "edit-llm-tools-001".into(),
+            session_id: "executor-tests".into(),
+            workflow_source: serde_json::to_vec(&source).unwrap(),
+            layout_source: br#"{"nodes":[]}"#.to_vec(),
+            recorded_at_unix_millis: 140,
+        })
+        .unwrap();
+    let published = library
+        .publish_revision(PublishWorkflowRevision {
+            workflow_id: LLM_WORKFLOW_ID.into(),
+            expected_draft_sequence: 0,
+            revision_id: LLM_REVISION_ID.into(),
+            registration_id: "registration-llm-tools-001".into(),
+            release_version: "1.0.0".into(),
+            schema_bundle_json: serde_json::to_vec(&json!({
+                "bundleVersion": 1,
+                "schemas": [
+                    {
+                        "id": "dev.kaname.llm/output-v1",
+                        "schema": {
+                            "$schema": "https://json-schema.org/draft/2020-12/schema",
+                            "type": "object",
+                            "required": ["summary"],
+                            "properties": {"summary": {"type": "string"}},
+                            "additionalProperties": false
+                        }
+                    },
+                    {
+                        "id": "dev.kaname.tool/search-input-v1",
+                        "schema": {
+                            "$schema": "https://json-schema.org/draft/2020-12/schema",
+                            "type": "object",
+                            "required": ["query"],
+                            "properties": {"query": {"type": "string"}},
+                            "additionalProperties": false
+                        }
+                    },
+                    {
+                        "id": "dev.kaname.tool/search-output-v1",
+                        "schema": {
+                            "$schema": "https://json-schema.org/draft/2020-12/schema",
+                            "type": "object",
+                            "required": ["hits"],
+                            "properties": {"hits": {"type": "array"}},
+                            "additionalProperties": false
+                        }
+                    }
+                ]
+            }))
+            .unwrap(),
+            dependency_lock_json: serde_json::to_vec(&json!({
+                "lockVersion": 1,
+                "dependencies": [{
+                    "kind": "tool",
+                    "id": "synthetic.search",
+                    "version": "1.0.0",
+                    "digest": "a".repeat(64)
+                }]
+            }))
+            .unwrap(),
+            configuration_contract_json: br#"{"type":"object"}"#.to_vec(),
+            published_at_unix_millis: 150,
+        })
+        .unwrap();
+    (library, published)
+}
+
+fn llm_tool_provider() -> DeterministicWorkflowLlmProvider {
+    let input_schema = json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "required": ["query"],
+        "properties": {"query": {"type": "string"}},
+        "additionalProperties": false
+    });
+    let output_schema = json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "required": ["hits"],
+        "properties": {"hits": {"type": "array"}},
+        "additionalProperties": false
+    });
+    let mut provider = DeterministicWorkflowLlmProvider::default();
+    provider.register(
+        WorkflowLlmProviderDefinition {
+            provider_id: "synthetic-provider".into(),
+            model_id: "synthetic-model".into(),
+            model_revision: "revision-2026-08-15".into(),
+            model_class: "reasoning".into(),
+            timeout_milliseconds: 100,
+            maximum_context_bytes: 49_152,
+            idempotent: true,
+            tools: vec![WorkflowLlmProviderToolDefinition {
+                tool_id: "synthetic.search".into(),
+                version: "1.0.0".into(),
+                package_digest: "a".repeat(64),
+                description: "Search the bounded synthetic fixture".into(),
+                input_schema_ref: "dev.kaname.tool/search-input-v1".into(),
+                input_schema,
+                output_schema_ref: "dev.kaname.tool/search-output-v1".into(),
+                output_schema,
+            }],
+        },
+        DeterministicLlmPlan::Succeed {
+            output: json!({"summary": "Safe result with inspected tools"}),
+            elapsed_milliseconds: 11,
+        },
+    );
+    provider.register_trace(
+        "reasoning",
+        WorkflowLlmProviderTrace {
+            request_id: "provider-request-tools-001".into(),
+            response_id: "provider-response-tools-001".into(),
+            receipt_metadata: json!({"region": "synthetic"}),
+            tool_calls: vec![
+                WorkflowLlmProviderToolCall {
+                    call_id: "call-search-001".into(),
+                    tool_id: "synthetic.search".into(),
+                    input: json!({"query": "bounded evidence"}),
+                    result: WorkflowLlmProviderToolResult::Succeeded(json!({
+                        "hits": [{"title": "Local result"}]
+                    })),
+                    duration_milliseconds: 3,
+                },
+                WorkflowLlmProviderToolCall {
+                    call_id: "call-search-002".into(),
+                    tool_id: "synthetic.search".into(),
+                    input: json!({"query": "failed evidence"}),
+                    result: WorkflowLlmProviderToolResult::Failed {
+                        code: "tool.synthetic-failure".into(),
+                        error: json!({"message": "Synthetic bounded failure"}),
+                    },
+                    duration_milliseconds: 2,
+                },
+            ],
+            response_messages: vec![
+                WorkflowLlmProviderResponseMessage {
+                    message_id: "response-message-tool-001".into(),
+                    role: "tool".into(),
+                    kind: "tool_result".into(),
+                    summary: "Large tool payload retained as a bounded summary".into(),
+                    content: json!({"payload": "x".repeat(30_000)}),
+                    tool_call_id: Some("call-search-001".into()),
+                },
+                WorkflowLlmProviderResponseMessage {
+                    message_id: "response-message-final-001".into(),
+                    role: "assistant".into(),
+                    kind: "final".into(),
+                    summary: "Final structured response".into(),
+                    content: json!({"summary": "Safe result with inspected tools"}),
+                    tool_call_id: None,
+                },
+            ],
+            usage: WorkflowLlmProviderUsage {
+                input_tokens: 120,
+                cached_input_tokens: 20,
+                output_tokens: 40,
+                reasoning_tokens: 10,
+                cost_currency: "USD".into(),
+                input_cost_micros: 120,
+                output_cost_micros: 80,
+                reasoning_cost_micros: 10,
+                tool_cost_micros: 25,
+            },
+        },
     );
     provider
 }
