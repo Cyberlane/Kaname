@@ -96,10 +96,11 @@ fn workflow_run_inspect(journal_path: &str, projection_path: &str) -> Result<Str
     let (projection, _) = WorkflowRunProjection::open_or_rebuild(projection_path, &journal)
         .map_err(|_| "workflow_run_projection_unavailable".to_owned())?;
     let runs = projection
-        .inspect_runs(
+        .inspect_runs_as_of(
             (!query.workflow_id.is_empty()).then_some(query.workflow_id.as_str()),
             (!query.run_id.is_empty()).then_some(query.run_id.as_str()),
             query.limit,
+            query.as_of_unix_millis,
         )
         .map_err(|_| "workflow_run_inspection_failed".to_owned())?;
     let absence_reason = if !query.run_id.is_empty() && runs.is_empty() {

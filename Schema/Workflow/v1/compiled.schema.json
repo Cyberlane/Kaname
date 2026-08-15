@@ -74,6 +74,7 @@
     "resources",
     "policies",
     "storage",
+    "retention",
     "dependencies"
   ],
   "properties": {
@@ -150,6 +151,9 @@
         "$ref": "storage-declaration.schema.json"
       },
       "maxProperties": 256
+    },
+    "retention": {
+      "$ref": "retention-policy.schema.json"
     },
     "dependencies": {
       "type": "array",

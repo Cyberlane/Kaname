@@ -5,7 +5,7 @@
 //! inline value before the generic journal stores bytes. It does not execute a
 //! workflow or grant connector, storage, model, or effect authority.
 
-use crate::{v1, workflow_canonical};
+use crate::{v1, workflow_canonical, workflow_retention::WorkflowRunRetentionPolicy};
 use prost::Message;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -710,7 +710,10 @@ fn validate_token_created(payload: &v1::WorkflowRunTokenCreated) -> Result<()> {
     validate_identifier(&payload.request_command_id, 128, "request_command_id")?;
     validate_identifier(&payload.workflow_id, 128, "workflow_id")?;
     validate_identifier(&payload.revision_id, 128, "revision_id")?;
-    validate_digest(&payload.package_digest, "package_digest")
+    validate_digest(&payload.package_digest, "package_digest")?;
+    WorkflowRunRetentionPolicy::from_proto(payload.retention_policy.as_ref())
+        .map_err(|_| WorkflowRuntimeContractError::Invalid("run_retention_policy"))?;
+    Ok(())
 }
 
 fn validate_execution_token_created(payload: &v1::WorkflowExecutionTokenCreated) -> Result<()> {

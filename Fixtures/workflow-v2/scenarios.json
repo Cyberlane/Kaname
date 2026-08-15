@@ -454,7 +454,7 @@
       "definition": {
         "workflowID": "dev.kaname.fixture.retention-success",
         "entrypoint": "complete",
-        "retention": {"mode": "deleteAfterSuccess"},
+        "retention": {"mode": "delete-after-success"},
         "nodes": [{"id": "complete", "type": "control.complete"}],
         "edges": []
       },
@@ -503,7 +503,7 @@
       "definition": {
         "workflowID": "dev.kaname.fixture.retention-manual",
         "entrypoint": "complete",
-        "retention": {"mode": "days", "days": 30},
+        "retention": {"mode": "duration", "days": 30},
         "nodes": [{"id": "complete", "type": "control.complete"}],
         "edges": []
       },

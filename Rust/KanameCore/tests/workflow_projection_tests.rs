@@ -5,7 +5,8 @@ use kaname_core::{
         WorkflowAttemptOutcome, WorkflowAttemptSettled, WorkflowAttemptStarted,
         WorkflowEdgeCheckpointState, WorkflowEdgeCheckpointed, WorkflowMatchTraceRecorded,
         WorkflowPortEmitted, WorkflowRunCancellationRequested, WorkflowRunOutcome,
-        WorkflowRunSettled, WorkflowRunTokenCreated, WorkflowValueReference,
+        WorkflowRunRetentionMode, WorkflowRunRetentionPolicy, WorkflowRunSettled,
+        WorkflowRunTokenCreated, WorkflowValueReference,
     },
     workflow_projection::{
         WorkflowProjectionError, WorkflowProjectionFault, WorkflowRunProjection,
@@ -184,6 +185,7 @@ fn invalid_lifecycle_rolls_back_the_entire_projection_batch() {
                 workflow_id: "workflow-invalid".into(),
                 revision_id: "revision-invalid".into(),
                 package_digest: "e".repeat(64),
+                retention_policy: None,
             },
             "command-invalid",
             RUN_ID,
@@ -239,7 +241,7 @@ fn inspection_returns_revision_pinned_grouped_evidence_and_explains_absence() {
     assert_eq!(recent[1].revision_id, "revision-006");
 
     let run = projection
-        .inspect_runs(None, Some(RUN_ID), 1)
+        .inspect_runs_as_of(None, Some(RUN_ID), 1, 1_080)
         .unwrap()
         .pop()
         .unwrap();
@@ -259,6 +261,20 @@ fn inspection_returns_revision_pinned_grouped_evidence_and_explains_absence() {
     assert_eq!(run.match_traces[0].matched_case_ids, ["case-five"]);
     assert_eq!(run.events.len(), 9);
     assert_eq!(run.events[0].kind, WORKFLOW_RUN_TOKEN_CREATED_KIND);
+    let policy = run.retention_policy.as_ref().unwrap();
+    assert_eq!(
+        policy.mode,
+        WorkflowRunRetentionMode::DeleteAfterSuccess as i32
+    );
+    assert_eq!(policy.days, 0);
+    let preview = run.purge_preview.as_ref().unwrap();
+    assert!(preview.manual_eligible);
+    assert!(preview.automatic_eligible);
+    assert_eq!(preview.automatic_eligible_at_unix_millis, 1_080);
+    assert_eq!(preview.affected_attempt_ids.len(), 2);
+    assert_eq!(preview.affected_value_ids.len(), 2);
+    assert!(preview.affected_value_bytes > 0);
+    assert_eq!(preview.evidence_digest.len(), 64);
     assert!(
         projection
             .inspect_runs(None, Some("purged-run"), 1)
@@ -305,6 +321,10 @@ fn append_complete_corpus(journal: &mut Journal) {
                 workflow_id: "workflow-001".into(),
                 revision_id: "revision-006".into(),
                 package_digest: "a".repeat(64),
+                retention_policy: Some(WorkflowRunRetentionPolicy {
+                    mode: WorkflowRunRetentionMode::DeleteAfterSuccess as i32,
+                    days: 0,
+                }),
             },
             "command-run-001",
             RUN_ID,
@@ -465,6 +485,7 @@ fn append_complete_corpus(journal: &mut Journal) {
                 workflow_id: "workflow-001".into(),
                 revision_id: "revision-006".into(),
                 package_digest: "a".repeat(64),
+                retention_policy: None,
             },
             "command-run-002",
             "run-projection-002",

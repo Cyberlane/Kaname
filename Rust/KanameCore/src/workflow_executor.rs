@@ -22,6 +22,7 @@ use crate::{
         WorkflowLlmProviderTrace,
     },
     workflow_match::{self, EvaluationOutcome, MatchConfig, MatchRoots, TraceOutcome},
+    workflow_retention::WorkflowRunRetentionPolicy,
     workflow_runtime::{self, WorkflowRuntimeCommand, WorkflowRuntimeEvent},
     workflow_schema::{self, WorkflowSchemaCheckOutcome, WorkflowSchemaCheckRequest},
     workflow_storage::{
@@ -184,6 +185,8 @@ struct CompiledWorkflow {
     resources: BTreeMap<String, String>,
     policies: BTreeMap<String, Value>,
     storage: BTreeMap<String, CompiledStorageDeclaration>,
+    #[serde(default)]
+    retention: WorkflowRunRetentionPolicy,
     dependencies: Vec<CompiledDependency>,
 }
 
@@ -1558,6 +1561,10 @@ fn compiled_storage_requirements(
 }
 
 fn validate_compiled_subset(compiled: &CompiledWorkflow) -> Result<()> {
+    compiled
+        .retention
+        .validate()
+        .map_err(|_| WorkflowExecutionError::Integrity("compiled_retention_policy".into()))?;
     let nodes = compiled
         .nodes
         .iter()
@@ -2069,6 +2076,7 @@ fn next_events(
                 workflow_id: request.workflow_id.clone(),
                 revision_id: request.revision_id.clone(),
                 package_digest: request.package_digest.clone(),
+                retention_policy: Some(package.compiled.retention.as_proto()),
             },
             &command.command_id,
             &request.run_id,

@@ -6,6 +6,7 @@ use crate::{
         WorkflowSourceLocation,
     },
     workflow_canonical,
+    workflow_retention::WorkflowRunRetentionPolicy,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -190,6 +191,7 @@ struct CompiledArtifact<'a> {
     resources: &'a BTreeMap<String, String>,
     policies: &'a BTreeMap<String, Policy>,
     storage: &'a BTreeMap<String, StorageDeclaration>,
+    retention: WorkflowRunRetentionPolicy,
     dependencies: Vec<&'a Dependency>,
 }
 
@@ -372,6 +374,9 @@ fn emit_compiled_artifact(
         .collect::<Result<Vec<_>, ()>>()?;
     let edges = manifest.workflow.graph.edges.iter().collect::<Vec<_>>();
     let dependencies = lock.dependencies.iter().collect::<Vec<_>>();
+    let retention =
+        WorkflowRunRetentionPolicy::from_optional_json(manifest.workflow.retention.as_ref())
+            .map_err(|_| ())?;
     let artifact = CompiledArtifact {
         compiled_format_version: 1,
         workflow_id: &manifest.workflow.workflow_id,
@@ -388,6 +393,7 @@ fn emit_compiled_artifact(
         resources: &manifest.workflow.resources,
         policies: &manifest.workflow.policies,
         storage: &manifest.workflow.storage,
+        retention,
         dependencies,
     };
     let compiled = canonical_value(&artifact)?;

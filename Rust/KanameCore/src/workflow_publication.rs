@@ -13,6 +13,7 @@ use crate::{
         Result, WorkflowLibraryError, WorkflowLibraryStore, ensure_private_directory,
         read_bounded_private_file, sync_directory, write_new_private_file_unflushed,
     },
+    workflow_retention::WorkflowRunRetentionPolicy,
 };
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -109,6 +110,8 @@ struct PublishedCompiledContract {
     resources: BTreeMap<String, String>,
     policies: BTreeMap<String, Value>,
     storage: BTreeMap<String, Value>,
+    #[serde(default)]
+    retention: WorkflowRunRetentionPolicy,
     dependencies: Vec<PublishedDependency>,
 }
 
@@ -540,6 +543,7 @@ fn parse_compiled_contract(bytes: &[u8]) -> Result<PublishedCompiledContract> {
         || compiled.resources.len() > 1024
         || compiled.policies.len() > 1024
         || compiled.storage.len() > 1024
+        || compiled.retention.validate().is_err()
         || compiled.dependencies.len() > 1024
         || compiled.nodes.iter().any(|node| {
             node.id.is_empty()

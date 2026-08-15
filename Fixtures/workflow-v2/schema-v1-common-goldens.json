@@ -429,6 +429,10 @@
       "resources": {},
       "policies": {},
       "storage": {},
+      "retention": {
+        "mode": "duration",
+        "days": 30
+      },
       "dependencies": []
     },
     "invalid": {

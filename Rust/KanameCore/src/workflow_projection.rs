@@ -9,6 +9,7 @@ use crate::{
     journal::{Journal, JournalError},
     v1,
     workflow_library::{PrivatePathKind, prepare_database_path, protect_private_path},
+    workflow_retention::WorkflowRunRetentionPolicy,
     workflow_runtime::{self, WorkflowRuntimeEvent},
 };
 use prost::Message;
@@ -18,13 +19,14 @@ use rusqlite::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeMap,
     ffi::OsString,
     fmt, fs,
     path::{Path, PathBuf},
     time::Duration,
 };
 
-const PROJECTION_SCHEMA_VERSION: i64 = 11;
+const PROJECTION_SCHEMA_VERSION: i64 = 12;
 const DEFAULT_BATCH_SIZE: u32 = 250;
 
 const INITIAL_SCHEMA: &str = r#"
@@ -59,6 +61,9 @@ CREATE TABLE workflow_runs (
     workflow_id TEXT NOT NULL,
     revision_id TEXT NOT NULL,
     package_digest TEXT NOT NULL CHECK (length(package_digest) = 64),
+    retention_mode TEXT NOT NULL DEFAULT 'duration'
+        CHECK (retention_mode IN ('duration', 'delete-after-success', 'forever')),
+    retention_days INTEGER NOT NULL DEFAULT 30 CHECK (retention_days BETWEEN 0 AND 3650),
     status TEXT NOT NULL CHECK (status IN ('running', 'cancelling', 'succeeded', 'failed', 'cancelled')),
     outcome TEXT,
     error_code TEXT,
@@ -1229,6 +1234,7 @@ impl WorkflowRunProjection {
             transaction.execute_batch(PROJECTION_MIGRATION_9)?;
             transaction.execute_batch(PROJECTION_MIGRATION_10)?;
             apply_projection_migration_11(&transaction)?;
+            apply_projection_migration_12(&transaction)?;
             transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
             refresh_state_digest(&transaction)?;
             transaction.commit()?;
@@ -1242,6 +1248,7 @@ impl WorkflowRunProjection {
             transaction.execute_batch(PROJECTION_MIGRATION_9)?;
             transaction.execute_batch(PROJECTION_MIGRATION_10)?;
             apply_projection_migration_11(&transaction)?;
+            apply_projection_migration_12(&transaction)?;
             transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
             refresh_state_digest(&transaction)?;
             transaction.commit()?;
@@ -1254,6 +1261,7 @@ impl WorkflowRunProjection {
             transaction.execute_batch(PROJECTION_MIGRATION_9)?;
             transaction.execute_batch(PROJECTION_MIGRATION_10)?;
             apply_projection_migration_11(&transaction)?;
+            apply_projection_migration_12(&transaction)?;
             transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
             refresh_state_digest(&transaction)?;
             transaction.commit()?;
@@ -1265,6 +1273,7 @@ impl WorkflowRunProjection {
             transaction.execute_batch(PROJECTION_MIGRATION_9)?;
             transaction.execute_batch(PROJECTION_MIGRATION_10)?;
             apply_projection_migration_11(&transaction)?;
+            apply_projection_migration_12(&transaction)?;
             transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
             refresh_state_digest(&transaction)?;
             transaction.commit()?;
@@ -1275,6 +1284,7 @@ impl WorkflowRunProjection {
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             transaction.execute_batch(PROJECTION_MIGRATION_10)?;
             apply_projection_migration_11(&transaction)?;
+            apply_projection_migration_12(&transaction)?;
             transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
             refresh_state_digest(&transaction)?;
             transaction.commit()?;
@@ -1284,6 +1294,16 @@ impl WorkflowRunProjection {
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             apply_projection_migration_11(&transaction)?;
+            apply_projection_migration_12(&transaction)?;
+            transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
+            refresh_state_digest(&transaction)?;
+            transaction.commit()?;
+        }
+        let found: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if found == 11 {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            apply_projection_migration_12(&transaction)?;
             transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
             refresh_state_digest(&transaction)?;
             transaction.commit()?;
@@ -1646,7 +1666,22 @@ impl WorkflowRunProjection {
         run_id: Option<&str>,
         limit: u32,
     ) -> Result<Vec<v1::WorkflowProjectedRun>> {
+        self.inspect_runs_as_of(workflow_id, run_id, limit, 0)
+    }
+
+    pub fn inspect_runs_as_of(
+        &self,
+        workflow_id: Option<&str>,
+        run_id: Option<&str>,
+        limit: u32,
+        as_of_unix_millis: i64,
+    ) -> Result<Vec<v1::WorkflowProjectedRun>> {
         self.integrity_check()?;
+        if as_of_unix_millis < 0 {
+            return Err(WorkflowProjectionError::Integrity(
+                "inspection_time_out_of_bounds".into(),
+            ));
+        }
         if limit == 0 || limit > 100 {
             return Err(WorkflowProjectionError::Integrity(
                 "inspection_limit_out_of_bounds".into(),
@@ -1692,11 +1727,15 @@ impl WorkflowRunProjection {
         }
         run_ids
             .iter()
-            .map(|run_id| self.inspect_run(run_id))
+            .map(|run_id| self.inspect_run(run_id, as_of_unix_millis))
             .collect()
     }
 
-    fn inspect_run(&self, run_id: &str) -> Result<v1::WorkflowProjectedRun> {
+    fn inspect_run(
+        &self,
+        run_id: &str,
+        as_of_unix_millis: i64,
+    ) -> Result<v1::WorkflowProjectedRun> {
         type RunRow = (
             String,
             String,
@@ -1704,6 +1743,8 @@ impl WorkflowRunProjection {
             String,
             String,
             String,
+            String,
+            i64,
             String,
             Option<String>,
             Option<String>,
@@ -1718,7 +1759,7 @@ impl WorkflowRunProjection {
         );
         let row: RunRow = self.connection.query_row(
             "SELECT run_id, run_token_id, request_command_id, workflow_id, revision_id,
-                    package_digest, status, outcome, error_code, error_value_id,
+                    package_digest, retention_mode, retention_days, status, outcome, error_code, error_value_id,
                     final_emission_ids_json, cancellation_command_id, cancellation_reason_code,
                     created_at_unix_millis, settled_at_unix_millis,
                     first_store_position, last_store_position
@@ -1743,27 +1784,29 @@ impl WorkflowRunProjection {
                     row.get(14)?,
                     row.get(15)?,
                     row.get(16)?,
+                    row.get(17)?,
+                    row.get(18)?,
                 ))
             },
         )?;
-        Ok(v1::WorkflowProjectedRun {
+        let mut projected = v1::WorkflowProjectedRun {
             run_id: row.0,
             run_token_id: row.1,
             request_command_id: row.2,
             workflow_id: row.3,
             revision_id: row.4,
             package_digest: row.5,
-            status: row.6,
-            outcome: row.7.unwrap_or_default(),
-            error_code: row.8.unwrap_or_default(),
-            error: self.inspect_optional_value(row.9.as_deref())?,
-            final_emission_ids: decode_string_list(&row.10)?,
-            cancellation_command_id: row.11.unwrap_or_default(),
-            cancellation_reason_code: row.12.unwrap_or_default(),
-            created_at_unix_millis: row.13,
-            settled_at_unix_millis: row.14.unwrap_or_default(),
-            first_store_position: projected_u64(row.15)?,
-            last_store_position: projected_u64(row.16)?,
+            status: row.8,
+            outcome: row.9.unwrap_or_default(),
+            error_code: row.10.unwrap_or_default(),
+            error: self.inspect_optional_value(row.11.as_deref())?,
+            final_emission_ids: decode_string_list(&row.12)?,
+            cancellation_command_id: row.13.unwrap_or_default(),
+            cancellation_reason_code: row.14.unwrap_or_default(),
+            created_at_unix_millis: row.15,
+            settled_at_unix_millis: row.16.unwrap_or_default(),
+            first_store_position: projected_u64(row.17)?,
+            last_store_position: projected_u64(row.18)?,
             attempts: self.inspect_attempts(run_id)?,
             nodes: self.inspect_nodes(run_id)?,
             emissions: self.inspect_emissions(run_id)?,
@@ -1780,7 +1823,11 @@ impl WorkflowRunProjection {
             subflows: self.inspect_subflows(run_id)?,
             capability_attempts: self.inspect_capability_attempts(run_id)?,
             llm_attempts: self.inspect_llm_attempts(run_id)?,
-        })
+            retention_policy: Some(projected_retention_policy(&row.6, row.7)?),
+            purge_preview: None,
+        };
+        projected.purge_preview = Some(projected_purge_preview(&projected, as_of_unix_millis)?);
+        Ok(projected)
     }
 
     fn inspect_attempts(&self, run_id: &str) -> Result<Vec<v1::WorkflowProjectedAttempt>> {
@@ -3181,6 +3228,270 @@ fn decode_string_list(value: &str) -> Result<Vec<String>> {
         .map_err(|_| WorkflowProjectionError::Integrity("string_list_decode_failed".into()))
 }
 
+fn projected_retention_policy(mode: &str, days: i64) -> Result<v1::WorkflowRunRetentionPolicy> {
+    let days = projected_u32(days)?;
+    let policy = match mode {
+        "duration" if (1..=3_650).contains(&days) => WorkflowRunRetentionPolicy::Duration { days },
+        "delete-after-success" if days == 0 => WorkflowRunRetentionPolicy::DeleteAfterSuccess,
+        "forever" if days == 0 => WorkflowRunRetentionPolicy::Forever,
+        _ => {
+            return Err(WorkflowProjectionError::Integrity(
+                "run_retention_policy".into(),
+            ));
+        }
+    };
+    Ok(policy.as_proto())
+}
+
+fn projected_purge_preview(
+    run: &v1::WorkflowProjectedRun,
+    as_of_unix_millis: i64,
+) -> Result<v1::WorkflowRunPurgePreview> {
+    let policy = WorkflowRunRetentionPolicy::from_proto(run.retention_policy.as_ref())
+        .map_err(|_| WorkflowProjectionError::Integrity("run_retention_policy".into()))?;
+    let outcome = match run.outcome.as_str() {
+        "succeeded" => Some(v1::WorkflowRunOutcome::Succeeded),
+        "failed" => Some(v1::WorkflowRunOutcome::Failed),
+        "cancelled" => Some(v1::WorkflowRunOutcome::Cancelled),
+        "" => None,
+        _ => {
+            return Err(WorkflowProjectionError::Integrity(
+                "run_retention_outcome".into(),
+            ));
+        }
+    };
+    let protection = crate::workflow_retention::WorkflowRunProtectionState {
+        settled: matches!(run.status.as_str(), "succeeded" | "failed" | "cancelled"),
+        waiting: run.waits.iter().any(|wait| wait.status == "waiting"),
+        // V2 effect approvals do not yet have a workflow-runtime projection.
+        // Their runs remain unsettled, which is independently protected.
+        approval_pending: false,
+        unknown_outcome: run
+            .retries
+            .iter()
+            .any(|retry| retry.decision == "unknown-outcome"),
+    };
+    let protected_reason = protection.protected_reason().unwrap_or_default();
+    let automatic_eligible_at = policy
+        .automatic_eligible_at(
+            outcome,
+            (run.settled_at_unix_millis > 0).then_some(run.settled_at_unix_millis),
+        )
+        .unwrap_or_default();
+
+    let mut values = BTreeMap::<String, v1::WorkflowProjectedValue>::new();
+    let mut remember = |value: Option<&v1::WorkflowProjectedValue>| {
+        if let Some(value) = value {
+            values
+                .entry(value.value_id.clone())
+                .or_insert_with(|| value.clone());
+        }
+    };
+    remember(run.error.as_ref());
+    for attempt in &run.attempts {
+        remember(attempt.error.as_ref());
+    }
+    for emission in &run.emissions {
+        remember(emission.value.as_ref());
+    }
+    for trace in &run.match_traces {
+        remember(trace.trace.as_ref());
+    }
+    for token in &run.execution_tokens {
+        remember(token.error.as_ref());
+    }
+    for iteration in &run.iterations {
+        remember(iteration.output.as_ref());
+    }
+    for retry in &run.retries {
+        remember(retry.retry_input.as_ref());
+        remember(retry.error.as_ref());
+    }
+    for wait in &run.waits {
+        remember(wait.output.as_ref());
+    }
+    for signal in &run.wait_signals {
+        remember(signal.value.as_ref());
+    }
+    if let Some(episode) = run.episode.as_ref() {
+        remember(episode.compiled_context.as_ref());
+        for input in &episode.inputs {
+            remember(input.value.as_ref());
+        }
+    }
+    for subflow in &run.subflows {
+        remember(subflow.input.as_ref());
+        remember(subflow.output.as_ref());
+        remember(subflow.error.as_ref());
+    }
+    for capability in &run.capability_attempts {
+        remember(capability.configuration.as_ref());
+        remember(capability.input.as_ref());
+        remember(capability.output.as_ref());
+        remember(capability.error.as_ref());
+        for artifact in capability
+            .artifact_inputs
+            .iter()
+            .chain(&capability.artifact_outputs)
+        {
+            remember(artifact.value.as_ref());
+        }
+    }
+    for llm in &run.llm_attempts {
+        remember(llm.input.as_ref());
+        remember(llm.output.as_ref());
+        remember(llm.error.as_ref());
+        for group in &llm.context_groups {
+            remember(group.content.as_ref());
+        }
+        for message in &llm.messages {
+            remember(message.content.as_ref());
+        }
+        for attachment in &llm.attachments {
+            remember(attachment.value.as_ref());
+        }
+        for call in &llm.tool_calls {
+            remember(call.input.as_ref());
+            remember(call.output.as_ref());
+            remember(call.error.as_ref());
+        }
+        for message in &llm.response_messages {
+            remember(message.content.as_ref());
+        }
+    }
+
+    let mut affected_value_ids = Vec::new();
+    let mut affected_file_handle_ids = Vec::new();
+    let mut retained_promoted_handle_ids = Vec::new();
+    let mut affected_value_bytes = 0_u64;
+    for value in values.values() {
+        let promoted = value.storage.as_ref().is_some_and(|storage| {
+            matches!(storage.scope.as_str(), "case" | "workflow")
+                && !storage.source_version_id.is_empty()
+        });
+        if promoted {
+            if let Some(storage) = value.storage.as_ref() {
+                retained_promoted_handle_ids.push(storage.handle_id.clone());
+            }
+            continue;
+        }
+        affected_value_ids.push(value.value_id.clone());
+        affected_value_bytes = affected_value_bytes
+            .checked_add(value.byte_count)
+            .ok_or_else(|| WorkflowProjectionError::Integrity("run_purge_byte_count".into()))?;
+        if let Some(storage) = value.storage.as_ref()
+            && storage.scope == "job"
+        {
+            affected_file_handle_ids.push(storage.handle_id.clone());
+        }
+    }
+    affected_file_handle_ids.sort();
+    affected_file_handle_ids.dedup();
+    retained_promoted_handle_ids.sort();
+    retained_promoted_handle_ids.dedup();
+    let affected_attempt_ids = run
+        .attempts
+        .iter()
+        .map(|attempt| attempt.attempt_id.clone())
+        .collect::<Vec<_>>();
+    let evidence = serde_json::json!({
+        "runId": run.run_id,
+        "status": run.status,
+        "outcome": run.outcome,
+        "policy": policy,
+        "protectedReason": protected_reason,
+        "attemptIds": affected_attempt_ids,
+        "valueIds": affected_value_ids,
+        "fileHandleIds": affected_file_handle_ids,
+        "retainedPromotedHandleIds": retained_promoted_handle_ids,
+        "affectedValueBytes": affected_value_bytes,
+    });
+    let evidence_bytes = serde_json_canonicalizer::to_vec(&evidence)
+        .map_err(|_| WorkflowProjectionError::Integrity("run_purge_evidence".into()))?;
+    let manual_eligible = protected_reason.is_empty();
+    Ok(v1::WorkflowRunPurgePreview {
+        manual_eligible,
+        automatic_eligible: manual_eligible
+            && automatic_eligible_at > 0
+            && as_of_unix_millis >= automatic_eligible_at,
+        protected_reason: protected_reason.into(),
+        automatic_eligible_at_unix_millis: automatic_eligible_at,
+        affected_attempt_ids,
+        affected_value_ids,
+        affected_file_handle_ids,
+        retained_promoted_handle_ids,
+        affected_value_bytes,
+        evidence_digest: hex::encode(Sha256::digest(evidence_bytes)),
+    })
+}
+
+#[cfg(test)]
+mod purge_preview_tests {
+    use super::*;
+
+    fn projected_value(
+        value_id: &str,
+        handle_id: &str,
+        scope: &str,
+        source_version_id: &str,
+        byte_count: u64,
+    ) -> v1::WorkflowProjectedValue {
+        v1::WorkflowProjectedValue {
+            value_id: value_id.into(),
+            byte_count,
+            storage: Some(v1::WorkflowStorageValueMetadata {
+                handle_id: handle_id.into(),
+                scope: scope.into(),
+                source_version_id: source_version_id.into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn preview_deletes_job_values_and_retains_promoted_objects() {
+        let run = v1::WorkflowProjectedRun {
+            run_id: "run-retention-preview".into(),
+            status: "succeeded".into(),
+            outcome: "succeeded".into(),
+            settled_at_unix_millis: 1_000,
+            retention_policy: Some(WorkflowRunRetentionPolicy::DeleteAfterSuccess.as_proto()),
+            attempts: vec![v1::WorkflowProjectedAttempt {
+                attempt_id: "attempt-retention-preview".into(),
+                ..Default::default()
+            }],
+            emissions: vec![
+                v1::WorkflowProjectedEmission {
+                    value: Some(projected_value("value-job", "handle-job", "job", "", 24)),
+                    ..Default::default()
+                },
+                v1::WorkflowProjectedEmission {
+                    value: Some(projected_value(
+                        "value-promoted",
+                        "handle-case",
+                        "case",
+                        "version-job-source",
+                        48,
+                    )),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let preview = projected_purge_preview(&run, 1_000).unwrap();
+        assert!(preview.manual_eligible);
+        assert!(preview.automatic_eligible);
+        assert_eq!(preview.affected_attempt_ids, ["attempt-retention-preview"]);
+        assert_eq!(preview.affected_value_ids, ["value-job"]);
+        assert_eq!(preview.affected_file_handle_ids, ["handle-job"]);
+        assert_eq!(preview.retained_promoted_handle_ids, ["handle-case"]);
+        assert_eq!(preview.affected_value_bytes, 24);
+        assert_eq!(preview.evidence_digest.len(), 64);
+    }
+}
+
 fn decode_optional_string_list(value: Option<&str>) -> Result<Vec<String>> {
     value
         .map(decode_string_list)
@@ -3505,11 +3816,21 @@ fn apply_event(transaction: &Transaction<'_>, event: &v1::EventEnvelope) -> Resu
             if run_exists(transaction, &payload.run_id)? {
                 return lifecycle("run_identity_reused");
             }
+            let retention = WorkflowRunRetentionPolicy::from_proto(
+                payload.retention_policy.as_ref(),
+            )
+            .map_err(|_| WorkflowProjectionError::Lifecycle("run_retention_policy".into()))?;
+            let (retention_mode, retention_days) = match retention {
+                WorkflowRunRetentionPolicy::Duration { days } => ("duration", days),
+                WorkflowRunRetentionPolicy::DeleteAfterSuccess => ("delete-after-success", 0),
+                WorkflowRunRetentionPolicy::Forever => ("forever", 0),
+            };
             transaction.execute(
                 "INSERT INTO workflow_runs
                  (run_id, run_token_id, request_command_id, workflow_id, revision_id, package_digest,
-                  status, created_at_unix_millis, first_store_position, last_store_position)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', ?7, ?8, ?8)",
+                  retention_mode, retention_days, status, created_at_unix_millis,
+                  first_store_position, last_store_position)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'running', ?9, ?10, ?10)",
                 params![
                     payload.run_id,
                     payload.run_token_id,
@@ -3517,6 +3838,8 @@ fn apply_event(transaction: &Transaction<'_>, event: &v1::EventEnvelope) -> Resu
                     payload.workflow_id,
                     payload.revision_id,
                     payload.package_digest,
+                    retention_mode,
+                    i64::from(retention_days),
                     event.occurred_at_unix_millis,
                     sql_u64(event.store_position)?,
                 ],
@@ -5022,6 +5345,26 @@ fn apply_projection_migration_11(transaction: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
+fn apply_projection_migration_12(transaction: &Transaction<'_>) -> Result<()> {
+    for (column, declaration) in [
+        (
+            "retention_mode",
+            "TEXT NOT NULL DEFAULT 'duration' CHECK (retention_mode IN ('duration', 'delete-after-success', 'forever'))",
+        ),
+        (
+            "retention_days",
+            "INTEGER NOT NULL DEFAULT 30 CHECK (retention_days BETWEEN 0 AND 3650)",
+        ),
+    ] {
+        if !table_has_column(transaction, "workflow_runs", column)? {
+            transaction.execute_batch(&format!(
+                "ALTER TABLE workflow_runs ADD COLUMN {column} {declaration};"
+            ))?;
+        }
+    }
+    Ok(())
+}
+
 fn table_has_column(connection: &Connection, table: &str, expected_column: &str) -> Result<bool> {
     let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
     let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
@@ -5063,8 +5406,8 @@ fn canonical_state_bytes(connection: &Connection) -> Result<Vec<u8>> {
             table_rows(
                 connection,
                 "runs",
-                "SELECT run_id, run_token_id, request_command_id, workflow_id, revision_id, package_digest, status, outcome, error_code, error_value_id, final_emission_ids_json, cancellation_command_id, cancellation_reason_code, created_at_unix_millis, settled_at_unix_millis, first_store_position, last_store_position FROM workflow_runs ORDER BY run_id",
-                17,
+                "SELECT run_id, run_token_id, request_command_id, workflow_id, revision_id, package_digest, status, outcome, error_code, error_value_id, final_emission_ids_json, cancellation_command_id, cancellation_reason_code, retention_mode, retention_days, created_at_unix_millis, settled_at_unix_millis, first_store_position, last_store_position FROM workflow_runs ORDER BY run_id",
+                19,
             )?,
             table_rows(
                 connection,

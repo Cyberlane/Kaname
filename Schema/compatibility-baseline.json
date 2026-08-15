@@ -139,6 +139,12 @@
       "2": "WORKFLOW_RUN_OUTCOME_FAILED",
       "3": "WORKFLOW_RUN_OUTCOME_CANCELLED"
     },
+    "workflow_runtime.WorkflowRunRetentionMode": {
+      "0": "WORKFLOW_RUN_RETENTION_MODE_UNSPECIFIED",
+      "1": "WORKFLOW_RUN_RETENTION_MODE_DURATION",
+      "2": "WORKFLOW_RUN_RETENTION_MODE_DELETE_AFTER_SUCCESS",
+      "3": "WORKFLOW_RUN_RETENTION_MODE_FOREVER"
+    },
     "workflow_runtime.WorkflowWaitDecision": {
       "0": "WORKFLOW_WAIT_DECISION_UNSPECIFIED",
       "1": "WORKFLOW_WAIT_DECISION_RESUMED",
@@ -1242,6 +1248,8 @@
       "31": "WorkflowProjectedSubflow subflows",
       "32": "WorkflowProjectedCapabilityAttempt capability_attempts",
       "33": "WorkflowProjectedLlmAttempt llm_attempts",
+      "34": "WorkflowRunRetentionPolicy retention_policy",
+      "35": "WorkflowRunPurgePreview purge_preview",
       "4": "string workflow_id",
       "5": "string revision_id",
       "6": "string package_digest",
@@ -1345,7 +1353,8 @@
       "2": "string request_id",
       "3": "string workflow_id",
       "4": "string run_id",
-      "5": "uint32 limit"
+      "5": "uint32 limit",
+      "6": "int64 as_of_unix_millis"
     },
     "workflow_runtime.WorkflowRunInspectionResponse": {
       "1": "SchemaVersion schema_version",
@@ -1353,6 +1362,22 @@
       "3": "uint64 projection_high_water_mark",
       "4": "WorkflowProjectedRun runs",
       "5": "string absence_reason"
+    },
+    "workflow_runtime.WorkflowRunPurgePreview": {
+      "1": "bool manual_eligible",
+      "10": "string evidence_digest",
+      "2": "bool automatic_eligible",
+      "3": "string protected_reason",
+      "4": "int64 automatic_eligible_at_unix_millis",
+      "5": "string affected_attempt_ids",
+      "6": "string affected_value_ids",
+      "7": "string affected_file_handle_ids",
+      "8": "string retained_promoted_handle_ids",
+      "9": "uint64 affected_value_bytes"
+    },
+    "workflow_runtime.WorkflowRunRetentionPolicy": {
+      "1": "WorkflowRunRetentionMode mode",
+      "2": "uint32 days"
     },
     "workflow_runtime.WorkflowRunSettled": {
       "1": "string run_id",
@@ -1368,7 +1393,8 @@
       "3": "string request_command_id",
       "4": "string workflow_id",
       "5": "string revision_id",
-      "6": "string package_digest"
+      "6": "string package_digest",
+      "7": "WorkflowRunRetentionPolicy retention_policy"
     },
     "workflow_runtime.WorkflowStorageValueMetadata": {
       "1": "string handle_id",

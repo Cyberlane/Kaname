@@ -80,6 +80,14 @@ struct DesktopWorkflowRunInspectionTests {
         #expect(run.llmAttempts.first?.validation?.status == "succeeded")
         #expect(run.llmAttempts.first?.providerReceipt?.requestID == "provider-request-run-v2")
         #expect(run.events.map(\.storePosition) == [11, 12, 13, 14, 15])
+        #expect(run.retentionPolicy.mode == "duration")
+        #expect(run.retentionPolicy.days == 30)
+        #expect(run.retentionPolicy.summary == "Keep for 30 days")
+        #expect(run.purgePreview.manualEligible)
+        #expect(run.purgePreview.affectedAttemptIDs == ["attempt-run-v2"])
+        #expect(run.purgePreview.affectedValueIDs == ["value-run-v2"])
+        #expect(run.purgePreview.affectedFileHandleIDs == ["job-value-run-v2"])
+        #expect(run.purgePreview.retainedPromotedHandleIDs == ["workflow-value-run-v2"])
     }
 
     @Test("LLM inspection presentation stays collapsed, searchable, bounded, and compact-aware")
@@ -590,6 +598,17 @@ private actor HistoricalRunTransport:
             event.occurredAtUnixMillis = 1_000 + Int64(position)
             return event
         }
+        projected.retentionPolicy.mode = .duration
+        projected.retentionPolicy.days = 30
+        projected.purgePreview.manualEligible = true
+        projected.purgePreview.automaticEligible = false
+        projected.purgePreview.automaticEligibleAtUnixMillis = 2_592_001_040
+        projected.purgePreview.affectedAttemptIds = [attempt.attemptID]
+        projected.purgePreview.affectedValueIds = [value.valueID]
+        projected.purgePreview.affectedFileHandleIds = [value.storage.handleID]
+        projected.purgePreview.retainedPromotedHandleIds = ["workflow-value-\(id)"]
+        projected.purgePreview.affectedValueBytes = value.byteCount
+        projected.purgePreview.evidenceDigest = String(repeating: "0", count: 64)
         return projected
     }
 }

@@ -68,6 +68,7 @@ struct DesktopDurableWorkflowRunsView: View {
     @State private var zoom = 1.0
     @State private var llmSearchText = ""
     @State private var expandedLlmGroups: Set<String> = []
+    @State private var showingPurgePreview = false
 
     init(runner: LocalCoreRunner) {
         _viewModel = StateObject(wrappedValue: DesktopDurableWorkflowRunsViewModel(runner: runner))
@@ -205,6 +206,7 @@ struct DesktopDurableWorkflowRunsView: View {
                 }
                 Spacer()
             }
+            retentionCard(snapshot.run)
             if let reason = snapshot.revisionAbsenceReason {
                 Label(reason, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption).foregroundStyle(Nord.auroraYellow).panelStyle()
@@ -221,6 +223,71 @@ struct DesktopDurableWorkflowRunsView: View {
         .padding(14)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Nord.polarNight1.opacity(0.45), in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private func retentionCard(_ run: DesktopDurableWorkflowRun) -> some View {
+        let preview = run.purgePreview
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 9) {
+                Label(run.retentionPolicy.summary, systemImage: "clock.arrow.circlepath")
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                if let reason = preview.protectedReason {
+                    Label(retentionProtectionLabel(reason), systemImage: "lock.fill")
+                        .font(.caption2).foregroundStyle(Nord.auroraYellow)
+                } else if preview.automaticEligible {
+                    Text("Eligible now").font(.caption2).foregroundStyle(Nord.auroraGreen)
+                } else if let eligibleAt = preview.automaticEligibleAtUnixMillis {
+                    Text(Date(timeIntervalSince1970: Double(eligibleAt) / 1_000), style: .relative)
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                Button("Review deletion…", systemImage: "trash") {
+                    showingPurgePreview.toggle()
+                }
+                .buttonStyle(.bordered)
+            }
+            if showingPurgePreview {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Deletion preview").font(.caption.weight(.semibold))
+                    Text("\(preview.affectedAttemptIDs.count) attempts · \(preview.affectedValueIDs.count) values · \(preview.affectedFileHandleIDs.count) files · \(ByteCountFormatter.string(fromByteCount: Int64(clamping: preview.affectedValueBytes), countStyle: .file))")
+                        .font(.caption2).foregroundStyle(.secondary)
+                    if !preview.retainedPromotedHandleIDs.isEmpty {
+                        Label("\(preview.retainedPromotedHandleIDs.count) promoted objects will be retained", systemImage: "archivebox.fill")
+                            .font(.caption2).foregroundStyle(Nord.auroraGreen)
+                    }
+                    retentionIdentifiers("Attempts", preview.affectedAttemptIDs)
+                    retentionIdentifiers("Values", preview.affectedValueIDs)
+                    retentionIdentifiers("Files", preview.affectedFileHandleIDs)
+                    retentionIdentifiers("Retained promoted", preview.retainedPromotedHandleIDs)
+                    Text("Evidence \(preview.evidenceDigest)")
+                        .font(.system(size: 9, design: .monospaced)).foregroundStyle(.secondary)
+                        .lineLimit(1).textSelection(.enabled)
+                }
+                .padding(9)
+                .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+            }
+        }
+        .padding(10)
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    @ViewBuilder
+    private func retentionIdentifiers(_ title: String, _ identifiers: [String]) -> some View {
+        if !identifiers.isEmpty {
+            Text("\(title): \(identifiers.joined(separator: ", "))")
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundStyle(.secondary).lineLimit(3).textSelection(.enabled)
+        }
+    }
+
+    private func retentionProtectionLabel(_ reason: String) -> String {
+        switch reason {
+        case "waiting": "Waiting run protected"
+        case "approval_pending": "Approval-pending run protected"
+        case "unknown_outcome": "Unknown outcome protected"
+        case "run_not_settled": "Active run protected"
+        default: "Run protected"
+        }
     }
 
     private func canvas(_ graph: DesktopWorkflowHistoricalGraph, run: DesktopDurableWorkflowRun) -> some View {
@@ -894,6 +961,7 @@ struct DesktopDurableWorkflowRunsView: View {
         selectedRunID = snapshot.id
         selectedNodeID = snapshot.graph?.nodes.first?.id
         inspectorGroup = .inputs
+        showingPurgePreview = false
     }
 
     private func statusSymbol(_ status: String) -> String {

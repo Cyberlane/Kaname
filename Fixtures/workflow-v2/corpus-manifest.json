@@ -2,7 +2,7 @@
   "corpusVersion": 1,
   "privacyClass": "synthetic-public",
   "scenarioFile": "Fixtures/workflow-v2/scenarios.json",
-  "scenarioFileSHA256": "a02c0bdedf403b18ac78929aa786bfad9159791c93af6eb4060d92819e571f0b",
+  "scenarioFileSHA256": "acbf6c3f1e3b6eafe874d707f7288182096151da251ae7576ff8f6993ab16591",
   "compilerInvariantFile": "Fixtures/workflow-v2/compiler-invariants.json",
   "compilerInvariantFileSHA256": "2c73ade6cdf69f7f6bcab0cc98ee9c85330ddfe84fdf6e60fe2473317977d9d4",
   "matchEvaluatorFile": "Fixtures/workflow-v2/match-evaluator-v1.json",

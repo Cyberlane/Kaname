@@ -7,9 +7,10 @@ use kaname_core::{
         WorkflowEdgeCheckpointState, WorkflowEdgeCheckpointed, WorkflowInputBinding,
         WorkflowJoinDecision, WorkflowJoinEvaluated, WorkflowMatchTraceRecorded,
         WorkflowPortEmitted, WorkflowRunCancellationRequested, WorkflowRunOutcome,
-        WorkflowRunSettled, WorkflowRunTokenCreated, WorkflowValueReference,
-        WorkflowWaitCorrelation, WorkflowWaitDecision, WorkflowWaitResolved,
-        WorkflowWaitSignalRecorded, WorkflowWaitSubscribed,
+        WorkflowRunRetentionMode, WorkflowRunRetentionPolicy, WorkflowRunSettled,
+        WorkflowRunTokenCreated, WorkflowValueReference, WorkflowWaitCorrelation,
+        WorkflowWaitDecision, WorkflowWaitResolved, WorkflowWaitSignalRecorded,
+        WorkflowWaitSubscribed,
     },
     workflow_runtime::{
         WORKFLOW_ATTEMPT_SETTLED_KIND, WORKFLOW_ATTEMPT_SETTLED_TYPE,
@@ -195,6 +196,7 @@ fn every_runtime_event_round_trips_through_the_journal_after_restart() {
                 workflow_id: "workflow-001".into(),
                 revision_id: "revision-001".into(),
                 package_digest: "a".repeat(64),
+                retention_policy: None,
             },
             "command-run-001",
             RUN_ID,
@@ -458,6 +460,27 @@ fn malformed_runtime_contracts_fail_before_journal_mutation() {
         .provider_instance_id = "gmail-live".into();
     assert_invalid_event(&mut journal, provider_provenance);
 
+    let invalid_retention = runtime_event(
+        "event-invalid-retention",
+        WORKFLOW_RUN_TOKEN_CREATED_KIND,
+        WORKFLOW_RUN_TOKEN_CREATED_TYPE,
+        WorkflowRunTokenCreated {
+            run_id: RUN_ID.into(),
+            run_token_id: TOKEN_ID.into(),
+            request_command_id: "command-invalid-retention".into(),
+            workflow_id: "workflow-001".into(),
+            revision_id: "revision-001".into(),
+            package_digest: "a".repeat(64),
+            retention_policy: Some(WorkflowRunRetentionPolicy {
+                mode: WorkflowRunRetentionMode::Duration as i32,
+                days: 0,
+            }),
+        },
+        "command-invalid-retention",
+        RUN_ID,
+    );
+    assert_invalid_event(&mut journal, invalid_retention);
+
     let mut oversized_payload = valid_token_event();
     oversized_payload.payload.as_mut().unwrap().value = vec![0; 48 * 1024 + 1];
     assert_invalid_event(&mut journal, oversized_payload);
@@ -652,6 +675,7 @@ fn valid_token_event() -> EventEnvelope {
             workflow_id: "workflow-001".into(),
             revision_id: "revision-001".into(),
             package_digest: "a".repeat(64),
+            retention_policy: None,
         },
         "command-run-001",
         RUN_ID,

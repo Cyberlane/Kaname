@@ -116,6 +116,7 @@ fn run_inspection_queries_are_bounded_and_path_free() {
         workflow_id: "workflow-one".into(),
         run_id: String::new(),
         limit: 30,
+        as_of_unix_millis: 1_700_000_000_000,
     };
     assert_eq!(
         workflow_protocol::decode_run_inspection_query(&query.encode_to_vec()).unwrap(),

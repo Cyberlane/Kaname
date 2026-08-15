@@ -41,6 +41,21 @@ message WorkflowInputBinding {
   reserved 3 to 10;
 }
 
+enum WorkflowRunRetentionMode {
+  WORKFLOW_RUN_RETENTION_MODE_UNSPECIFIED = 0;
+  WORKFLOW_RUN_RETENTION_MODE_DURATION = 1;
+  WORKFLOW_RUN_RETENTION_MODE_DELETE_AFTER_SUCCESS = 2;
+  WORKFLOW_RUN_RETENTION_MODE_FOREVER = 3;
+}
+
+// Immutable retention policy copied from the published workflow revision into
+// the run-start fact. A missing workflow policy compiles to the 30-day default.
+message WorkflowRunRetentionPolicy {
+  WorkflowRunRetentionMode mode = 1;
+  uint32 days = 2;
+  reserved 3 to 10;
+}
+
 // Payload for command kind `workflow.run.request`.
 message RequestWorkflowRun {
   string run_id = 1;
@@ -94,7 +109,8 @@ message WorkflowRunTokenCreated {
   string workflow_id = 4;
   string revision_id = 5;
   string package_digest = 6;
-  reserved 7 to 20;
+  WorkflowRunRetentionPolicy retention_policy = 7;
+  reserved 8 to 20;
 }
 
 // The immutable boundary between a durable case and one version-pinned run.
@@ -718,7 +734,8 @@ message WorkflowRunInspectionQuery {
   string workflow_id = 3;
   string run_id = 4;
   uint32 limit = 5;
-  reserved 6 to 15;
+  int64 as_of_unix_millis = 6;
+  reserved 7 to 15;
   reserved "database_path", "journal_path", "raw_path";
 }
 
@@ -1112,6 +1129,23 @@ message WorkflowProjectedEventReference {
   reserved 6 to 12;
 }
 
+// Exact, bounded preview of the detailed projection rows and scoped values a
+// run purge would remove. Promoted case/workflow handles remain listed but are
+// never eligible for deletion with the run's job-scoped content.
+message WorkflowRunPurgePreview {
+  bool manual_eligible = 1;
+  bool automatic_eligible = 2;
+  string protected_reason = 3;
+  int64 automatic_eligible_at_unix_millis = 4;
+  repeated string affected_attempt_ids = 5;
+  repeated string affected_value_ids = 6;
+  repeated string affected_file_handle_ids = 7;
+  repeated string retained_promoted_handle_ids = 8;
+  uint64 affected_value_bytes = 9;
+  string evidence_digest = 10;
+  reserved 11 to 20;
+}
+
 message WorkflowProjectedRun {
   string run_id = 1;
   string run_token_id = 2;
@@ -1146,7 +1180,9 @@ message WorkflowProjectedRun {
   repeated WorkflowProjectedSubflow subflows = 31;
   repeated WorkflowProjectedCapabilityAttempt capability_attempts = 32;
   repeated WorkflowProjectedLlmAttempt llm_attempts = 33;
-  reserved 34 to 40;
+  WorkflowRunRetentionPolicy retention_policy = 34;
+  WorkflowRunPurgePreview purge_preview = 35;
+  reserved 36 to 45;
 }
 
 message WorkflowRunInspectionResponse {

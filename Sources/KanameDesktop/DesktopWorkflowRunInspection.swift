@@ -590,6 +590,62 @@ public struct DesktopWorkflowProjectedEvent: Identifiable, Equatable, Sendable {
     public let occurredAtUnixMillis: Int64
 }
 
+public struct DesktopWorkflowRunRetentionPolicy: Equatable, Sendable {
+    public let mode: String
+    public let days: UInt32?
+
+    public init(mode: String, days: UInt32?) {
+        self.mode = mode
+        self.days = days
+    }
+
+    public var summary: String {
+        switch mode {
+        case "duration": "Keep for \(days ?? 30) days"
+        case "delete-after-success": "Delete after success"
+        case "forever": "Keep forever"
+        default: mode
+        }
+    }
+}
+
+public struct DesktopWorkflowRunPurgePreview: Equatable, Sendable {
+    public let manualEligible: Bool
+    public let automaticEligible: Bool
+    public let protectedReason: String?
+    public let automaticEligibleAtUnixMillis: Int64?
+    public let affectedAttemptIDs: [String]
+    public let affectedValueIDs: [String]
+    public let affectedFileHandleIDs: [String]
+    public let retainedPromotedHandleIDs: [String]
+    public let affectedValueBytes: UInt64
+    public let evidenceDigest: String
+
+    public init(
+        manualEligible: Bool,
+        automaticEligible: Bool,
+        protectedReason: String?,
+        automaticEligibleAtUnixMillis: Int64?,
+        affectedAttemptIDs: [String],
+        affectedValueIDs: [String],
+        affectedFileHandleIDs: [String],
+        retainedPromotedHandleIDs: [String],
+        affectedValueBytes: UInt64,
+        evidenceDigest: String
+    ) {
+        self.manualEligible = manualEligible
+        self.automaticEligible = automaticEligible
+        self.protectedReason = protectedReason
+        self.automaticEligibleAtUnixMillis = automaticEligibleAtUnixMillis
+        self.affectedAttemptIDs = affectedAttemptIDs
+        self.affectedValueIDs = affectedValueIDs
+        self.affectedFileHandleIDs = affectedFileHandleIDs
+        self.retainedPromotedHandleIDs = retainedPromotedHandleIDs
+        self.affectedValueBytes = affectedValueBytes
+        self.evidenceDigest = evidenceDigest
+    }
+}
+
 public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
     public var id: String { runID }
     public let runID: String
@@ -620,6 +676,8 @@ public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
     public let subflows: [DesktopWorkflowProjectedSubflow]
     public let capabilityAttempts: [DesktopWorkflowProjectedCapabilityAttempt]
     public let llmAttempts: [DesktopWorkflowProjectedLlmAttempt]
+    public let retentionPolicy: DesktopWorkflowRunRetentionPolicy
+    public let purgePreview: DesktopWorkflowRunPurgePreview
 
     public init(
         runID: String, workflowID: String, revisionID: String, packageDigest: String,
@@ -638,7 +696,14 @@ public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
         episode: DesktopWorkflowProjectedCaseEpisode? = nil,
         subflows: [DesktopWorkflowProjectedSubflow] = [],
         capabilityAttempts: [DesktopWorkflowProjectedCapabilityAttempt] = [],
-        llmAttempts: [DesktopWorkflowProjectedLlmAttempt] = []
+        llmAttempts: [DesktopWorkflowProjectedLlmAttempt] = [],
+        retentionPolicy: DesktopWorkflowRunRetentionPolicy = .init(mode: "duration", days: 30),
+        purgePreview: DesktopWorkflowRunPurgePreview = .init(
+            manualEligible: false, automaticEligible: false, protectedReason: "not_loaded",
+            automaticEligibleAtUnixMillis: nil, affectedAttemptIDs: [], affectedValueIDs: [],
+            affectedFileHandleIDs: [], retainedPromotedHandleIDs: [], affectedValueBytes: 0,
+            evidenceDigest: String(repeating: "0", count: 64)
+        )
     ) {
         self.runID = runID
         self.workflowID = workflowID
@@ -668,6 +733,8 @@ public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
         self.subflows = subflows
         self.capabilityAttempts = capabilityAttempts
         self.llmAttempts = llmAttempts
+        self.retentionPolicy = retentionPolicy
+        self.purgePreview = purgePreview
     }
 
     public func attempt(for nodeID: String) -> DesktopWorkflowProjectedAttempt? {
@@ -882,10 +949,12 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
         workflowID: String? = nil,
         runID: String? = nil,
         limit: UInt32 = 30,
+        asOfUnixMillis: Int64 = Int64(Date().timeIntervalSince1970 * 1_000),
         requestID: String
     ) async throws -> DesktopWorkflowRunInspectionPage {
         guard !requestID.isEmpty,
               limit > 0, limit <= 100,
+              asOfUnixMillis >= 0,
               workflowID?.count ?? 0 <= 128,
               runID?.count ?? 0 <= 128 else {
             throw DesktopWorkflowRunInspectionError.invalidRequest
@@ -896,6 +965,7 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
         request.workflowID = workflowID ?? ""
         request.runID = runID ?? ""
         request.limit = limit
+        request.asOfUnixMillis = asOfUnixMillis
         let response = try await transport.inspectWorkflowRuns(request, timeout: timeout)
         guard response.schemaVersion.major == 1,
               response.requestID == requestID else {
@@ -914,6 +984,8 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
               !run.revisionID.isEmpty,
               run.packageDigest.count == 64,
               !run.status.isEmpty,
+              run.hasRetentionPolicy,
+              run.hasPurgePreview,
               run.firstStorePosition > 0,
               run.lastStorePosition >= run.firstStorePosition else {
             throw DesktopWorkflowRunInspectionError.malformedResponse
@@ -946,7 +1018,51 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
             episode: try run.hasEpisode ? episode(run.episode) : nil,
             subflows: try run.subflows.map(subflow),
             capabilityAttempts: try run.capabilityAttempts.map(capabilityAttempt),
-            llmAttempts: try run.llmAttempts.map(llmAttempt)
+            llmAttempts: try run.llmAttempts.map(llmAttempt),
+            retentionPolicy: try retentionPolicy(run.retentionPolicy),
+            purgePreview: try purgePreview(run.purgePreview)
+        )
+    }
+
+    private static func retentionPolicy(
+        _ policy: Kaname_V1_WorkflowRunRetentionPolicy
+    ) throws -> DesktopWorkflowRunRetentionPolicy {
+        switch policy.mode {
+        case .duration:
+            guard (1...3_650).contains(policy.days) else {
+                throw DesktopWorkflowRunInspectionError.malformedResponse
+            }
+            return .init(mode: "duration", days: policy.days)
+        case .deleteAfterSuccess:
+            guard policy.days == 0 else { throw DesktopWorkflowRunInspectionError.malformedResponse }
+            return .init(mode: "delete-after-success", days: nil)
+        case .forever:
+            guard policy.days == 0 else { throw DesktopWorkflowRunInspectionError.malformedResponse }
+            return .init(mode: "forever", days: nil)
+        default:
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+    }
+
+    private static func purgePreview(
+        _ preview: Kaname_V1_WorkflowRunPurgePreview
+    ) throws -> DesktopWorkflowRunPurgePreview {
+        guard preview.evidenceDigest.count == 64,
+              preview.automaticEligibleAtUnixMillis >= 0 else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        return .init(
+            manualEligible: preview.manualEligible,
+            automaticEligible: preview.automaticEligible,
+            protectedReason: preview.protectedReason.nilIfEmpty,
+            automaticEligibleAtUnixMillis: preview.automaticEligibleAtUnixMillis > 0
+                ? preview.automaticEligibleAtUnixMillis : nil,
+            affectedAttemptIDs: preview.affectedAttemptIds,
+            affectedValueIDs: preview.affectedValueIds,
+            affectedFileHandleIDs: preview.affectedFileHandleIds,
+            retainedPromotedHandleIDs: preview.retainedPromotedHandleIds,
+            affectedValueBytes: preview.affectedValueBytes,
+            evidenceDigest: preview.evidenceDigest
         )
     }
 
