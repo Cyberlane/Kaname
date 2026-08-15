@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "providerKind": "example.jmap",
+  "accountBindingId": "fixture-account",
+  "conversationId": "jmap-thread-private",
+  "cursor": "jmap-state-private",
+  "messages": [
+    {
+      "id": "jmap-message-private-1",
+      "conversationId": "jmap-thread-private",
+      "occurredAtUnixMillis": 1000,
+      "headers": {
+        "from": "sender@example.test",
+        "subject": "Quarterly report",
+        "to": "recipient@example.test"
+      },
+      "resourceIds": ["inbox"],
+      "attachments": []
+    },
+    {
+      "id": "jmap-message-private-2",
+      "conversationId": "jmap-thread-private",
+      "occurredAtUnixMillis": 2000,
+      "headers": {
+        "from": "sender@example.test",
+        "subject": "Re: Quarterly report",
+        "to": "recipient@example.test"
+      },
+      "resourceIds": ["inbox", "unread"],
+      "attachments": [
+        {
+          "id": "jmap-attachment-private",
+          "filename": "report.pdf",
+          "mediaType": "application/pdf",
+          "byteCount": 4096
+        }
+      ]
+    }
+  ]
+}

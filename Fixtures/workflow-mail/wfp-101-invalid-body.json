@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "providerKind": "google.gmail",
+  "accountBindingId": "fixture-account",
+  "conversationId": "thread-private",
+  "cursor": "cursor-private",
+  "messages": [
+    {
+      "id": "message-private",
+      "conversationId": "thread-private",
+      "occurredAtUnixMillis": 1000,
+      "headers": {"Subject": "Quarterly report"},
+      "resourceIds": ["inbox"],
+      "attachments": [],
+      "body": "This field is deliberately forbidden from metadata intake."
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "providerKind": "google.gmail",
+  "accountBindingId": "fixture-account",
+  "conversationId": "gmail-thread-private",
+  "cursor": "gmail-history-private",
+  "messages": [
+    {
+      "id": "gmail-message-private-2",
+      "conversationId": "gmail-thread-private",
+      "occurredAtUnixMillis": 2000,
+      "headers": {
+        "From": "sender@example.test",
+        "Subject": "Re: Quarterly report",
+        "To": "recipient@example.test"
+      },
+      "resourceIds": ["unread", "inbox", "inbox"],
+      "attachments": [
+        {
+          "id": "gmail-attachment-private",
+          "filename": "report.pdf",
+          "mediaType": "application/pdf",
+          "byteCount": 4096
+        }
+      ]
+    },
+    {
+      "id": "gmail-message-private-1",
+      "conversationId": "gmail-thread-private",
+      "occurredAtUnixMillis": 1000,
+      "headers": {
+        "From": "sender@example.test",
+        "Subject": "Quarterly report",
+        "To": "recipient@example.test"
+      },
+      "resourceIds": ["inbox"],
+      "attachments": []
+    }
+  ]
+}
