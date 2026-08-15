@@ -728,6 +728,32 @@ public struct DesktopWorkflowProjectedEffectReconciliation: Equatable, Sendable 
     public let observationCount: UInt32
 }
 
+public struct DesktopWorkflowProjectedConnectorObservationReceipt: Equatable, Sendable {
+    public let receiptID: String
+    public let evidenceDigest: String
+    public let observedFields: [String]
+    public let itemCount: UInt32
+    public let resultByteCount: UInt64
+}
+
+public struct DesktopWorkflowProjectedConnectorObservation: Equatable, Sendable {
+    public let observationID: String
+    public let connectorClass: String
+    public let accountBindingID: String
+    public let operation: String
+    public let targetFingerprint: String
+    public let requestedFields: [String]
+    public let status: String
+    public let output: DesktopWorkflowProjectedValue?
+    public let errorCode: String?
+    public let error: DesktopWorkflowProjectedValue?
+    public let receipt: DesktopWorkflowProjectedConnectorObservationReceipt?
+    public let startedAtUnixMillis: Int64
+    public let settledAtUnixMillis: Int64?
+    public let startedStorePosition: UInt64
+    public let settledStorePosition: UInt64?
+}
+
 public enum DesktopWorkflowEffectLifecycleLayout: Equatable, Sendable {
     case compact
     case wide
@@ -884,6 +910,7 @@ public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
     public let capabilityAttempts: [DesktopWorkflowProjectedCapabilityAttempt]
     public let llmAttempts: [DesktopWorkflowProjectedLlmAttempt]
     public let effectAuthorities: [DesktopWorkflowProjectedEffectAuthority]
+    public let connectorObservations: [DesktopWorkflowProjectedConnectorObservation]
     public let retentionPolicy: DesktopWorkflowRunRetentionPolicy
     public let purgePreview: DesktopWorkflowRunPurgePreview
 
@@ -906,6 +933,7 @@ public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
         capabilityAttempts: [DesktopWorkflowProjectedCapabilityAttempt] = [],
         llmAttempts: [DesktopWorkflowProjectedLlmAttempt] = [],
         effectAuthorities: [DesktopWorkflowProjectedEffectAuthority] = [],
+        connectorObservations: [DesktopWorkflowProjectedConnectorObservation] = [],
         retentionPolicy: DesktopWorkflowRunRetentionPolicy = .init(mode: "duration", days: 30),
         purgePreview: DesktopWorkflowRunPurgePreview = .init(
             manualEligible: false, automaticEligible: false, protectedReason: "not_loaded",
@@ -944,6 +972,7 @@ public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
         self.capabilityAttempts = capabilityAttempts
         self.llmAttempts = llmAttempts
         self.effectAuthorities = effectAuthorities
+        self.connectorObservations = connectorObservations
         self.retentionPolicy = retentionPolicy
         self.purgePreview = purgePreview
     }
@@ -1367,6 +1396,7 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
             capabilityAttempts: try run.capabilityAttempts.map(capabilityAttempt),
             llmAttempts: try run.llmAttempts.map(llmAttempt),
             effectAuthorities: try run.effectAuthorities.map(effectAuthority),
+            connectorObservations: try run.connectorObservations.map(connectorObservation),
             retentionPolicy: try retentionPolicy(run.retentionPolicy),
             purgePreview: try purgePreview(run.purgePreview)
         )
@@ -1390,6 +1420,70 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
         default:
             throw DesktopWorkflowRunInspectionError.malformedResponse
         }
+    }
+
+    private static func connectorObservation(
+        _ item: Kaname_V1_WorkflowProjectedConnectorObservation
+    ) throws -> DesktopWorkflowProjectedConnectorObservation {
+        guard item.hasStarted, item.started.hasIntent, item.started.hasRegistration else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        let intent = item.started.intent
+        let registration = item.started.registration
+        guard !intent.observationID.isEmpty,
+              intent.connectorClass == registration.connectorClass,
+              intent.accountBindingID == registration.accountBindingID,
+              !intent.operation.isEmpty,
+              intent.targetFingerprint.count == 64,
+              item.started.intentDigest.count == 64,
+              registration.installationDigest.count == 64,
+              registration.registrationDigest.count == 64,
+              registration.allowedOperations.contains(intent.operation),
+              Set(intent.requestedFields).isSubset(of: Set(registration.allowedFields)),
+              ["started", "succeeded", "rejected", "failed"].contains(item.status),
+              item.startedStorePosition > 0 else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        let settlement = item.hasSettlement ? item.settlement : nil
+        guard (item.status == "started") == (settlement == nil),
+              settlement?.observationID == nil || settlement?.observationID == intent.observationID,
+              settlement?.intentDigest == nil || settlement?.intentDigest == item.started.intentDigest else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        let receipt: DesktopWorkflowProjectedConnectorObservationReceipt?
+        if let settlement, settlement.hasReceipt {
+            let source = settlement.receipt
+            guard !source.receiptID.isEmpty, source.evidenceDigest.count == 64,
+                  source.observedFields == intent.requestedFields else {
+                throw DesktopWorkflowRunInspectionError.malformedResponse
+            }
+            receipt = .init(
+                receiptID: source.receiptID,
+                evidenceDigest: source.evidenceDigest,
+                observedFields: source.observedFields,
+                itemCount: source.itemCount,
+                resultByteCount: source.resultByteCount
+            )
+        } else {
+            receipt = nil
+        }
+        return .init(
+            observationID: intent.observationID,
+            connectorClass: intent.connectorClass,
+            accountBindingID: intent.accountBindingID,
+            operation: intent.operation,
+            targetFingerprint: intent.targetFingerprint,
+            requestedFields: intent.requestedFields,
+            status: item.status,
+            output: try settlement?.hasOutput == true ? observationValue(settlement!.output) : nil,
+            errorCode: settlement?.errorCode.nilIfEmpty,
+            error: try settlement?.hasError == true ? observationValue(settlement!.error) : nil,
+            receipt: receipt,
+            startedAtUnixMillis: item.startedAtUnixMillis,
+            settledAtUnixMillis: item.settledAtUnixMillis > 0 ? item.settledAtUnixMillis : nil,
+            startedStorePosition: item.startedStorePosition,
+            settledStorePosition: item.settledStorePosition > 0 ? item.settledStorePosition : nil
+        )
     }
 
     private static func effectAuthority(
@@ -2105,6 +2199,27 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
             storageReferenceID: value.storageReferenceID.nilIfEmpty,
             availability: value.availability,
             storage: try value.hasStorage ? storage(value.storage) : nil
+        )
+    }
+
+    private static func observationValue(
+        _ value: Kaname_V1_WorkflowValueReference
+    ) throws -> DesktopWorkflowProjectedValue {
+        guard !value.valueID.isEmpty,
+              !value.contentType.isEmpty,
+              value.sha256.count == 64,
+              value.byteCount == value.inlineCanonicalJson.count else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        return DesktopWorkflowProjectedValue(
+            id: value.valueID,
+            contentType: value.contentType,
+            byteCount: value.byteCount,
+            sha256: value.sha256,
+            inlineCanonicalJSON: value.inlineCanonicalJson,
+            storageReferenceID: nil,
+            availability: "inline",
+            storage: nil
         )
     }
 

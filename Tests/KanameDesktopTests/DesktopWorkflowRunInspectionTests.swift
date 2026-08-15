@@ -88,6 +88,12 @@ struct DesktopWorkflowRunInspectionTests {
         #expect(run.effectAuthorities.first?.dispatch?.outcome == "unknown")
         #expect(run.effectAuthorities.first?.reconciliation?.outcome == "applied")
         #expect(run.effectAuthorities.first?.reconciliation?.observationCount == 1)
+        #expect(run.connectorObservations.first?.observationID == "observation-run-v2")
+        #expect(run.connectorObservations.first?.connectorClass == "kaname.mail")
+        #expect(run.connectorObservations.first?.requestedFields == ["headers.from", "labels"])
+        #expect(run.connectorObservations.first?.status == "succeeded")
+        #expect(run.connectorObservations.first?.receipt?.itemCount == 1)
+        #expect(run.connectorObservations.first?.output?.availability == "inline")
         #expect(run.events.map(\.storePosition) == [11, 12, 13, 14, 15, 16, 17, 18])
         #expect(run.retentionPolicy.mode == "duration")
         #expect(run.retentionPolicy.days == 30)
@@ -787,6 +793,69 @@ private actor HistoricalRunTransport:
             authority.reconciledStorePosition = 18
             authority.reconciliationCount = 1
             projected.effectAuthorities = [authority]
+            var observationRequest = Kaname_V1_WorkflowValueReference()
+            observationRequest.valueID = "observation-request-run-v2"
+            observationRequest.contentType = "application/json"
+            observationRequest.inlineCanonicalJson = Data(#"{"target":"opaque"}"#.utf8)
+            observationRequest.byteCount = UInt64(observationRequest.inlineCanonicalJson.count)
+            observationRequest.sha256 = String(repeating: "1", count: 64)
+            var observationIntent = Kaname_V1_WorkflowConnectorObservationIntent()
+            observationIntent.runID = id
+            observationIntent.runTokenID = "run-token-run-v2"
+            observationIntent.observationID = "observation-run-v2"
+            observationIntent.connectorClass = "kaname.mail"
+            observationIntent.accountBindingID = "binding-mail-run-v2"
+            observationIntent.operation = "read.metadata"
+            observationIntent.targetFingerprint = String(repeating: "2", count: 64)
+            observationIntent.idempotencyKey = observationIntent.observationID
+            observationIntent.requestedFields = ["headers.from", "labels"]
+            observationIntent.request = observationRequest
+            var observationRegistration = Kaname_V1_WorkflowConnectorObservationRegistration()
+            observationRegistration.connectorClass = observationIntent.connectorClass
+            observationRegistration.accountBindingID = observationIntent.accountBindingID
+            observationRegistration.bindingID = "binding-installation-mail-run-v2"
+            observationRegistration.connectorVersion = "1.0.0"
+            observationRegistration.installationDigest = String(repeating: "3", count: 64)
+            observationRegistration.allowedOperations = [observationIntent.operation]
+            observationRegistration.allowedFields = observationIntent.requestedFields
+            observationRegistration.maximumResultBytes = 32_768
+            observationRegistration.registrationDigest = String(repeating: "4", count: 64)
+            var observationStarted = Kaname_V1_WorkflowConnectorObservationStarted()
+            observationStarted.intent = observationIntent
+            observationStarted.intentDigest = String(repeating: "5", count: 64)
+            observationStarted.registration = observationRegistration
+            observationStarted.deadlineUnixMillis = 4_000
+            var observationOutput = Kaname_V1_WorkflowValueReference()
+            observationOutput.valueID = "observation-output-run-v2"
+            observationOutput.contentType = "application/json"
+            observationOutput.inlineCanonicalJson = Data(#"{"labels":["INBOX"]}"#.utf8)
+            observationOutput.byteCount = UInt64(observationOutput.inlineCanonicalJson.count)
+            observationOutput.sha256 = String(repeating: "6", count: 64)
+            var observationReceipt = Kaname_V1_WorkflowConnectorObservationReceipt()
+            observationReceipt.receiptID = "receipt-observation-run-v2"
+            observationReceipt.evidenceDigest = observationOutput.sha256
+            observationReceipt.observedFields = observationIntent.requestedFields
+            observationReceipt.itemCount = 1
+            observationReceipt.resultByteCount = observationOutput.byteCount
+            var observationSettled = Kaname_V1_WorkflowConnectorObservationSettled()
+            observationSettled.runID = id
+            observationSettled.runTokenID = observationIntent.runTokenID
+            observationSettled.observationID = observationIntent.observationID
+            observationSettled.intentDigest = observationStarted.intentDigest
+            observationSettled.outcome = .succeeded
+            observationSettled.output = observationOutput
+            observationSettled.receipt = observationReceipt
+            observationSettled.elapsedMilliseconds = 8
+            observationSettled.idempotencyKey = observationIntent.idempotencyKey
+            var observation = Kaname_V1_WorkflowProjectedConnectorObservation()
+            observation.started = observationStarted
+            observation.status = "succeeded"
+            observation.settlement = observationSettled
+            observation.startedAtUnixMillis = 3_300
+            observation.settledAtUnixMillis = 3_308
+            observation.startedStorePosition = 16
+            observation.settledStorePosition = 17
+            projected.connectorObservations = [observation]
             var context = Kaname_V1_WorkflowProjectedValue()
             context.valueID = "context-run-v2"
             context.contentType = "application/json"

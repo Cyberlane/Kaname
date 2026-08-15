@@ -40,6 +40,25 @@ struct GmailWorkServiceTests {
     }
 
     @Test
+    func metadataParserProjectsOnlySelectedHeadersLabelsAndCursor() throws {
+        let metadata = try GmailAPIParser.threadMetadata(
+            data: Data(
+                """
+                {"id":"thread-1","historyId":"105","messages":[{"id":"message-1","threadId":"thread-1","labelIds":["UNREAD","INBOX"],"snippet":"excluded body-like text","payload":{"mimeType":"multipart/mixed","headers":[{"name":"From","value":"sender@example.test"},{"name":"Date","value":"Today"},{"name":"Subject","value":"Excluded subject"}],"body":{"data":"ZXhjbHVkZWQgYm9keQ=="},"parts":[{"filename":"excluded.pdf","body":{"attachmentId":"excluded-attachment"}}]}}]}
+                """.utf8
+            ),
+            account: account,
+            selectedHeaders: ["From", "from", "Date"]
+        )
+
+        #expect(metadata.historyID == "105")
+        #expect(metadata.messages.first?.headers == [
+            "Date": "Today", "From": "sender@example.test",
+        ])
+        #expect(metadata.messages.first?.labels == ["INBOX", "UNREAD"])
+    }
+
+    @Test
     func fullRemoteMessageExposesHeadersAndAttachmentIdentityForOutboundReconciliation() throws {
         let attachment = base64URL("result bytes")
         let message = try GmailAPIParser.message(

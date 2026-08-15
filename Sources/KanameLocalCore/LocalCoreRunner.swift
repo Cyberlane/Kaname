@@ -68,6 +68,8 @@ public protocol LocalCoreControlService {
     func importFrozenWorkspace(_ request: Data, reply: @escaping (Data?, String) -> Void)
     func inspectWorkflowRuns(_ request: Data, reply: @escaping (Data?, String) -> Void)
     func purgeWorkflowRun(_ request: Data, reply: @escaping (Data?, String) -> Void)
+    func beginWorkflowConnectorObservation(_ request: Data, reply: @escaping (Data?, String) -> Void)
+    func settleWorkflowConnectorObservation(_ request: Data, reply: @escaping (Data?, String) -> Void)
 }
 #endif
 
@@ -264,6 +266,32 @@ public struct LocalCoreRunner: Sendable {
         )
     }
 
+    public func beginWorkflowConnectorObservation(
+        _ request: Kaname_V1_BeginWorkflowConnectorObservationRequest,
+        timeout: TimeInterval = 15
+    ) async throws -> Kaname_V1_BeginWorkflowConnectorObservationResponse {
+        try await workflowLibraryResponse(
+            request: request.serializedData(),
+            requestID: request.requestID,
+            timeout: timeout,
+            operation: .beginWorkflowConnectorObservation,
+            as: Kaname_V1_BeginWorkflowConnectorObservationResponse.self
+        )
+    }
+
+    public func settleWorkflowConnectorObservation(
+        _ request: Kaname_V1_SettleWorkflowConnectorObservationRequest,
+        timeout: TimeInterval = 15
+    ) async throws -> Kaname_V1_SettleWorkflowConnectorObservationResponse {
+        try await workflowLibraryResponse(
+            request: request.serializedData(),
+            requestID: request.requestID,
+            timeout: timeout,
+            operation: .settleWorkflowConnectorObservation,
+            as: Kaname_V1_SettleWorkflowConnectorObservationResponse.self
+        )
+    }
+
     private func serviceResponse(
         request: Data,
         timeout: TimeInterval,
@@ -401,6 +429,8 @@ extension Kaname_V1_SetWorkflowActivationResponse: WorkflowLibraryWireResponse {
 extension Kaname_V1_ImportFrozenWorkspaceResponse: WorkflowLibraryWireResponse {}
 extension Kaname_V1_WorkflowRunInspectionResponse: WorkflowLibraryWireResponse {}
 extension Kaname_V1_PurgeWorkflowRunResponse: WorkflowLibraryWireResponse {}
+extension Kaname_V1_BeginWorkflowConnectorObservationResponse: WorkflowLibraryWireResponse {}
+extension Kaname_V1_SettleWorkflowConnectorObservationResponse: WorkflowLibraryWireResponse {}
 
 #if os(macOS)
 private enum LocalCoreServiceOperation {
@@ -417,6 +447,8 @@ private enum LocalCoreServiceOperation {
     case importFrozenWorkspace
     case inspectWorkflowRuns
     case purgeWorkflowRun
+    case beginWorkflowConnectorObservation
+    case settleWorkflowConnectorObservation
 
     var maximumResponseBytes: Int {
         switch self {
@@ -478,6 +510,10 @@ private func runBoundedService(
     case .importFrozenWorkspace: service.importFrozenWorkspace(request, reply: reply)
     case .inspectWorkflowRuns: service.inspectWorkflowRuns(request, reply: reply)
     case .purgeWorkflowRun: service.purgeWorkflowRun(request, reply: reply)
+    case .beginWorkflowConnectorObservation:
+        service.beginWorkflowConnectorObservation(request, reply: reply)
+    case .settleWorkflowConnectorObservation:
+        service.settleWorkflowConnectorObservation(request, reply: reply)
     }
     guard completion.wait(timeout: .now() + timeout) == .success else {
         connection.invalidate()

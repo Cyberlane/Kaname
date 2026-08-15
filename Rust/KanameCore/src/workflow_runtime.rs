@@ -34,6 +34,10 @@ pub const WORKFLOW_CAPABILITY_ATTEMPT_STARTED_KIND: &str = "workflow.capability.
 pub const WORKFLOW_CAPABILITY_ATTEMPT_SETTLED_KIND: &str = "workflow.capability.attempt-settled";
 pub const WORKFLOW_LLM_ATTEMPT_STARTED_KIND: &str = "workflow.llm.attempt-started";
 pub const WORKFLOW_LLM_ATTEMPT_SETTLED_KIND: &str = "workflow.llm.attempt-settled";
+pub const WORKFLOW_CONNECTOR_OBSERVATION_STARTED_KIND: &str =
+    "workflow.connector-observation.started";
+pub const WORKFLOW_CONNECTOR_OBSERVATION_SETTLED_KIND: &str =
+    "workflow.connector-observation.settled";
 pub const WORKFLOW_EFFECT_PROPOSED_KIND: &str = "workflow.effect.proposed";
 pub const WORKFLOW_EFFECT_AUTHORIZED_KIND: &str = "workflow.effect.authorized";
 pub const WORKFLOW_EFFECT_DISPATCH_STARTED_KIND: &str = "workflow.effect.dispatch-started";
@@ -72,6 +76,10 @@ pub const WORKFLOW_CAPABILITY_ATTEMPT_SETTLED_TYPE: &str =
     "kaname.workflow.capability-attempt-settled.v1";
 pub const WORKFLOW_LLM_ATTEMPT_STARTED_TYPE: &str = "kaname.workflow.llm-attempt-started.v1";
 pub const WORKFLOW_LLM_ATTEMPT_SETTLED_TYPE: &str = "kaname.workflow.llm-attempt-settled.v1";
+pub const WORKFLOW_CONNECTOR_OBSERVATION_STARTED_TYPE: &str =
+    "kaname.workflow.connector-observation-started.v1";
+pub const WORKFLOW_CONNECTOR_OBSERVATION_SETTLED_TYPE: &str =
+    "kaname.workflow.connector-observation-settled.v1";
 pub const WORKFLOW_EFFECT_PROPOSED_TYPE: &str = "kaname.workflow.effect-proposed.v1";
 pub const WORKFLOW_EFFECT_AUTHORIZED_TYPE: &str = "kaname.workflow.effect-authorized.v1";
 pub const WORKFLOW_EFFECT_DISPATCH_STARTED_TYPE: &str =
@@ -138,6 +146,8 @@ pub enum WorkflowRuntimeEvent {
     CapabilityAttemptSettled(v1::WorkflowCapabilityAttemptSettled),
     LlmAttemptStarted(v1::WorkflowLlmAttemptStarted),
     LlmAttemptSettled(v1::WorkflowLlmAttemptSettled),
+    ConnectorObservationStarted(v1::WorkflowConnectorObservationStarted),
+    ConnectorObservationSettled(v1::WorkflowConnectorObservationSettled),
     EffectProposed(v1::WorkflowEffectProposed),
     EffectAuthorized(v1::WorkflowEffectAuthorized),
     EffectDispatchStarted(v1::WorkflowEffectDispatchStarted),
@@ -173,6 +183,11 @@ impl WorkflowRuntimeEvent {
             Self::CapabilityAttemptSettled(payload) => &payload.run_id,
             Self::LlmAttemptStarted(payload) => &payload.run_id,
             Self::LlmAttemptSettled(payload) => &payload.run_id,
+            Self::ConnectorObservationStarted(payload) => payload
+                .intent
+                .as_ref()
+                .map_or("", |intent| intent.run_id.as_str()),
+            Self::ConnectorObservationSettled(payload) => &payload.run_id,
             Self::EffectProposed(payload) => payload
                 .intent
                 .as_ref()
@@ -198,6 +213,7 @@ pub fn is_workflow_runtime_kind(kind: &str) -> bool {
         "workflow.attempt.",
         "workflow.capability.",
         "workflow.llm.",
+        "workflow.connector-observation.",
         "workflow.effect.",
         "workflow.port.",
         "workflow.edge.",
@@ -390,6 +406,29 @@ pub fn decode_workflow_event(event: &v1::EventEnvelope) -> Result<WorkflowRuntim
             validate_event_context(event, &payload.run_id)?;
             Ok(WorkflowRuntimeEvent::LlmAttemptSettled(payload))
         }
+        WORKFLOW_CONNECTOR_OBSERVATION_STARTED_KIND => {
+            let payload: v1::WorkflowConnectorObservationStarted = decode_payload(
+                event.payload.as_ref(),
+                WORKFLOW_CONNECTOR_OBSERVATION_STARTED_TYPE,
+            )?;
+            validate_connector_observation_started(&payload)?;
+            let run_id = &payload
+                .intent
+                .as_ref()
+                .ok_or_else(|| invalid_error("connector_observation_intent_missing"))?
+                .run_id;
+            validate_event_context(event, run_id)?;
+            Ok(WorkflowRuntimeEvent::ConnectorObservationStarted(payload))
+        }
+        WORKFLOW_CONNECTOR_OBSERVATION_SETTLED_KIND => {
+            let payload: v1::WorkflowConnectorObservationSettled = decode_payload(
+                event.payload.as_ref(),
+                WORKFLOW_CONNECTOR_OBSERVATION_SETTLED_TYPE,
+            )?;
+            validate_connector_observation_settled(&payload)?;
+            validate_event_context(event, &payload.run_id)?;
+            Ok(WorkflowRuntimeEvent::ConnectorObservationSettled(payload))
+        }
         WORKFLOW_EFFECT_PROPOSED_KIND => {
             let payload: v1::WorkflowEffectProposed =
                 decode_payload(event.payload.as_ref(), WORKFLOW_EFFECT_PROPOSED_TYPE)?;
@@ -576,6 +615,211 @@ pub fn workflow_effect_connector_registration_digest(
     let mut canonical = registration.clone();
     canonical.registration_digest.clear();
     sha256_hex(&canonical.encode_to_vec())
+}
+
+pub fn workflow_connector_observation_intent_digest(
+    intent: &v1::WorkflowConnectorObservationIntent,
+) -> String {
+    sha256_hex(&intent.encode_to_vec())
+}
+
+pub fn workflow_connector_observation_registration_digest(
+    registration: &v1::WorkflowConnectorObservationRegistration,
+) -> String {
+    let mut canonical = registration.clone();
+    canonical.registration_digest.clear();
+    sha256_hex(&canonical.encode_to_vec())
+}
+
+fn validate_connector_observation_started(
+    payload: &v1::WorkflowConnectorObservationStarted,
+) -> Result<()> {
+    let intent = payload
+        .intent
+        .as_ref()
+        .ok_or_else(|| invalid_error("connector_observation_intent_missing"))?;
+    validate_run_and_token(&intent.run_id, &intent.run_token_id)?;
+    for (value, code) in [
+        (&intent.observation_id, "connector_observation_id"),
+        (&intent.connector_class, "connector_observation_class"),
+        (
+            &intent.account_binding_id,
+            "connector_observation_account_binding",
+        ),
+        (&intent.operation, "connector_observation_operation"),
+        (
+            &intent.idempotency_key,
+            "connector_observation_idempotency_key",
+        ),
+    ] {
+        validate_identifier(value, 128, code)?;
+    }
+    validate_digest(
+        &intent.target_fingerprint,
+        "connector_observation_target_fingerprint",
+    )?;
+    validate_digest(
+        &payload.intent_digest,
+        "connector_observation_intent_digest",
+    )?;
+    validate_value(intent.request.as_ref())?;
+    validate_observation_fields(
+        &intent.requested_fields,
+        "connector_observation_requested_fields",
+    )?;
+    if intent.idempotency_key != intent.observation_id
+        || payload.intent_digest != workflow_connector_observation_intent_digest(intent)
+        || payload.deadline_unix_millis <= 0
+    {
+        return invalid("connector_observation_intent_contract");
+    }
+    let registration = payload
+        .registration
+        .as_ref()
+        .ok_or_else(|| invalid_error("connector_observation_registration_missing"))?;
+    validate_connector_observation_registration(registration)?;
+    if registration.connector_class != intent.connector_class
+        || registration.account_binding_id != intent.account_binding_id
+        || registration
+            .allowed_operations
+            .binary_search(&intent.operation)
+            .is_err()
+        || intent
+            .requested_fields
+            .iter()
+            .any(|field| registration.allowed_fields.binary_search(field).is_err())
+    {
+        return invalid("connector_observation_registration_mismatch");
+    }
+    Ok(())
+}
+
+fn validate_connector_observation_registration(
+    registration: &v1::WorkflowConnectorObservationRegistration,
+) -> Result<()> {
+    for (value, code) in [
+        (&registration.connector_class, "connector_observation_class"),
+        (
+            &registration.account_binding_id,
+            "connector_observation_account_binding",
+        ),
+        (&registration.binding_id, "connector_observation_binding"),
+        (
+            &registration.connector_version,
+            "connector_observation_version",
+        ),
+    ] {
+        validate_identifier(value, 128, code)?;
+    }
+    validate_digest(
+        &registration.installation_digest,
+        "connector_observation_installation_digest",
+    )?;
+    validate_digest(
+        &registration.registration_digest,
+        "connector_observation_registration_digest",
+    )?;
+    validate_identifier_list(
+        &registration.allowed_operations,
+        64,
+        "connector_observation_allowed_operations",
+    )?;
+    validate_observation_fields(
+        &registration.allowed_fields,
+        "connector_observation_allowed_fields",
+    )?;
+    if registration.allowed_operations.is_empty()
+        || registration
+            .allowed_operations
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+        || registration.maximum_result_bytes == 0
+        || registration.maximum_result_bytes > MAXIMUM_INLINE_VALUE_BYTES as u64
+        || registration.registration_digest
+            != workflow_connector_observation_registration_digest(registration)
+    {
+        return invalid("connector_observation_registration_contract");
+    }
+    Ok(())
+}
+
+fn validate_connector_observation_settled(
+    payload: &v1::WorkflowConnectorObservationSettled,
+) -> Result<()> {
+    validate_run_and_token(&payload.run_id, &payload.run_token_id)?;
+    validate_identifier(&payload.observation_id, 128, "connector_observation_id")?;
+    validate_identifier(
+        &payload.idempotency_key,
+        128,
+        "connector_observation_idempotency_key",
+    )?;
+    validate_digest(
+        &payload.intent_digest,
+        "connector_observation_intent_digest",
+    )?;
+    if payload.idempotency_key != payload.observation_id
+        || payload.elapsed_milliseconds > 86_400_000
+    {
+        return invalid("connector_observation_settlement_contract");
+    }
+    let outcome = v1::WorkflowConnectorObservationOutcome::try_from(payload.outcome)
+        .map_err(|_| invalid_error("connector_observation_outcome"))?;
+    match outcome {
+        v1::WorkflowConnectorObservationOutcome::Succeeded => {
+            let output = payload
+                .output
+                .as_ref()
+                .ok_or_else(|| invalid_error("connector_observation_output_missing"))?;
+            validate_value(Some(output))?;
+            if !payload.error_code.is_empty() || payload.error.is_some() {
+                return invalid("connector_observation_success_error");
+            }
+            let receipt = payload
+                .receipt
+                .as_ref()
+                .ok_or_else(|| invalid_error("connector_observation_receipt_missing"))?;
+            validate_identifier(&receipt.receipt_id, 256, "connector_observation_receipt_id")?;
+            validate_digest(
+                &receipt.evidence_digest,
+                "connector_observation_evidence_digest",
+            )?;
+            validate_observation_fields(
+                &receipt.observed_fields,
+                "connector_observation_observed_fields",
+            )?;
+            if receipt.observed_fields.is_empty()
+                || receipt.result_byte_count != output.byte_count
+                || receipt.evidence_digest != output.sha256
+            {
+                return invalid("connector_observation_receipt_contract");
+            }
+        }
+        v1::WorkflowConnectorObservationOutcome::Rejected
+        | v1::WorkflowConnectorObservationOutcome::Failed => {
+            validate_identifier(&payload.error_code, 128, "connector_observation_error_code")?;
+            validate_value(payload.error.as_ref())?;
+            if payload.output.is_some() || payload.receipt.is_some() {
+                return invalid("connector_observation_failure_output");
+            }
+        }
+        v1::WorkflowConnectorObservationOutcome::Unspecified => {
+            return invalid("connector_observation_outcome");
+        }
+    }
+    Ok(())
+}
+
+fn validate_observation_fields(values: &[String], code: &'static str) -> Result<()> {
+    validate_identifier_list(values, 64, code)?;
+    if values.windows(2).any(|pair| pair[0] >= pair[1])
+        || values.iter().any(|field| {
+            let field = field.to_ascii_lowercase();
+            field.contains("body") || field.contains("attachment")
+        })
+    {
+        return invalid(code);
+    }
+    Ok(())
 }
 
 fn validate_effect_proposed(payload: &v1::WorkflowEffectProposed) -> Result<()> {

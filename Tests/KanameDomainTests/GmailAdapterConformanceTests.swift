@@ -45,6 +45,21 @@ struct GmailAdapterConformanceTests {
     }
 
     @Test
+    func adapterUsesTheBodyFreeMetadataSurfaceForWorkflowObservation() async throws {
+        let adapter = GmailMailProviderAdapter(service: GmailConformanceFixtureService())
+        let metadata = try await adapter.conversationMetadata(
+            accountID: "account-1", conversationID: "thread-1",
+            selectedHeaders: ["From", "Date"]
+        )
+
+        #expect(metadata.id == "thread-1")
+        #expect(metadata.account.stableID == "google.gmail:account-1")
+        #expect(metadata.cursor == "105")
+        #expect(metadata.messages.first?.headers == ["Date": "fixture", "From": "fixture"])
+        #expect(metadata.resourceIDs == ["INBOX"])
+    }
+
+    @Test
     func adapterRejectsUndeclaredQueryExtensions() async {
         let adapter = GmailMailProviderAdapter(service: GmailConformanceFixtureService())
         await #expect(throws: MailProviderAdapterError.unsupportedExtension("portable.unknown")) {
@@ -119,6 +134,24 @@ private actor GmailConformanceFixtureService: GmailMailServing {
 
     func readMailThread(accountID: String, threadID: String) async throws -> GmailThreadDetailSnapshot {
         thread()
+    }
+
+    func readMailThreadMetadata(
+        accountID: String,
+        threadID: String,
+        selectedHeaders: [String]
+    ) async throws -> GmailThreadMetadataSnapshot {
+        GmailThreadMetadataSnapshot(
+            id: "thread-1",
+            accountID: accountID,
+            historyID: "105",
+            messages: [.init(
+                id: "message-1",
+                threadID: "thread-1",
+                headers: Dictionary(uniqueKeysWithValues: selectedHeaders.map { ($0, "fixture") }),
+                labels: ["INBOX"]
+            )]
+        )
     }
 
     func listGmailLabels(accountID: String) async throws -> [GmailLabelSnapshot] {

@@ -8,6 +8,9 @@ public protocol GmailMailServing: Sendable {
     ) async throws -> GoogleAuthorizationScopeDiff
     func searchMail(accountID: String, query: String, pageToken: String?, limit: Int) async throws -> GmailThreadPage
     func readMailThread(accountID: String, threadID: String) async throws -> GmailThreadDetailSnapshot
+    func readMailThreadMetadata(
+        accountID: String, threadID: String, selectedHeaders: [String]
+    ) async throws -> GmailThreadMetadataSnapshot
     func listGmailLabels(accountID: String) async throws -> [GmailLabelSnapshot]
     func gmailHistoryCursor(accountID: String) async throws -> String
     func listGmailHistory(
@@ -30,7 +33,7 @@ public protocol GmailMailServing: Sendable {
 
 extension NativeGoogleIntegrationService: GmailMailServing {}
 
-public struct GmailMailProviderAdapter: MailProviderAdapter, Sendable {
+public struct GmailMailProviderAdapter: MailProviderAdapter, MailProviderMetadataAdapter, Sendable {
     public static let rawQueryExtensionID = "gmail.raw-query"
     public static let projectedHeadersExtensionID = "gmail.projected-headers"
     public static let modifyScope = "https://www.googleapis.com/auth/gmail.modify"
@@ -112,6 +115,31 @@ public struct GmailMailProviderAdapter: MailProviderAdapter, Sendable {
 
     public func conversation(accountID: String, conversationID: String) async throws -> MailConversationSnapshot {
         conversation(try await service.readMailThread(accountID: accountID, threadID: conversationID))
+    }
+
+    public func conversationMetadata(
+        accountID: String,
+        conversationID: String,
+        selectedHeaders: [String]
+    ) async throws -> MailConversationMetadataSnapshot {
+        let thread = try await service.readMailThreadMetadata(
+            accountID: accountID,
+            threadID: conversationID,
+            selectedHeaders: selectedHeaders
+        )
+        return MailConversationMetadataSnapshot(
+            id: thread.id,
+            account: accountIdentity(thread.accountID),
+            cursor: thread.historyID,
+            messages: thread.messages.map {
+                MailMessageMetadataSnapshot(
+                    id: $0.id,
+                    conversationID: $0.threadID,
+                    headers: $0.headers,
+                    resourceIDs: $0.labels
+                )
+            }
+        )
     }
 
     public func resources(accountID: String) async throws -> [MailResourceSnapshot] {

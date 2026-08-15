@@ -96,7 +96,10 @@ let package = Package(
         ),
         .target(
             name: "KanameWorkflowHost",
-            dependencies: ["KanameDesktop", "KanameConnectivity"]
+            dependencies: [
+                "KanameDesktop", "KanameConnectivity", "KanameLocalCore", "KanameProtocol",
+                .product(name: "SwiftProtobuf", package: "swift-protobuf"),
+            ]
         ),
         .executableTarget(
             name: "KanamePrototype",

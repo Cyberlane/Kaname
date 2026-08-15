@@ -218,6 +218,44 @@ private final class LocalControlService: NSObject, LocalCoreControlService {
         )
     }
 
+    func beginWorkflowConnectorObservation(
+        _ request: Data,
+        reply: @escaping (Data?, String) -> Void
+    ) {
+        runWorkflowConnectorObservationOperation(
+            "workflow-connector-observation-begin", request: request, reply: reply
+        )
+    }
+
+    func settleWorkflowConnectorObservation(
+        _ request: Data,
+        reply: @escaping (Data?, String) -> Void
+    ) {
+        runWorkflowConnectorObservationOperation(
+            "workflow-connector-observation-settle", request: request, reply: reply
+        )
+    }
+
+    private func runWorkflowConnectorObservationOperation(
+        _ operation: String,
+        request: Data,
+        reply: @escaping (Data?, String) -> Void
+    ) {
+        let applicationSupportRoot = journalDirectory
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let projection = applicationSupportRoot
+            .appendingPathComponent("Workflows", isDirectory: true)
+            .appendingPathComponent("workflow-run-projection.sqlite")
+        runWireOperation(
+            operation,
+            request: request,
+            extraArguments: [projection.path],
+            permissionTarget: projection,
+            reply: reply
+        )
+    }
+
     private func runWorkflowLibraryOperation(
         _ operation: String,
         request: Data,

@@ -26,7 +26,7 @@ use std::{
     time::Duration,
 };
 
-const PROJECTION_SCHEMA_VERSION: i64 = 15;
+const PROJECTION_SCHEMA_VERSION: i64 = 16;
 const DEFAULT_BATCH_SIZE: u32 = 250;
 
 const INITIAL_SCHEMA: &str = r#"
@@ -508,6 +508,24 @@ CREATE TABLE workflow_effect_authorities (
 CREATE INDEX workflow_effect_authorities_run_position
     ON workflow_effect_authorities(run_id, proposed_store_position, effect_id);
 
+CREATE TABLE workflow_connector_observations (
+    observation_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+    run_token_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    intent_digest TEXT NOT NULL CHECK (length(intent_digest) = 64),
+    target_fingerprint TEXT NOT NULL CHECK (length(target_fingerprint) = 64),
+    status TEXT NOT NULL CHECK (status IN ('started', 'succeeded', 'rejected', 'failed')),
+    started_wire BLOB NOT NULL,
+    settled_wire BLOB,
+    started_at_unix_millis INTEGER NOT NULL CHECK (started_at_unix_millis >= 0),
+    settled_at_unix_millis INTEGER,
+    started_store_position INTEGER NOT NULL UNIQUE CHECK (started_store_position > 0),
+    settled_store_position INTEGER UNIQUE
+) STRICT;
+CREATE INDEX workflow_connector_observations_run_position
+    ON workflow_connector_observations(run_id, started_store_position, observation_id);
+
 CREATE TABLE workflow_projected_events (
     event_id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
@@ -646,6 +664,26 @@ FROM workflow_effect_authorities_v14;
 DROP TABLE workflow_effect_authorities_v14;
 CREATE INDEX workflow_effect_authorities_run_position
     ON workflow_effect_authorities(run_id, proposed_store_position, effect_id);
+"#;
+
+const PROJECTION_MIGRATION_16: &str = r#"
+CREATE TABLE IF NOT EXISTS workflow_connector_observations (
+    observation_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+    run_token_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    intent_digest TEXT NOT NULL CHECK (length(intent_digest) = 64),
+    target_fingerprint TEXT NOT NULL CHECK (length(target_fingerprint) = 64),
+    status TEXT NOT NULL CHECK (status IN ('started', 'succeeded', 'rejected', 'failed')),
+    started_wire BLOB NOT NULL,
+    settled_wire BLOB,
+    started_at_unix_millis INTEGER NOT NULL CHECK (started_at_unix_millis >= 0),
+    settled_at_unix_millis INTEGER,
+    started_store_position INTEGER NOT NULL UNIQUE CHECK (started_store_position > 0),
+    settled_store_position INTEGER UNIQUE
+) STRICT;
+CREATE INDEX IF NOT EXISTS workflow_connector_observations_run_position
+    ON workflow_connector_observations(run_id, started_store_position, observation_id);
 "#;
 
 const PROJECTION_MIGRATION_2: &str = r#"
@@ -1492,6 +1530,15 @@ impl WorkflowRunProjection {
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             apply_projection_migration_15(&transaction)?;
+            transaction.pragma_update(None, "user_version", 15)?;
+            refresh_state_digest(&transaction)?;
+            transaction.commit()?;
+        }
+        let found: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if found == 15 {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(PROJECTION_MIGRATION_16)?;
             transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
             refresh_state_digest(&transaction)?;
             transaction.commit()?;
@@ -1844,6 +1891,7 @@ impl WorkflowRunProjection {
         transaction.execute_batch(
             "DELETE FROM workflow_run_purge_receipts;
              DELETE FROM workflow_projected_events;
+             DELETE FROM workflow_connector_observations;
              DELETE FROM workflow_effect_authorities;
              DELETE FROM workflow_llm_attempts;
              DELETE FROM workflow_capability_attempts;
@@ -1892,6 +1940,7 @@ impl WorkflowRunProjection {
             "capability_attempts" => "SELECT COUNT(*) FROM workflow_capability_attempts",
             "llm_attempts" => "SELECT COUNT(*) FROM workflow_llm_attempts",
             "effect_authorities" => "SELECT COUNT(*) FROM workflow_effect_authorities",
+            "connector_observations" => "SELECT COUNT(*) FROM workflow_connector_observations",
             "events" => "SELECT COUNT(*) FROM workflow_projected_events",
             "purge_receipts" => "SELECT COUNT(*) FROM workflow_run_purge_receipts",
             "values" => "SELECT COUNT(*) FROM workflow_values",
@@ -1937,6 +1986,33 @@ impl WorkflowRunProjection {
                     .as_ref()
                     .and_then(|proposal| proposal.intent.as_ref())
                     .is_some_and(|intent| intent.effect_id == effect_id)
+            }))
+    }
+
+    pub fn connector_observation(
+        &self,
+        observation_id: &str,
+    ) -> Result<Option<v1::WorkflowProjectedConnectorObservation>> {
+        let run_id: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT run_id FROM workflow_connector_observations WHERE observation_id = ?1",
+                [observation_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(run_id) = run_id else {
+            return Ok(None);
+        };
+        Ok(self
+            .inspect_connector_observations(&run_id)?
+            .into_iter()
+            .find(|observation| {
+                observation
+                    .started
+                    .as_ref()
+                    .and_then(|started| started.intent.as_ref())
+                    .is_some_and(|intent| intent.observation_id == observation_id)
             }))
     }
 
@@ -2206,6 +2282,7 @@ impl WorkflowRunProjection {
             retention_policy: Some(projected_retention_policy(&row.6, row.7)?),
             purge_preview: None,
             effect_authorities: self.inspect_effect_authorities(run_id)?,
+            connector_observations: self.inspect_connector_observations(run_id)?,
         };
         projected.purge_preview = Some(projected_purge_preview(&projected, as_of_unix_millis)?);
         Ok(projected)
@@ -2326,6 +2403,70 @@ impl WorkflowRunProjection {
                 reconciliation_count: u32::try_from(row.16).map_err(|_| {
                     WorkflowProjectionError::Integrity("effect_reconciliation_count_invalid".into())
                 })?,
+            })
+        })
+        .collect()
+    }
+
+    fn inspect_connector_observations(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<v1::WorkflowProjectedConnectorObservation>> {
+        type ObservationRow = (
+            Vec<u8>,
+            String,
+            Option<Vec<u8>>,
+            i64,
+            Option<i64>,
+            i64,
+            Option<i64>,
+        );
+        let mut statement = self.connection.prepare(
+            "SELECT started_wire, status, settled_wire, started_at_unix_millis,
+                    settled_at_unix_millis, started_store_position, settled_store_position
+             FROM workflow_connector_observations WHERE run_id = ?1
+             ORDER BY started_store_position, observation_id",
+        )?;
+        let rows = statement.query_map([run_id], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let row: ObservationRow = row?;
+            Ok(v1::WorkflowProjectedConnectorObservation {
+                started: Some(
+                    v1::WorkflowConnectorObservationStarted::decode(row.0.as_slice()).map_err(
+                        |_| {
+                            WorkflowProjectionError::Integrity(
+                                "connector_observation_started_wire_invalid".into(),
+                            )
+                        },
+                    )?,
+                ),
+                status: row.1,
+                settlement: row
+                    .2
+                    .map(|wire| {
+                        v1::WorkflowConnectorObservationSettled::decode(wire.as_slice()).map_err(
+                            |_| {
+                                WorkflowProjectionError::Integrity(
+                                    "connector_observation_settled_wire_invalid".into(),
+                                )
+                            },
+                        )
+                    })
+                    .transpose()?,
+                started_at_unix_millis: row.3,
+                settled_at_unix_millis: row.4.unwrap_or_default(),
+                started_store_position: projected_u64(row.5)?,
+                settled_store_position: row.6.map(projected_u64).transpose()?.unwrap_or_default(),
             })
         })
         .collect()
@@ -5024,6 +5165,74 @@ fn apply_event(transaction: &Transaction<'_>, event: &v1::EventEnvelope) -> Resu
             )?;
             touch_run(transaction, &payload.run_id, event.store_position)?;
         }
+        WorkflowRuntimeEvent::ConnectorObservationStarted(payload) => {
+            let intent = payload.intent.as_ref().ok_or_else(|| {
+                WorkflowProjectionError::Lifecycle("connector_observation_intent_missing".into())
+            })?;
+            require_active_run(transaction, &intent.run_id, &intent.run_token_id)?;
+            transaction.execute(
+                "INSERT INTO workflow_connector_observations
+                 (observation_id, run_id, run_token_id, idempotency_key, intent_digest,
+                  target_fingerprint, status, started_wire,
+                  started_at_unix_millis, started_store_position)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'started', ?7, ?8, ?9)",
+                params![
+                    intent.observation_id,
+                    intent.run_id,
+                    intent.run_token_id,
+                    intent.idempotency_key,
+                    payload.intent_digest,
+                    intent.target_fingerprint,
+                    payload.encode_to_vec(),
+                    event.occurred_at_unix_millis,
+                    sql_u64(event.store_position)?,
+                ],
+            )?;
+            touch_run(transaction, &intent.run_id, event.store_position)?;
+        }
+        WorkflowRuntimeEvent::ConnectorObservationSettled(payload) => {
+            let current: Option<(String, String, String, String)> = transaction
+                .query_row(
+                    "SELECT run_id, run_token_id, intent_digest, status
+                     FROM workflow_connector_observations WHERE observation_id = ?1",
+                    [&payload.observation_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()?;
+            if current
+                .as_ref()
+                .is_none_or(|(run_id, run_token_id, intent_digest, status)| {
+                    run_id != &payload.run_id
+                        || run_token_id != &payload.run_token_id
+                        || intent_digest != &payload.intent_digest
+                        || status != "started"
+                })
+            {
+                return lifecycle("connector_observation_not_active");
+            }
+            let status = match v1::WorkflowConnectorObservationOutcome::try_from(payload.outcome) {
+                Ok(v1::WorkflowConnectorObservationOutcome::Succeeded) => "succeeded",
+                Ok(v1::WorkflowConnectorObservationOutcome::Rejected) => "rejected",
+                Ok(v1::WorkflowConnectorObservationOutcome::Failed) => "failed",
+                _ => return lifecycle("connector_observation_outcome_invalid"),
+            };
+            let updated = transaction.execute(
+                "UPDATE workflow_connector_observations SET status = ?1, settled_wire = ?2,
+                   settled_at_unix_millis = ?3, settled_store_position = ?4
+                 WHERE observation_id = ?5 AND status = 'started'",
+                params![
+                    status,
+                    payload.encode_to_vec(),
+                    event.occurred_at_unix_millis,
+                    sql_u64(event.store_position)?,
+                    payload.observation_id,
+                ],
+            )?;
+            if updated != 1 {
+                return lifecycle("connector_observation_not_active");
+            }
+            touch_run(transaction, &payload.run_id, event.store_position)?;
+        }
         WorkflowRuntimeEvent::EffectProposed(payload) => {
             let intent = payload.intent.as_ref().ok_or_else(|| {
                 WorkflowProjectionError::Lifecycle("effect_intent_missing".into())
@@ -5497,6 +5706,15 @@ fn apply_event(transaction: &Transaction<'_>, event: &v1::EventEnvelope) -> Resu
             )?;
             if running_attempts != 0 {
                 return lifecycle("run_has_active_attempts");
+            }
+            let active_observations: i64 = transaction.query_row(
+                "SELECT COUNT(*) FROM workflow_connector_observations
+                 WHERE run_id = ?1 AND status = 'started'",
+                [&payload.run_id],
+                |row| row.get(0),
+            )?;
+            if active_observations != 0 {
+                return lifecycle("run_has_active_connector_observations");
             }
             let token_count: i64 = transaction.query_row(
                 "SELECT COUNT(*) FROM workflow_execution_tokens WHERE run_id = ?1",
@@ -6545,6 +6763,12 @@ fn canonical_state_bytes(connection: &Connection) -> Result<Vec<u8>> {
                 "effect_authorities",
                 "SELECT effect_id, run_id, attempt_id, node_id, idempotency_key, intent_digest, preview_digest, destination_fingerprint, approval_id, approval_fingerprint, expires_at_unix_millis, status, proposal_wire, authorization_wire, dispatch_started_wire, dispatch_settled_wire, reconciliation_wire, proposed_at_unix_millis, authorized_at_unix_millis, dispatch_started_at_unix_millis, dispatch_settled_at_unix_millis, reconciled_at_unix_millis, proposed_store_position, authorized_store_position, dispatch_started_store_position, dispatch_settled_store_position, reconciled_store_position, reconciliation_count FROM workflow_effect_authorities ORDER BY run_id, proposed_store_position, effect_id",
                 28,
+            )?,
+            table_rows(
+                connection,
+                "connector_observations",
+                "SELECT observation_id, run_id, run_token_id, idempotency_key, intent_digest, target_fingerprint, status, started_wire, settled_wire, started_at_unix_millis, settled_at_unix_millis, started_store_position, settled_store_position FROM workflow_connector_observations ORDER BY run_id, started_store_position, observation_id",
+                13,
             )?,
             table_rows(
                 connection,

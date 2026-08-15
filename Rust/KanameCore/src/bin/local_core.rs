@@ -6,6 +6,9 @@ use kaname_core::{
     policy::{ApprovalResolutionResult, LocalPolicyCore, approval_fingerprint},
     v1::{self, EventEnvelope},
     workflow_canonical, workflow_compiler,
+    workflow_connector_observation::{
+        begin_workflow_connector_observation, settle_workflow_connector_observation,
+    },
     workflow_import::{ImportFrozenWorkflowDraft, ImportFrozenWorkspace},
     workflow_object_store::WorkflowObjectStoreQuota,
     workflow_projection::WorkflowRunProjection,
@@ -78,12 +81,22 @@ fn main() {
         [operation, journal_path, projection_path] if operation == "workflow-run-inspect" => {
             workflow_run_inspect(journal_path, projection_path)
         }
+        [operation, journal_path, projection_path]
+            if operation == "workflow-connector-observation-begin" =>
+        {
+            workflow_connector_observation_begin(journal_path, projection_path)
+        }
+        [operation, journal_path, projection_path]
+            if operation == "workflow-connector-observation-settle" =>
+        {
+            workflow_connector_observation_settle(journal_path, projection_path)
+        }
         [operation, journal_path, projection_path, application_support]
             if operation == "workflow-run-purge" =>
         {
             workflow_run_purge(journal_path, projection_path, application_support)
         }
-        _ => Err("usage: kaname-local-core scenario <F-01..F-14> | scenario-store <F-01..F-14> <journal-path> | append-event <journal-path> < event-envelope.bin | authorize-action <journal-path> < approval-command.bin | record-review <journal-path> < command-envelope.bin | replay <journal-path> < replay-request.bin | mobile-propose <journal-path> < enrollment-challenge.bin | mobile-decide <journal-path> < enrollment-decision.bin | mobile-admit <journal-path> <recipient-device-id> <recipient-key-id> < encrypted-envelope.bin | scale <S-01..S-04> | workflow-schema-check < request.json | workflow-canonicalize < value.json | workflow-compile < compile-request.bin | workflow-library-query <application-support-root> < query-request.bin | workflow-library-activate <application-support-root> < activation-request.bin | workflow-library-import-frozen <application-support-root> < import-request.bin | workflow-run-inspect <journal-path> <projection-path> < query.bin | workflow-run-purge <journal-path> <projection-path> <application-support-root> < request.bin".to_owned()),
+        _ => Err("usage: kaname-local-core scenario <F-01..F-14> | scenario-store <F-01..F-14> <journal-path> | append-event <journal-path> < event-envelope.bin | authorize-action <journal-path> < approval-command.bin | record-review <journal-path> < command-envelope.bin | replay <journal-path> < replay-request.bin | mobile-propose <journal-path> < enrollment-challenge.bin | mobile-decide <journal-path> < enrollment-decision.bin | mobile-admit <journal-path> <recipient-device-id> <recipient-key-id> < encrypted-envelope.bin | scale <S-01..S-04> | workflow-schema-check < request.json | workflow-canonicalize < value.json | workflow-compile < compile-request.bin | workflow-library-query <application-support-root> < query-request.bin | workflow-library-activate <application-support-root> < activation-request.bin | workflow-library-import-frozen <application-support-root> < import-request.bin | workflow-run-inspect <journal-path> <projection-path> < query.bin | workflow-connector-observation-begin <journal-path> <projection-path> < request.bin | workflow-connector-observation-settle <journal-path> <projection-path> < request.bin | workflow-run-purge <journal-path> <projection-path> <application-support-root> < request.bin".to_owned()),
     };
     match result {
         Ok(json) => println!("{json}"),
@@ -130,6 +143,54 @@ fn workflow_run_inspect(journal_path: &str, projection_path: &str) -> Result<Str
         }
         .encode_to_vec(),
     ))
+}
+
+fn workflow_connector_observation_begin(
+    journal_path: &str,
+    projection_path: &str,
+) -> Result<String, String> {
+    let wire = read_standard_input()?;
+    workflow_connector_observation_begin_wire(journal_path, projection_path, &wire)
+}
+
+fn workflow_connector_observation_begin_wire(
+    journal_path: &str,
+    projection_path: &str,
+    wire: &[u8],
+) -> Result<String, String> {
+    let request = v1::BeginWorkflowConnectorObservationRequest::decode(wire)
+        .map_err(|_| "workflow_connector_observation_begin_rejected".to_owned())?;
+    let mut journal = Journal::open(journal_path, &CURSOR_KEY)
+        .map_err(|_| "workflow_run_journal_unavailable".to_owned())?;
+    let (mut projection, _) = WorkflowRunProjection::open_or_rebuild(projection_path, &journal)
+        .map_err(|_| "workflow_run_projection_unavailable".to_owned())?;
+    let response = begin_workflow_connector_observation(&mut journal, &mut projection, request)
+        .map_err(|error| format!("workflow_connector_observation_begin_failed:{error}"))?;
+    Ok(hex::encode(response.encode_to_vec()))
+}
+
+fn workflow_connector_observation_settle(
+    journal_path: &str,
+    projection_path: &str,
+) -> Result<String, String> {
+    let wire = read_standard_input()?;
+    workflow_connector_observation_settle_wire(journal_path, projection_path, &wire)
+}
+
+fn workflow_connector_observation_settle_wire(
+    journal_path: &str,
+    projection_path: &str,
+    wire: &[u8],
+) -> Result<String, String> {
+    let request = v1::SettleWorkflowConnectorObservationRequest::decode(wire)
+        .map_err(|_| "workflow_connector_observation_settle_rejected".to_owned())?;
+    let mut journal = Journal::open(journal_path, &CURSOR_KEY)
+        .map_err(|_| "workflow_run_journal_unavailable".to_owned())?;
+    let (mut projection, _) = WorkflowRunProjection::open_or_rebuild(projection_path, &journal)
+        .map_err(|_| "workflow_run_projection_unavailable".to_owned())?;
+    let response = settle_workflow_connector_observation(&mut journal, &mut projection, request)
+        .map_err(|error| format!("workflow_connector_observation_settle_failed:{error}"))?;
+    Ok(hex::encode(response.encode_to_vec()))
 }
 
 fn workflow_run_purge(

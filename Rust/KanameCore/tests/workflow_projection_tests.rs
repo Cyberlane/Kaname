@@ -152,7 +152,7 @@ fn version_thirteen_projection_adds_effect_authority_without_rebuild() {
 }
 
 #[test]
-fn version_fourteen_projection_adds_effect_dispatch_evidence_without_rebuild() {
+fn version_fourteen_projection_migrates_through_connector_observations_without_rebuild() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("workflow-projection.sqlite");
     {
@@ -198,7 +198,7 @@ fn version_fourteen_projection_adds_effect_dispatch_evidence_without_rebuild() {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 15);
+    assert_eq!(version, 16);
     let columns = connection
         .prepare("PRAGMA table_info(workflow_effect_authorities)")
         .unwrap()
@@ -208,6 +208,15 @@ fn version_fourteen_projection_adds_effect_dispatch_evidence_without_rebuild() {
         .unwrap();
     assert!(columns.contains(&"dispatch_started_wire".to_string()));
     assert!(columns.contains(&"reconciliation_count".to_string()));
+    let connector_observation_table: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table' AND name = 'workflow_connector_observations'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(connector_observation_table, 1);
 }
 
 #[test]

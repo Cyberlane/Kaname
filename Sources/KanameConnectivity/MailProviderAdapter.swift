@@ -208,6 +208,63 @@ public struct MailConversationSnapshot: Codable, Equatable, Identifiable, Sendab
     public var stableID: String { "\(account.stableID):\(id)" }
 }
 
+/// A deliberately body-free provider observation. Connectors use this surface
+/// when a workflow needs identity, selected headers, and logical resources but
+/// has no authority to fetch message bodies or attachment descriptors.
+public struct MailMessageMetadataSnapshot: Codable, Equatable, Identifiable, Sendable {
+    public let id: String
+    public let conversationID: String
+    public let headers: [String: String]
+    public let resourceIDs: [String]
+
+    public init(
+        id: String,
+        conversationID: String,
+        headers: [String: String],
+        resourceIDs: [String]
+    ) {
+        self.id = id
+        self.conversationID = conversationID
+        self.headers = headers
+        self.resourceIDs = Array(Set(resourceIDs)).sorted()
+    }
+}
+
+public struct MailConversationMetadataSnapshot: Codable, Equatable, Identifiable, Sendable {
+    public let id: String
+    public let account: MailAccountIdentity
+    public let cursor: String?
+    public let messages: [MailMessageMetadataSnapshot]
+
+    public init(
+        id: String,
+        account: MailAccountIdentity,
+        cursor: String?,
+        messages: [MailMessageMetadataSnapshot]
+    ) {
+        self.id = id
+        self.account = account
+        self.cursor = cursor
+        self.messages = messages
+    }
+
+    public var resourceIDs: [String] {
+        Array(Set(messages.flatMap(\.resourceIDs))).sorted()
+    }
+}
+
+/// The credential-bearing provider remains behind this narrow read-only
+/// boundary. Implementations must not satisfy it by calling a full-content
+/// message endpoint and redacting after the response arrives.
+public protocol MailProviderMetadataAdapter: Sendable {
+    var identity: MailProviderIdentity { get }
+    func conversationMetadata(
+        accountID: String,
+        conversationID: String,
+        selectedHeaders: [String]
+    ) async throws -> MailConversationMetadataSnapshot
+}
+
 public struct MailConversationPage: Codable, Equatable, Sendable {
     public let account: MailAccountIdentity
     public let conversations: [MailConversationSnapshot]

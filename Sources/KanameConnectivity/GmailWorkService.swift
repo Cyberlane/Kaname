@@ -39,6 +39,20 @@ public struct GmailThreadDetailSnapshot: Equatable, Identifiable, Sendable {
     public var stableID: String { "\(accountID):\(id)" }
 }
 
+public struct GmailMessageMetadataSnapshot: Equatable, Identifiable, Sendable {
+    public let id: String
+    public let threadID: String
+    public let headers: [String: String]
+    public let labels: [String]
+}
+
+public struct GmailThreadMetadataSnapshot: Equatable, Identifiable, Sendable {
+    public let id: String
+    public let accountID: String
+    public let historyID: String?
+    public let messages: [GmailMessageMetadataSnapshot]
+}
+
 public struct GmailThreadPage: Equatable, Sendable {
     public let accountID: String
     public let accountIdentity: String
@@ -303,6 +317,39 @@ public extension NativeGoogleIntegrationService {
             account: account,
             threadID: try GmailAPIParser.validatedID(threadID),
             accessToken: token
+        )
+    }
+
+    func readMailThreadMetadata(
+        accountID: String,
+        threadID: String,
+        selectedHeaders: [String]
+    ) async throws -> GmailThreadMetadataSnapshot {
+        let account = try gmailAccount(id: accountID)
+        let token = try await validAccessToken(for: account)
+        let id = try GmailAPIParser.validatedID(threadID)
+        let headers = try GmailAPIParser.validatedMetadataHeaders(selectedHeaders)
+        var components = URLComponents(
+            string: "https://gmail.googleapis.com/gmail/v1/users/me/threads/\(id)"
+        )!
+        components.queryItems = [
+            URLQueryItem(name: "format", value: "metadata"),
+            URLQueryItem(
+                name: "fields",
+                value: "id,historyId,messages(id,threadId,labelIds,payload/headers)"
+            ),
+        ]
+            + headers.map { URLQueryItem(name: "metadataHeaders", value: $0) }
+        let data = try await authorizedData(
+            url: components.url!, accessToken: token, service: "Gmail thread metadata"
+        )
+        guard data.count <= 1_048_576 else {
+            throw NativeGoogleIntegrationError.invalidResponse(
+                "Gmail thread metadata exceeded its bounded response limit"
+            )
+        }
+        return try GmailAPIParser.threadMetadata(
+            data: data, account: account, selectedHeaders: headers
         )
     }
 
@@ -627,6 +674,27 @@ public enum GmailAPIParser {
         return value
     }
 
+    public static func validatedMetadataHeaders(_ values: [String]) throws -> [String] {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-"))
+        let trimmed = values.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        var seen: Set<String> = []
+        let normalized = trimmed.sorted { lhs, rhs in
+            let left = lhs.lowercased()
+            let right = rhs.lowercased()
+            return left == right ? lhs < rhs : left < right
+        }.filter {
+            seen.insert($0.lowercased()).inserted
+        }
+        guard !normalized.isEmpty, normalized.count <= 32,
+              normalized.allSatisfy({
+                  !$0.isEmpty && $0.utf8.count <= 128
+                      && $0.unicodeScalars.allSatisfy(allowed.contains)
+              }) else {
+            throw GmailWorkError.invalidIdentifier
+        }
+        return normalized
+    }
+
     public static func profileHistoryID(data: Data) throws -> String {
         struct Response: Decodable { let historyId: String }
         let response = try GoogleAPIResponseParser.decode(Response.self, from: data, service: "Gmail profile")
@@ -712,6 +780,41 @@ public enum GmailAPIParser {
             )
         } catch let error as GmailWorkError { throw error }
         catch { throw NativeGoogleIntegrationError.invalidResponse("Gmail thread") }
+    }
+
+    public static func threadMetadata(
+        data: Data,
+        account: NativeGoogleAccountSnapshot,
+        selectedHeaders: [String]
+    ) throws -> GmailThreadMetadataSnapshot {
+        do {
+            let allowed = try validatedMetadataHeaders(selectedHeaders)
+            let decoded = try JSONDecoder().decode(GmailWireThread.self, from: data)
+            let messages = try (decoded.messages ?? []).map { message in
+                let wireHeaders = message.payload?.headers ?? []
+                let headers = Dictionary(uniqueKeysWithValues: allowed.compactMap { name in
+                    wireHeaders.first {
+                        $0.name.caseInsensitiveCompare(name) == .orderedSame
+                    }.map { (name, String($0.value.prefix(8_192))) }
+                })
+                return GmailMessageMetadataSnapshot(
+                    id: try validatedID(message.id),
+                    threadID: try validatedID(message.threadId),
+                    headers: headers,
+                    labels: Array(Set(try (message.labelIds ?? []).map(validatedID))).sorted()
+                )
+            }
+            return GmailThreadMetadataSnapshot(
+                id: try validatedID(decoded.id),
+                accountID: account.id,
+                historyID: decoded.historyId,
+                messages: messages
+            )
+        } catch let error as GmailWorkError {
+            throw error
+        } catch {
+            throw NativeGoogleIntegrationError.invalidResponse("Gmail thread metadata")
+        }
     }
 
     public static func message(data: Data, account: NativeGoogleAccountSnapshot) throws -> GmailMessageSnapshot {

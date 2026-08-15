@@ -15,6 +15,7 @@ pub(crate) mod private_filesystem;
 pub mod workflow_canonical;
 pub mod workflow_capabilities;
 pub mod workflow_compiler;
+pub mod workflow_connector_observation;
 pub mod workflow_drafts;
 pub mod workflow_effect_authority;
 pub mod workflow_effect_connector;

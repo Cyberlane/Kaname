@@ -631,6 +631,119 @@ message WorkflowLlmAttemptSettled {
   reserved "credential", "api_key", "endpoint", "host_path", "secret";
 }
 
+// One installation-private, read-only connector request. Account and target
+// identities are opaque local bindings/fingerprints; portable workflow source
+// cannot embed them or grant mutation authority.
+message WorkflowConnectorObservationIntent {
+  string run_id = 1;
+  string run_token_id = 2;
+  string observation_id = 3;
+  string connector_class = 4;
+  string account_binding_id = 5;
+  string operation = 6;
+  string target_fingerprint = 7;
+  string idempotency_key = 8;
+  repeated string requested_fields = 9;
+  WorkflowValueReference request = 10;
+  reserved 11 to 25;
+  reserved "credential", "secret", "account_id", "target_id", "body", "attachment";
+}
+
+// Installation-private connector identity admitted before a read. This is
+// readiness evidence only and can never authorize an external mutation.
+message WorkflowConnectorObservationRegistration {
+  string connector_class = 1;
+  string account_binding_id = 2;
+  string binding_id = 3;
+  string connector_version = 4;
+  string installation_digest = 5;
+  repeated string allowed_operations = 6;
+  repeated string allowed_fields = 7;
+  uint64 maximum_result_bytes = 8;
+  string registration_digest = 9;
+  reserved 10 to 20;
+  reserved "credential", "secret", "account_id", "endpoint", "host_path";
+}
+
+message WorkflowConnectorObservationStarted {
+  WorkflowConnectorObservationIntent intent = 1;
+  string intent_digest = 2;
+  WorkflowConnectorObservationRegistration registration = 3;
+  int64 deadline_unix_millis = 4;
+  reserved 5 to 15;
+}
+
+enum WorkflowConnectorObservationOutcome {
+  WORKFLOW_CONNECTOR_OBSERVATION_OUTCOME_UNSPECIFIED = 0;
+  WORKFLOW_CONNECTOR_OBSERVATION_OUTCOME_SUCCEEDED = 1;
+  WORKFLOW_CONNECTOR_OBSERVATION_OUTCOME_REJECTED = 2;
+  WORKFLOW_CONNECTOR_OBSERVATION_OUTCOME_FAILED = 3;
+}
+
+message WorkflowConnectorObservationReceipt {
+  string receipt_id = 1;
+  string evidence_digest = 2;
+  repeated string observed_fields = 3;
+  uint32 item_count = 4;
+  uint64 result_byte_count = 5;
+  reserved 6 to 15;
+  reserved "provider_reference", "credential", "secret", "body", "attachment";
+}
+
+message WorkflowConnectorObservationSettled {
+  string run_id = 1;
+  string run_token_id = 2;
+  string observation_id = 3;
+  string intent_digest = 4;
+  WorkflowConnectorObservationOutcome outcome = 5;
+  WorkflowValueReference output = 6;
+  string error_code = 7;
+  WorkflowValueReference error = 8;
+  WorkflowConnectorObservationReceipt receipt = 9;
+  uint64 elapsed_milliseconds = 10;
+  string idempotency_key = 11;
+  reserved 12 to 25;
+  reserved "provider_reference", "credential", "secret", "body", "attachment";
+}
+
+message BeginWorkflowConnectorObservationRequest {
+  SchemaVersion schema_version = 1;
+  string request_id = 2;
+  WorkflowConnectorObservationIntent intent = 3;
+  WorkflowConnectorObservationRegistration registration = 4;
+  int64 started_at_unix_millis = 5;
+  reserved 6 to 15;
+}
+
+message BeginWorkflowConnectorObservationResponse {
+  SchemaVersion schema_version = 1;
+  string request_id = 2;
+  WorkflowConnectorObservationStarted started = 3;
+  bool duplicate = 4;
+  string status = 5;
+  uint64 store_position = 6;
+  WorkflowConnectorObservationSettled settlement = 7;
+  reserved 8 to 15;
+}
+
+message SettleWorkflowConnectorObservationRequest {
+  SchemaVersion schema_version = 1;
+  string request_id = 2;
+  WorkflowConnectorObservationSettled settlement = 3;
+  int64 settled_at_unix_millis = 4;
+  reserved 5 to 15;
+}
+
+message SettleWorkflowConnectorObservationResponse {
+  SchemaVersion schema_version = 1;
+  string request_id = 2;
+  WorkflowConnectorObservationSettled settlement = 3;
+  bool duplicate = 4;
+  string status = 5;
+  uint64 store_position = 6;
+  reserved 7 to 15;
+}
+
 // Immutable description of one proposed external effect. Account binding and
 // destination identities are installation-private fingerprints; portable
 // workflow packages cannot contain this message or a live authority grant.
@@ -1123,6 +1236,17 @@ message WorkflowProjectedLlmResponseMessage {
   reserved 8 to 20;
 }
 
+message WorkflowProjectedConnectorObservation {
+  WorkflowConnectorObservationStarted started = 1;
+  string status = 2;
+  WorkflowConnectorObservationSettled settlement = 3;
+  int64 started_at_unix_millis = 4;
+  int64 settled_at_unix_millis = 5;
+  uint64 started_store_position = 6;
+  uint64 settled_store_position = 7;
+  reserved 8 to 15;
+}
+
 message WorkflowProjectedNodeState {
   string node_id = 1;
   string status = 2;
@@ -1407,7 +1531,8 @@ message WorkflowProjectedRun {
   WorkflowRunRetentionPolicy retention_policy = 34;
   WorkflowRunPurgePreview purge_preview = 35;
   repeated WorkflowProjectedEffectAuthority effect_authorities = 36;
-  reserved 37 to 45;
+  repeated WorkflowProjectedConnectorObservation connector_observations = 37;
+  reserved 38 to 45;
 }
 
 message WorkflowProjectedEffectAuthority {

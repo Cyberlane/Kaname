@@ -8260,6 +8260,12 @@ fn recorded_run(journal: &Journal, run_id: &str) -> Result<RecordedRun> {
                 // coordinator. Executor replay consumes these as evidence and
                 // never invokes a connector from journal replay.
             }
+            WorkflowRuntimeEvent::ConnectorObservationStarted(_)
+            | WorkflowRuntimeEvent::ConnectorObservationSettled(_) => {
+                // Read-only connector qualification has a separate two-phase
+                // coordinator. Replay observes its receipts but cannot invoke
+                // a provider or turn a read into effect authority.
+            }
             WorkflowRuntimeEvent::RunCancellationRequested(payload) => {
                 if state.cancellation.replace(payload).is_some() {
                     return Err(WorkflowExecutionError::Lifecycle(

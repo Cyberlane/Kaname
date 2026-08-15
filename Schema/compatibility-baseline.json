@@ -93,6 +93,12 @@
       "6": "WORKFLOW_CAPABILITY_ATTEMPT_OUTCOME_MALFORMED_RESULT",
       "7": "WORKFLOW_CAPABILITY_ATTEMPT_OUTCOME_CRASHED"
     },
+    "workflow_runtime.WorkflowConnectorObservationOutcome": {
+      "0": "WORKFLOW_CONNECTOR_OBSERVATION_OUTCOME_UNSPECIFIED",
+      "1": "WORKFLOW_CONNECTOR_OBSERVATION_OUTCOME_SUCCEEDED",
+      "2": "WORKFLOW_CONNECTOR_OBSERVATION_OUTCOME_REJECTED",
+      "3": "WORKFLOW_CONNECTOR_OBSERVATION_OUTCOME_FAILED"
+    },
     "workflow_runtime.WorkflowEdgeCheckpointState": {
       "0": "WORKFLOW_EDGE_CHECKPOINT_STATE_UNSPECIFIED",
       "1": "WORKFLOW_EDGE_CHECKPOINT_STATE_ADMITTED",
@@ -605,6 +611,22 @@
       "2": "uint32 line",
       "3": "uint32 column"
     },
+    "workflow_runtime.BeginWorkflowConnectorObservationRequest": {
+      "1": "SchemaVersion schema_version",
+      "2": "string request_id",
+      "3": "WorkflowConnectorObservationIntent intent",
+      "4": "WorkflowConnectorObservationRegistration registration",
+      "5": "int64 started_at_unix_millis"
+    },
+    "workflow_runtime.BeginWorkflowConnectorObservationResponse": {
+      "1": "SchemaVersion schema_version",
+      "2": "string request_id",
+      "3": "WorkflowConnectorObservationStarted started",
+      "4": "bool duplicate",
+      "5": "string status",
+      "6": "uint64 store_position",
+      "7": "WorkflowConnectorObservationSettled settlement"
+    },
     "workflow_runtime.CancelWorkflowRun": {
       "1": "string run_id",
       "2": "string run_token_id",
@@ -638,6 +660,20 @@
       "5": "string trigger_kind",
       "6": "string trigger_event_id",
       "7": "WorkflowInputBinding inputs"
+    },
+    "workflow_runtime.SettleWorkflowConnectorObservationRequest": {
+      "1": "SchemaVersion schema_version",
+      "2": "string request_id",
+      "3": "WorkflowConnectorObservationSettled settlement",
+      "4": "int64 settled_at_unix_millis"
+    },
+    "workflow_runtime.SettleWorkflowConnectorObservationResponse": {
+      "1": "SchemaVersion schema_version",
+      "2": "string request_id",
+      "3": "WorkflowConnectorObservationSettled settlement",
+      "4": "bool duplicate",
+      "5": "string status",
+      "6": "uint64 store_position"
     },
     "workflow_runtime.SignalWorkflowWait": {
       "1": "string run_id",
@@ -733,6 +769,55 @@
       "7": "string kind",
       "8": "string prior_episode_id",
       "9": "string workflow_id"
+    },
+    "workflow_runtime.WorkflowConnectorObservationIntent": {
+      "1": "string run_id",
+      "10": "WorkflowValueReference request",
+      "2": "string run_token_id",
+      "3": "string observation_id",
+      "4": "string connector_class",
+      "5": "string account_binding_id",
+      "6": "string operation",
+      "7": "string target_fingerprint",
+      "8": "string idempotency_key",
+      "9": "string requested_fields"
+    },
+    "workflow_runtime.WorkflowConnectorObservationReceipt": {
+      "1": "string receipt_id",
+      "2": "string evidence_digest",
+      "3": "string observed_fields",
+      "4": "uint32 item_count",
+      "5": "uint64 result_byte_count"
+    },
+    "workflow_runtime.WorkflowConnectorObservationRegistration": {
+      "1": "string connector_class",
+      "2": "string account_binding_id",
+      "3": "string binding_id",
+      "4": "string connector_version",
+      "5": "string installation_digest",
+      "6": "string allowed_operations",
+      "7": "string allowed_fields",
+      "8": "uint64 maximum_result_bytes",
+      "9": "string registration_digest"
+    },
+    "workflow_runtime.WorkflowConnectorObservationSettled": {
+      "1": "string run_id",
+      "10": "uint64 elapsed_milliseconds",
+      "11": "string idempotency_key",
+      "2": "string run_token_id",
+      "3": "string observation_id",
+      "4": "string intent_digest",
+      "5": "WorkflowConnectorObservationOutcome outcome",
+      "6": "WorkflowValueReference output",
+      "7": "string error_code",
+      "8": "WorkflowValueReference error",
+      "9": "WorkflowConnectorObservationReceipt receipt"
+    },
+    "workflow_runtime.WorkflowConnectorObservationStarted": {
+      "1": "WorkflowConnectorObservationIntent intent",
+      "2": "string intent_digest",
+      "3": "WorkflowConnectorObservationRegistration registration",
+      "4": "int64 deadline_unix_millis"
     },
     "workflow_runtime.WorkflowEdgeCheckpointed": {
       "1": "string run_id",
@@ -1147,6 +1232,15 @@
       "8": "string trigger_event_id",
       "9": "WorkflowProjectedInputBinding inputs"
     },
+    "workflow_runtime.WorkflowProjectedConnectorObservation": {
+      "1": "WorkflowConnectorObservationStarted started",
+      "2": "string status",
+      "3": "WorkflowConnectorObservationSettled settlement",
+      "4": "int64 started_at_unix_millis",
+      "5": "int64 settled_at_unix_millis",
+      "6": "uint64 started_store_position",
+      "7": "uint64 settled_store_position"
+    },
     "workflow_runtime.WorkflowProjectedEdgeCheckpoint": {
       "1": "string event_id",
       "2": "string edge_id",
@@ -1405,6 +1499,7 @@
       "34": "WorkflowRunRetentionPolicy retention_policy",
       "35": "WorkflowRunPurgePreview purge_preview",
       "36": "WorkflowProjectedEffectAuthority effect_authorities",
+      "37": "WorkflowProjectedConnectorObservation connector_observations",
       "4": "string workflow_id",
       "5": "string revision_id",
       "6": "string package_digest",
