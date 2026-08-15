@@ -8251,6 +8251,10 @@ fn recorded_run(journal: &Journal, run_id: &str) -> Result<RecordedRun> {
                 });
             }
             WorkflowRuntimeEvent::MatchTraceRecorded(_) => {}
+            WorkflowRuntimeEvent::EffectProposed(_) | WorkflowRuntimeEvent::EffectAuthorized(_) => {
+                // WFP-008A records authority evidence only. Connector dispatch
+                // remains deliberately absent until WFP-008B.
+            }
             WorkflowRuntimeEvent::RunCancellationRequested(payload) => {
                 if state.cancellation.replace(payload).is_some() {
                     return Err(WorkflowExecutionError::Lifecycle(

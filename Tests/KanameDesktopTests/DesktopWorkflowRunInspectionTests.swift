@@ -79,6 +79,11 @@ struct DesktopWorkflowRunInspectionTests {
         #expect(run.llmAttempts.first?.usage?.totalTokens == 170)
         #expect(run.llmAttempts.first?.validation?.status == "succeeded")
         #expect(run.llmAttempts.first?.providerReceipt?.requestID == "provider-request-run-v2")
+        #expect(run.effectAuthorities.first?.effectID == "effect-run-v2")
+        #expect(run.effectAuthorities.first?.status == "authorized")
+        #expect(run.effectAuthorities.first?.connectorClass == "dev.kaname.email")
+        #expect(run.effectAuthorities.first?.actorID == "owner-local")
+        #expect(run.effectAuthorities.first?.grantID == "grant-effect-run-v2")
         #expect(run.events.map(\.storePosition) == [11, 12, 13, 14, 15])
         #expect(run.retentionPolicy.mode == "duration")
         #expect(run.retentionPolicy.days == 30)
@@ -88,6 +93,7 @@ struct DesktopWorkflowRunInspectionTests {
         #expect(run.purgePreview.affectedValueIDs == ["value-run-v2"])
         #expect(run.purgePreview.affectedFileHandleIDs == ["job-value-run-v2"])
         #expect(run.purgePreview.retainedPromotedHandleIDs == ["workflow-value-run-v2"])
+        #expect(run.purgePreview.affectedEffectIDs == ["effect-run-v2"])
     }
 
     @Test("LLM inspection presentation stays collapsed, searchable, bounded, and compact-aware")
@@ -155,6 +161,7 @@ private actor PurgeTransport: DesktopWorkflowRunPurgeTransport {
         tombstone.affectedValueCount = 1
         tombstone.affectedFileHandleCount = 1
         tombstone.historicalRevisionRetained = true
+        tombstone.affectedEffectAuthorityCount = 1
         var receipt = Kaname_V1_WorkflowRunPurgeReceipt()
         receipt.purgeEventID = "purge-event-run-v2"
         receipt.purgeStorePosition = 16
@@ -613,6 +620,70 @@ private actor HistoricalRunTransport:
             llm.providerReceipt.providerRunReference = llm.providerRunReference
             llm.providerReceipt.metadataDigest = String(repeating: "d", count: 64)
             projected.llmAttempts = [llm]
+            var intent = Kaname_V1_WorkflowEffectIntent()
+            intent.effectID = "effect-run-v2"
+            intent.runID = id
+            intent.runTokenID = "run-token-run-v2"
+            intent.attemptID = attempt.attemptID
+            intent.executionTokenID = token.executionTokenID
+            intent.nodeID = attempt.nodeID
+            intent.workflowID = "workflow-one"
+            intent.revisionID = revision
+            intent.connectorClass = "dev.kaname.email"
+            intent.action = "draft-reply"
+            intent.accountBindingID = "binding-email-primary"
+            intent.destinationFingerprint = String(repeating: "4", count: 64)
+            intent.inputDigest = String(repeating: "5", count: 64)
+            intent.idempotencyKey = "effect-idempotency-run-v2"
+            var preview = Kaname_V1_WorkflowEffectPreview()
+            preview.summary = "Create the reviewed draft"
+            preview.consequence = "A provider draft will be created"
+            preview.reversible = true
+            preview.destinationFingerprint = intent.destinationFingerprint
+            preview.previewDigest = String(repeating: "6", count: 64)
+            var approval = Kaname_V1_ApprovalRequest()
+            approval.approvalID = "approval-effect-run-v2"
+            approval.actionKind = "workflow.effect"
+            approval.targetID = intent.effectID
+            approval.targetRevision = revision
+            approval.effectDigest = Data(repeating: 0x07, count: 32)
+            approval.consequence = preview.consequence
+            approval.reversible = preview.reversible
+            approval.expiresAtUnixMillis = 5_000
+            approval.fingerprint = Data(repeating: 0x08, count: 32)
+            approval.approvalPayloadVersion = 1
+            var proposal = Kaname_V1_WorkflowEffectProposed()
+            proposal.intent = intent
+            proposal.intentDigest = String(repeating: "7", count: 64)
+            proposal.preview = preview
+            proposal.approvalRequest = approval
+            var resolution = Kaname_V1_ApprovalResolution()
+            resolution.approvalID = approval.approvalID
+            resolution.decision = .approve
+            resolution.expectedFingerprint = approval.fingerprint
+            resolution.actorID = "owner-local"
+            resolution.deviceID = "device-local"
+            var authorization = Kaname_V1_WorkflowEffectAuthorized()
+            authorization.runID = id
+            authorization.runTokenID = intent.runTokenID
+            authorization.effectID = intent.effectID
+            authorization.grantID = "grant-effect-run-v2"
+            authorization.resolution = resolution
+            authorization.approvalFingerprint = approval.fingerprint
+            authorization.intentDigest = proposal.intentDigest
+            authorization.previewDigest = preview.previewDigest
+            authorization.destinationFingerprint = intent.destinationFingerprint
+            authorization.idempotencyKey = intent.idempotencyKey
+            authorization.expiresAtUnixMillis = approval.expiresAtUnixMillis
+            var authority = Kaname_V1_WorkflowProjectedEffectAuthority()
+            authority.proposal = proposal
+            authority.status = "authorized"
+            authority.authorization = authorization
+            authority.proposedAtUnixMillis = 2_000
+            authority.authorizedAtUnixMillis = 3_000
+            authority.proposedStorePosition = 14
+            authority.authorizedStorePosition = 15
+            projected.effectAuthorities = [authority]
             var context = Kaname_V1_WorkflowProjectedValue()
             context.valueID = "context-run-v2"
             context.contentType = "application/json"
@@ -658,6 +729,7 @@ private actor HistoricalRunTransport:
         projected.purgePreview.affectedFileHandleIds = [value.storage.handleID]
         projected.purgePreview.retainedPromotedHandleIds = ["workflow-value-\(id)"]
         projected.purgePreview.affectedValueBytes = value.byteCount
+        projected.purgePreview.affectedEffectIds = id == "run-v2" ? ["effect-run-v2"] : []
         projected.purgePreview.evidenceDigest = String(repeating: "0", count: 64)
         return projected
     }

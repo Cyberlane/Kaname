@@ -177,6 +177,7 @@ fn purge_workflow_run_inner(
             affected_value_bytes: preview.affected_value_bytes,
             installation_id,
             historical_revision_retained: true,
+            affected_effect_authority_count: preview.affected_effect_ids.len() as u64,
         };
         let purge_event_id = purge_event_id(&request.request_id, &request.run_id);
         let appended = journal.append_event(v1::EventEnvelope {

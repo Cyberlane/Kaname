@@ -725,6 +725,48 @@
       "7": "WorkflowEdgeCheckpointState state",
       "8": "string execution_token_id"
     },
+    "workflow_runtime.WorkflowEffectAuthorized": {
+      "1": "string run_id",
+      "10": "string idempotency_key",
+      "11": "int64 expires_at_unix_millis",
+      "2": "string run_token_id",
+      "3": "string effect_id",
+      "4": "string grant_id",
+      "5": "ApprovalResolution resolution",
+      "6": "bytes approval_fingerprint",
+      "7": "string intent_digest",
+      "8": "string preview_digest",
+      "9": "string destination_fingerprint"
+    },
+    "workflow_runtime.WorkflowEffectIntent": {
+      "1": "string effect_id",
+      "10": "string action",
+      "11": "string account_binding_id",
+      "12": "string destination_fingerprint",
+      "13": "string input_digest",
+      "14": "string idempotency_key",
+      "2": "string run_id",
+      "3": "string run_token_id",
+      "4": "string attempt_id",
+      "5": "string execution_token_id",
+      "6": "string node_id",
+      "7": "string workflow_id",
+      "8": "string revision_id",
+      "9": "string connector_class"
+    },
+    "workflow_runtime.WorkflowEffectPreview": {
+      "1": "string summary",
+      "2": "string consequence",
+      "3": "bool reversible",
+      "4": "string destination_fingerprint",
+      "5": "string preview_digest"
+    },
+    "workflow_runtime.WorkflowEffectProposed": {
+      "1": "WorkflowEffectIntent intent",
+      "2": "string intent_digest",
+      "3": "WorkflowEffectPreview preview",
+      "4": "ApprovalRequest approval_request"
+    },
     "workflow_runtime.WorkflowExecutionTokenCreated": {
       "1": "string run_id",
       "10": "string iteration_node_id",
@@ -1043,6 +1085,15 @@
       "8": "uint64 store_position",
       "9": "string execution_token_id"
     },
+    "workflow_runtime.WorkflowProjectedEffectAuthority": {
+      "1": "WorkflowEffectProposed proposal",
+      "2": "string status",
+      "3": "WorkflowEffectAuthorized authorization",
+      "4": "int64 proposed_at_unix_millis",
+      "5": "int64 authorized_at_unix_millis",
+      "6": "uint64 proposed_store_position",
+      "7": "uint64 authorized_store_position"
+    },
     "workflow_runtime.WorkflowProjectedEmission": {
       "1": "string emission_id",
       "2": "string attempt_id",
@@ -1270,6 +1321,7 @@
       "33": "WorkflowProjectedLlmAttempt llm_attempts",
       "34": "WorkflowRunRetentionPolicy retention_policy",
       "35": "WorkflowRunPurgePreview purge_preview",
+      "36": "WorkflowProjectedEffectAuthority effect_authorities",
       "4": "string workflow_id",
       "5": "string revision_id",
       "6": "string package_digest",
@@ -1386,6 +1438,7 @@
     "workflow_runtime.WorkflowRunPurgePreview": {
       "1": "bool manual_eligible",
       "10": "string evidence_digest",
+      "11": "string affected_effect_ids",
       "2": "bool automatic_eligible",
       "3": "string protected_reason",
       "4": "int64 automatic_eligible_at_unix_millis",
@@ -1417,6 +1470,7 @@
       "15": "uint64 affected_value_bytes",
       "16": "string installation_id",
       "17": "bool historical_revision_retained",
+      "18": "uint64 affected_effect_authority_count",
       "2": "string purge_command_id",
       "3": "string workflow_id",
       "4": "string revision_id",

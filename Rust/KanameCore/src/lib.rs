@@ -16,6 +16,7 @@ pub mod workflow_canonical;
 pub mod workflow_capabilities;
 pub mod workflow_compiler;
 pub mod workflow_drafts;
+pub mod workflow_effect_authority;
 pub mod workflow_executor;
 pub mod workflow_import;
 pub mod workflow_library;

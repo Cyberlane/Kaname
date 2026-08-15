@@ -267,7 +267,7 @@ struct DesktopDurableWorkflowRunsView: View {
             if showingPurgePreview {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Deletion preview").font(.caption.weight(.semibold))
-                    Text("\(preview.affectedAttemptIDs.count) attempts · \(preview.affectedValueIDs.count) values · \(preview.affectedFileHandleIDs.count) files · \(ByteCountFormatter.string(fromByteCount: Int64(clamping: preview.affectedValueBytes), countStyle: .file))")
+                    Text("\(preview.affectedAttemptIDs.count) attempts · \(preview.affectedEffectIDs.count) effect grants · \(preview.affectedValueIDs.count) values · \(preview.affectedFileHandleIDs.count) files · \(ByteCountFormatter.string(fromByteCount: Int64(clamping: preview.affectedValueBytes), countStyle: .file))")
                         .font(.caption2).foregroundStyle(.secondary)
                     if !preview.retainedPromotedHandleIDs.isEmpty {
                         Label("\(preview.retainedPromotedHandleIDs.count) promoted objects will be retained", systemImage: "archivebox.fill")

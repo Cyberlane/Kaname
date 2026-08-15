@@ -627,6 +627,7 @@ public struct DesktopWorkflowRunPurgePreview: Equatable, Sendable {
     public let affectedFileHandleIDs: [String]
     public let retainedPromotedHandleIDs: [String]
     public let affectedValueBytes: UInt64
+    public let affectedEffectIDs: [String]
     public let evidenceDigest: String
 
     public init(
@@ -639,6 +640,7 @@ public struct DesktopWorkflowRunPurgePreview: Equatable, Sendable {
         affectedFileHandleIDs: [String],
         retainedPromotedHandleIDs: [String],
         affectedValueBytes: UInt64,
+        affectedEffectIDs: [String],
         evidenceDigest: String
     ) {
         self.manualEligible = manualEligible
@@ -650,8 +652,36 @@ public struct DesktopWorkflowRunPurgePreview: Equatable, Sendable {
         self.affectedFileHandleIDs = affectedFileHandleIDs
         self.retainedPromotedHandleIDs = retainedPromotedHandleIDs
         self.affectedValueBytes = affectedValueBytes
+        self.affectedEffectIDs = affectedEffectIDs
         self.evidenceDigest = evidenceDigest
     }
+}
+
+public struct DesktopWorkflowProjectedEffectAuthority: Identifiable, Equatable, Sendable {
+    public var id: String { effectID }
+    public let effectID: String
+    public let nodeID: String
+    public let connectorClass: String
+    public let action: String
+    public let accountBindingID: String
+    public let destinationFingerprint: String
+    public let inputDigest: String
+    public let intentDigest: String
+    public let previewDigest: String
+    public let idempotencyKey: String
+    public let approvalID: String
+    public let approvalFingerprint: Data
+    public let status: String
+    public let consequence: String
+    public let reversible: Bool
+    public let expiresAtUnixMillis: Int64
+    public let grantID: String?
+    public let actorID: String?
+    public let deviceID: String?
+    public let proposedAtUnixMillis: Int64
+    public let authorizedAtUnixMillis: Int64?
+    public let proposedStorePosition: UInt64
+    public let authorizedStorePosition: UInt64?
 }
 
 public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
@@ -684,6 +714,7 @@ public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
     public let subflows: [DesktopWorkflowProjectedSubflow]
     public let capabilityAttempts: [DesktopWorkflowProjectedCapabilityAttempt]
     public let llmAttempts: [DesktopWorkflowProjectedLlmAttempt]
+    public let effectAuthorities: [DesktopWorkflowProjectedEffectAuthority]
     public let retentionPolicy: DesktopWorkflowRunRetentionPolicy
     public let purgePreview: DesktopWorkflowRunPurgePreview
 
@@ -705,11 +736,13 @@ public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
         subflows: [DesktopWorkflowProjectedSubflow] = [],
         capabilityAttempts: [DesktopWorkflowProjectedCapabilityAttempt] = [],
         llmAttempts: [DesktopWorkflowProjectedLlmAttempt] = [],
+        effectAuthorities: [DesktopWorkflowProjectedEffectAuthority] = [],
         retentionPolicy: DesktopWorkflowRunRetentionPolicy = .init(mode: "duration", days: 30),
         purgePreview: DesktopWorkflowRunPurgePreview = .init(
             manualEligible: false, automaticEligible: false, protectedReason: "not_loaded",
             automaticEligibleAtUnixMillis: nil, affectedAttemptIDs: [], affectedValueIDs: [],
             affectedFileHandleIDs: [], retainedPromotedHandleIDs: [], affectedValueBytes: 0,
+            affectedEffectIDs: [],
             evidenceDigest: String(repeating: "0", count: 64)
         )
     ) {
@@ -741,6 +774,7 @@ public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
         self.subflows = subflows
         self.capabilityAttempts = capabilityAttempts
         self.llmAttempts = llmAttempts
+        self.effectAuthorities = effectAuthorities
         self.retentionPolicy = retentionPolicy
         self.purgePreview = purgePreview
     }
@@ -1027,6 +1061,7 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
             subflows: try run.subflows.map(subflow),
             capabilityAttempts: try run.capabilityAttempts.map(capabilityAttempt),
             llmAttempts: try run.llmAttempts.map(llmAttempt),
+            effectAuthorities: try run.effectAuthorities.map(effectAuthority),
             retentionPolicy: try retentionPolicy(run.retentionPolicy),
             purgePreview: try purgePreview(run.purgePreview)
         )
@@ -1052,6 +1087,82 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
         }
     }
 
+    private static func effectAuthority(
+        _ item: Kaname_V1_WorkflowProjectedEffectAuthority
+    ) throws -> DesktopWorkflowProjectedEffectAuthority {
+        guard item.hasProposal, item.proposal.hasIntent, item.proposal.hasPreview,
+              item.proposal.hasApprovalRequest else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        let proposal = item.proposal
+        let intent = proposal.intent
+        let preview = proposal.preview
+        let approval = proposal.approvalRequest
+        guard !intent.effectID.isEmpty, !intent.nodeID.isEmpty,
+              !intent.connectorClass.isEmpty, !intent.action.isEmpty,
+              !intent.accountBindingID.isEmpty, intent.destinationFingerprint.count == 64,
+              intent.inputDigest.count == 64, proposal.intentDigest.count == 64,
+              preview.previewDigest.count == 64,
+              preview.destinationFingerprint == intent.destinationFingerprint,
+              !intent.idempotencyKey.isEmpty, !approval.approvalID.isEmpty,
+              approval.fingerprint.count == 32, approval.targetID == intent.effectID,
+              approval.targetRevision == intent.revisionID,
+              approval.expiresAtUnixMillis > item.proposedAtUnixMillis,
+              ["proposed", "authorized"].contains(item.status),
+              item.proposedStorePosition > 0 else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        let authorized = item.status == "authorized"
+        guard authorized == item.hasAuthorization,
+              authorized == (item.authorizedAtUnixMillis > 0),
+              authorized == (item.authorizedStorePosition > 0) else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        if authorized {
+            let authorization = item.authorization
+            guard authorization.effectID == intent.effectID,
+                  authorization.intentDigest == proposal.intentDigest,
+                  authorization.previewDigest == preview.previewDigest,
+                  authorization.destinationFingerprint == intent.destinationFingerprint,
+                  authorization.idempotencyKey == intent.idempotencyKey,
+                  authorization.approvalFingerprint == approval.fingerprint,
+                  authorization.hasResolution,
+                  authorization.resolution.approvalID == approval.approvalID,
+                  authorization.resolution.expectedFingerprint == approval.fingerprint,
+                  authorization.resolution.decision == .approve,
+                  !authorization.grantID.isEmpty,
+                  !authorization.resolution.actorID.isEmpty,
+                  !authorization.resolution.deviceID.isEmpty else {
+                throw DesktopWorkflowRunInspectionError.malformedResponse
+            }
+        }
+        return DesktopWorkflowProjectedEffectAuthority(
+            effectID: intent.effectID,
+            nodeID: intent.nodeID,
+            connectorClass: intent.connectorClass,
+            action: intent.action,
+            accountBindingID: intent.accountBindingID,
+            destinationFingerprint: intent.destinationFingerprint,
+            inputDigest: intent.inputDigest,
+            intentDigest: proposal.intentDigest,
+            previewDigest: preview.previewDigest,
+            idempotencyKey: intent.idempotencyKey,
+            approvalID: approval.approvalID,
+            approvalFingerprint: approval.fingerprint,
+            status: item.status,
+            consequence: preview.consequence,
+            reversible: preview.reversible,
+            expiresAtUnixMillis: approval.expiresAtUnixMillis,
+            grantID: authorized ? item.authorization.grantID : nil,
+            actorID: authorized ? item.authorization.resolution.actorID : nil,
+            deviceID: authorized ? item.authorization.resolution.deviceID : nil,
+            proposedAtUnixMillis: item.proposedAtUnixMillis,
+            authorizedAtUnixMillis: authorized ? item.authorizedAtUnixMillis : nil,
+            proposedStorePosition: item.proposedStorePosition,
+            authorizedStorePosition: authorized ? item.authorizedStorePosition : nil
+        )
+    }
+
     private static func purgePreview(
         _ preview: Kaname_V1_WorkflowRunPurgePreview
     ) throws -> DesktopWorkflowRunPurgePreview {
@@ -1070,6 +1181,7 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
             affectedFileHandleIDs: preview.affectedFileHandleIds,
             retainedPromotedHandleIDs: preview.retainedPromotedHandleIds,
             affectedValueBytes: preview.affectedValueBytes,
+            affectedEffectIDs: preview.affectedEffectIds,
             evidenceDigest: preview.evidenceDigest
         )
     }
@@ -1849,6 +1961,8 @@ public struct DesktopWorkflowRunPurgeClient: Sendable {
               response.receipt.hasTombstone,
               response.receipt.tombstone.runID == run.runID,
               response.receipt.tombstone.previewEvidenceDigest == run.purgePreview.evidenceDigest,
+              response.receipt.tombstone.affectedEffectAuthorityCount
+                == UInt64(run.purgePreview.affectedEffectIDs.count),
               response.receipt.tombstone.historicalRevisionRetained,
               !response.receipt.purgeEventID.isEmpty,
               response.receipt.purgeStorePosition > run.lastStorePosition else {

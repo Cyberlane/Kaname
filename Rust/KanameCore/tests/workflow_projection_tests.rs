@@ -130,6 +130,28 @@ fn version_one_projection_migrates_storage_lineage_columns_in_place() {
 }
 
 #[test]
+fn version_thirteen_projection_adds_effect_authority_without_rebuild() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("workflow-projection.sqlite");
+    {
+        let projection = WorkflowRunProjection::open(&path).unwrap();
+        assert_eq!(projection.high_water_mark().unwrap(), 0);
+    }
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "DROP TABLE workflow_effect_authorities;
+             PRAGMA user_version = 13;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let projection = WorkflowRunProjection::open(&path).unwrap();
+    assert_eq!(projection.row_count("effect_authorities").unwrap(), 0);
+    projection.integrity_check().unwrap();
+}
+
+#[test]
 fn corrupt_logical_projection_is_detected_and_rebuilt_from_the_journal() {
     let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
     append_complete_corpus(&mut journal);

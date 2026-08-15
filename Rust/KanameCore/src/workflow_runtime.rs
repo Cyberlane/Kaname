@@ -5,7 +5,10 @@
 //! inline value before the generic journal stores bytes. It does not execute a
 //! workflow or grant connector, storage, model, or effect authority.
 
-use crate::{v1, workflow_canonical, workflow_retention::WorkflowRunRetentionPolicy};
+use crate::{
+    policy::approval_fingerprint, v1, workflow_canonical,
+    workflow_retention::WorkflowRunRetentionPolicy,
+};
 use prost::Message;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -31,6 +34,8 @@ pub const WORKFLOW_CAPABILITY_ATTEMPT_STARTED_KIND: &str = "workflow.capability.
 pub const WORKFLOW_CAPABILITY_ATTEMPT_SETTLED_KIND: &str = "workflow.capability.attempt-settled";
 pub const WORKFLOW_LLM_ATTEMPT_STARTED_KIND: &str = "workflow.llm.attempt-started";
 pub const WORKFLOW_LLM_ATTEMPT_SETTLED_KIND: &str = "workflow.llm.attempt-settled";
+pub const WORKFLOW_EFFECT_PROPOSED_KIND: &str = "workflow.effect.proposed";
+pub const WORKFLOW_EFFECT_AUTHORIZED_KIND: &str = "workflow.effect.authorized";
 pub const WORKFLOW_ATTEMPT_SETTLED_KIND: &str = "workflow.attempt.settled";
 pub const WORKFLOW_PORT_EMITTED_KIND: &str = "workflow.port.emitted";
 pub const WORKFLOW_EDGE_CHECKPOINTED_KIND: &str = "workflow.edge.checkpointed";
@@ -64,6 +69,8 @@ pub const WORKFLOW_CAPABILITY_ATTEMPT_SETTLED_TYPE: &str =
     "kaname.workflow.capability-attempt-settled.v1";
 pub const WORKFLOW_LLM_ATTEMPT_STARTED_TYPE: &str = "kaname.workflow.llm-attempt-started.v1";
 pub const WORKFLOW_LLM_ATTEMPT_SETTLED_TYPE: &str = "kaname.workflow.llm-attempt-settled.v1";
+pub const WORKFLOW_EFFECT_PROPOSED_TYPE: &str = "kaname.workflow.effect-proposed.v1";
+pub const WORKFLOW_EFFECT_AUTHORIZED_TYPE: &str = "kaname.workflow.effect-authorized.v1";
 pub const WORKFLOW_ATTEMPT_SETTLED_TYPE: &str = "kaname.workflow.attempt-settled.v1";
 pub const WORKFLOW_PORT_EMITTED_TYPE: &str = "kaname.workflow.port-emitted.v1";
 pub const WORKFLOW_EDGE_CHECKPOINTED_TYPE: &str = "kaname.workflow.edge-checkpointed.v1";
@@ -123,6 +130,8 @@ pub enum WorkflowRuntimeEvent {
     CapabilityAttemptSettled(v1::WorkflowCapabilityAttemptSettled),
     LlmAttemptStarted(v1::WorkflowLlmAttemptStarted),
     LlmAttemptSettled(v1::WorkflowLlmAttemptSettled),
+    EffectProposed(v1::WorkflowEffectProposed),
+    EffectAuthorized(v1::WorkflowEffectAuthorized),
     AttemptSettled(v1::WorkflowAttemptSettled),
     PortEmitted(v1::WorkflowPortEmitted),
     EdgeCheckpointed(v1::WorkflowEdgeCheckpointed),
@@ -153,6 +162,11 @@ impl WorkflowRuntimeEvent {
             Self::CapabilityAttemptSettled(payload) => &payload.run_id,
             Self::LlmAttemptStarted(payload) => &payload.run_id,
             Self::LlmAttemptSettled(payload) => &payload.run_id,
+            Self::EffectProposed(payload) => payload
+                .intent
+                .as_ref()
+                .map_or("", |intent| intent.run_id.as_str()),
+            Self::EffectAuthorized(payload) => &payload.run_id,
             Self::AttemptSettled(payload) => &payload.run_id,
             Self::PortEmitted(payload) => &payload.run_id,
             Self::EdgeCheckpointed(payload) => &payload.run_id,
@@ -170,6 +184,7 @@ pub fn is_workflow_runtime_kind(kind: &str) -> bool {
         "workflow.attempt.",
         "workflow.capability.",
         "workflow.llm.",
+        "workflow.effect.",
         "workflow.port.",
         "workflow.edge.",
         "workflow.match.",
@@ -361,6 +376,25 @@ pub fn decode_workflow_event(event: &v1::EventEnvelope) -> Result<WorkflowRuntim
             validate_event_context(event, &payload.run_id)?;
             Ok(WorkflowRuntimeEvent::LlmAttemptSettled(payload))
         }
+        WORKFLOW_EFFECT_PROPOSED_KIND => {
+            let payload: v1::WorkflowEffectProposed =
+                decode_payload(event.payload.as_ref(), WORKFLOW_EFFECT_PROPOSED_TYPE)?;
+            validate_effect_proposed(&payload)?;
+            let run_id = &payload
+                .intent
+                .as_ref()
+                .ok_or_else(|| invalid_error("effect_intent_missing"))?
+                .run_id;
+            validate_event_context(event, run_id)?;
+            Ok(WorkflowRuntimeEvent::EffectProposed(payload))
+        }
+        WORKFLOW_EFFECT_AUTHORIZED_KIND => {
+            let payload: v1::WorkflowEffectAuthorized =
+                decode_payload(event.payload.as_ref(), WORKFLOW_EFFECT_AUTHORIZED_TYPE)?;
+            validate_effect_authorized(&payload)?;
+            validate_event_context(event, &payload.run_id)?;
+            Ok(WorkflowRuntimeEvent::EffectAuthorized(payload))
+        }
         WORKFLOW_ATTEMPT_SETTLED_KIND => {
             let payload: v1::WorkflowAttemptSettled =
                 decode_payload(event.payload.as_ref(), WORKFLOW_ATTEMPT_SETTLED_TYPE)?;
@@ -483,6 +517,143 @@ fn validate_run_request(request: &v1::RequestWorkflowRun) -> Result<()> {
             return invalid("duplicate_input_port");
         }
         validate_value(input.value.as_ref())?;
+    }
+    Ok(())
+}
+
+pub fn workflow_effect_intent_digest(intent: &v1::WorkflowEffectIntent) -> String {
+    sha256_hex(&intent.encode_to_vec())
+}
+
+pub fn workflow_effect_preview_digest(preview: &v1::WorkflowEffectPreview) -> String {
+    let mut canonical = preview.clone();
+    canonical.preview_digest.clear();
+    sha256_hex(&canonical.encode_to_vec())
+}
+
+fn validate_effect_proposed(payload: &v1::WorkflowEffectProposed) -> Result<()> {
+    let intent = payload
+        .intent
+        .as_ref()
+        .ok_or_else(|| invalid_error("effect_intent_missing"))?;
+    validate_run_and_token(&intent.run_id, &intent.run_token_id)?;
+    for (value, code) in [
+        (&intent.effect_id, "effect_id"),
+        (&intent.attempt_id, "attempt_id"),
+        (&intent.execution_token_id, "execution_token_id"),
+        (&intent.node_id, "node_id"),
+        (&intent.workflow_id, "workflow_id"),
+        (&intent.revision_id, "revision_id"),
+        (&intent.connector_class, "connector_class"),
+        (&intent.action, "effect_action"),
+        (&intent.account_binding_id, "account_binding_id"),
+        (&intent.idempotency_key, "effect_idempotency_key"),
+    ] {
+        validate_identifier(value, 128, code)?;
+    }
+    for (value, code) in [
+        (
+            &intent.destination_fingerprint,
+            "effect_destination_fingerprint",
+        ),
+        (&intent.input_digest, "effect_input_digest"),
+        (&payload.intent_digest, "effect_intent_digest"),
+    ] {
+        validate_digest(value, code)?;
+    }
+    if payload.intent_digest != workflow_effect_intent_digest(intent) {
+        return invalid("effect_intent_digest_mismatch");
+    }
+    let preview = payload
+        .preview
+        .as_ref()
+        .ok_or_else(|| invalid_error("effect_preview_missing"))?;
+    validate_text(&preview.summary, 1024, "effect_preview_summary")?;
+    validate_text(&preview.consequence, 1024, "effect_preview_consequence")?;
+    validate_digest(
+        &preview.destination_fingerprint,
+        "effect_preview_destination_fingerprint",
+    )?;
+    validate_digest(&preview.preview_digest, "effect_preview_digest")?;
+    if preview.destination_fingerprint != intent.destination_fingerprint
+        || preview.preview_digest != workflow_effect_preview_digest(preview)
+    {
+        return invalid("effect_preview_mismatch");
+    }
+    let approval = payload
+        .approval_request
+        .as_ref()
+        .ok_or_else(|| invalid_error("effect_approval_missing"))?;
+    validate_identifier(&approval.approval_id, 128, "approval_id")?;
+    validate_identifier(
+        &approval.policy_reference,
+        128,
+        "effect_approval_policy_reference",
+    )?;
+    if approval.action_kind != "workflow.effect"
+        || approval.target_id != intent.effect_id
+        || approval.target_revision != intent.revision_id
+        || approval.effect_digest != hex::decode(&payload.intent_digest).unwrap_or_default()
+        || approval.consequence != preview.consequence
+        || approval.reversible != preview.reversible
+        || approval.expires_at_unix_millis <= 0
+        || approval.approval_payload_version != 1
+        || approval.fingerprint != approval_fingerprint(approval)
+    {
+        return invalid("effect_approval_mismatch");
+    }
+    let scope = approval
+        .scope
+        .as_ref()
+        .ok_or_else(|| invalid_error("effect_approval_scope_missing"))?;
+    validate_identifier(&scope.project_id, 128, "effect_scope_project_id")?;
+    if !scope.workspace_id.is_empty() {
+        validate_identifier(&scope.workspace_id, 128, "effect_scope_workspace_id")?;
+    }
+    validate_identifier(&scope.account_id, 128, "effect_scope_account_id")?;
+    validate_identifier(&scope.egress_class, 128, "effect_scope_egress_class")?;
+    validate_digest(&scope.destination_digest, "effect_scope_destination_digest")?;
+    if !scope.authority_id.is_empty()
+        || scope.account_id != intent.account_binding_id
+        || scope.destination_digest != intent.destination_fingerprint
+    {
+        return invalid("effect_approval_scope_mismatch");
+    }
+    Ok(())
+}
+
+fn validate_effect_authorized(payload: &v1::WorkflowEffectAuthorized) -> Result<()> {
+    validate_run_and_token(&payload.run_id, &payload.run_token_id)?;
+    for (value, code) in [
+        (&payload.effect_id, "effect_id"),
+        (&payload.grant_id, "effect_grant_id"),
+        (&payload.idempotency_key, "effect_idempotency_key"),
+    ] {
+        validate_identifier(value, 128, code)?;
+    }
+    for (value, code) in [
+        (&payload.intent_digest, "effect_intent_digest"),
+        (&payload.preview_digest, "effect_preview_digest"),
+        (
+            &payload.destination_fingerprint,
+            "effect_destination_fingerprint",
+        ),
+    ] {
+        validate_digest(value, code)?;
+    }
+    let resolution = payload
+        .resolution
+        .as_ref()
+        .ok_or_else(|| invalid_error("effect_resolution_missing"))?;
+    validate_identifier(&resolution.approval_id, 128, "approval_id")?;
+    validate_identifier(&resolution.actor_id, 128, "approval_actor_id")?;
+    validate_identifier(&resolution.device_id, 128, "approval_device_id")?;
+    if v1::ApprovalDecision::try_from(resolution.decision) != Ok(v1::ApprovalDecision::Approve)
+        || resolution.expected_fingerprint != payload.approval_fingerprint
+        || payload.approval_fingerprint.len() != 32
+        || payload.expires_at_unix_millis <= 0
+    {
+        return invalid("effect_authorization_mismatch");
     }
     Ok(())
 }

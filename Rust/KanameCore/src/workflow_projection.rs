@@ -26,7 +26,7 @@ use std::{
     time::Duration,
 };
 
-const PROJECTION_SCHEMA_VERSION: i64 = 13;
+const PROJECTION_SCHEMA_VERSION: i64 = 14;
 const DEFAULT_BATCH_SIZE: u32 = 250;
 
 const INITIAL_SCHEMA: &str = r#"
@@ -472,6 +472,29 @@ CREATE TABLE workflow_llm_attempts (
 CREATE INDEX workflow_llm_attempts_run_position
     ON workflow_llm_attempts(run_id, started_store_position, invocation_id);
 
+CREATE TABLE workflow_effect_authorities (
+    effect_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+    attempt_id TEXT NOT NULL REFERENCES workflow_attempts(attempt_id) ON DELETE CASCADE,
+    node_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    intent_digest TEXT NOT NULL CHECK (length(intent_digest) = 64),
+    preview_digest TEXT NOT NULL CHECK (length(preview_digest) = 64),
+    destination_fingerprint TEXT NOT NULL CHECK (length(destination_fingerprint) = 64),
+    approval_id TEXT NOT NULL UNIQUE,
+    approval_fingerprint BLOB NOT NULL CHECK (length(approval_fingerprint) = 32),
+    expires_at_unix_millis INTEGER NOT NULL CHECK (expires_at_unix_millis > 0),
+    status TEXT NOT NULL CHECK (status IN ('proposed', 'authorized')),
+    proposal_wire BLOB NOT NULL,
+    authorization_wire BLOB,
+    proposed_at_unix_millis INTEGER NOT NULL CHECK (proposed_at_unix_millis >= 0),
+    authorized_at_unix_millis INTEGER,
+    proposed_store_position INTEGER NOT NULL UNIQUE CHECK (proposed_store_position > 0),
+    authorized_store_position INTEGER UNIQUE
+) STRICT;
+CREATE INDEX workflow_effect_authorities_run_position
+    ON workflow_effect_authorities(run_id, proposed_store_position, effect_id);
+
 CREATE TABLE workflow_projected_events (
     event_id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
@@ -501,6 +524,7 @@ CREATE TABLE workflow_run_purge_receipts (
     affected_file_handle_count INTEGER NOT NULL CHECK (affected_file_handle_count >= 0),
     retained_promoted_handle_ids_json TEXT NOT NULL,
     affected_value_bytes INTEGER NOT NULL CHECK (affected_value_bytes >= 0),
+    affected_effect_authority_count INTEGER NOT NULL CHECK (affected_effect_authority_count >= 0),
     installation_id TEXT NOT NULL,
     historical_revision_retained INTEGER NOT NULL CHECK (historical_revision_retained = 1),
     purged_at_unix_millis INTEGER NOT NULL CHECK (purged_at_unix_millis >= 0),
@@ -531,6 +555,31 @@ CREATE TABLE IF NOT EXISTS workflow_run_purge_receipts (
     purged_at_unix_millis INTEGER NOT NULL CHECK (purged_at_unix_millis >= 0),
     purge_store_position INTEGER NOT NULL UNIQUE CHECK (purge_store_position > source_last_store_position)
 ) STRICT;
+"#;
+
+const PROJECTION_MIGRATION_14: &str = r#"
+CREATE TABLE IF NOT EXISTS workflow_effect_authorities (
+    effect_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+    attempt_id TEXT NOT NULL REFERENCES workflow_attempts(attempt_id) ON DELETE CASCADE,
+    node_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    intent_digest TEXT NOT NULL CHECK (length(intent_digest) = 64),
+    preview_digest TEXT NOT NULL CHECK (length(preview_digest) = 64),
+    destination_fingerprint TEXT NOT NULL CHECK (length(destination_fingerprint) = 64),
+    approval_id TEXT NOT NULL UNIQUE,
+    approval_fingerprint BLOB NOT NULL CHECK (length(approval_fingerprint) = 32),
+    expires_at_unix_millis INTEGER NOT NULL CHECK (expires_at_unix_millis > 0),
+    status TEXT NOT NULL CHECK (status IN ('proposed', 'authorized')),
+    proposal_wire BLOB NOT NULL,
+    authorization_wire BLOB,
+    proposed_at_unix_millis INTEGER NOT NULL CHECK (proposed_at_unix_millis >= 0),
+    authorized_at_unix_millis INTEGER,
+    proposed_store_position INTEGER NOT NULL UNIQUE CHECK (proposed_store_position > 0),
+    authorized_store_position INTEGER UNIQUE
+) STRICT;
+CREATE INDEX IF NOT EXISTS workflow_effect_authorities_run_position
+    ON workflow_effect_authorities(run_id, proposed_store_position, effect_id);
 "#;
 
 const PROJECTION_MIGRATION_2: &str = r#"
@@ -1372,6 +1421,15 @@ impl WorkflowRunProjection {
             refresh_state_digest(&transaction)?;
             transaction.commit()?;
         }
+        let found: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if found == 13 {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            apply_projection_migration_14(&transaction)?;
+            transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
+            refresh_state_digest(&transaction)?;
+            transaction.commit()?;
+        }
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "FULL")?;
         let projection = Self { connection };
@@ -1541,6 +1599,30 @@ impl WorkflowRunProjection {
                 "llm_projection_invalid".into(),
             ));
         }
+        let invalid_effect = self
+            .connection
+            .query_row(
+                "SELECT 1 FROM workflow_effect_authorities e
+                 JOIN workflow_runs r ON r.run_id = e.run_id
+                 JOIN workflow_attempts a ON a.attempt_id = e.attempt_id
+                 WHERE e.node_id != a.node_id
+                    OR e.expires_at_unix_millis <= e.proposed_at_unix_millis
+                    OR (e.status = 'proposed' AND (e.authorization_wire IS NOT NULL
+                        OR e.authorized_at_unix_millis IS NOT NULL
+                        OR e.authorized_store_position IS NOT NULL))
+                    OR (e.status = 'authorized' AND (e.authorization_wire IS NULL
+                        OR e.authorized_at_unix_millis IS NULL
+                        OR e.authorized_store_position IS NULL))
+                 LIMIT 1",
+                [],
+                |_| Ok(()),
+            )
+            .optional()?;
+        if invalid_effect.is_some() {
+            return Err(WorkflowProjectionError::Integrity(
+                "effect_authority_projection_invalid".into(),
+            ));
+        }
         let stored: String = self.connection.query_row(
             "SELECT state_digest FROM workflow_projection_meta WHERE singleton = 1",
             [],
@@ -1668,6 +1750,7 @@ impl WorkflowRunProjection {
         transaction.execute_batch(
             "DELETE FROM workflow_run_purge_receipts;
              DELETE FROM workflow_projected_events;
+             DELETE FROM workflow_effect_authorities;
              DELETE FROM workflow_llm_attempts;
              DELETE FROM workflow_capability_attempts;
              DELETE FROM workflow_subflows;
@@ -1714,6 +1797,7 @@ impl WorkflowRunProjection {
             "subflows" => "SELECT COUNT(*) FROM workflow_subflows",
             "capability_attempts" => "SELECT COUNT(*) FROM workflow_capability_attempts",
             "llm_attempts" => "SELECT COUNT(*) FROM workflow_llm_attempts",
+            "effect_authorities" => "SELECT COUNT(*) FROM workflow_effect_authorities",
             "events" => "SELECT COUNT(*) FROM workflow_projected_events",
             "purge_receipts" => "SELECT COUNT(*) FROM workflow_run_purge_receipts",
             "values" => "SELECT COUNT(*) FROM workflow_values",
@@ -1733,6 +1817,33 @@ impl WorkflowRunProjection {
         limit: u32,
     ) -> Result<Vec<v1::WorkflowProjectedRun>> {
         self.inspect_runs_as_of(workflow_id, run_id, limit, 0)
+    }
+
+    pub fn effect_authority(
+        &self,
+        effect_id: &str,
+    ) -> Result<Option<v1::WorkflowProjectedEffectAuthority>> {
+        let run_id: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT run_id FROM workflow_effect_authorities WHERE effect_id = ?1",
+                [effect_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(run_id) = run_id else {
+            return Ok(None);
+        };
+        Ok(self
+            .inspect_effect_authorities(&run_id)?
+            .into_iter()
+            .find(|authority| {
+                authority
+                    .proposal
+                    .as_ref()
+                    .and_then(|proposal| proposal.intent.as_ref())
+                    .is_some_and(|intent| intent.effect_id == effect_id)
+            }))
     }
 
     pub fn inspect_runs_as_of(
@@ -1826,6 +1937,7 @@ impl WorkflowRunProjection {
             i64,
             String,
             i64,
+            i64,
             String,
             i64,
             i64,
@@ -1838,7 +1950,8 @@ impl WorkflowRunProjection {
                         source_last_store_position, source_event_count, affected_attempt_count,
                         affected_value_count, affected_file_handle_count,
                         retained_promoted_handle_ids_json, affected_value_bytes,
-                        installation_id, historical_revision_retained, purge_store_position
+                        affected_effect_authority_count, installation_id,
+                        historical_revision_retained, purge_store_position
                  FROM workflow_run_purge_receipts WHERE run_id = ?1",
                 [run_id],
                 |row| {
@@ -1860,6 +1973,7 @@ impl WorkflowRunProjection {
                         row.get(14)?,
                         row.get(15)?,
                         row.get(16)?,
+                        row.get(17)?,
                     ))
                 },
             )
@@ -1877,7 +1991,7 @@ impl WorkflowRunProjection {
             )?;
             Ok((
                 row.0,
-                projected_u64(row.16)?,
+                projected_u64(row.17)?,
                 v1::WorkflowRunPurged {
                     run_id: run_id.to_owned(),
                     purge_command_id: row.1,
@@ -1894,8 +2008,9 @@ impl WorkflowRunProjection {
                     affected_file_handle_count: projected_u64(row.11)?,
                     retained_promoted_handle_ids: decode_string_list(&row.12)?,
                     affected_value_bytes: projected_u64(row.13)?,
-                    installation_id: row.14,
-                    historical_revision_retained: row.15 == 1,
+                    affected_effect_authority_count: projected_u64(row.14)?,
+                    installation_id: row.15,
+                    historical_revision_retained: row.16 == 1,
                 },
             ))
         })
@@ -1996,9 +2111,72 @@ impl WorkflowRunProjection {
             llm_attempts: self.inspect_llm_attempts(run_id)?,
             retention_policy: Some(projected_retention_policy(&row.6, row.7)?),
             purge_preview: None,
+            effect_authorities: self.inspect_effect_authorities(run_id)?,
         };
         projected.purge_preview = Some(projected_purge_preview(&projected, as_of_unix_millis)?);
         Ok(projected)
+    }
+
+    fn inspect_effect_authorities(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<v1::WorkflowProjectedEffectAuthority>> {
+        type EffectRow = (
+            Vec<u8>,
+            String,
+            Option<Vec<u8>>,
+            i64,
+            Option<i64>,
+            i64,
+            Option<i64>,
+        );
+        let mut statement = self.connection.prepare(
+            "SELECT proposal_wire, status, authorization_wire, proposed_at_unix_millis,
+                    authorized_at_unix_millis, proposed_store_position, authorized_store_position
+             FROM workflow_effect_authorities WHERE run_id = ?1
+             ORDER BY proposed_store_position, effect_id",
+        )?;
+        let rows = statement.query_map([run_id], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let row: EffectRow = row?;
+            Ok(v1::WorkflowProjectedEffectAuthority {
+                proposal: Some(
+                    v1::WorkflowEffectProposed::decode(row.0.as_slice()).map_err(|_| {
+                        WorkflowProjectionError::Integrity("effect_proposal_wire_invalid".into())
+                    })?,
+                ),
+                status: row.1,
+                authorization: row
+                    .2
+                    .map(|wire| {
+                        v1::WorkflowEffectAuthorized::decode(wire.as_slice()).map_err(|_| {
+                            WorkflowProjectionError::Integrity(
+                                "effect_authorization_wire_invalid".into(),
+                            )
+                        })
+                    })
+                    .transpose()?,
+                proposed_at_unix_millis: row.3,
+                authorized_at_unix_millis: row.4.unwrap_or_default(),
+                proposed_store_position: projected_u64(row.5)?,
+                authorized_store_position: row
+                    .6
+                    .map(projected_u64)
+                    .transpose()?
+                    .unwrap_or_default(),
+            })
+        })
+        .collect()
     }
 
     fn inspect_attempts(&self, run_id: &str) -> Result<Vec<v1::WorkflowProjectedAttempt>> {
@@ -3572,6 +3750,12 @@ fn projected_purge_preview(
         .iter()
         .map(|attempt| attempt.attempt_id.clone())
         .collect::<Vec<_>>();
+    let affected_effect_ids = run
+        .effect_authorities
+        .iter()
+        .filter_map(|authority| authority.proposal.as_ref()?.intent.as_ref())
+        .map(|intent| intent.effect_id.clone())
+        .collect::<Vec<_>>();
     let evidence = serde_json::json!({
         "runId": run.run_id,
         "status": run.status,
@@ -3579,6 +3763,7 @@ fn projected_purge_preview(
         "policy": policy,
         "protectedReason": protected_reason,
         "attemptIds": affected_attempt_ids,
+        "effectIds": affected_effect_ids,
         "valueIds": affected_value_ids,
         "fileHandleIds": affected_file_handle_ids,
         "retainedPromotedHandleIds": retained_promoted_handle_ids,
@@ -3600,6 +3785,7 @@ fn projected_purge_preview(
         retained_promoted_handle_ids,
         affected_value_bytes,
         evidence_digest: hex::encode(Sha256::digest(evidence_bytes)),
+        affected_effect_ids,
     })
 }
 
@@ -4674,6 +4860,128 @@ fn apply_event(transaction: &Transaction<'_>, event: &v1::EventEnvelope) -> Resu
             )?;
             touch_run(transaction, &payload.run_id, event.store_position)?;
         }
+        WorkflowRuntimeEvent::EffectProposed(payload) => {
+            let intent = payload.intent.as_ref().ok_or_else(|| {
+                WorkflowProjectionError::Lifecycle("effect_intent_missing".into())
+            })?;
+            require_active_attempt(
+                transaction,
+                &intent.run_id,
+                &intent.run_token_id,
+                &intent.attempt_id,
+                &intent.node_id,
+                None,
+                Some(&intent.execution_token_id),
+            )?;
+            let pins: (String, String) = transaction.query_row(
+                "SELECT workflow_id, revision_id FROM workflow_runs WHERE run_id = ?1",
+                [&intent.run_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            if pins != (intent.workflow_id.clone(), intent.revision_id.clone()) {
+                return lifecycle("effect_revision_pin_mismatch");
+            }
+            let preview = payload.preview.as_ref().ok_or_else(|| {
+                WorkflowProjectionError::Lifecycle("effect_preview_missing".into())
+            })?;
+            let approval = payload.approval_request.as_ref().ok_or_else(|| {
+                WorkflowProjectionError::Lifecycle("effect_approval_missing".into())
+            })?;
+            if approval.expires_at_unix_millis <= event.occurred_at_unix_millis {
+                return lifecycle("effect_proposal_expired");
+            }
+            transaction.execute(
+                "INSERT INTO workflow_effect_authorities
+                 (effect_id, run_id, attempt_id, node_id, idempotency_key, intent_digest,
+                  preview_digest, destination_fingerprint, approval_id, approval_fingerprint,
+                  expires_at_unix_millis, status, proposal_wire, proposed_at_unix_millis,
+                  proposed_store_position)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'proposed', ?12, ?13, ?14)",
+                params![
+                    intent.effect_id,
+                    intent.run_id,
+                    intent.attempt_id,
+                    intent.node_id,
+                    intent.idempotency_key,
+                    payload.intent_digest,
+                    preview.preview_digest,
+                    intent.destination_fingerprint,
+                    approval.approval_id,
+                    approval.fingerprint,
+                    approval.expires_at_unix_millis,
+                    payload.encode_to_vec(),
+                    event.occurred_at_unix_millis,
+                    sql_u64(event.store_position)?,
+                ],
+            )?;
+            touch_run(transaction, &intent.run_id, event.store_position)?;
+        }
+        WorkflowRuntimeEvent::EffectAuthorized(payload) => {
+            require_active_run(transaction, &payload.run_id, &payload.run_token_id)?;
+            let resolution = payload.resolution.as_ref().ok_or_else(|| {
+                WorkflowProjectionError::Lifecycle("effect_resolution_missing".into())
+            })?;
+            type ProposalIdentity = (String, String, String, String, Vec<u8>, i64, String);
+            let proposed: Option<ProposalIdentity> = transaction
+                .query_row(
+                    "SELECT run_id, intent_digest, preview_digest, destination_fingerprint,
+                            approval_fingerprint, expires_at_unix_millis, status
+                     FROM workflow_effect_authorities WHERE effect_id = ?1
+                       AND idempotency_key = ?2 AND approval_id = ?3",
+                    params![
+                        payload.effect_id,
+                        payload.idempotency_key,
+                        resolution.approval_id,
+                    ],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((
+                run_id,
+                intent_digest,
+                preview_digest,
+                destination,
+                fingerprint,
+                expires,
+                status,
+            )) = proposed
+            else {
+                return lifecycle("effect_proposal_missing");
+            };
+            if status != "proposed"
+                || run_id != payload.run_id
+                || intent_digest != payload.intent_digest
+                || preview_digest != payload.preview_digest
+                || destination != payload.destination_fingerprint
+                || fingerprint != payload.approval_fingerprint
+                || expires != payload.expires_at_unix_millis
+                || expires <= event.occurred_at_unix_millis
+            {
+                return lifecycle("effect_authorization_stale_or_mismatched");
+            }
+            transaction.execute(
+                "UPDATE workflow_effect_authorities SET status = 'authorized',
+                   authorization_wire = ?1, authorized_at_unix_millis = ?2,
+                   authorized_store_position = ?3 WHERE effect_id = ?4",
+                params![
+                    payload.encode_to_vec(),
+                    event.occurred_at_unix_millis,
+                    sql_u64(event.store_position)?,
+                    payload.effect_id,
+                ],
+            )?;
+            touch_run(transaction, &payload.run_id, event.store_position)?;
+        }
         WorkflowRuntimeEvent::PortEmitted(payload) => {
             require_active_attempt(
                 transaction,
@@ -4953,10 +5261,11 @@ fn apply_event(transaction: &Transaction<'_>, event: &v1::EventEnvelope) -> Resu
                   package_digest, mode, preview_evidence_digest, source_first_store_position,
                   source_last_store_position, source_event_count, affected_attempt_count,
                   affected_value_count, affected_file_handle_count,
-                  retained_promoted_handle_ids_json, affected_value_bytes, installation_id,
+                  retained_promoted_handle_ids_json, affected_value_bytes,
+                  affected_effect_authority_count, installation_id,
                   historical_revision_retained, purged_at_unix_millis, purge_store_position)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                         ?14, ?15, ?16, ?17, 1, ?18, ?19)",
+                         ?14, ?15, ?16, ?17, ?18, 1, ?19, ?20)",
                 params![
                     payload.run_id,
                     event.event_id,
@@ -4974,6 +5283,7 @@ fn apply_event(transaction: &Transaction<'_>, event: &v1::EventEnvelope) -> Resu
                     sql_u64(payload.affected_file_handle_count)?,
                     string_list_json(&payload.retained_promoted_handle_ids)?,
                     sql_u64(payload.affected_value_bytes)?,
+                    sql_u64(payload.affected_effect_authority_count)?,
                     payload.installation_id,
                     event.occurred_at_unix_millis,
                     sql_u64(event.store_position)?,
@@ -5733,6 +6043,22 @@ fn apply_projection_migration_12(transaction: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
+fn apply_projection_migration_14(transaction: &Transaction<'_>) -> Result<()> {
+    transaction.execute_batch(PROJECTION_MIGRATION_14)?;
+    if !table_has_column(
+        transaction,
+        "workflow_run_purge_receipts",
+        "affected_effect_authority_count",
+    )? {
+        transaction.execute_batch(
+            "ALTER TABLE workflow_run_purge_receipts
+             ADD COLUMN affected_effect_authority_count INTEGER NOT NULL DEFAULT 0
+             CHECK (affected_effect_authority_count >= 0);",
+        )?;
+    }
+    Ok(())
+}
+
 fn table_has_column(connection: &Connection, table: &str, expected_column: &str) -> Result<bool> {
     let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
     let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
@@ -5881,6 +6207,12 @@ fn canonical_state_bytes(connection: &Connection) -> Result<Vec<u8>> {
             )?,
             table_rows(
                 connection,
+                "effect_authorities",
+                "SELECT effect_id, run_id, attempt_id, node_id, idempotency_key, intent_digest, preview_digest, destination_fingerprint, approval_id, approval_fingerprint, expires_at_unix_millis, status, proposal_wire, authorization_wire, proposed_at_unix_millis, authorized_at_unix_millis, proposed_store_position, authorized_store_position FROM workflow_effect_authorities ORDER BY run_id, proposed_store_position, effect_id",
+                18,
+            )?,
+            table_rows(
+                connection,
                 "events",
                 "SELECT event_id, run_id, kind, store_position, stream_sequence, occurred_at_unix_millis FROM workflow_projected_events ORDER BY store_position, event_id",
                 6,
@@ -5888,8 +6220,8 @@ fn canonical_state_bytes(connection: &Connection) -> Result<Vec<u8>> {
             table_rows(
                 connection,
                 "purge_receipts",
-                "SELECT run_id, purge_event_id, purge_command_id, workflow_id, revision_id, package_digest, mode, preview_evidence_digest, source_first_store_position, source_last_store_position, source_event_count, affected_attempt_count, affected_value_count, affected_file_handle_count, retained_promoted_handle_ids_json, affected_value_bytes, installation_id, historical_revision_retained, purged_at_unix_millis, purge_store_position FROM workflow_run_purge_receipts ORDER BY purge_store_position, run_id",
-                20,
+                "SELECT run_id, purge_event_id, purge_command_id, workflow_id, revision_id, package_digest, mode, preview_evidence_digest, source_first_store_position, source_last_store_position, source_event_count, affected_attempt_count, affected_value_count, affected_file_handle_count, retained_promoted_handle_ids_json, affected_value_bytes, affected_effect_authority_count, installation_id, historical_revision_retained, purged_at_unix_millis, purge_store_position FROM workflow_run_purge_receipts ORDER BY purge_store_position, run_id",
+                21,
             )?,
         ],
     };
@@ -6046,6 +6378,7 @@ mod purge_preview_tests {
         assert_eq!(preview.affected_file_handle_ids, ["handle-job"]);
         assert_eq!(preview.retained_promoted_handle_ids, ["handle-case"]);
         assert_eq!(preview.affected_value_bytes, 24);
+        assert!(preview.affected_effect_ids.is_empty());
         assert_eq!(preview.evidence_digest.len(), 64);
     }
 

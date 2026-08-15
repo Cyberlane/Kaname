@@ -323,6 +323,22 @@ fn workflow_graph_and_node_envelope_are_closed_at_their_boundaries() {
         &Value::Object(invalid_workflow),
         &registry
     ));
+    let effect_config: Value = serde_json::from_slice(
+        &fs::read(fixture_root().join("schema-v1-node-goldens.json")).unwrap(),
+    )
+    .unwrap();
+    let mut effect = node(
+        "effect.connector",
+        effect_config["effect.connector"].clone(),
+    );
+    effect["config"]["authorityGrant"] = json!({
+        "accountId": "forbidden-portable-account",
+        "expiresAt": 5000
+    });
+    assert!(
+        !is_valid(&documents["node.schema.json"], &effect, &registry),
+        "portable effect nodes must not embed live authority grants"
+    );
     let invalid_graph =
         json!({"entrypoints": [], "nodes": [manual], "edges": [], "implicitGlobals": {}});
     assert!(!is_valid(

@@ -3,6 +3,7 @@ syntax = "proto3";
 package kaname.v1;
 
 import "kaname/v1/common.proto";
+import "kaname/v1/approval.proto";
 
 // A value recorded directly in the bounded journal or represented by an
 // opaque storage reference. Host paths and secret material are never valid
@@ -630,6 +631,67 @@ message WorkflowLlmAttemptSettled {
   reserved "credential", "api_key", "endpoint", "host_path", "secret";
 }
 
+// Immutable description of one proposed external effect. Account binding and
+// destination identities are installation-private fingerprints; portable
+// workflow packages cannot contain this message or a live authority grant.
+message WorkflowEffectIntent {
+  string effect_id = 1;
+  string run_id = 2;
+  string run_token_id = 3;
+  string attempt_id = 4;
+  string execution_token_id = 5;
+  string node_id = 6;
+  string workflow_id = 7;
+  string revision_id = 8;
+  string connector_class = 9;
+  string action = 10;
+  string account_binding_id = 11;
+  string destination_fingerprint = 12;
+  string input_digest = 13;
+  string idempotency_key = 14;
+  reserved 15 to 25;
+  reserved "credential", "access_token", "recipient_address", "raw_destination";
+}
+
+message WorkflowEffectPreview {
+  string summary = 1;
+  string consequence = 2;
+  bool reversible = 3;
+  string destination_fingerprint = 4;
+  string preview_digest = 5;
+  reserved 6 to 15;
+  reserved "raw_body", "recipient_address", "credential";
+}
+
+// Payload for event kind `workflow.effect.proposed`. The embedded approval is
+// a proposal only and carries no authority until a matching authorization
+// event is durably admitted.
+message WorkflowEffectProposed {
+  WorkflowEffectIntent intent = 1;
+  string intent_digest = 2;
+  WorkflowEffectPreview preview = 3;
+  ApprovalRequest approval_request = 4;
+  reserved 5 to 15;
+}
+
+// Payload for event kind `workflow.effect.authorized`. This is an exact,
+// expiring local grant; it is not provider execution or an effect receipt.
+message WorkflowEffectAuthorized {
+  string run_id = 1;
+  string run_token_id = 2;
+  string effect_id = 3;
+  string grant_id = 4;
+  ApprovalResolution resolution = 5;
+  bytes approval_fingerprint = 6;
+  string intent_digest = 7;
+  string preview_digest = 8;
+  string destination_fingerprint = 9;
+  string idempotency_key = 10;
+  int64 expires_at_unix_millis = 11;
+  reserved 12 to 20;
+  reserved "credential", "access_token", "recipient_address", "raw_destination";
+}
+
 enum WorkflowAttemptOutcome {
   WORKFLOW_ATTEMPT_OUTCOME_UNSPECIFIED = 0;
   WORKFLOW_ATTEMPT_OUTCOME_SUCCEEDED = 1;
@@ -766,7 +828,8 @@ message WorkflowRunPurged {
   uint64 affected_value_bytes = 15;
   string installation_id = 16;
   bool historical_revision_retained = 17;
-  reserved 18 to 30;
+  uint64 affected_effect_authority_count = 18;
+  reserved 19 to 30;
 }
 
 message WorkflowRunPurgeReceipt {
@@ -1209,7 +1272,8 @@ message WorkflowRunPurgePreview {
   repeated string retained_promoted_handle_ids = 8;
   uint64 affected_value_bytes = 9;
   string evidence_digest = 10;
-  reserved 11 to 20;
+  repeated string affected_effect_ids = 11;
+  reserved 12 to 20;
 }
 
 message WorkflowProjectedRun {
@@ -1248,7 +1312,19 @@ message WorkflowProjectedRun {
   repeated WorkflowProjectedLlmAttempt llm_attempts = 33;
   WorkflowRunRetentionPolicy retention_policy = 34;
   WorkflowRunPurgePreview purge_preview = 35;
-  reserved 36 to 45;
+  repeated WorkflowProjectedEffectAuthority effect_authorities = 36;
+  reserved 37 to 45;
+}
+
+message WorkflowProjectedEffectAuthority {
+  WorkflowEffectProposed proposal = 1;
+  string status = 2;
+  WorkflowEffectAuthorized authorization = 3;
+  int64 proposed_at_unix_millis = 4;
+  int64 authorized_at_unix_millis = 5;
+  uint64 proposed_store_position = 6;
+  uint64 authorized_store_position = 7;
+  reserved 8 to 15;
 }
 
 message WorkflowRunInspectionResponse {
