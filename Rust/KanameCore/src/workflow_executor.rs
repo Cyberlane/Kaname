@@ -8251,9 +8251,14 @@ fn recorded_run(journal: &Journal, run_id: &str) -> Result<RecordedRun> {
                 });
             }
             WorkflowRuntimeEvent::MatchTraceRecorded(_) => {}
-            WorkflowRuntimeEvent::EffectProposed(_) | WorkflowRuntimeEvent::EffectAuthorized(_) => {
-                // WFP-008A records authority evidence only. Connector dispatch
-                // remains deliberately absent until WFP-008B.
+            WorkflowRuntimeEvent::EffectProposed(_)
+            | WorkflowRuntimeEvent::EffectAuthorized(_)
+            | WorkflowRuntimeEvent::EffectDispatchStarted(_)
+            | WorkflowRuntimeEvent::EffectDispatchSettled(_)
+            | WorkflowRuntimeEvent::EffectReconciled(_) => {
+                // Effect execution has its own durable outbox/reconciliation
+                // coordinator. Executor replay consumes these as evidence and
+                // never invokes a connector from journal replay.
             }
             WorkflowRuntimeEvent::RunCancellationRequested(payload) => {
                 if state.cancellation.replace(payload).is_some() {

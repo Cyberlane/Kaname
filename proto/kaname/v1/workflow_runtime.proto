@@ -692,6 +692,100 @@ message WorkflowEffectAuthorized {
   reserved "credential", "access_token", "recipient_address", "raw_destination";
 }
 
+// Installation-private connector identity admitted by the host immediately
+// before dispatch. Portable workflow packages cannot provide this record.
+message WorkflowEffectConnectorRegistration {
+  string connector_class = 1;
+  string version = 2;
+  string package_digest = 3;
+  string binding_id = 4;
+  string account_binding_id = 5;
+  repeated string allowed_actions = 6;
+  bool idempotent = 7;
+  bool supports_reconciliation = 8;
+  string registration_digest = 9;
+  reserved 10 to 20;
+  reserved "credential", "access_token", "endpoint", "host", "secret";
+}
+
+// Durable outbox boundary written before a registered connector is invoked.
+message WorkflowEffectDispatchStarted {
+  string run_id = 1;
+  string run_token_id = 2;
+  string effect_id = 3;
+  string dispatch_id = 4;
+  string grant_id = 5;
+  string intent_digest = 6;
+  string preview_digest = 7;
+  string destination_fingerprint = 8;
+  string idempotency_key = 9;
+  WorkflowEffectConnectorRegistration registration = 10;
+  int64 deadline_unix_millis = 11;
+  reserved 12 to 20;
+  reserved "credential", "access_token", "recipient_address", "raw_destination";
+}
+
+enum WorkflowEffectDispatchOutcome {
+  WORKFLOW_EFFECT_DISPATCH_OUTCOME_UNSPECIFIED = 0;
+  WORKFLOW_EFFECT_DISPATCH_OUTCOME_SUCCEEDED = 1;
+  WORKFLOW_EFFECT_DISPATCH_OUTCOME_REJECTED = 2;
+  WORKFLOW_EFFECT_DISPATCH_OUTCOME_NOT_SENT = 3;
+  WORKFLOW_EFFECT_DISPATCH_OUTCOME_UNKNOWN = 4;
+}
+
+enum WorkflowEffectReceiptOutcome {
+  WORKFLOW_EFFECT_RECEIPT_OUTCOME_UNSPECIFIED = 0;
+  WORKFLOW_EFFECT_RECEIPT_OUTCOME_APPLIED = 1;
+  WORKFLOW_EFFECT_RECEIPT_OUTCOME_NOT_APPLIED = 2;
+  WORKFLOW_EFFECT_RECEIPT_OUTCOME_UNKNOWN = 3;
+}
+
+// Opaque, bounded evidence returned by a connector. Provider payloads and
+// remote content stay outside the workflow journal.
+message WorkflowEffectReceipt {
+  string receipt_id = 1;
+  string provider_reference = 2;
+  WorkflowEffectReceiptOutcome outcome = 3;
+  string evidence_digest = 4;
+  reserved 5 to 12;
+  reserved "payload", "body", "credential", "access_token", "raw_destination";
+}
+
+message WorkflowEffectDispatchSettled {
+  string run_id = 1;
+  string run_token_id = 2;
+  string effect_id = 3;
+  string dispatch_id = 4;
+  string grant_id = 5;
+  WorkflowEffectDispatchOutcome outcome = 6;
+  string error_code = 7;
+  WorkflowEffectReceipt receipt = 8;
+  uint64 elapsed_milliseconds = 9;
+  string idempotency_key = 10;
+  reserved 11 to 20;
+}
+
+enum WorkflowEffectReconciliationOutcome {
+  WORKFLOW_EFFECT_RECONCILIATION_OUTCOME_UNSPECIFIED = 0;
+  WORKFLOW_EFFECT_RECONCILIATION_OUTCOME_APPLIED = 1;
+  WORKFLOW_EFFECT_RECONCILIATION_OUTCOME_NOT_APPLIED = 2;
+  WORKFLOW_EFFECT_RECONCILIATION_OUTCOME_STILL_UNKNOWN = 3;
+}
+
+message WorkflowEffectReconciled {
+  string run_id = 1;
+  string run_token_id = 2;
+  string effect_id = 3;
+  string dispatch_id = 4;
+  string reconciliation_id = 5;
+  WorkflowEffectReconciliationOutcome outcome = 6;
+  string error_code = 7;
+  WorkflowEffectReceipt receipt = 8;
+  uint64 elapsed_milliseconds = 9;
+  string idempotency_key = 10;
+  reserved 11 to 20;
+}
+
 enum WorkflowAttemptOutcome {
   WORKFLOW_ATTEMPT_OUTCOME_UNSPECIFIED = 0;
   WORKFLOW_ATTEMPT_OUTCOME_SUCCEEDED = 1;
@@ -1324,7 +1418,17 @@ message WorkflowProjectedEffectAuthority {
   int64 authorized_at_unix_millis = 5;
   uint64 proposed_store_position = 6;
   uint64 authorized_store_position = 7;
-  reserved 8 to 15;
+  WorkflowEffectDispatchStarted dispatch_started = 8;
+  WorkflowEffectDispatchSettled dispatch_settled = 9;
+  WorkflowEffectReconciled reconciliation = 10;
+  int64 dispatch_started_at_unix_millis = 11;
+  int64 dispatch_settled_at_unix_millis = 12;
+  int64 reconciled_at_unix_millis = 13;
+  uint64 dispatch_started_store_position = 14;
+  uint64 dispatch_settled_store_position = 15;
+  uint64 reconciled_store_position = 16;
+  uint32 reconciliation_count = 17;
+  reserved 18 to 25;
 }
 
 message WorkflowRunInspectionResponse {

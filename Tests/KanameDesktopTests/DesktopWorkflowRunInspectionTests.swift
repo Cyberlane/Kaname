@@ -80,11 +80,15 @@ struct DesktopWorkflowRunInspectionTests {
         #expect(run.llmAttempts.first?.validation?.status == "succeeded")
         #expect(run.llmAttempts.first?.providerReceipt?.requestID == "provider-request-run-v2")
         #expect(run.effectAuthorities.first?.effectID == "effect-run-v2")
-        #expect(run.effectAuthorities.first?.status == "authorized")
+        #expect(run.effectAuthorities.first?.status == "reconciled_applied")
         #expect(run.effectAuthorities.first?.connectorClass == "dev.kaname.email")
         #expect(run.effectAuthorities.first?.actorID == "owner-local")
         #expect(run.effectAuthorities.first?.grantID == "grant-effect-run-v2")
-        #expect(run.events.map(\.storePosition) == [11, 12, 13, 14, 15])
+        #expect(run.effectAuthorities.first?.dispatch?.registration.bindingID == "binding-installation-email")
+        #expect(run.effectAuthorities.first?.dispatch?.outcome == "unknown")
+        #expect(run.effectAuthorities.first?.reconciliation?.outcome == "applied")
+        #expect(run.effectAuthorities.first?.reconciliation?.observationCount == 1)
+        #expect(run.events.map(\.storePosition) == [11, 12, 13, 14, 15, 16, 17, 18])
         #expect(run.retentionPolicy.mode == "duration")
         #expect(run.retentionPolicy.days == 30)
         #expect(run.retentionPolicy.summary == "Keep for 30 days")
@@ -137,7 +141,7 @@ struct DesktopWorkflowRunInspectionTests {
         #expect(receipt.tombstone.runID == "run-v2")
         #expect(receipt.tombstone.previewEvidenceDigest == run.purgePreview.evidenceDigest)
         #expect(receipt.tombstone.historicalRevisionRetained)
-        #expect(receipt.compactedJournalEventCount == 5)
+        #expect(receipt.compactedJournalEventCount == 8)
     }
 }
 
@@ -155,8 +159,8 @@ private actor PurgeTransport: DesktopWorkflowRunPurgeTransport {
         tombstone.mode = request.mode
         tombstone.previewEvidenceDigest = request.expectedPreviewEvidenceDigest
         tombstone.sourceFirstStorePosition = 11
-        tombstone.sourceLastStorePosition = 15
-        tombstone.sourceEventCount = 5
+        tombstone.sourceLastStorePosition = 18
+        tombstone.sourceEventCount = 8
         tombstone.affectedAttemptCount = 1
         tombstone.affectedValueCount = 1
         tombstone.affectedFileHandleCount = 1
@@ -164,14 +168,14 @@ private actor PurgeTransport: DesktopWorkflowRunPurgeTransport {
         tombstone.affectedEffectAuthorityCount = 1
         var receipt = Kaname_V1_WorkflowRunPurgeReceipt()
         receipt.purgeEventID = "purge-event-run-v2"
-        receipt.purgeStorePosition = 16
+        receipt.purgeStorePosition = 19
         receipt.tombstone = tombstone
-        receipt.compactedJournalEventCount = 5
+        receipt.compactedJournalEventCount = 8
         var response = Kaname_V1_PurgeWorkflowRunResponse()
         response.schemaVersion.major = 1
         response.requestID = request.requestID
         response.receipt = receipt
-        response.projectionHighWaterMark = 16
+        response.projectionHighWaterMark = 19
         return response
     }
 }
@@ -396,7 +400,7 @@ private actor HistoricalRunTransport:
         projected.createdAtUnixMillis = 1_000
         projected.settledAtUnixMillis = 1_040
         projected.firstStorePosition = 11
-        projected.lastStorePosition = 15
+        projected.lastStorePosition = id == "run-v2" ? 18 : 15
         projected.attempts = [attempt]
         projected.nodes = [node]
         projected.emissions = [emission]
@@ -675,14 +679,77 @@ private actor HistoricalRunTransport:
             authorization.destinationFingerprint = intent.destinationFingerprint
             authorization.idempotencyKey = intent.idempotencyKey
             authorization.expiresAtUnixMillis = approval.expiresAtUnixMillis
+            var registration = Kaname_V1_WorkflowEffectConnectorRegistration()
+            registration.connectorClass = intent.connectorClass
+            registration.version = "1.0.0"
+            registration.packageDigest = String(repeating: "a", count: 64)
+            registration.bindingID = "binding-installation-email"
+            registration.accountBindingID = intent.accountBindingID
+            registration.allowedActions = [intent.action]
+            registration.idempotent = true
+            registration.supportsReconciliation = true
+            registration.registrationDigest = String(repeating: "b", count: 64)
+            var dispatchStarted = Kaname_V1_WorkflowEffectDispatchStarted()
+            dispatchStarted.runID = id
+            dispatchStarted.runTokenID = intent.runTokenID
+            dispatchStarted.effectID = intent.effectID
+            dispatchStarted.dispatchID = "dispatch-effect-run-v2"
+            dispatchStarted.grantID = authorization.grantID
+            dispatchStarted.intentDigest = proposal.intentDigest
+            dispatchStarted.previewDigest = preview.previewDigest
+            dispatchStarted.destinationFingerprint = intent.destinationFingerprint
+            dispatchStarted.idempotencyKey = intent.idempotencyKey
+            dispatchStarted.registration = registration
+            dispatchStarted.deadlineUnixMillis = 4_000
+            var unknownReceipt = Kaname_V1_WorkflowEffectReceipt()
+            unknownReceipt.receiptID = "receipt-effect-unknown"
+            unknownReceipt.providerReference = "provider-effect-run-v2"
+            unknownReceipt.outcome = .unknown
+            unknownReceipt.evidenceDigest = String(repeating: "c", count: 64)
+            var dispatchSettled = Kaname_V1_WorkflowEffectDispatchSettled()
+            dispatchSettled.runID = id
+            dispatchSettled.runTokenID = intent.runTokenID
+            dispatchSettled.effectID = intent.effectID
+            dispatchSettled.dispatchID = dispatchStarted.dispatchID
+            dispatchSettled.grantID = authorization.grantID
+            dispatchSettled.outcome = .unknown
+            dispatchSettled.errorCode = "connector.timeout_after_send"
+            dispatchSettled.receipt = unknownReceipt
+            dispatchSettled.elapsedMilliseconds = 50
+            dispatchSettled.idempotencyKey = intent.idempotencyKey
+            var appliedReceipt = Kaname_V1_WorkflowEffectReceipt()
+            appliedReceipt.receiptID = "receipt-effect-applied"
+            appliedReceipt.providerReference = "provider-effect-run-v2"
+            appliedReceipt.outcome = .applied
+            appliedReceipt.evidenceDigest = String(repeating: "d", count: 64)
+            var reconciliation = Kaname_V1_WorkflowEffectReconciled()
+            reconciliation.runID = id
+            reconciliation.runTokenID = intent.runTokenID
+            reconciliation.effectID = intent.effectID
+            reconciliation.dispatchID = dispatchStarted.dispatchID
+            reconciliation.reconciliationID = "reconciliation-effect-run-v2"
+            reconciliation.outcome = .applied
+            reconciliation.receipt = appliedReceipt
+            reconciliation.elapsedMilliseconds = 10
+            reconciliation.idempotencyKey = intent.idempotencyKey
             var authority = Kaname_V1_WorkflowProjectedEffectAuthority()
             authority.proposal = proposal
-            authority.status = "authorized"
+            authority.status = "reconciled_applied"
             authority.authorization = authorization
             authority.proposedAtUnixMillis = 2_000
             authority.authorizedAtUnixMillis = 3_000
             authority.proposedStorePosition = 14
             authority.authorizedStorePosition = 15
+            authority.dispatchStarted = dispatchStarted
+            authority.dispatchSettled = dispatchSettled
+            authority.reconciliation = reconciliation
+            authority.dispatchStartedAtUnixMillis = 3_100
+            authority.dispatchSettledAtUnixMillis = 3_150
+            authority.reconciledAtUnixMillis = 3_200
+            authority.dispatchStartedStorePosition = 16
+            authority.dispatchSettledStorePosition = 17
+            authority.reconciledStorePosition = 18
+            authority.reconciliationCount = 1
             projected.effectAuthorities = [authority]
             var context = Kaname_V1_WorkflowProjectedValue()
             context.valueID = "context-run-v2"
@@ -710,7 +777,7 @@ private actor HistoricalRunTransport:
             episode.startedStorePosition = 11
             projected.episode = episode
         }
-        projected.events = (11...15).map { position in
+        projected.events = (11...(id == "run-v2" ? 18 : 15)).map { position in
             var event = Kaname_V1_WorkflowProjectedEventReference()
             event.eventID = "event-\(id)-\(position)"
             event.kind = "workflow.fixture.\(position)"

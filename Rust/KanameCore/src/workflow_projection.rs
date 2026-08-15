@@ -26,7 +26,7 @@ use std::{
     time::Duration,
 };
 
-const PROJECTION_SCHEMA_VERSION: i64 = 14;
+const PROJECTION_SCHEMA_VERSION: i64 = 15;
 const DEFAULT_BATCH_SIZE: u32 = 250;
 
 const INITIAL_SCHEMA: &str = r#"
@@ -484,13 +484,26 @@ CREATE TABLE workflow_effect_authorities (
     approval_id TEXT NOT NULL UNIQUE,
     approval_fingerprint BLOB NOT NULL CHECK (length(approval_fingerprint) = 32),
     expires_at_unix_millis INTEGER NOT NULL CHECK (expires_at_unix_millis > 0),
-    status TEXT NOT NULL CHECK (status IN ('proposed', 'authorized')),
+    status TEXT NOT NULL CHECK (status IN (
+        'proposed', 'authorized', 'dispatching', 'succeeded', 'rejected', 'not_sent',
+        'outcome_unknown', 'reconciled_applied', 'reconciled_not_applied'
+    )),
     proposal_wire BLOB NOT NULL,
     authorization_wire BLOB,
+    dispatch_started_wire BLOB,
+    dispatch_settled_wire BLOB,
+    reconciliation_wire BLOB,
     proposed_at_unix_millis INTEGER NOT NULL CHECK (proposed_at_unix_millis >= 0),
     authorized_at_unix_millis INTEGER,
+    dispatch_started_at_unix_millis INTEGER,
+    dispatch_settled_at_unix_millis INTEGER,
+    reconciled_at_unix_millis INTEGER,
     proposed_store_position INTEGER NOT NULL UNIQUE CHECK (proposed_store_position > 0),
-    authorized_store_position INTEGER UNIQUE
+    authorized_store_position INTEGER UNIQUE,
+    dispatch_started_store_position INTEGER UNIQUE,
+    dispatch_settled_store_position INTEGER UNIQUE,
+    reconciled_store_position INTEGER UNIQUE,
+    reconciliation_count INTEGER NOT NULL DEFAULT 0 CHECK (reconciliation_count >= 0)
 ) STRICT;
 CREATE INDEX workflow_effect_authorities_run_position
     ON workflow_effect_authorities(run_id, proposed_store_position, effect_id);
@@ -579,6 +592,59 @@ CREATE TABLE IF NOT EXISTS workflow_effect_authorities (
     authorized_store_position INTEGER UNIQUE
 ) STRICT;
 CREATE INDEX IF NOT EXISTS workflow_effect_authorities_run_position
+    ON workflow_effect_authorities(run_id, proposed_store_position, effect_id);
+"#;
+
+const PROJECTION_MIGRATION_15: &str = r#"
+ALTER TABLE workflow_effect_authorities RENAME TO workflow_effect_authorities_v14;
+CREATE TABLE workflow_effect_authorities (
+    effect_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+    attempt_id TEXT NOT NULL REFERENCES workflow_attempts(attempt_id) ON DELETE CASCADE,
+    node_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    intent_digest TEXT NOT NULL CHECK (length(intent_digest) = 64),
+    preview_digest TEXT NOT NULL CHECK (length(preview_digest) = 64),
+    destination_fingerprint TEXT NOT NULL CHECK (length(destination_fingerprint) = 64),
+    approval_id TEXT NOT NULL UNIQUE,
+    approval_fingerprint BLOB NOT NULL CHECK (length(approval_fingerprint) = 32),
+    expires_at_unix_millis INTEGER NOT NULL CHECK (expires_at_unix_millis > 0),
+    status TEXT NOT NULL CHECK (status IN (
+        'proposed', 'authorized', 'dispatching', 'succeeded', 'rejected', 'not_sent',
+        'outcome_unknown', 'reconciled_applied', 'reconciled_not_applied'
+    )),
+    proposal_wire BLOB NOT NULL,
+    authorization_wire BLOB,
+    dispatch_started_wire BLOB,
+    dispatch_settled_wire BLOB,
+    reconciliation_wire BLOB,
+    proposed_at_unix_millis INTEGER NOT NULL CHECK (proposed_at_unix_millis >= 0),
+    authorized_at_unix_millis INTEGER,
+    dispatch_started_at_unix_millis INTEGER,
+    dispatch_settled_at_unix_millis INTEGER,
+    reconciled_at_unix_millis INTEGER,
+    proposed_store_position INTEGER NOT NULL UNIQUE CHECK (proposed_store_position > 0),
+    authorized_store_position INTEGER UNIQUE,
+    dispatch_started_store_position INTEGER UNIQUE,
+    dispatch_settled_store_position INTEGER UNIQUE,
+    reconciled_store_position INTEGER UNIQUE,
+    reconciliation_count INTEGER NOT NULL DEFAULT 0 CHECK (reconciliation_count >= 0)
+) STRICT;
+INSERT INTO workflow_effect_authorities (
+    effect_id, run_id, attempt_id, node_id, idempotency_key, intent_digest,
+    preview_digest, destination_fingerprint, approval_id, approval_fingerprint,
+    expires_at_unix_millis, status, proposal_wire, authorization_wire,
+    proposed_at_unix_millis, authorized_at_unix_millis, proposed_store_position,
+    authorized_store_position
+)
+SELECT effect_id, run_id, attempt_id, node_id, idempotency_key, intent_digest,
+       preview_digest, destination_fingerprint, approval_id, approval_fingerprint,
+       expires_at_unix_millis, status, proposal_wire, authorization_wire,
+       proposed_at_unix_millis, authorized_at_unix_millis, proposed_store_position,
+       authorized_store_position
+FROM workflow_effect_authorities_v14;
+DROP TABLE workflow_effect_authorities_v14;
+CREATE INDEX workflow_effect_authorities_run_position
     ON workflow_effect_authorities(run_id, proposed_store_position, effect_id);
 "#;
 
@@ -1333,8 +1399,7 @@ impl WorkflowRunProjection {
             apply_projection_migration_11(&transaction)?;
             apply_projection_migration_12(&transaction)?;
             transaction.execute_batch(PROJECTION_MIGRATION_13)?;
-            transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
-            refresh_state_digest(&transaction)?;
+            transaction.pragma_update(None, "user_version", 13)?;
             transaction.commit()?;
         }
         let found: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -1348,8 +1413,7 @@ impl WorkflowRunProjection {
             apply_projection_migration_11(&transaction)?;
             apply_projection_migration_12(&transaction)?;
             transaction.execute_batch(PROJECTION_MIGRATION_13)?;
-            transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
-            refresh_state_digest(&transaction)?;
+            transaction.pragma_update(None, "user_version", 13)?;
             transaction.commit()?;
         }
         let found: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -1362,8 +1426,7 @@ impl WorkflowRunProjection {
             apply_projection_migration_11(&transaction)?;
             apply_projection_migration_12(&transaction)?;
             transaction.execute_batch(PROJECTION_MIGRATION_13)?;
-            transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
-            refresh_state_digest(&transaction)?;
+            transaction.pragma_update(None, "user_version", 13)?;
             transaction.commit()?;
         }
         let found: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -1375,8 +1438,7 @@ impl WorkflowRunProjection {
             apply_projection_migration_11(&transaction)?;
             apply_projection_migration_12(&transaction)?;
             transaction.execute_batch(PROJECTION_MIGRATION_13)?;
-            transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
-            refresh_state_digest(&transaction)?;
+            transaction.pragma_update(None, "user_version", 13)?;
             transaction.commit()?;
         }
         let found: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -1387,8 +1449,7 @@ impl WorkflowRunProjection {
             apply_projection_migration_11(&transaction)?;
             apply_projection_migration_12(&transaction)?;
             transaction.execute_batch(PROJECTION_MIGRATION_13)?;
-            transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
-            refresh_state_digest(&transaction)?;
+            transaction.pragma_update(None, "user_version", 13)?;
             transaction.commit()?;
         }
         let found: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -1398,8 +1459,7 @@ impl WorkflowRunProjection {
             apply_projection_migration_11(&transaction)?;
             apply_projection_migration_12(&transaction)?;
             transaction.execute_batch(PROJECTION_MIGRATION_13)?;
-            transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
-            refresh_state_digest(&transaction)?;
+            transaction.pragma_update(None, "user_version", 13)?;
             transaction.commit()?;
         }
         let found: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -1408,8 +1468,7 @@ impl WorkflowRunProjection {
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             apply_projection_migration_12(&transaction)?;
             transaction.execute_batch(PROJECTION_MIGRATION_13)?;
-            transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
-            refresh_state_digest(&transaction)?;
+            transaction.pragma_update(None, "user_version", 13)?;
             transaction.commit()?;
         }
         let found: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -1417,8 +1476,7 @@ impl WorkflowRunProjection {
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             transaction.execute_batch(PROJECTION_MIGRATION_13)?;
-            transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
-            refresh_state_digest(&transaction)?;
+            transaction.pragma_update(None, "user_version", 13)?;
             transaction.commit()?;
         }
         let found: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -1426,6 +1484,14 @@ impl WorkflowRunProjection {
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             apply_projection_migration_14(&transaction)?;
+            transaction.pragma_update(None, "user_version", 14)?;
+            transaction.commit()?;
+        }
+        let found: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if found == 14 {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            apply_projection_migration_15(&transaction)?;
             transaction.pragma_update(None, "user_version", PROJECTION_SCHEMA_VERSION)?;
             refresh_state_digest(&transaction)?;
             transaction.commit()?;
@@ -1609,10 +1675,38 @@ impl WorkflowRunProjection {
                     OR e.expires_at_unix_millis <= e.proposed_at_unix_millis
                     OR (e.status = 'proposed' AND (e.authorization_wire IS NOT NULL
                         OR e.authorized_at_unix_millis IS NOT NULL
-                        OR e.authorized_store_position IS NOT NULL))
+                        OR e.authorized_store_position IS NOT NULL
+                        OR e.dispatch_started_wire IS NOT NULL))
                     OR (e.status = 'authorized' AND (e.authorization_wire IS NULL
                         OR e.authorized_at_unix_millis IS NULL
-                        OR e.authorized_store_position IS NULL))
+                        OR e.authorized_store_position IS NULL
+                        OR e.dispatch_started_wire IS NOT NULL))
+                    OR (e.status = 'dispatching' AND (e.authorization_wire IS NULL
+                        OR e.dispatch_started_wire IS NULL
+                        OR e.dispatch_settled_wire IS NOT NULL
+                        OR e.reconciliation_wire IS NOT NULL))
+                    OR (e.status IN ('succeeded', 'rejected', 'not_sent') AND
+                        (e.authorization_wire IS NULL OR e.dispatch_started_wire IS NULL
+                         OR e.dispatch_settled_wire IS NULL OR e.reconciliation_wire IS NOT NULL))
+                    OR (e.status = 'outcome_unknown' AND
+                        (e.authorization_wire IS NULL OR e.dispatch_started_wire IS NULL
+                         OR (e.dispatch_settled_wire IS NULL AND e.reconciliation_wire IS NULL)))
+                    OR (e.status IN ('reconciled_applied', 'reconciled_not_applied') AND
+                        (e.authorization_wire IS NULL OR e.dispatch_started_wire IS NULL
+                         OR e.reconciliation_wire IS NULL))
+                    OR ((e.reconciliation_count = 0) != (e.reconciliation_wire IS NULL))
+                    OR (e.dispatch_started_wire IS NOT NULL AND
+                        (e.dispatch_started_at_unix_millis IS NULL
+                         OR e.dispatch_started_store_position IS NULL
+                         OR e.dispatch_started_at_unix_millis >= e.expires_at_unix_millis))
+                    OR ((e.dispatch_settled_wire IS NULL) !=
+                        (e.dispatch_settled_at_unix_millis IS NULL))
+                    OR ((e.dispatch_settled_wire IS NULL) !=
+                        (e.dispatch_settled_store_position IS NULL))
+                    OR ((e.reconciliation_wire IS NULL) !=
+                        (e.reconciled_at_unix_millis IS NULL))
+                    OR ((e.reconciliation_wire IS NULL) !=
+                        (e.reconciled_store_position IS NULL))
                  LIMIT 1",
                 [],
                 |_| Ok(()),
@@ -2125,14 +2219,29 @@ impl WorkflowRunProjection {
             Vec<u8>,
             String,
             Option<Vec<u8>>,
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
             i64,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
             Option<i64>,
             i64,
             Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            i64,
         );
         let mut statement = self.connection.prepare(
-            "SELECT proposal_wire, status, authorization_wire, proposed_at_unix_millis,
-                    authorized_at_unix_millis, proposed_store_position, authorized_store_position
+            "SELECT proposal_wire, status, authorization_wire, dispatch_started_wire,
+                    dispatch_settled_wire, reconciliation_wire, proposed_at_unix_millis,
+                    authorized_at_unix_millis, dispatch_started_at_unix_millis,
+                    dispatch_settled_at_unix_millis, reconciled_at_unix_millis,
+                    proposed_store_position, authorized_store_position,
+                    dispatch_started_store_position, dispatch_settled_store_position,
+                    reconciled_store_position, reconciliation_count
              FROM workflow_effect_authorities WHERE run_id = ?1
              ORDER BY proposed_store_position, effect_id",
         )?;
@@ -2145,6 +2254,16 @@ impl WorkflowRunProjection {
                 row.get(4)?,
                 row.get(5)?,
                 row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+                row.get(9)?,
+                row.get(10)?,
+                row.get(11)?,
+                row.get(12)?,
+                row.get(13)?,
+                row.get(14)?,
+                row.get(15)?,
+                row.get(16)?,
             ))
         })?;
         rows.map(|row| {
@@ -2166,14 +2285,47 @@ impl WorkflowRunProjection {
                         })
                     })
                     .transpose()?,
-                proposed_at_unix_millis: row.3,
-                authorized_at_unix_millis: row.4.unwrap_or_default(),
-                proposed_store_position: projected_u64(row.5)?,
+                dispatch_started: decode_optional_message(
+                    row.3.as_deref(),
+                    "effect_dispatch_started_wire_invalid",
+                )?,
+                dispatch_settled: decode_optional_message(
+                    row.4.as_deref(),
+                    "effect_dispatch_settled_wire_invalid",
+                )?,
+                reconciliation: decode_optional_message(
+                    row.5.as_deref(),
+                    "effect_reconciliation_wire_invalid",
+                )?,
+                proposed_at_unix_millis: row.6,
+                authorized_at_unix_millis: row.7.unwrap_or_default(),
+                dispatch_started_at_unix_millis: row.8.unwrap_or_default(),
+                dispatch_settled_at_unix_millis: row.9.unwrap_or_default(),
+                reconciled_at_unix_millis: row.10.unwrap_or_default(),
+                proposed_store_position: projected_u64(row.11)?,
                 authorized_store_position: row
-                    .6
+                    .12
                     .map(projected_u64)
                     .transpose()?
                     .unwrap_or_default(),
+                dispatch_started_store_position: row
+                    .13
+                    .map(projected_u64)
+                    .transpose()?
+                    .unwrap_or_default(),
+                dispatch_settled_store_position: row
+                    .14
+                    .map(projected_u64)
+                    .transpose()?
+                    .unwrap_or_default(),
+                reconciled_store_position: row
+                    .15
+                    .map(projected_u64)
+                    .transpose()?
+                    .unwrap_or_default(),
+                reconciliation_count: u32::try_from(row.16).map_err(|_| {
+                    WorkflowProjectionError::Integrity("effect_reconciliation_count_invalid".into())
+                })?,
             })
         })
         .collect()
@@ -4982,6 +5134,172 @@ fn apply_event(transaction: &Transaction<'_>, event: &v1::EventEnvelope) -> Resu
             )?;
             touch_run(transaction, &payload.run_id, event.store_position)?;
         }
+        WorkflowRuntimeEvent::EffectDispatchStarted(payload) => {
+            require_active_run(transaction, &payload.run_id, &payload.run_token_id)?;
+            type AuthorityRow = (String, Vec<u8>, Vec<u8>, i64);
+            let current: Option<AuthorityRow> = transaction
+                .query_row(
+                    "SELECT status, proposal_wire, authorization_wire, expires_at_unix_millis
+                     FROM workflow_effect_authorities WHERE effect_id = ?1",
+                    [&payload.effect_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()?;
+            let Some((status, proposal_wire, authorization_wire, expires_at)) = current else {
+                return lifecycle("effect_authority_missing");
+            };
+            let proposal =
+                v1::WorkflowEffectProposed::decode(proposal_wire.as_slice()).map_err(|_| {
+                    WorkflowProjectionError::Integrity("effect_proposal_wire_invalid".into())
+                })?;
+            let intent = proposal.intent.as_ref().ok_or_else(|| {
+                WorkflowProjectionError::Lifecycle("effect_intent_missing".into())
+            })?;
+            let authorization = v1::WorkflowEffectAuthorized::decode(authorization_wire.as_slice())
+                .map_err(|_| {
+                    WorkflowProjectionError::Integrity("effect_authorization_wire_invalid".into())
+                })?;
+            let registration = payload.registration.as_ref().ok_or_else(|| {
+                WorkflowProjectionError::Lifecycle("effect_connector_registration_missing".into())
+            })?;
+            if status != "authorized"
+                || intent.run_id != payload.run_id
+                || intent.run_token_id != payload.run_token_id
+                || authorization.grant_id != payload.grant_id
+                || proposal.intent_digest != payload.intent_digest
+                || proposal
+                    .preview
+                    .as_ref()
+                    .map(|value| value.preview_digest.as_str())
+                    != Some(payload.preview_digest.as_str())
+                || intent.destination_fingerprint != payload.destination_fingerprint
+                || intent.idempotency_key != payload.idempotency_key
+                || intent.connector_class != registration.connector_class
+                || intent.account_binding_id != registration.account_binding_id
+                || registration
+                    .allowed_actions
+                    .binary_search(&intent.action)
+                    .is_err()
+                || expires_at <= event.occurred_at_unix_millis
+                || payload.deadline_unix_millis <= event.occurred_at_unix_millis
+                || payload.deadline_unix_millis > expires_at
+            {
+                return lifecycle("effect_dispatch_stale_or_mismatched");
+            }
+            transaction.execute(
+                "UPDATE workflow_effect_authorities SET status = 'dispatching',
+                   dispatch_started_wire = ?1, dispatch_started_at_unix_millis = ?2,
+                   dispatch_started_store_position = ?3 WHERE effect_id = ?4",
+                params![
+                    payload.encode_to_vec(),
+                    event.occurred_at_unix_millis,
+                    sql_u64(event.store_position)?,
+                    payload.effect_id,
+                ],
+            )?;
+            touch_run(transaction, &payload.run_id, event.store_position)?;
+        }
+        WorkflowRuntimeEvent::EffectDispatchSettled(payload) => {
+            require_active_run(transaction, &payload.run_id, &payload.run_token_id)?;
+            type DispatchIdentity = (String, Vec<u8>, Vec<u8>);
+            let current: Option<DispatchIdentity> = transaction
+                .query_row(
+                    "SELECT status, authorization_wire, dispatch_started_wire
+                     FROM workflow_effect_authorities WHERE effect_id = ?1",
+                    [&payload.effect_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            let Some((status, authorization_wire, dispatch_wire)) = current else {
+                return lifecycle("effect_dispatch_missing");
+            };
+            let authorization = v1::WorkflowEffectAuthorized::decode(authorization_wire.as_slice())
+                .map_err(|_| {
+                    WorkflowProjectionError::Integrity("effect_authorization_wire_invalid".into())
+                })?;
+            let dispatch = v1::WorkflowEffectDispatchStarted::decode(dispatch_wire.as_slice())
+                .map_err(|_| {
+                    WorkflowProjectionError::Integrity("effect_dispatch_wire_invalid".into())
+                })?;
+            if status != "dispatching"
+                || dispatch.run_id != payload.run_id
+                || dispatch.run_token_id != payload.run_token_id
+                || dispatch.dispatch_id != payload.dispatch_id
+                || dispatch.grant_id != payload.grant_id
+                || authorization.grant_id != payload.grant_id
+                || dispatch.idempotency_key != payload.idempotency_key
+            {
+                return lifecycle("effect_dispatch_result_stale_or_mismatched");
+            }
+            let status = match v1::WorkflowEffectDispatchOutcome::try_from(payload.outcome) {
+                Ok(v1::WorkflowEffectDispatchOutcome::Succeeded) => "succeeded",
+                Ok(v1::WorkflowEffectDispatchOutcome::Rejected) => "rejected",
+                Ok(v1::WorkflowEffectDispatchOutcome::NotSent) => "not_sent",
+                Ok(v1::WorkflowEffectDispatchOutcome::Unknown) => "outcome_unknown",
+                _ => return lifecycle("effect_dispatch_outcome_invalid"),
+            };
+            transaction.execute(
+                "UPDATE workflow_effect_authorities SET status = ?1,
+                   dispatch_settled_wire = ?2, dispatch_settled_at_unix_millis = ?3,
+                   dispatch_settled_store_position = ?4 WHERE effect_id = ?5",
+                params![
+                    status,
+                    payload.encode_to_vec(),
+                    event.occurred_at_unix_millis,
+                    sql_u64(event.store_position)?,
+                    payload.effect_id,
+                ],
+            )?;
+            touch_run(transaction, &payload.run_id, event.store_position)?;
+        }
+        WorkflowRuntimeEvent::EffectReconciled(payload) => {
+            require_active_run(transaction, &payload.run_id, &payload.run_token_id)?;
+            type ReconciliationIdentity = (String, Vec<u8>, i64);
+            let current: Option<ReconciliationIdentity> = transaction
+                .query_row(
+                    "SELECT status, dispatch_started_wire, reconciliation_count
+                     FROM workflow_effect_authorities WHERE effect_id = ?1",
+                    [&payload.effect_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            let Some((status, dispatch_wire, reconciliation_count)) = current else {
+                return lifecycle("effect_dispatch_missing");
+            };
+            let dispatch = v1::WorkflowEffectDispatchStarted::decode(dispatch_wire.as_slice())
+                .map_err(|_| {
+                    WorkflowProjectionError::Integrity("effect_dispatch_wire_invalid".into())
+                })?;
+            if !matches!(status.as_str(), "dispatching" | "outcome_unknown")
+                || dispatch.run_id != payload.run_id
+                || dispatch.run_token_id != payload.run_token_id
+                || dispatch.dispatch_id != payload.dispatch_id
+                || dispatch.idempotency_key != payload.idempotency_key
+            {
+                return lifecycle("effect_reconciliation_stale_or_mismatched");
+            }
+            let status = match v1::WorkflowEffectReconciliationOutcome::try_from(payload.outcome) {
+                Ok(v1::WorkflowEffectReconciliationOutcome::Applied) => "reconciled_applied",
+                Ok(v1::WorkflowEffectReconciliationOutcome::NotApplied) => "reconciled_not_applied",
+                Ok(v1::WorkflowEffectReconciliationOutcome::StillUnknown) => "outcome_unknown",
+                _ => return lifecycle("effect_reconciliation_outcome_invalid"),
+            };
+            transaction.execute(
+                "UPDATE workflow_effect_authorities SET status = ?1,
+                   reconciliation_wire = ?2, reconciled_at_unix_millis = ?3,
+                   reconciled_store_position = ?4, reconciliation_count = ?5
+                 WHERE effect_id = ?6",
+                params![
+                    status,
+                    payload.encode_to_vec(),
+                    event.occurred_at_unix_millis,
+                    sql_u64(event.store_position)?,
+                    reconciliation_count.saturating_add(1),
+                    payload.effect_id,
+                ],
+            )?;
+            touch_run(transaction, &payload.run_id, event.store_position)?;
+        }
         WorkflowRuntimeEvent::PortEmitted(payload) => {
             require_active_attempt(
                 transaction,
@@ -6059,6 +6377,11 @@ fn apply_projection_migration_14(transaction: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
+fn apply_projection_migration_15(transaction: &Transaction<'_>) -> Result<()> {
+    transaction.execute_batch(PROJECTION_MIGRATION_15)?;
+    Ok(())
+}
+
 fn table_has_column(connection: &Connection, table: &str, expected_column: &str) -> Result<bool> {
     let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
     let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
@@ -6208,8 +6531,8 @@ fn canonical_state_bytes(connection: &Connection) -> Result<Vec<u8>> {
             table_rows(
                 connection,
                 "effect_authorities",
-                "SELECT effect_id, run_id, attempt_id, node_id, idempotency_key, intent_digest, preview_digest, destination_fingerprint, approval_id, approval_fingerprint, expires_at_unix_millis, status, proposal_wire, authorization_wire, proposed_at_unix_millis, authorized_at_unix_millis, proposed_store_position, authorized_store_position FROM workflow_effect_authorities ORDER BY run_id, proposed_store_position, effect_id",
-                18,
+                "SELECT effect_id, run_id, attempt_id, node_id, idempotency_key, intent_digest, preview_digest, destination_fingerprint, approval_id, approval_fingerprint, expires_at_unix_millis, status, proposal_wire, authorization_wire, dispatch_started_wire, dispatch_settled_wire, reconciliation_wire, proposed_at_unix_millis, authorized_at_unix_millis, dispatch_started_at_unix_millis, dispatch_settled_at_unix_millis, reconciled_at_unix_millis, proposed_store_position, authorized_store_position, dispatch_started_store_position, dispatch_settled_store_position, reconciled_store_position, reconciliation_count FROM workflow_effect_authorities ORDER BY run_id, proposed_store_position, effect_id",
+                28,
             )?,
             table_rows(
                 connection,

@@ -90,10 +90,10 @@ pub fn propose_workflow_effect(
         }
         return Err(WorkflowEffectAuthorityError::StaleOrMismatched);
     }
-    append_event(
+    append_effect_event(
         journal,
         &intent.run_id,
-        stable_id(
+        stable_effect_id(
             "effect-proposed",
             &intent.effect_id,
             &intent.idempotency_key,
@@ -170,7 +170,7 @@ pub fn authorize_workflow_effect(
         run_id: intent.run_id.clone(),
         run_token_id: intent.run_token_id.clone(),
         effect_id: intent.effect_id.clone(),
-        grant_id: stable_id("effect-grant", &approval.approval_id, &intent.effect_id),
+        grant_id: stable_effect_id("effect-grant", &approval.approval_id, &intent.effect_id),
         resolution: Some(resolution),
         approval_fingerprint: approval.fingerprint.clone(),
         intent_digest: proposal.intent_digest.clone(),
@@ -179,10 +179,10 @@ pub fn authorize_workflow_effect(
         idempotency_key: intent.idempotency_key.clone(),
         expires_at_unix_millis: approval.expires_at_unix_millis,
     };
-    append_event(
+    append_effect_event(
         journal,
         &intent.run_id,
-        stable_id(
+        stable_effect_id(
             "effect-authorized",
             &intent.effect_id,
             &approval.approval_id,
@@ -203,7 +203,7 @@ pub fn authorize_workflow_effect(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn append_event(
+pub(crate) fn append_effect_event(
     journal: &mut Journal,
     run_id: &str,
     event_id: String,
@@ -248,7 +248,7 @@ fn append_event(
     Ok(())
 }
 
-fn stable_id(domain: &str, left: &str, right: &str) -> String {
+pub(crate) fn stable_effect_id(domain: &str, left: &str, right: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"kaname.workflow.effect-authority.v1\0");
     hasher.update(domain.as_bytes());

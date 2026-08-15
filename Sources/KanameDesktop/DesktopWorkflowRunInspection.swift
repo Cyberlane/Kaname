@@ -682,6 +682,50 @@ public struct DesktopWorkflowProjectedEffectAuthority: Identifiable, Equatable, 
     public let authorizedAtUnixMillis: Int64?
     public let proposedStorePosition: UInt64
     public let authorizedStorePosition: UInt64?
+    public let dispatch: DesktopWorkflowProjectedEffectDispatch?
+    public let reconciliation: DesktopWorkflowProjectedEffectReconciliation?
+}
+
+public struct DesktopWorkflowProjectedEffectConnectorRegistration: Equatable, Sendable {
+    public let connectorClass: String
+    public let version: String
+    public let packageDigest: String
+    public let bindingID: String
+    public let accountBindingID: String
+    public let allowedActions: [String]
+    public let registrationDigest: String
+}
+
+public struct DesktopWorkflowProjectedEffectReceipt: Equatable, Sendable {
+    public let receiptID: String
+    public let providerReference: String?
+    public let outcome: String
+    public let evidenceDigest: String
+}
+
+public struct DesktopWorkflowProjectedEffectDispatch: Equatable, Sendable {
+    public let dispatchID: String
+    public let registration: DesktopWorkflowProjectedEffectConnectorRegistration
+    public let deadlineUnixMillis: Int64
+    public let outcome: String?
+    public let errorCode: String?
+    public let receipt: DesktopWorkflowProjectedEffectReceipt?
+    public let elapsedMilliseconds: UInt64?
+    public let startedAtUnixMillis: Int64
+    public let settledAtUnixMillis: Int64?
+    public let startedStorePosition: UInt64
+    public let settledStorePosition: UInt64?
+}
+
+public struct DesktopWorkflowProjectedEffectReconciliation: Equatable, Sendable {
+    public let reconciliationID: String
+    public let outcome: String
+    public let errorCode: String?
+    public let receipt: DesktopWorkflowProjectedEffectReceipt
+    public let elapsedMilliseconds: UInt64
+    public let reconciledAtUnixMillis: Int64
+    public let storePosition: UInt64
+    public let observationCount: UInt32
 }
 
 public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
@@ -1108,11 +1152,14 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
               approval.fingerprint.count == 32, approval.targetID == intent.effectID,
               approval.targetRevision == intent.revisionID,
               approval.expiresAtUnixMillis > item.proposedAtUnixMillis,
-              ["proposed", "authorized"].contains(item.status),
+              [
+                  "proposed", "authorized", "dispatching", "succeeded", "rejected", "not_sent",
+                  "outcome_unknown", "reconciled_applied", "reconciled_not_applied",
+              ].contains(item.status),
               item.proposedStorePosition > 0 else {
             throw DesktopWorkflowRunInspectionError.malformedResponse
         }
-        let authorized = item.status == "authorized"
+        let authorized = item.status != "proposed"
         guard authorized == item.hasAuthorization,
               authorized == (item.authorizedAtUnixMillis > 0),
               authorized == (item.authorizedStorePosition > 0) else {
@@ -1136,6 +1183,8 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
                 throw DesktopWorkflowRunInspectionError.malformedResponse
             }
         }
+        let dispatch = try effectDispatch(item, proposal: proposal)
+        let reconciliation = try effectReconciliation(item, dispatch: dispatch)
         return DesktopWorkflowProjectedEffectAuthority(
             effectID: intent.effectID,
             nodeID: intent.nodeID,
@@ -1159,7 +1208,193 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
             proposedAtUnixMillis: item.proposedAtUnixMillis,
             authorizedAtUnixMillis: authorized ? item.authorizedAtUnixMillis : nil,
             proposedStorePosition: item.proposedStorePosition,
-            authorizedStorePosition: authorized ? item.authorizedStorePosition : nil
+            authorizedStorePosition: authorized ? item.authorizedStorePosition : nil,
+            dispatch: dispatch,
+            reconciliation: reconciliation
+        )
+    }
+
+    private static func effectDispatch(
+        _ item: Kaname_V1_WorkflowProjectedEffectAuthority,
+        proposal: Kaname_V1_WorkflowEffectProposed
+    ) throws -> DesktopWorkflowProjectedEffectDispatch? {
+        let requiresDispatch = !["proposed", "authorized"].contains(item.status)
+        guard requiresDispatch == item.hasDispatchStarted,
+              requiresDispatch == (item.dispatchStartedAtUnixMillis > 0),
+              requiresDispatch == (item.dispatchStartedStorePosition > 0) else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        guard requiresDispatch else {
+            guard !item.hasDispatchSettled, !item.hasReconciliation,
+                  item.dispatchSettledAtUnixMillis == 0, item.reconciledAtUnixMillis == 0,
+                  item.dispatchSettledStorePosition == 0, item.reconciledStorePosition == 0,
+                  item.reconciliationCount == 0 else {
+                throw DesktopWorkflowRunInspectionError.malformedResponse
+            }
+            return nil
+        }
+        let intent = proposal.intent
+        let authorization = item.authorization
+        let started = item.dispatchStarted
+        guard started.runID == intent.runID, started.runTokenID == intent.runTokenID,
+              started.effectID == intent.effectID, !started.dispatchID.isEmpty,
+              started.grantID == authorization.grantID,
+              started.intentDigest == proposal.intentDigest,
+              started.previewDigest == proposal.preview.previewDigest,
+              started.destinationFingerprint == intent.destinationFingerprint,
+              started.idempotencyKey == intent.idempotencyKey,
+              started.deadlineUnixMillis > item.dispatchStartedAtUnixMillis,
+              started.deadlineUnixMillis <= authorization.expiresAtUnixMillis,
+              started.hasRegistration else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        let registration = started.registration
+        guard registration.connectorClass == intent.connectorClass,
+              !registration.version.isEmpty, registration.packageDigest.count == 64,
+              !registration.bindingID.isEmpty,
+              registration.accountBindingID == intent.accountBindingID,
+              !registration.allowedActions.isEmpty,
+              registration.allowedActions == registration.allowedActions.sorted(),
+              Set(registration.allowedActions).count == registration.allowedActions.count,
+              registration.allowedActions.contains(intent.action),
+              registration.idempotent, registration.supportsReconciliation,
+              registration.registrationDigest.count == 64 else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        let settledRequired = ["succeeded", "rejected", "not_sent"].contains(item.status)
+        let settledAllowed = !["proposed", "authorized", "dispatching"].contains(item.status)
+        guard !settledRequired || item.hasDispatchSettled,
+              item.hasDispatchSettled == (item.dispatchSettledAtUnixMillis > 0),
+              item.hasDispatchSettled == (item.dispatchSettledStorePosition > 0),
+              !item.hasDispatchSettled || settledAllowed else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        let settled = item.hasDispatchSettled ? item.dispatchSettled : nil
+        let receipt = try settled.map { value -> DesktopWorkflowProjectedEffectReceipt in
+            guard value.runID == intent.runID, value.runTokenID == intent.runTokenID,
+                  value.effectID == intent.effectID, value.dispatchID == started.dispatchID,
+                  value.grantID == authorization.grantID,
+                  value.idempotencyKey == intent.idempotencyKey, value.hasReceipt else {
+                throw DesktopWorkflowRunInspectionError.malformedResponse
+            }
+            let expected: Kaname_V1_WorkflowEffectReceiptOutcome
+            switch value.outcome {
+            case .succeeded:
+                guard item.status == "succeeded", value.errorCode.isEmpty else {
+                    throw DesktopWorkflowRunInspectionError.malformedResponse
+                }
+                expected = .applied
+            case .rejected:
+                guard item.status == "rejected", !value.errorCode.isEmpty else {
+                    throw DesktopWorkflowRunInspectionError.malformedResponse
+                }
+                expected = .notApplied
+            case .notSent:
+                guard item.status == "not_sent", !value.errorCode.isEmpty else {
+                    throw DesktopWorkflowRunInspectionError.malformedResponse
+                }
+                expected = .notApplied
+            case .unknown:
+                guard ["outcome_unknown", "reconciled_applied", "reconciled_not_applied"]
+                    .contains(item.status), !value.errorCode.isEmpty else {
+                    throw DesktopWorkflowRunInspectionError.malformedResponse
+                }
+                expected = .unknown
+            default:
+                throw DesktopWorkflowRunInspectionError.malformedResponse
+            }
+            return try effectReceipt(value.receipt, expected: expected)
+        }
+        return .init(
+            dispatchID: started.dispatchID,
+            registration: .init(
+                connectorClass: registration.connectorClass,
+                version: registration.version,
+                packageDigest: registration.packageDigest,
+                bindingID: registration.bindingID,
+                accountBindingID: registration.accountBindingID,
+                allowedActions: registration.allowedActions,
+                registrationDigest: registration.registrationDigest
+            ),
+            deadlineUnixMillis: started.deadlineUnixMillis,
+            outcome: settled.map { String(describing: $0.outcome) },
+            errorCode: settled.flatMap { $0.errorCode.isEmpty ? nil : $0.errorCode },
+            receipt: receipt,
+            elapsedMilliseconds: settled?.elapsedMilliseconds,
+            startedAtUnixMillis: item.dispatchStartedAtUnixMillis,
+            settledAtUnixMillis: item.hasDispatchSettled ? item.dispatchSettledAtUnixMillis : nil,
+            startedStorePosition: item.dispatchStartedStorePosition,
+            settledStorePosition: item.hasDispatchSettled ? item.dispatchSettledStorePosition : nil
+        )
+    }
+
+    private static func effectReconciliation(
+        _ item: Kaname_V1_WorkflowProjectedEffectAuthority,
+        dispatch: DesktopWorkflowProjectedEffectDispatch?
+    ) throws -> DesktopWorkflowProjectedEffectReconciliation? {
+        let hasReconciliation = item.hasReconciliation
+        guard hasReconciliation == (item.reconciliationCount > 0),
+              hasReconciliation == (item.reconciledAtUnixMillis > 0),
+              hasReconciliation == (item.reconciledStorePosition > 0),
+              ["reconciled_applied", "reconciled_not_applied"].contains(item.status)
+                  ? hasReconciliation : true else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        guard hasReconciliation else { return nil }
+        guard let dispatch else { throw DesktopWorkflowRunInspectionError.malformedResponse }
+        let intent = item.proposal.intent
+        let value = item.reconciliation
+        guard value.runID == intent.runID, value.runTokenID == intent.runTokenID,
+              value.effectID == intent.effectID, value.dispatchID == dispatch.dispatchID,
+              !value.reconciliationID.isEmpty,
+              value.idempotencyKey == intent.idempotencyKey, value.hasReceipt else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        let expected: Kaname_V1_WorkflowEffectReceiptOutcome
+        switch value.outcome {
+        case .applied:
+            guard item.status == "reconciled_applied", value.errorCode.isEmpty else {
+                throw DesktopWorkflowRunInspectionError.malformedResponse
+            }
+            expected = .applied
+        case .notApplied:
+            guard item.status == "reconciled_not_applied", !value.errorCode.isEmpty else {
+                throw DesktopWorkflowRunInspectionError.malformedResponse
+            }
+            expected = .notApplied
+        case .stillUnknown:
+            guard item.status == "outcome_unknown", !value.errorCode.isEmpty else {
+                throw DesktopWorkflowRunInspectionError.malformedResponse
+            }
+            expected = .unknown
+        default:
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        return .init(
+            reconciliationID: value.reconciliationID,
+            outcome: String(describing: value.outcome),
+            errorCode: value.errorCode.isEmpty ? nil : value.errorCode,
+            receipt: try effectReceipt(value.receipt, expected: expected),
+            elapsedMilliseconds: value.elapsedMilliseconds,
+            reconciledAtUnixMillis: item.reconciledAtUnixMillis,
+            storePosition: item.reconciledStorePosition,
+            observationCount: item.reconciliationCount
+        )
+    }
+
+    private static func effectReceipt(
+        _ value: Kaname_V1_WorkflowEffectReceipt,
+        expected: Kaname_V1_WorkflowEffectReceiptOutcome
+    ) throws -> DesktopWorkflowProjectedEffectReceipt {
+        guard !value.receiptID.isEmpty, value.outcome == expected,
+              value.evidenceDigest.count == 64 else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        return .init(
+            receiptID: value.receiptID,
+            providerReference: value.providerReference.isEmpty ? nil : value.providerReference,
+            outcome: String(describing: value.outcome),
+            evidenceDigest: value.evidenceDigest
         )
     }
 

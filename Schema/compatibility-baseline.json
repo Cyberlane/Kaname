@@ -98,6 +98,25 @@
       "1": "WORKFLOW_EDGE_CHECKPOINT_STATE_ADMITTED",
       "2": "WORKFLOW_EDGE_CHECKPOINT_STATE_SKIPPED"
     },
+    "workflow_runtime.WorkflowEffectDispatchOutcome": {
+      "0": "WORKFLOW_EFFECT_DISPATCH_OUTCOME_UNSPECIFIED",
+      "1": "WORKFLOW_EFFECT_DISPATCH_OUTCOME_SUCCEEDED",
+      "2": "WORKFLOW_EFFECT_DISPATCH_OUTCOME_REJECTED",
+      "3": "WORKFLOW_EFFECT_DISPATCH_OUTCOME_NOT_SENT",
+      "4": "WORKFLOW_EFFECT_DISPATCH_OUTCOME_UNKNOWN"
+    },
+    "workflow_runtime.WorkflowEffectReceiptOutcome": {
+      "0": "WORKFLOW_EFFECT_RECEIPT_OUTCOME_UNSPECIFIED",
+      "1": "WORKFLOW_EFFECT_RECEIPT_OUTCOME_APPLIED",
+      "2": "WORKFLOW_EFFECT_RECEIPT_OUTCOME_NOT_APPLIED",
+      "3": "WORKFLOW_EFFECT_RECEIPT_OUTCOME_UNKNOWN"
+    },
+    "workflow_runtime.WorkflowEffectReconciliationOutcome": {
+      "0": "WORKFLOW_EFFECT_RECONCILIATION_OUTCOME_UNSPECIFIED",
+      "1": "WORKFLOW_EFFECT_RECONCILIATION_OUTCOME_APPLIED",
+      "2": "WORKFLOW_EFFECT_RECONCILIATION_OUTCOME_NOT_APPLIED",
+      "3": "WORKFLOW_EFFECT_RECONCILIATION_OUTCOME_STILL_UNKNOWN"
+    },
     "workflow_runtime.WorkflowExecutionTokenOutcome": {
       "0": "WORKFLOW_EXECUTION_TOKEN_OUTCOME_UNSPECIFIED",
       "1": "WORKFLOW_EXECUTION_TOKEN_OUTCOME_COMPLETED",
@@ -738,6 +757,42 @@
       "8": "string preview_digest",
       "9": "string destination_fingerprint"
     },
+    "workflow_runtime.WorkflowEffectConnectorRegistration": {
+      "1": "string connector_class",
+      "2": "string version",
+      "3": "string package_digest",
+      "4": "string binding_id",
+      "5": "string account_binding_id",
+      "6": "string allowed_actions",
+      "7": "bool idempotent",
+      "8": "bool supports_reconciliation",
+      "9": "string registration_digest"
+    },
+    "workflow_runtime.WorkflowEffectDispatchSettled": {
+      "1": "string run_id",
+      "10": "string idempotency_key",
+      "2": "string run_token_id",
+      "3": "string effect_id",
+      "4": "string dispatch_id",
+      "5": "string grant_id",
+      "6": "WorkflowEffectDispatchOutcome outcome",
+      "7": "string error_code",
+      "8": "WorkflowEffectReceipt receipt",
+      "9": "uint64 elapsed_milliseconds"
+    },
+    "workflow_runtime.WorkflowEffectDispatchStarted": {
+      "1": "string run_id",
+      "10": "WorkflowEffectConnectorRegistration registration",
+      "11": "int64 deadline_unix_millis",
+      "2": "string run_token_id",
+      "3": "string effect_id",
+      "4": "string dispatch_id",
+      "5": "string grant_id",
+      "6": "string intent_digest",
+      "7": "string preview_digest",
+      "8": "string destination_fingerprint",
+      "9": "string idempotency_key"
+    },
     "workflow_runtime.WorkflowEffectIntent": {
       "1": "string effect_id",
       "10": "string action",
@@ -766,6 +821,24 @@
       "2": "string intent_digest",
       "3": "WorkflowEffectPreview preview",
       "4": "ApprovalRequest approval_request"
+    },
+    "workflow_runtime.WorkflowEffectReceipt": {
+      "1": "string receipt_id",
+      "2": "string provider_reference",
+      "3": "WorkflowEffectReceiptOutcome outcome",
+      "4": "string evidence_digest"
+    },
+    "workflow_runtime.WorkflowEffectReconciled": {
+      "1": "string run_id",
+      "10": "string idempotency_key",
+      "2": "string run_token_id",
+      "3": "string effect_id",
+      "4": "string dispatch_id",
+      "5": "string reconciliation_id",
+      "6": "WorkflowEffectReconciliationOutcome outcome",
+      "7": "string error_code",
+      "8": "WorkflowEffectReceipt receipt",
+      "9": "uint64 elapsed_milliseconds"
     },
     "workflow_runtime.WorkflowExecutionTokenCreated": {
       "1": "string run_id",
@@ -1087,12 +1160,22 @@
     },
     "workflow_runtime.WorkflowProjectedEffectAuthority": {
       "1": "WorkflowEffectProposed proposal",
+      "10": "WorkflowEffectReconciled reconciliation",
+      "11": "int64 dispatch_started_at_unix_millis",
+      "12": "int64 dispatch_settled_at_unix_millis",
+      "13": "int64 reconciled_at_unix_millis",
+      "14": "uint64 dispatch_started_store_position",
+      "15": "uint64 dispatch_settled_store_position",
+      "16": "uint64 reconciled_store_position",
+      "17": "uint32 reconciliation_count",
       "2": "string status",
       "3": "WorkflowEffectAuthorized authorization",
       "4": "int64 proposed_at_unix_millis",
       "5": "int64 authorized_at_unix_millis",
       "6": "uint64 proposed_store_position",
-      "7": "uint64 authorized_store_position"
+      "7": "uint64 authorized_store_position",
+      "8": "WorkflowEffectDispatchStarted dispatch_started",
+      "9": "WorkflowEffectDispatchSettled dispatch_settled"
     },
     "workflow_runtime.WorkflowProjectedEmission": {
       "1": "string emission_id",

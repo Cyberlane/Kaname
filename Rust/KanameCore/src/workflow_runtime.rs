@@ -36,6 +36,9 @@ pub const WORKFLOW_LLM_ATTEMPT_STARTED_KIND: &str = "workflow.llm.attempt-starte
 pub const WORKFLOW_LLM_ATTEMPT_SETTLED_KIND: &str = "workflow.llm.attempt-settled";
 pub const WORKFLOW_EFFECT_PROPOSED_KIND: &str = "workflow.effect.proposed";
 pub const WORKFLOW_EFFECT_AUTHORIZED_KIND: &str = "workflow.effect.authorized";
+pub const WORKFLOW_EFFECT_DISPATCH_STARTED_KIND: &str = "workflow.effect.dispatch-started";
+pub const WORKFLOW_EFFECT_DISPATCH_SETTLED_KIND: &str = "workflow.effect.dispatch-settled";
+pub const WORKFLOW_EFFECT_RECONCILED_KIND: &str = "workflow.effect.reconciled";
 pub const WORKFLOW_ATTEMPT_SETTLED_KIND: &str = "workflow.attempt.settled";
 pub const WORKFLOW_PORT_EMITTED_KIND: &str = "workflow.port.emitted";
 pub const WORKFLOW_EDGE_CHECKPOINTED_KIND: &str = "workflow.edge.checkpointed";
@@ -71,6 +74,11 @@ pub const WORKFLOW_LLM_ATTEMPT_STARTED_TYPE: &str = "kaname.workflow.llm-attempt
 pub const WORKFLOW_LLM_ATTEMPT_SETTLED_TYPE: &str = "kaname.workflow.llm-attempt-settled.v1";
 pub const WORKFLOW_EFFECT_PROPOSED_TYPE: &str = "kaname.workflow.effect-proposed.v1";
 pub const WORKFLOW_EFFECT_AUTHORIZED_TYPE: &str = "kaname.workflow.effect-authorized.v1";
+pub const WORKFLOW_EFFECT_DISPATCH_STARTED_TYPE: &str =
+    "kaname.workflow.effect-dispatch-started.v1";
+pub const WORKFLOW_EFFECT_DISPATCH_SETTLED_TYPE: &str =
+    "kaname.workflow.effect-dispatch-settled.v1";
+pub const WORKFLOW_EFFECT_RECONCILED_TYPE: &str = "kaname.workflow.effect-reconciled.v1";
 pub const WORKFLOW_ATTEMPT_SETTLED_TYPE: &str = "kaname.workflow.attempt-settled.v1";
 pub const WORKFLOW_PORT_EMITTED_TYPE: &str = "kaname.workflow.port-emitted.v1";
 pub const WORKFLOW_EDGE_CHECKPOINTED_TYPE: &str = "kaname.workflow.edge-checkpointed.v1";
@@ -132,6 +140,9 @@ pub enum WorkflowRuntimeEvent {
     LlmAttemptSettled(v1::WorkflowLlmAttemptSettled),
     EffectProposed(v1::WorkflowEffectProposed),
     EffectAuthorized(v1::WorkflowEffectAuthorized),
+    EffectDispatchStarted(v1::WorkflowEffectDispatchStarted),
+    EffectDispatchSettled(v1::WorkflowEffectDispatchSettled),
+    EffectReconciled(v1::WorkflowEffectReconciled),
     AttemptSettled(v1::WorkflowAttemptSettled),
     PortEmitted(v1::WorkflowPortEmitted),
     EdgeCheckpointed(v1::WorkflowEdgeCheckpointed),
@@ -167,6 +178,9 @@ impl WorkflowRuntimeEvent {
                 .as_ref()
                 .map_or("", |intent| intent.run_id.as_str()),
             Self::EffectAuthorized(payload) => &payload.run_id,
+            Self::EffectDispatchStarted(payload) => &payload.run_id,
+            Self::EffectDispatchSettled(payload) => &payload.run_id,
+            Self::EffectReconciled(payload) => &payload.run_id,
             Self::AttemptSettled(payload) => &payload.run_id,
             Self::PortEmitted(payload) => &payload.run_id,
             Self::EdgeCheckpointed(payload) => &payload.run_id,
@@ -395,6 +409,31 @@ pub fn decode_workflow_event(event: &v1::EventEnvelope) -> Result<WorkflowRuntim
             validate_event_context(event, &payload.run_id)?;
             Ok(WorkflowRuntimeEvent::EffectAuthorized(payload))
         }
+        WORKFLOW_EFFECT_DISPATCH_STARTED_KIND => {
+            let payload: v1::WorkflowEffectDispatchStarted = decode_payload(
+                event.payload.as_ref(),
+                WORKFLOW_EFFECT_DISPATCH_STARTED_TYPE,
+            )?;
+            validate_effect_dispatch_started(&payload)?;
+            validate_event_context(event, &payload.run_id)?;
+            Ok(WorkflowRuntimeEvent::EffectDispatchStarted(payload))
+        }
+        WORKFLOW_EFFECT_DISPATCH_SETTLED_KIND => {
+            let payload: v1::WorkflowEffectDispatchSettled = decode_payload(
+                event.payload.as_ref(),
+                WORKFLOW_EFFECT_DISPATCH_SETTLED_TYPE,
+            )?;
+            validate_effect_dispatch_settled(&payload)?;
+            validate_event_context(event, &payload.run_id)?;
+            Ok(WorkflowRuntimeEvent::EffectDispatchSettled(payload))
+        }
+        WORKFLOW_EFFECT_RECONCILED_KIND => {
+            let payload: v1::WorkflowEffectReconciled =
+                decode_payload(event.payload.as_ref(), WORKFLOW_EFFECT_RECONCILED_TYPE)?;
+            validate_effect_reconciled(&payload)?;
+            validate_event_context(event, &payload.run_id)?;
+            Ok(WorkflowRuntimeEvent::EffectReconciled(payload))
+        }
         WORKFLOW_ATTEMPT_SETTLED_KIND => {
             let payload: v1::WorkflowAttemptSettled =
                 decode_payload(event.payload.as_ref(), WORKFLOW_ATTEMPT_SETTLED_TYPE)?;
@@ -531,6 +570,14 @@ pub fn workflow_effect_preview_digest(preview: &v1::WorkflowEffectPreview) -> St
     sha256_hex(&canonical.encode_to_vec())
 }
 
+pub fn workflow_effect_connector_registration_digest(
+    registration: &v1::WorkflowEffectConnectorRegistration,
+) -> String {
+    let mut canonical = registration.clone();
+    canonical.registration_digest.clear();
+    sha256_hex(&canonical.encode_to_vec())
+}
+
 fn validate_effect_proposed(payload: &v1::WorkflowEffectProposed) -> Result<()> {
     let intent = payload
         .intent
@@ -656,6 +703,174 @@ fn validate_effect_authorized(payload: &v1::WorkflowEffectAuthorized) -> Result<
         return invalid("effect_authorization_mismatch");
     }
     Ok(())
+}
+
+fn validate_effect_connector_registration(
+    registration: &v1::WorkflowEffectConnectorRegistration,
+) -> Result<()> {
+    for (value, code) in [
+        (&registration.connector_class, "effect_connector_class"),
+        (&registration.version, "effect_connector_version"),
+        (&registration.binding_id, "effect_connector_binding_id"),
+        (
+            &registration.account_binding_id,
+            "effect_connector_account_binding_id",
+        ),
+    ] {
+        validate_identifier(value, 128, code)?;
+    }
+    validate_digest(
+        &registration.package_digest,
+        "effect_connector_package_digest",
+    )?;
+    validate_digest(
+        &registration.registration_digest,
+        "effect_connector_registration_digest",
+    )?;
+    if !registration.idempotent
+        || !registration.supports_reconciliation
+        || registration.allowed_actions.is_empty()
+        || registration.allowed_actions.len() > 64
+        || registration
+            .allowed_actions
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+        || registration.registration_digest
+            != workflow_effect_connector_registration_digest(registration)
+    {
+        return invalid("effect_connector_registration_contract");
+    }
+    for action in &registration.allowed_actions {
+        validate_identifier(action, 128, "effect_connector_allowed_action")?;
+    }
+    Ok(())
+}
+
+fn validate_effect_dispatch_started(payload: &v1::WorkflowEffectDispatchStarted) -> Result<()> {
+    validate_run_and_token(&payload.run_id, &payload.run_token_id)?;
+    for (value, code) in [
+        (&payload.effect_id, "effect_id"),
+        (&payload.dispatch_id, "effect_dispatch_id"),
+        (&payload.grant_id, "effect_grant_id"),
+        (&payload.idempotency_key, "effect_idempotency_key"),
+    ] {
+        validate_identifier(value, 128, code)?;
+    }
+    for (value, code) in [
+        (&payload.intent_digest, "effect_intent_digest"),
+        (&payload.preview_digest, "effect_preview_digest"),
+        (
+            &payload.destination_fingerprint,
+            "effect_destination_fingerprint",
+        ),
+    ] {
+        validate_digest(value, code)?;
+    }
+    validate_effect_connector_registration(
+        payload
+            .registration
+            .as_ref()
+            .ok_or_else(|| invalid_error("effect_connector_registration_missing"))?,
+    )?;
+    if payload.deadline_unix_millis <= 0 {
+        return invalid("effect_dispatch_deadline");
+    }
+    Ok(())
+}
+
+fn validate_effect_receipt(
+    receipt: Option<&v1::WorkflowEffectReceipt>,
+    expected: v1::WorkflowEffectReceiptOutcome,
+) -> Result<()> {
+    let receipt = receipt.ok_or_else(|| invalid_error("effect_receipt_missing"))?;
+    validate_identifier(&receipt.receipt_id, 256, "effect_receipt_id")?;
+    if !receipt.provider_reference.is_empty() {
+        validate_identifier(
+            &receipt.provider_reference,
+            256,
+            "effect_provider_reference",
+        )?;
+    }
+    validate_digest(&receipt.evidence_digest, "effect_receipt_evidence_digest")?;
+    if v1::WorkflowEffectReceiptOutcome::try_from(receipt.outcome) != Ok(expected) {
+        return invalid("effect_receipt_outcome");
+    }
+    Ok(())
+}
+
+fn validate_effect_dispatch_settled(payload: &v1::WorkflowEffectDispatchSettled) -> Result<()> {
+    validate_run_and_token(&payload.run_id, &payload.run_token_id)?;
+    for (value, code) in [
+        (&payload.effect_id, "effect_id"),
+        (&payload.dispatch_id, "effect_dispatch_id"),
+        (&payload.grant_id, "effect_grant_id"),
+        (&payload.idempotency_key, "effect_idempotency_key"),
+    ] {
+        validate_identifier(value, 128, code)?;
+    }
+    if payload.elapsed_milliseconds > 86_400_000 {
+        return invalid("effect_dispatch_elapsed");
+    }
+    let outcome = v1::WorkflowEffectDispatchOutcome::try_from(payload.outcome)
+        .map_err(|_| invalid_error("effect_dispatch_outcome"))?;
+    let receipt_outcome = match outcome {
+        v1::WorkflowEffectDispatchOutcome::Succeeded => {
+            if !payload.error_code.is_empty() {
+                return invalid("effect_dispatch_success_error");
+            }
+            v1::WorkflowEffectReceiptOutcome::Applied
+        }
+        v1::WorkflowEffectDispatchOutcome::Rejected
+        | v1::WorkflowEffectDispatchOutcome::NotSent => {
+            validate_identifier(&payload.error_code, 128, "effect_dispatch_error_code")?;
+            v1::WorkflowEffectReceiptOutcome::NotApplied
+        }
+        v1::WorkflowEffectDispatchOutcome::Unknown => {
+            validate_identifier(&payload.error_code, 128, "effect_dispatch_error_code")?;
+            v1::WorkflowEffectReceiptOutcome::Unknown
+        }
+        v1::WorkflowEffectDispatchOutcome::Unspecified => {
+            return invalid("effect_dispatch_outcome");
+        }
+    };
+    validate_effect_receipt(payload.receipt.as_ref(), receipt_outcome)
+}
+
+fn validate_effect_reconciled(payload: &v1::WorkflowEffectReconciled) -> Result<()> {
+    validate_run_and_token(&payload.run_id, &payload.run_token_id)?;
+    for (value, code) in [
+        (&payload.effect_id, "effect_id"),
+        (&payload.dispatch_id, "effect_dispatch_id"),
+        (&payload.reconciliation_id, "effect_reconciliation_id"),
+        (&payload.idempotency_key, "effect_idempotency_key"),
+    ] {
+        validate_identifier(value, 128, code)?;
+    }
+    if payload.elapsed_milliseconds > 86_400_000 {
+        return invalid("effect_reconciliation_elapsed");
+    }
+    let outcome = v1::WorkflowEffectReconciliationOutcome::try_from(payload.outcome)
+        .map_err(|_| invalid_error("effect_reconciliation_outcome"))?;
+    let receipt_outcome = match outcome {
+        v1::WorkflowEffectReconciliationOutcome::Applied => {
+            if !payload.error_code.is_empty() {
+                return invalid("effect_reconciliation_success_error");
+            }
+            v1::WorkflowEffectReceiptOutcome::Applied
+        }
+        v1::WorkflowEffectReconciliationOutcome::NotApplied => {
+            validate_identifier(&payload.error_code, 128, "effect_reconciliation_error_code")?;
+            v1::WorkflowEffectReceiptOutcome::NotApplied
+        }
+        v1::WorkflowEffectReconciliationOutcome::StillUnknown => {
+            validate_identifier(&payload.error_code, 128, "effect_reconciliation_error_code")?;
+            v1::WorkflowEffectReceiptOutcome::Unknown
+        }
+        v1::WorkflowEffectReconciliationOutcome::Unspecified => {
+            return invalid("effect_reconciliation_outcome");
+        }
+    };
+    validate_effect_receipt(payload.receipt.as_ref(), receipt_outcome)
 }
 
 fn validate_case_episode_started(payload: &v1::WorkflowCaseEpisodeStarted) -> Result<()> {

@@ -152,6 +152,65 @@ fn version_thirteen_projection_adds_effect_authority_without_rebuild() {
 }
 
 #[test]
+fn version_fourteen_projection_adds_effect_dispatch_evidence_without_rebuild() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("workflow-projection.sqlite");
+    {
+        let projection = WorkflowRunProjection::open(&path).unwrap();
+        assert_eq!(projection.high_water_mark().unwrap(), 0);
+    }
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "DROP TABLE workflow_effect_authorities;
+             CREATE TABLE workflow_effect_authorities (
+                 effect_id TEXT PRIMARY KEY,
+                 run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+                 attempt_id TEXT NOT NULL REFERENCES workflow_attempts(attempt_id) ON DELETE CASCADE,
+                 node_id TEXT NOT NULL,
+                 idempotency_key TEXT NOT NULL UNIQUE,
+                 intent_digest TEXT NOT NULL CHECK (length(intent_digest) = 64),
+                 preview_digest TEXT NOT NULL CHECK (length(preview_digest) = 64),
+                 destination_fingerprint TEXT NOT NULL CHECK (length(destination_fingerprint) = 64),
+                 approval_id TEXT NOT NULL UNIQUE,
+                 approval_fingerprint BLOB NOT NULL CHECK (length(approval_fingerprint) = 32),
+                 expires_at_unix_millis INTEGER NOT NULL CHECK (expires_at_unix_millis > 0),
+                 status TEXT NOT NULL CHECK (status IN ('proposed', 'authorized')),
+                 proposal_wire BLOB NOT NULL,
+                 authorization_wire BLOB,
+                 proposed_at_unix_millis INTEGER NOT NULL CHECK (proposed_at_unix_millis >= 0),
+                 authorized_at_unix_millis INTEGER,
+                 proposed_store_position INTEGER NOT NULL UNIQUE CHECK (proposed_store_position > 0),
+                 authorized_store_position INTEGER UNIQUE
+             ) STRICT;
+             CREATE INDEX workflow_effect_authorities_run_position
+                 ON workflow_effect_authorities(run_id, proposed_store_position, effect_id);
+             PRAGMA user_version = 14;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let projection = WorkflowRunProjection::open(&path).unwrap();
+    assert_eq!(projection.row_count("effect_authorities").unwrap(), 0);
+    projection.integrity_check().unwrap();
+    drop(projection);
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 15);
+    let columns = connection
+        .prepare("PRAGMA table_info(workflow_effect_authorities)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(columns.contains(&"dispatch_started_wire".to_string()));
+    assert!(columns.contains(&"reconciliation_count".to_string()));
+}
+
+#[test]
 fn corrupt_logical_projection_is_detected_and_rebuilt_from_the_journal() {
     let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
     append_complete_corpus(&mut journal);

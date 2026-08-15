@@ -4,11 +4,16 @@ use kaname_core::{
     v1::{
         ApprovalDecision, ApprovalRequest, ApprovalResolution, EventEnvelope, EventProvenance,
         EvidenceRetentionClass, OpaqueTypedPayload, SchemaVersion, Scope, WorkflowAttemptStarted,
-        WorkflowEffectIntent, WorkflowEffectPreview, WorkflowEffectProposed,
-        WorkflowExecutionTokenCreated, WorkflowRunTokenCreated,
+        WorkflowEffectConnectorRegistration, WorkflowEffectIntent, WorkflowEffectPreview,
+        WorkflowEffectProposed, WorkflowExecutionTokenCreated, WorkflowRunTokenCreated,
     },
     workflow_effect_authority::{
         WorkflowEffectAuthorityError, authorize_workflow_effect, propose_workflow_effect,
+    },
+    workflow_effect_connector::{
+        DeterministicEffectConnectorPlan, DeterministicWorkflowEffectConnector,
+        WorkflowEffectConnector, WorkflowEffectConnectorError, WorkflowEffectConnectorRequest,
+        dispatch_workflow_effect, reconcile_workflow_effect,
     },
     workflow_projection::WorkflowRunProjection,
     workflow_runtime::{
@@ -158,6 +163,362 @@ fn changed_intent_cannot_reuse_effect_or_idempotency_identity() {
         Err(WorkflowEffectAuthorityError::StaleOrMismatched)
     ));
     assert_eq!(projection.row_count("effect_authorities").unwrap(), 1);
+}
+
+#[test]
+fn successful_dispatch_is_idempotent_across_duplicate_requests_and_restart() {
+    let directory = tempdir().unwrap();
+    let journal_path = directory.path().join("journal.sqlite");
+    let projection_path = directory.path().join("projection.sqlite");
+    let mut journal = Journal::open(&journal_path, &CURSOR_KEY).unwrap();
+    append_active_attempt(&mut journal);
+    let mut projection = WorkflowRunProjection::open(&projection_path).unwrap();
+    let effect = proposal("effect-success", "idempotency-success", 100_000);
+    authorize(&mut journal, &mut projection, effect, 2_000, 3_000);
+    let mut connector = connector(DeterministicEffectConnectorPlan::Succeed);
+
+    let dispatched = dispatch_workflow_effect(
+        &mut journal,
+        &mut projection,
+        &mut connector,
+        "effect-success",
+        4_000,
+    )
+    .unwrap();
+    assert!(!dispatched.duplicate);
+    assert_eq!(dispatched.authority.status, "succeeded");
+    assert_eq!(connector.dispatch_count("idempotency-success"), 1);
+    let connector_request = WorkflowEffectConnectorRequest {
+        proposal: dispatched.authority.proposal.clone().unwrap(),
+        authorization: dispatched.authority.authorization.clone().unwrap(),
+        dispatch: dispatched.authority.dispatch_started.clone().unwrap(),
+        prior_receipt: dispatched
+            .authority
+            .dispatch_settled
+            .as_ref()
+            .and_then(|value| value.receipt.clone()),
+    };
+    let _ = connector.dispatch(&connector_request);
+    assert_eq!(connector.dispatch_count("idempotency-success"), 1);
+
+    let duplicate = dispatch_workflow_effect(
+        &mut journal,
+        &mut projection,
+        &mut connector,
+        "effect-success",
+        5_000,
+    )
+    .unwrap();
+    assert!(duplicate.duplicate);
+    assert_eq!(connector.dispatch_count("idempotency-success"), 1);
+    let expected = projection.canonical_snapshot().unwrap();
+    drop(projection);
+    drop(journal);
+
+    let mut journal = Journal::open(&journal_path, &CURSOR_KEY).unwrap();
+    let mut projection = WorkflowRunProjection::open(&projection_path).unwrap();
+    let after_restart = dispatch_workflow_effect(
+        &mut journal,
+        &mut projection,
+        &mut connector,
+        "effect-success",
+        6_000,
+    )
+    .unwrap();
+    assert!(after_restart.duplicate);
+    assert_eq!(connector.dispatch_count("idempotency-success"), 1);
+    assert_eq!(projection.canonical_snapshot().unwrap(), expected);
+    projection.rebuild_from_zero(&journal).unwrap();
+    assert_eq!(projection.canonical_snapshot().unwrap(), expected);
+}
+
+#[test]
+fn rejection_and_timeout_before_send_are_known_non_applied_outcomes() {
+    for (effect_id, idempotency_key, plan, expected_status, expected_error) in [
+        (
+            "effect-rejected",
+            "idempotency-rejected",
+            DeterministicEffectConnectorPlan::Reject,
+            "rejected",
+            "connector.rejected",
+        ),
+        (
+            "effect-timeout-before",
+            "idempotency-timeout-before",
+            DeterministicEffectConnectorPlan::TimeoutBeforeSend,
+            "not_sent",
+            "connector.timeout_before_send",
+        ),
+    ] {
+        let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+        append_active_attempt(&mut journal);
+        let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+        authorize(
+            &mut journal,
+            &mut projection,
+            proposal(effect_id, idempotency_key, 100_000),
+            2_000,
+            3_000,
+        );
+        let mut connector = connector(plan);
+        let result = dispatch_workflow_effect(
+            &mut journal,
+            &mut projection,
+            &mut connector,
+            effect_id,
+            4_000,
+        )
+        .unwrap();
+        assert_eq!(result.authority.status, expected_status);
+        assert_eq!(
+            result
+                .authority
+                .dispatch_settled
+                .as_ref()
+                .unwrap()
+                .error_code,
+            expected_error
+        );
+        assert_eq!(connector.dispatch_count(idempotency_key), 1);
+        assert!(matches!(
+            reconcile_workflow_effect(
+                &mut journal,
+                &mut projection,
+                &mut connector,
+                effect_id,
+                70_000,
+            ),
+            Err(WorkflowEffectConnectorError::NotReconcilable)
+        ));
+    }
+}
+
+#[test]
+fn timeout_after_send_can_only_reconcile_and_never_dispatch_again() {
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    append_active_attempt(&mut journal);
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    authorize(
+        &mut journal,
+        &mut projection,
+        proposal("effect-timeout-after", "idempotency-timeout-after", 100_000),
+        2_000,
+        3_000,
+    );
+    let mut connector = connector(DeterministicEffectConnectorPlan::TimeoutAfterSend);
+    let dispatched = dispatch_workflow_effect(
+        &mut journal,
+        &mut projection,
+        &mut connector,
+        "effect-timeout-after",
+        4_000,
+    )
+    .unwrap();
+    assert_eq!(dispatched.authority.status, "outcome_unknown");
+    assert_eq!(connector.dispatch_count("idempotency-timeout-after"), 1);
+    assert!(matches!(
+        dispatch_workflow_effect(
+            &mut journal,
+            &mut projection,
+            &mut connector,
+            "effect-timeout-after",
+            65_000,
+        ),
+        Err(WorkflowEffectConnectorError::ReconciliationRequired)
+    ));
+    assert_eq!(connector.dispatch_count("idempotency-timeout-after"), 1);
+
+    let reconciled = reconcile_workflow_effect(
+        &mut journal,
+        &mut projection,
+        &mut connector,
+        "effect-timeout-after",
+        70_000,
+    )
+    .unwrap();
+    assert_eq!(reconciled.authority.status, "reconciled_applied");
+    assert_eq!(reconciled.authority.reconciliation_count, 1);
+    assert_eq!(connector.dispatch_count("idempotency-timeout-after"), 1);
+    assert_eq!(
+        connector.reconciliation_count("idempotency-timeout-after"),
+        1
+    );
+    assert!(
+        dispatch_workflow_effect(
+            &mut journal,
+            &mut projection,
+            &mut connector,
+            "effect-timeout-after",
+            80_000,
+        )
+        .unwrap()
+        .duplicate
+    );
+    assert!(
+        reconcile_workflow_effect(
+            &mut journal,
+            &mut projection,
+            &mut connector,
+            "effect-timeout-after",
+            80_000,
+        )
+        .unwrap()
+        .duplicate
+    );
+    assert_eq!(connector.dispatch_count("idempotency-timeout-after"), 1);
+    assert_eq!(
+        connector.reconciliation_count("idempotency-timeout-after"),
+        1
+    );
+}
+
+#[test]
+fn ambiguous_outcome_remains_blocked_and_records_each_reconciliation_observation() {
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    append_active_attempt(&mut journal);
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    authorize(
+        &mut journal,
+        &mut projection,
+        proposal("effect-ambiguous", "idempotency-ambiguous", 100_000),
+        2_000,
+        3_000,
+    );
+    let mut connector = connector(DeterministicEffectConnectorPlan::Ambiguous);
+    dispatch_workflow_effect(
+        &mut journal,
+        &mut projection,
+        &mut connector,
+        "effect-ambiguous",
+        4_000,
+    )
+    .unwrap();
+    for (ordinal, at) in [(1, 5_000), (2, 6_000)] {
+        let result = reconcile_workflow_effect(
+            &mut journal,
+            &mut projection,
+            &mut connector,
+            "effect-ambiguous",
+            at,
+        )
+        .unwrap();
+        assert_eq!(result.authority.status, "outcome_unknown");
+        assert_eq!(result.authority.reconciliation_count, ordinal);
+    }
+    assert!(matches!(
+        dispatch_workflow_effect(
+            &mut journal,
+            &mut projection,
+            &mut connector,
+            "effect-ambiguous",
+            7_000,
+        ),
+        Err(WorkflowEffectConnectorError::ReconciliationRequired)
+    ));
+    assert_eq!(connector.dispatch_count("idempotency-ambiguous"), 1);
+    assert_eq!(connector.reconciliation_count("idempotency-ambiguous"), 2);
+}
+
+#[test]
+fn stale_authority_and_registration_drift_fail_before_dispatch_mutation() {
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    append_active_attempt(&mut journal);
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    authorize(
+        &mut journal,
+        &mut projection,
+        proposal("effect-stale", "idempotency-stale", 5_000),
+        2_000,
+        3_000,
+    );
+    let before = journal.event_page_after(0, 100).unwrap().high_water_mark;
+    let mut connector = connector(DeterministicEffectConnectorPlan::Succeed);
+    assert!(matches!(
+        dispatch_workflow_effect(
+            &mut journal,
+            &mut projection,
+            &mut connector,
+            "effect-stale",
+            5_000,
+        ),
+        Err(WorkflowEffectConnectorError::AuthorityExpired)
+    ));
+    assert_eq!(
+        journal.event_page_after(0, 100).unwrap().high_water_mark,
+        before
+    );
+    assert_eq!(connector.dispatch_count("idempotency-stale"), 0);
+
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    append_active_attempt(&mut journal);
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    authorize(
+        &mut journal,
+        &mut projection,
+        proposal("effect-drift", "idempotency-drift", 100_000),
+        2_000,
+        3_000,
+    );
+    let before = journal.event_page_after(0, 100).unwrap().high_water_mark;
+    let mut drifted = connector_registration();
+    drifted.allowed_actions = vec!["archive".into()];
+    let mut connector = DeterministicWorkflowEffectConnector::default();
+    connector.register(drifted, DeterministicEffectConnectorPlan::Succeed);
+    assert!(matches!(
+        dispatch_workflow_effect(
+            &mut journal,
+            &mut projection,
+            &mut connector,
+            "effect-drift",
+            4_000,
+        ),
+        Err(WorkflowEffectConnectorError::RegistrationMismatch)
+    ));
+    assert_eq!(
+        journal.event_page_after(0, 100).unwrap().high_water_mark,
+        before
+    );
+    assert_eq!(connector.dispatch_count("idempotency-drift"), 0);
+}
+
+fn authorize(
+    journal: &mut Journal,
+    projection: &mut WorkflowRunProjection,
+    proposal: WorkflowEffectProposed,
+    proposed_at_unix_millis: i64,
+    authorized_at_unix_millis: i64,
+) {
+    let effect_id = proposal.intent.as_ref().unwrap().effect_id.clone();
+    let approval = proposal.approval_request.as_ref().unwrap().clone();
+    propose_workflow_effect(journal, projection, proposal, proposed_at_unix_millis).unwrap();
+    authorize_workflow_effect(
+        journal,
+        projection,
+        &effect_id,
+        resolution(&approval, approval.fingerprint.clone()),
+        authorized_at_unix_millis,
+    )
+    .unwrap();
+}
+
+fn connector(plan: DeterministicEffectConnectorPlan) -> DeterministicWorkflowEffectConnector {
+    let mut connector = DeterministicWorkflowEffectConnector::default();
+    connector.register(connector_registration(), plan);
+    connector
+}
+
+fn connector_registration() -> WorkflowEffectConnectorRegistration {
+    WorkflowEffectConnectorRegistration {
+        connector_class: "mail".into(),
+        version: "1.0.0".into(),
+        package_digest: "c".repeat(64),
+        binding_id: "binding-installation-mail-primary".into(),
+        account_binding_id: "binding-mail-primary".into(),
+        allowed_actions: vec!["send".into()],
+        idempotent: true,
+        supports_reconciliation: true,
+        registration_digest: String::new(),
+    }
 }
 
 fn proposal(effect_id: &str, idempotency_key: &str, expires: i64) -> WorkflowEffectProposed {
