@@ -105,15 +105,18 @@ pub struct WorkflowRunProtectionState {
     pub settled: bool,
     pub waiting: bool,
     pub approval_pending: bool,
+    pub effect_authorized: bool,
     pub unknown_outcome: bool,
 }
 
 impl WorkflowRunProtectionState {
     pub fn protected_reason(self) -> Option<&'static str> {
-        if self.approval_pending {
-            Some("approval_pending")
-        } else if self.unknown_outcome {
+        if self.unknown_outcome {
             Some("unknown_outcome")
+        } else if self.approval_pending {
+            Some("approval_pending")
+        } else if self.effect_authorized {
+            Some("effect_authorized")
         } else if self.waiting {
             Some("waiting")
         } else if !self.settled {
@@ -164,18 +167,28 @@ mod tests {
                 settled: false,
                 waiting: true,
                 approval_pending: false,
+                effect_authorized: false,
                 unknown_outcome: false,
             },
             WorkflowRunProtectionState {
                 settled: false,
                 waiting: false,
                 approval_pending: true,
+                effect_authorized: false,
                 unknown_outcome: false,
             },
             WorkflowRunProtectionState {
                 settled: true,
                 waiting: false,
                 approval_pending: false,
+                effect_authorized: true,
+                unknown_outcome: false,
+            },
+            WorkflowRunProtectionState {
+                settled: true,
+                waiting: false,
+                approval_pending: false,
+                effect_authorized: false,
                 unknown_outcome: true,
             },
         ] {
@@ -186,6 +199,7 @@ mod tests {
                 settled: true,
                 waiting: false,
                 approval_pending: false,
+                effect_authorized: false,
                 unknown_outcome: false,
             }
             .protected_reason(),

@@ -9317,7 +9317,12 @@ private struct DesktopAutomationsView: View {
                     title: "Workflow runs",
                     detail: "Exact revision snapshots, durable node evidence, and read-only debugging"
                 )
-                if let runner = LocalCoreRunner.bundled() {
+                if CommandLine.arguments.contains("--desktop-effect-lifecycle-fixture") {
+                    DesktopDurableWorkflowRunsView(
+                        snapshot: DesktopWorkflowEffectLifecycleFixture.unknownOutcomeHistory(),
+                        qualificationFixture: true
+                    )
+                } else if let runner = LocalCoreRunner.bundled() {
                     DesktopDurableWorkflowRunsView(runner: runner)
                 } else {
                     BoundaryCallout(

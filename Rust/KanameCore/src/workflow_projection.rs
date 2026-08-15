@@ -3761,16 +3761,28 @@ fn projected_purge_preview(
             ));
         }
     };
+    let effect_approval_pending = run
+        .effect_authorities
+        .iter()
+        .any(|authority| authority.status == "proposed");
+    let effect_authorized = run
+        .effect_authorities
+        .iter()
+        .any(|authority| authority.status == "authorized");
+    let effect_outcome_unknown = run
+        .effect_authorities
+        .iter()
+        .any(|authority| matches!(authority.status.as_str(), "dispatching" | "outcome_unknown"));
     let protection = crate::workflow_retention::WorkflowRunProtectionState {
         settled: matches!(run.status.as_str(), "succeeded" | "failed" | "cancelled"),
         waiting: run.waits.iter().any(|wait| wait.status == "waiting"),
-        // V2 effect approvals do not yet have a workflow-runtime projection.
-        // Their runs remain unsettled, which is independently protected.
-        approval_pending: false,
-        unknown_outcome: run
-            .retries
-            .iter()
-            .any(|retry| retry.decision == "unknown-outcome"),
+        approval_pending: effect_approval_pending,
+        effect_authorized,
+        unknown_outcome: effect_outcome_unknown
+            || run
+                .retries
+                .iter()
+                .any(|retry| retry.decision == "unknown-outcome"),
     };
     // A case episode participates in an immutable cross-run context chain.
     // Run-only deletion cannot rewrite or gap that chain, so it remains

@@ -14,8 +14,8 @@ final class DesktopDurableWorkflowRunsViewModel: ObservableObject {
     }
 
     @Published private(set) var state: State = .idle
-    private let loader: DesktopWorkflowRunHistoryLoader
-    private let purgeClient: DesktopWorkflowRunPurgeClient
+    private let loader: DesktopWorkflowRunHistoryLoader?
+    private let purgeClient: DesktopWorkflowRunPurgeClient?
 
     init(runner: LocalCoreRunner) {
         purgeClient = DesktopWorkflowRunPurgeClient(transport: runner)
@@ -25,10 +25,17 @@ final class DesktopDurableWorkflowRunsViewModel: ObservableObject {
         )
     }
 
+    init(snapshot: DesktopWorkflowRunHistorySnapshot) {
+        state = .loaded(snapshot)
+        loader = nil
+        purgeClient = nil
+    }
+
     func load() async {
         guard state == .idle else { return }
         state = .loading
         do {
+            guard let loader else { return }
             state = .loaded(try await loader.load(
                 requestID: "workflow-runs:\(UUID().uuidString.lowercased())"
             ))
@@ -43,7 +50,7 @@ final class DesktopDurableWorkflowRunsViewModel: ObservableObject {
     }
 
     func purge(_ run: DesktopDurableWorkflowRun) async {
-        guard run.purgePreview.manualEligible else { return }
+        guard run.purgePreview.manualEligible, let purgeClient else { return }
         state = .loading
         do {
             _ = try await purgeClient.purge(
@@ -66,6 +73,7 @@ struct DesktopDurableWorkflowRunsView: View {
         case storage = "Storage"
         case tokens = "Tokens"
         case control = "Control flow"
+        case effect = "Effect"
         case capability = "Capability"
         case llm = "LLM"
         case subflow = "Child workflow"
@@ -87,9 +95,17 @@ struct DesktopDurableWorkflowRunsView: View {
     @State private var expandedLlmGroups: Set<String> = []
     @State private var showingPurgePreview = false
     @State private var showingPurgeConfirmation = false
+    private let qualificationFixture: Bool
 
     init(runner: LocalCoreRunner) {
+        qualificationFixture = false
         _viewModel = StateObject(wrappedValue: DesktopDurableWorkflowRunsViewModel(runner: runner))
+    }
+
+    init(snapshot: DesktopWorkflowRunHistorySnapshot, qualificationFixture: Bool = false) {
+        self.qualificationFixture = qualificationFixture
+        _viewModel = StateObject(wrappedValue: DesktopDurableWorkflowRunsViewModel(snapshot: snapshot))
+        _compactShowsDetail = State(initialValue: true)
     }
 
     var body: some View {
@@ -128,10 +144,14 @@ struct DesktopDurableWorkflowRunsView: View {
                 let compact = DesktopWorkflowLlmInspectionPresentation.layout(
                     for: proxy.size.width
                 ) == .compact
+                let effectCompact = compact
+                    || DesktopWorkflowEffectLifecyclePresentation.layout(
+                        for: max(0, proxy.size.width - 302)
+                    ) == .compact
                 Group {
                     if compact {
                         if compactShowsDetail, let run = selectedRun(in: history) {
-                            runDetail(run, compact: true)
+                            runDetail(run, compact: true, effectCompact: true)
                         } else {
                             runList(history)
                         }
@@ -139,7 +159,7 @@ struct DesktopDurableWorkflowRunsView: View {
                         HStack(alignment: .top, spacing: 12) {
                             runList(history).frame(width: 290)
                             if let run = selectedRun(in: history) {
-                                runDetail(run, compact: false)
+                                runDetail(run, compact: false, effectCompact: effectCompact)
                             }
                         }
                     }
@@ -184,6 +204,15 @@ struct DesktopDurableWorkflowRunsView: View {
                                 }
                             }
                             .font(.caption2).foregroundStyle(.secondary)
+                            if let effect = snapshot.run.effectAuthorities.last {
+                                Label(
+                                    DesktopWorkflowEffectLifecyclePresentation.title(for: effect.status),
+                                    systemImage: effectStatusSymbol(effect.status)
+                                )
+                                .font(.caption2)
+                                .foregroundStyle(effectStatusTint(effect.status))
+                                .lineLimit(1)
+                            }
                         }
                         Spacer(minLength: 0)
                         Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.secondary)
@@ -202,7 +231,11 @@ struct DesktopDurableWorkflowRunsView: View {
         .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
     }
 
-    private func runDetail(_ snapshot: DesktopWorkflowRunSnapshot, compact: Bool) -> some View {
+    private func runDetail(
+        _ snapshot: DesktopWorkflowRunSnapshot,
+        compact: Bool,
+        effectCompact: Bool
+    ) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 if compact {
@@ -224,13 +257,15 @@ struct DesktopDurableWorkflowRunsView: View {
                 }
                 Spacer()
             }
+            effectLifecycleSummary(snapshot.run.effectAuthorities, compact: effectCompact)
             retentionCard(snapshot.run)
             if let reason = snapshot.revisionAbsenceReason {
                 Label(reason, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption).foregroundStyle(Nord.auroraYellow).panelStyle()
             } else if let graph = snapshot.graph {
                 canvas(graph, run: snapshot.run)
-                    .frame(minHeight: 390)
+                    .frame(height: qualificationFixture ? 220 : nil)
+                    .frame(minHeight: qualificationFixture ? nil : 390)
                 inspector(snapshot, graph: graph)
             } else {
                 Label("The revision exists, but its historical graph could not be decoded. No empty diagram is shown.",
@@ -241,6 +276,79 @@ struct DesktopDurableWorkflowRunsView: View {
         .padding(14)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Nord.polarNight1.opacity(0.45), in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    @ViewBuilder
+    private func effectLifecycleSummary(
+        _ effects: [DesktopWorkflowProjectedEffectAuthority],
+        compact: Bool
+    ) -> some View {
+        if !effects.isEmpty {
+            VStack(alignment: .leading, spacing: 9) {
+                HStack {
+                    Label("Effect lifecycle", systemImage: "bolt.horizontal.circle.fill")
+                        .font(.caption.weight(.semibold)).foregroundStyle(Nord.frost1)
+                    Spacer()
+                    Text("\(effects.count) exact effect\(effects.count == 1 ? "" : "s")")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                ForEach(effects) { effect in
+                    VStack(alignment: .leading, spacing: 7) {
+                        HStack(alignment: .firstTextBaseline) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("\(effect.action) · \(effect.connectorClass)")
+                                    .font(.caption.weight(.bold))
+                                Text(effect.effectID)
+                                    .font(.system(size: 9, design: .monospaced))
+                                    .foregroundStyle(.secondary).lineLimit(1)
+                            }
+                            Spacer()
+                            Label(
+                                DesktopWorkflowEffectLifecyclePresentation.title(for: effect.status),
+                                systemImage: effectStatusSymbol(effect.status)
+                            )
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(effectStatusTint(effect.status))
+                        }
+                        if compact {
+                            VStack(alignment: .leading, spacing: 5) {
+                                ForEach(DesktopWorkflowEffectLifecyclePresentation.steps(for: effect.status)) {
+                                    effectStep($0)
+                                }
+                            }
+                        } else {
+                            HStack(spacing: 5) {
+                                ForEach(DesktopWorkflowEffectLifecyclePresentation.steps(for: effect.status)) {
+                                    effectStep($0).frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                            }
+                        }
+                        Label(
+                            DesktopWorkflowEffectLifecyclePresentation.nextAction(for: effect.status),
+                            systemImage: DesktopWorkflowEffectLifecyclePresentation.requiresAttention(effect.status)
+                                ? "hand.raised.fill" : "checkmark.shield.fill"
+                        )
+                        .font(.caption2)
+                        .foregroundStyle(
+                            DesktopWorkflowEffectLifecyclePresentation.requiresAttention(effect.status)
+                                ? Nord.auroraYellow : .secondary
+                        )
+                    }
+                    .padding(9)
+                    .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+                }
+            }
+            .padding(10)
+            .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 10))
+        }
+    }
+
+    private func effectStep(_ step: DesktopWorkflowEffectLifecycleStep) -> some View {
+        Label(step.title, systemImage: effectStepSymbol(step.state))
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundStyle(effectStepTint(step.state))
+            .padding(.horizontal, 7).padding(.vertical, 5)
+            .background(effectStepTint(step.state).opacity(0.11), in: Capsule())
     }
 
     private func retentionCard(_ run: DesktopDurableWorkflowRun) -> some View {
@@ -320,6 +428,7 @@ struct DesktopDurableWorkflowRunsView: View {
         switch reason {
         case "waiting": "Waiting run protected"
         case "approval_pending": "Approval-pending run protected"
+        case "effect_authorized": "Authorized effect protected"
         case "unknown_outcome": "Unknown outcome protected"
         case "run_not_settled": "Active run protected"
         case "case_episode": "Case episode protected"
@@ -360,15 +469,18 @@ struct DesktopDurableWorkflowRunsView: View {
                     .frame(width: size.width, height: size.height)
                     ForEach(graph.nodes) { node in
                         let state = run.nodes.first { $0.nodeID == node.id }?.status ?? "not-run"
+                        let effect = run.effects(for: node.id).last
                         Button {
                             selectedNodeID = node.id
-                            inspectorGroup = node.type.hasPrefix("storage.")
-                                ? .storage
-                                : (node.type == "data.case-context" ? .caseContext
-                                : (node.type == "control.subflow" ? .subflow
-                                : (run.attempt(for: node.id)?.errorCode == nil ? .inputs : .error)
-                                )
-                                )
+                            inspectorGroup = effect != nil
+                                ? .effect
+                                : (node.type.hasPrefix("storage.")
+                                    ? .storage
+                                    : (node.type == "data.case-context" ? .caseContext
+                                    : (node.type == "control.subflow" ? .subflow
+                                    : (run.attempt(for: node.id)?.errorCode == nil ? .inputs : .error)
+                                    )
+                                    ))
                         } label: {
                             VStack(alignment: .leading, spacing: 5) {
                                 HStack {
@@ -376,7 +488,16 @@ struct DesktopDurableWorkflowRunsView: View {
                                     Text(node.name).font(.caption.weight(.bold)).lineLimit(1)
                                 }
                                 Text(node.type).font(.system(size: 9, design: .monospaced)).foregroundStyle(.secondary)
-                                Text(state.capitalized).font(.caption2).foregroundStyle(statusTint(state))
+                                HStack(spacing: 4) {
+                                    Text(state.capitalized).foregroundStyle(statusTint(state))
+                                    if let effect {
+                                        Text("·").foregroundStyle(.secondary)
+                                        Text(DesktopWorkflowEffectLifecyclePresentation.title(for: effect.status))
+                                            .foregroundStyle(effectStatusTint(effect.status))
+                                            .lineLimit(1)
+                                    }
+                                }
+                                .font(.caption2)
                             }
                             .padding(11)
                             .frame(width: 220 * zoom, height: 90 * zoom, alignment: .leading)
@@ -540,6 +661,8 @@ struct DesktopDurableWorkflowRunsView: View {
                     }
                 }
             }
+        case .effect:
+            effectInspector(run.effects(for: node.id))
         case .subflow:
             subflowInspector(run.subflows.filter { $0.nodeID == node.id })
         case .capability:
@@ -580,6 +703,71 @@ struct DesktopDurableWorkflowRunsView: View {
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private func effectInspector(_ effects: [DesktopWorkflowProjectedEffectAuthority]) -> some View {
+        if effects.isEmpty {
+            explainedEmpty("This node has no proposed or executed effect evidence.")
+        } else {
+            VStack(alignment: .leading, spacing: 9) {
+                ForEach(effects) { effect in
+                    evidenceCard(
+                        title: DesktopWorkflowEffectLifecyclePresentation.title(for: effect.status),
+                        detail: "Effect \(effect.effectID)\nAction \(effect.action) · connector \(effect.connectorClass)\nNext action: \(DesktopWorkflowEffectLifecyclePresentation.nextAction(for: effect.status))"
+                    )
+                    let dispatchEvidence = effect.dispatch?.receipt?.evidenceDigest ?? "no dispatch receipt"
+                    let reconciliationEvidence = effect.reconciliation?.receipt.evidenceDigest
+                        ?? "no reconciliation receipt"
+                    evidenceCard(
+                        title: "Intent / receipt comparison",
+                        detail: "The journal bound every record below to the same effect, exact grant, dispatch, destination, and idempotency key.\nIntent \(effect.intentDigest)\nPreview \(effect.previewDigest)\nDestination \(effect.destinationFingerprint)\nDispatch evidence \(dispatchEvidence)\nReconciliation evidence \(reconciliationEvidence)"
+                    )
+                    evidenceCard(
+                        title: "Exact intent and authority",
+                        detail: "Consequence \(effect.consequence)\nReversible \(effect.reversible ? "yes" : "no")\nAccount binding \(effect.accountBindingID)\nDestination \(effect.destinationFingerprint)\nInput \(effect.inputDigest)\nIntent \(effect.intentDigest)\nPreview \(effect.previewDigest)\nIdempotency \(effect.idempotencyKey)\nApproval \(effect.approvalID) · expires \(effect.expiresAtUnixMillis)\nGrant \(effect.grantID ?? "awaiting exact approval")\nActor \(effect.actorID ?? "not granted") · device \(effect.deviceID ?? "not granted")\nJournal \(effect.proposedStorePosition)…\(effect.authorizedStorePosition.map(String.init) ?? "awaiting approval")"
+                    )
+                    if let dispatch = effect.dispatch {
+                        evidenceCard(
+                            title: "Installation-private dispatch binding",
+                            detail: "Dispatch \(dispatch.dispatchID)\nConnector \(dispatch.registration.connectorClass) \(dispatch.registration.version)\nPackage \(dispatch.registration.packageDigest)\nBinding \(dispatch.registration.bindingID) · account \(dispatch.registration.accountBindingID)\nActions \(dispatch.registration.allowedActions.joined(separator: ", "))\nRegistration \(dispatch.registration.registrationDigest)\nDeadline \(dispatch.deadlineUnixMillis)\nStarted \(dispatch.startedAtUnixMillis) · journal \(dispatch.startedStorePosition)\nSettled \(dispatch.settledAtUnixMillis.map(String.init) ?? "outcome not recorded") · journal \(dispatch.settledStorePosition.map(String.init) ?? "open")\nElapsed \(dispatch.elapsedMilliseconds.map(String.init) ?? "unknown") ms\nError \(dispatch.errorCode ?? "none")"
+                        )
+                        if let receipt = dispatch.receipt {
+                            effectReceiptCard("Dispatch receipt · \(receipt.outcome)", receipt)
+                        } else {
+                            explainedEmpty("No dispatch receipt is durable. Reconcile before any retry.")
+                        }
+                    } else {
+                        explainedEmpty("Dispatch has not crossed the durable outbox boundary.")
+                    }
+                    if let reconciliation = effect.reconciliation {
+                        evidenceCard(
+                            title: "Reconciliation · \(reconciliation.outcome)",
+                            detail: "Observation \(reconciliation.observationCount)\nReconciliation \(reconciliation.reconciliationID)\nElapsed \(reconciliation.elapsedMilliseconds) ms\nObserved \(reconciliation.reconciledAtUnixMillis) · journal \(reconciliation.storePosition)\nError \(reconciliation.errorCode ?? "none")"
+                        )
+                        effectReceiptCard(
+                            "Reconciliation receipt · \(reconciliation.receipt.outcome)",
+                            reconciliation.receipt
+                        )
+                    } else if ["dispatching", "outcome_unknown"].contains(effect.status) {
+                        Label("Reconciliation is required. Retrying this effect is blocked.", systemImage: "exclamationmark.shield.fill")
+                            .font(.caption.weight(.semibold)).foregroundStyle(Nord.auroraYellow)
+                            .padding(9).frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Nord.auroraYellow.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+                    }
+                }
+            }
+        }
+    }
+
+    private func effectReceiptCard(
+        _ title: String,
+        _ receipt: DesktopWorkflowProjectedEffectReceipt
+    ) -> some View {
+        evidenceCard(
+            title: title,
+            detail: "Receipt \(receipt.receiptID)\nProvider reference \(receipt.providerReference ?? "none")\nEvidence \(receipt.evidenceDigest)"
+        )
     }
 
     @ViewBuilder
@@ -997,8 +1185,53 @@ struct DesktopDurableWorkflowRunsView: View {
     private func select(_ snapshot: DesktopWorkflowRunSnapshot) {
         selectedRunID = snapshot.id
         selectedNodeID = snapshot.graph?.nodes.first?.id
-        inspectorGroup = .inputs
+        inspectorGroup = selectedNodeID.map { !snapshot.run.effects(for: $0).isEmpty } == true
+            ? .effect : .inputs
         showingPurgePreview = false
+    }
+
+    private func effectStatusSymbol(_ status: String) -> String {
+        switch status {
+        case "proposed": "person.badge.clock.fill"
+        case "authorized": "checkmark.seal.fill"
+        case "dispatching": "arrow.up.forward.circle.fill"
+        case "succeeded": "checkmark.circle.fill"
+        case "rejected": "xmark.octagon.fill"
+        case "not_sent": "nosign"
+        case "outcome_unknown": "questionmark.diamond.fill"
+        case "reconciled_applied", "reconciled_not_applied": "checkmark.shield.fill"
+        default: "exclamationmark.triangle.fill"
+        }
+    }
+
+    private func effectStatusTint(_ status: String) -> Color {
+        switch status {
+        case "succeeded", "reconciled_applied": Nord.auroraGreen
+        case "rejected": Nord.auroraRed
+        case "proposed", "dispatching", "outcome_unknown": Nord.auroraYellow
+        case "authorized": Nord.frost1
+        case "not_sent", "reconciled_not_applied": .secondary
+        default: Nord.auroraRed
+        }
+    }
+
+    private func effectStepSymbol(_ state: DesktopWorkflowEffectLifecycleStepState) -> String {
+        switch state {
+        case .complete: "checkmark.circle.fill"
+        case .current: "circle.inset.filled"
+        case .attention: "exclamationmark.triangle.fill"
+        case .pending: "circle.dashed"
+        case .notApplicable: "minus.circle"
+        }
+    }
+
+    private func effectStepTint(_ state: DesktopWorkflowEffectLifecycleStepState) -> Color {
+        switch state {
+        case .complete: Nord.auroraGreen
+        case .current: Nord.frost1
+        case .attention: Nord.auroraYellow
+        case .pending, .notApplicable: .secondary
+        }
     }
 
     private func statusSymbol(_ status: String) -> String {

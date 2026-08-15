@@ -128,6 +128,42 @@ struct DesktopWorkflowRunInspectionTests {
         #expect(DesktopWorkflowLlmInspectionPresentation.layout(for: 1_050) == .wide)
     }
 
+    @Test("effect lifecycle stays compact-aware, action-specific, and deletion-safe")
+    func effectLifecyclePresentationContract() async throws {
+        let page = try await DesktopWorkflowRunInspectionClient(
+            transport: HistoricalRunTransport()
+        ).runs(runID: "run-v2", limit: 1, requestID: "run:effect-presentation")
+        let effect = try #require(page.runs.first?.effectAuthorities.first)
+
+        #expect(DesktopWorkflowEffectLifecyclePresentation.layout(for: 719) == .compact)
+        #expect(DesktopWorkflowEffectLifecyclePresentation.layout(for: 720) == .wide)
+        #expect(DesktopWorkflowEffectLifecyclePresentation.title(for: effect.status)
+            == "Reconciled · applied")
+        #expect(DesktopWorkflowEffectLifecyclePresentation.steps(for: effect.status).map(\.state)
+            == [.complete, .complete, .complete, .complete, .complete])
+        #expect(!DesktopWorkflowEffectLifecyclePresentation.requiresAttention(effect.status))
+        #expect(!DesktopWorkflowEffectLifecyclePresentation.protectsDeletion(effect.status))
+        #expect(DesktopWorkflowEffectLifecyclePresentation.nextAction(for: effect.status)
+            .contains("reconciliation confirmed"))
+
+        for status in ["proposed", "authorized", "dispatching", "outcome_unknown"] {
+            #expect(DesktopWorkflowEffectLifecyclePresentation.protectsDeletion(status))
+        }
+        #expect(DesktopWorkflowEffectLifecyclePresentation.requiresAttention("outcome_unknown"))
+        #expect(DesktopWorkflowEffectLifecyclePresentation.nextAction(for: "outcome_unknown")
+            == "Reconcile provider state. Do not retry the effect.")
+        #expect(DesktopWorkflowEffectLifecyclePresentation.steps(for: "outcome_unknown").map(\.state)
+            == [.complete, .complete, .complete, .attention, .current])
+        #expect(DesktopWorkflowEffectLifecyclePresentation.title(for: "corrupt")
+            == "Unknown effect state")
+
+        let fixture = DesktopWorkflowEffectLifecycleFixture.unknownOutcomeHistory()
+        #expect(fixture.runs.first?.run.effectAuthorities.first?.status == "outcome_unknown")
+        #expect(fixture.runs.first?.run.purgePreview.protectedReason == "unknown_outcome")
+        #expect(fixture.runs.first?.run.purgePreview.manualEligible == false)
+        #expect(fixture.runs.first?.graph?.nodes.first?.id == "effect-node")
+    }
+
     @Test("manual purge binds the reviewed digest and accepts only a tombstone receipt")
     func manualPurgeContract() async throws {
         let page = try await DesktopWorkflowRunInspectionClient(

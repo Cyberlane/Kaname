@@ -728,6 +728,131 @@ public struct DesktopWorkflowProjectedEffectReconciliation: Equatable, Sendable 
     public let observationCount: UInt32
 }
 
+public enum DesktopWorkflowEffectLifecycleLayout: Equatable, Sendable {
+    case compact
+    case wide
+}
+
+public enum DesktopWorkflowEffectLifecycleStepState: Equatable, Sendable {
+    case complete
+    case current
+    case attention
+    case pending
+    case notApplicable
+}
+
+public struct DesktopWorkflowEffectLifecycleStep: Identifiable, Equatable, Sendable {
+    public let id: String
+    public let title: String
+    public let state: DesktopWorkflowEffectLifecycleStepState
+}
+
+public enum DesktopWorkflowEffectLifecyclePresentation {
+    public static let compactWidthThreshold = 720.0
+
+    public static func layout(for width: Double) -> DesktopWorkflowEffectLifecycleLayout {
+        width < compactWidthThreshold ? .compact : .wide
+    }
+
+    public static func title(for status: String) -> String {
+        switch status {
+        case "proposed": "Awaiting approval"
+        case "authorized": "Approved"
+        case "dispatching": "Executing or interrupted"
+        case "succeeded": "Applied with receipt"
+        case "rejected": "Provider rejected"
+        case "not_sent": "Not sent"
+        case "outcome_unknown": "Outcome unknown"
+        case "reconciled_applied": "Reconciled · applied"
+        case "reconciled_not_applied": "Reconciled · not applied"
+        default: "Unknown effect state"
+        }
+    }
+
+    public static func nextAction(for status: String) -> String {
+        switch status {
+        case "proposed":
+            "Review and approve the exact intent before any dispatch."
+        case "authorized":
+            "Dispatch only through the registered installation-private connector."
+        case "dispatching", "outcome_unknown":
+            "Reconcile provider state. Do not retry the effect."
+        case "succeeded":
+            "No action required; the applied receipt is final."
+        case "rejected":
+            "Review the provider rejection before proposing a new effect."
+        case "not_sent":
+            "No effect was applied; propose a new exact intent before another attempt."
+        case "reconciled_applied":
+            "No action required; reconciliation confirmed the effect."
+        case "reconciled_not_applied":
+            "No effect was applied; propose a new exact intent if it is still needed."
+        default:
+            "Inspect durable evidence. No effect action is allowed from this state."
+        }
+    }
+
+    public static func requiresAttention(_ status: String) -> Bool {
+        ["proposed", "dispatching", "outcome_unknown"].contains(status)
+    }
+
+    public static func protectsDeletion(_ status: String) -> Bool {
+        ["proposed", "authorized", "dispatching", "outcome_unknown"].contains(status)
+    }
+
+    public static func steps(for status: String) -> [DesktopWorkflowEffectLifecycleStep] {
+        let proposed: DesktopWorkflowEffectLifecycleStepState = .complete
+        let approval: DesktopWorkflowEffectLifecycleStepState
+        let execution: DesktopWorkflowEffectLifecycleStepState
+        let receipt: DesktopWorkflowEffectLifecycleStepState
+        let reconciliation: DesktopWorkflowEffectLifecycleStepState
+        switch status {
+        case "proposed":
+            approval = .current
+            execution = .pending
+            receipt = .pending
+            reconciliation = .pending
+        case "authorized":
+            approval = .complete
+            execution = .current
+            receipt = .pending
+            reconciliation = .pending
+        case "dispatching":
+            approval = .complete
+            execution = .attention
+            receipt = .pending
+            reconciliation = .current
+        case "outcome_unknown":
+            approval = .complete
+            execution = .complete
+            receipt = .attention
+            reconciliation = .current
+        case "succeeded", "rejected", "not_sent":
+            approval = .complete
+            execution = .complete
+            receipt = .complete
+            reconciliation = .notApplicable
+        case "reconciled_applied", "reconciled_not_applied":
+            approval = .complete
+            execution = .complete
+            receipt = .complete
+            reconciliation = .complete
+        default:
+            approval = .attention
+            execution = .pending
+            receipt = .pending
+            reconciliation = .pending
+        }
+        return [
+            .init(id: "proposed", title: "Proposed", state: proposed),
+            .init(id: "approval", title: "Awaiting approval", state: approval),
+            .init(id: "execution", title: "Executing", state: execution),
+            .init(id: "receipt", title: "Receipt / unknown", state: receipt),
+            .init(id: "reconciliation", title: "Reconciled", state: reconciliation),
+        ]
+    }
+}
+
 public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
     public var id: String { runID }
     public let runID: String
@@ -849,6 +974,10 @@ public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
     public func llmAttempts(for nodeID: String) -> [DesktopWorkflowProjectedLlmAttempt] {
         llmAttempts.filter { $0.nodeID == nodeID }
     }
+
+    public func effects(for nodeID: String) -> [DesktopWorkflowProjectedEffectAuthority] {
+        effectAuthorities.filter { $0.nodeID == nodeID }
+    }
 }
 
 public struct DesktopWorkflowRunInspectionPage: Equatable, Sendable {
@@ -893,6 +1022,138 @@ public struct DesktopWorkflowRunHistorySnapshot: Equatable, Sendable {
     public let projectionHighWaterMark: UInt64
     public let runs: [DesktopWorkflowRunSnapshot]
     public let absenceReason: String?
+}
+
+public enum DesktopWorkflowEffectLifecycleFixture {
+    public static func unknownOutcomeHistory() -> DesktopWorkflowRunHistorySnapshot {
+        let effect = DesktopWorkflowProjectedEffectAuthority(
+            effectID: "effect-synthetic-archive",
+            nodeID: "effect-node",
+            connectorClass: "dev.kaname.synthetic-mail",
+            action: "archive",
+            accountBindingID: "synthetic-account",
+            destinationFingerprint: digest("1"),
+            inputDigest: digest("2"),
+            intentDigest: digest("3"),
+            previewDigest: digest("4"),
+            idempotencyKey: "synthetic-archive-once",
+            approvalID: "approval-synthetic-archive",
+            approvalFingerprint: Data(repeating: 0x07, count: 32),
+            status: "outcome_unknown",
+            consequence: "Archive one synthetic message from the fixture inbox.",
+            reversible: true,
+            expiresAtUnixMillis: 100_000,
+            grantID: "grant-synthetic-archive",
+            actorID: "fixture-owner",
+            deviceID: "fixture-device",
+            proposedAtUnixMillis: 10_000,
+            authorizedAtUnixMillis: 11_000,
+            proposedStorePosition: 11,
+            authorizedStorePosition: 12,
+            dispatch: DesktopWorkflowProjectedEffectDispatch(
+                dispatchID: "dispatch-synthetic-archive",
+                registration: DesktopWorkflowProjectedEffectConnectorRegistration(
+                    connectorClass: "dev.kaname.synthetic-mail",
+                    version: "1.0.0",
+                    packageDigest: digest("5"),
+                    bindingID: "binding-synthetic-mail",
+                    accountBindingID: "synthetic-account",
+                    allowedActions: ["archive"],
+                    registrationDigest: digest("6")
+                ),
+                deadlineUnixMillis: 70_000,
+                outcome: "unknown",
+                errorCode: "connector.timeout_after_send",
+                receipt: DesktopWorkflowProjectedEffectReceipt(
+                    receiptID: "receipt-dispatch-unknown",
+                    providerReference: "synthetic-message-17",
+                    outcome: "unknown",
+                    evidenceDigest: digest("7")
+                ),
+                elapsedMilliseconds: 60_000,
+                startedAtUnixMillis: 12_000,
+                settledAtUnixMillis: 72_000,
+                startedStorePosition: 13,
+                settledStorePosition: 14
+            ),
+            reconciliation: DesktopWorkflowProjectedEffectReconciliation(
+                reconciliationID: "reconciliation-synthetic-archive-2",
+                outcome: "stillUnknown",
+                errorCode: "connector.outcome_still_unknown",
+                receipt: DesktopWorkflowProjectedEffectReceipt(
+                    receiptID: "receipt-reconciliation-unknown",
+                    providerReference: "synthetic-message-17",
+                    outcome: "unknown",
+                    evidenceDigest: digest("8")
+                ),
+                elapsedMilliseconds: 10,
+                reconciledAtUnixMillis: 73_000,
+                storePosition: 15,
+                observationCount: 2
+            )
+        )
+        let run = DesktopDurableWorkflowRun(
+            runID: "run-synthetic-effect",
+            workflowID: "workflow-synthetic-effect",
+            revisionID: "revision-synthetic-effect-v1",
+            packageDigest: digest("9"),
+            status: "failed",
+            outcome: "failed",
+            errorCode: "effect.outcome_unknown",
+            error: nil,
+            createdAtUnixMillis: 9_000,
+            settledAtUnixMillis: 73_000,
+            firstStorePosition: 1,
+            lastStorePosition: 15,
+            attempts: [],
+            nodes: [],
+            emissions: [],
+            edges: [],
+            matchTraces: [],
+            events: [],
+            effectAuthorities: [effect],
+            purgePreview: DesktopWorkflowRunPurgePreview(
+                manualEligible: false,
+                automaticEligible: false,
+                protectedReason: "unknown_outcome",
+                automaticEligibleAtUnixMillis: nil,
+                affectedAttemptIDs: [],
+                affectedValueIDs: [],
+                affectedFileHandleIDs: [],
+                retainedPromotedHandleIDs: [],
+                affectedValueBytes: 0,
+                affectedEffectIDs: [effect.effectID],
+                evidenceDigest: digest("a")
+            )
+        )
+        let graph = DesktopWorkflowHistoricalGraph(
+            name: "Synthetic effect reconciliation",
+            nodes: [DesktopWorkflowHistoricalNode(
+                id: "effect-node",
+                key: "effect-node",
+                name: "Archive synthetic message",
+                type: "effect.connector",
+                configurationJSON: Data("{\"action\":\"archive\"}".utf8),
+                x: 90,
+                y: 90
+            )],
+            edges: []
+        )
+        return DesktopWorkflowRunHistorySnapshot(
+            projectionHighWaterMark: 15,
+            runs: [DesktopWorkflowRunSnapshot(
+                run: run,
+                revision: nil,
+                graph: graph,
+                revisionAbsenceReason: nil
+            )],
+            absenceReason: nil
+        )
+    }
+
+    private static func digest(_ character: Character) -> String {
+        String(repeating: String(character), count: 64)
+    }
 }
 
 public struct DesktopWorkflowRunHistoryLoader: Sendable {

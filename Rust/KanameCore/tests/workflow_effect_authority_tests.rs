@@ -48,6 +48,12 @@ fn exact_approval_is_durable_idempotent_and_rebuildable_without_dispatch() {
     assert!(!proposed.duplicate);
     assert_eq!(proposed.authority.status, "proposed");
     assert_eq!(projection.row_count("effect_authorities").unwrap(), 1);
+    let proposed_preview = projection.inspect_runs(None, Some(RUN_ID), 1).unwrap()[0]
+        .purge_preview
+        .clone()
+        .unwrap();
+    assert!(!proposed_preview.manual_eligible);
+    assert_eq!(proposed_preview.protected_reason, "approval_pending");
 
     let duplicate =
         propose_workflow_effect(&mut journal, &mut projection, proposal.clone(), 2_000).unwrap();
@@ -67,14 +73,13 @@ fn exact_approval_is_durable_idempotent_and_rebuildable_without_dispatch() {
     assert!(!authorized.duplicate);
     assert_eq!(authorized.authority.status, "authorized");
     assert!(authorized.authority.authorization.is_some());
-    assert_eq!(
-        projection.inspect_runs(None, Some(RUN_ID), 1).unwrap()[0]
-            .purge_preview
-            .as_ref()
-            .unwrap()
-            .affected_effect_ids,
-        ["effect-one"]
-    );
+    let authorized_preview = projection.inspect_runs(None, Some(RUN_ID), 1).unwrap()[0]
+        .purge_preview
+        .clone()
+        .unwrap();
+    assert!(!authorized_preview.manual_eligible);
+    assert_eq!(authorized_preview.protected_reason, "effect_authorized");
+    assert_eq!(authorized_preview.affected_effect_ids, ["effect-one"]);
     assert!(
         authorize_workflow_effect(
             &mut journal,
@@ -316,6 +321,12 @@ fn timeout_after_send_can_only_reconcile_and_never_dispatch_again() {
     .unwrap();
     assert_eq!(dispatched.authority.status, "outcome_unknown");
     assert_eq!(connector.dispatch_count("idempotency-timeout-after"), 1);
+    let unknown_preview = projection.inspect_runs(None, Some(RUN_ID), 1).unwrap()[0]
+        .purge_preview
+        .clone()
+        .unwrap();
+    assert!(!unknown_preview.manual_eligible);
+    assert_eq!(unknown_preview.protected_reason, "unknown_outcome");
     assert!(matches!(
         dispatch_workflow_effect(
             &mut journal,
@@ -338,6 +349,14 @@ fn timeout_after_send_can_only_reconcile_and_never_dispatch_again() {
     .unwrap();
     assert_eq!(reconciled.authority.status, "reconciled_applied");
     assert_eq!(reconciled.authority.reconciliation_count, 1);
+    assert_eq!(
+        projection.inspect_runs(None, Some(RUN_ID), 1).unwrap()[0]
+            .purge_preview
+            .as_ref()
+            .unwrap()
+            .protected_reason,
+        "run_not_settled"
+    );
     assert_eq!(connector.dispatch_count("idempotency-timeout-after"), 1);
     assert_eq!(
         connector.reconciliation_count("idempotency-timeout-after"),
