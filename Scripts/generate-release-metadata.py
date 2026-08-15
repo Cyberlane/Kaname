@@ -37,6 +37,23 @@ REVIEWED_LICENSE_TEXT_ALLOWLIST: dict[tuple[str, str, str, str], str] = {
         "protoc-bin-vendored-win32",
     )
 }
+# Reviewed 2026-08-16 against the exact published crates and their recorded
+# upstream commit 4ad172231ae487511bfc4cf3199d7edab328923b. Both crates declare
+# MIT but omit the repository-root LICENSE from their published archives.
+REVIEWED_LICENSE_TEXT_ALLOWLIST[
+    ("jsonschema-regex", "0.49.9", CRATES_IO_SOURCE, "MIT")
+] = "jsonschema-regex-0.49.9-mit-text-omitted-from-published-crate"
+REVIEWED_LICENSE_TEXT_ALLOWLIST[
+    ("jsonschema-value", "0.49.9", CRATES_IO_SOURCE, "MIT")
+] = "jsonschema-value-0.49.9-mit-text-omitted-from-published-crate"
+
+# Reviewed 2026-08-16 against the exact published crates and their recorded
+# upstream commit d74c030d9dc4f3cae02146d1f497ff62726ef09a. Both crates declare
+# MIT but omit the repository-root LICENSE from their published archives.
+for name in ("uuid-simd", "vsimd"):
+    REVIEWED_LICENSE_TEXT_ALLOWLIST[
+        (name, "0.8.0", CRATES_IO_SOURCE, "MIT")
+    ] = f"{name}-0.8.0-mit-text-omitted-from-published-crate"
 
 
 class ReleaseMetadataError(RuntimeError):

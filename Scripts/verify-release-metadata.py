@@ -144,6 +144,28 @@ def verify_fixture() -> None:
         broken_metadata["packages"][1]["source"] = None
         expect_failure(lambda: GENERATOR.cargo_packages(broken_metadata, lock), "required metadata is missing: source")
 
+        reviewed_exceptions = (
+            ("jsonschema-regex", "0.49.9"),
+            ("jsonschema-value", "0.49.9"),
+            ("uuid-simd", "0.8.0"),
+            ("vsimd", "0.8.0"),
+        )
+        for reviewed_name, reviewed_version in reviewed_exceptions:
+            reviewed_directory = root / reviewed_name
+            reviewed_directory.mkdir()
+            reviewed_package = {
+                "name": reviewed_name,
+                "version": reviewed_version,
+                "source": GENERATOR.CRATES_IO_SOURCE,
+                "license": "MIT",
+                "manifest_path": str(reviewed_directory / "Cargo.toml"),
+            }
+            documents, reason = GENERATOR.license_documents(reviewed_package)
+            assert documents == []
+            assert reason == f"{reviewed_name}-{reviewed_version}-mit-text-omitted-from-published-crate"
+        reviewed_package["version"] = "0.49.10"
+        expect_failure(lambda: GENERATOR.license_documents(reviewed_package), "license text is missing")
+
 
 def verify_repository_generation() -> None:
     with (
