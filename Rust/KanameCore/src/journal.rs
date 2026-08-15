@@ -87,6 +87,15 @@ pub struct JournalEventPage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowJournalCompactionReceipt {
+    pub run_id: String,
+    pub purge_event_id: String,
+    pub purge_store_position: u64,
+    pub compacted_event_count: u64,
+    pub duplicate: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     pub id: String,
     pub selector_id: String,
@@ -337,6 +346,10 @@ impl Journal {
             return Err(JournalError::Integrity("event_id_reused".into()));
         }
 
+        if workflow_run_stream_is_purged(&transaction, &event.stream_id)? {
+            return Err(JournalError::Integrity("workflow_run_purged".into()));
+        }
+
         let expected_sequence = next_stream_sequence(&transaction, &event.stream_id)?;
         if event.stream_sequence != 0 && event.stream_sequence != expected_sequence {
             return Err(JournalError::Integrity("stream_sequence_mismatch".into()));
@@ -396,6 +409,9 @@ impl Journal {
                 });
             }
             return Err(JournalError::Integrity("event_id_reused".into()));
+        }
+        if workflow_run_stream_is_purged(&transaction, &event.stream_id)? {
+            return Err(JournalError::Integrity("workflow_run_purged".into()));
         }
         if event.stream_sequence != next_stream_sequence(&transaction, &event.stream_id)?
             || event.store_position != next_store_position(&transaction)?
@@ -551,6 +567,70 @@ impl Journal {
             high_water_mark,
             next_store_position,
             has_more,
+        })
+    }
+
+    pub fn workflow_run_event_count(&self, run_id: &str) -> Result<u64> {
+        let stream_id = workflow_run_stream(run_id)?;
+        db_u64(self.connection.query_row(
+            "SELECT COUNT(*) FROM events WHERE stream_id = ?1",
+            [stream_id],
+            |row| row.get::<_, i64>(0),
+        )?)
+    }
+
+    /// Removes only the superseded facts for a workflow run after its durable
+    /// purge tombstone is present. The tombstone retains the highest stream
+    /// sequence and global position, so ordering can never be reused.
+    pub fn compact_workflow_run(
+        &mut self,
+        run_id: &str,
+        purge_event_id: &str,
+    ) -> Result<WorkflowJournalCompactionReceipt> {
+        self.require_writable()?;
+        let stream_id = workflow_run_stream(run_id)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let tombstone: Option<(i64, String)> = transaction
+            .query_row(
+                "SELECT store_position, kind FROM events
+                 WHERE event_id = ?1 AND stream_id = ?2",
+                params![purge_event_id, stream_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((purge_position, kind)) = tombstone else {
+            return Err(JournalError::Integrity("purge_tombstone_missing".into()));
+        };
+        if kind != workflow_runtime::WORKFLOW_RUN_PURGED_KIND {
+            return Err(JournalError::Integrity("purge_tombstone_kind".into()));
+        }
+        let invalid_later: bool = transaction
+            .query_row(
+                "SELECT 1 FROM events
+                 WHERE stream_id = ?1 AND event_id != ?2 AND store_position >= ?3 LIMIT 1",
+                params![stream_id, purge_event_id, purge_position],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if invalid_later {
+            return Err(JournalError::Integrity(
+                "purge_tombstone_not_terminal".into(),
+            ));
+        }
+        let deleted = transaction.execute(
+            "DELETE FROM events WHERE stream_id = ?1 AND event_id != ?2",
+            params![stream_id, purge_event_id],
+        )?;
+        transaction.commit()?;
+        Ok(WorkflowJournalCompactionReceipt {
+            run_id: run_id.to_owned(),
+            purge_event_id: purge_event_id.to_owned(),
+            purge_store_position: db_u64(purge_position)?,
+            compacted_event_count: deleted as u64,
+            duplicate: deleted == 0,
         })
     }
 
@@ -956,6 +1036,32 @@ fn selector_stream(selector_id: &str) -> Result<&str> {
         .strip_prefix("thread:")
         .filter(|stream| !stream.is_empty())
         .ok_or(JournalError::Protocol("unauthorized_selector"))
+}
+
+fn workflow_run_stream(run_id: &str) -> Result<String> {
+    if run_id.is_empty()
+        || run_id.len() > 128
+        || !run_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+    {
+        return Err(JournalError::Protocol("invalid_workflow_run_id"));
+    }
+    Ok(format!("workflow-run:{run_id}"))
+}
+
+fn workflow_run_stream_is_purged(
+    transaction: &rusqlite::Transaction<'_>,
+    stream_id: &str,
+) -> Result<bool> {
+    Ok(transaction
+        .query_row(
+            "SELECT 1 FROM events WHERE stream_id = ?1 AND kind = ?2 LIMIT 1",
+            params![stream_id, workflow_runtime::WORKFLOW_RUN_PURGED_KIND],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
 }
 
 fn selector_project(selector_id: &str) -> Result<&str> {

@@ -37,6 +37,7 @@ pub const WORKFLOW_EDGE_CHECKPOINTED_KIND: &str = "workflow.edge.checkpointed";
 pub const WORKFLOW_MATCH_TRACE_RECORDED_KIND: &str = "workflow.match.trace-recorded";
 pub const WORKFLOW_RUN_CANCELLATION_REQUESTED_KIND: &str = "workflow.run.cancellation-requested";
 pub const WORKFLOW_RUN_SETTLED_KIND: &str = "workflow.run.settled";
+pub const WORKFLOW_RUN_PURGED_KIND: &str = "workflow.run.purged";
 
 pub const WORKFLOW_RUN_REQUEST_TYPE: &str = "kaname.workflow.run-request.v1";
 pub const WORKFLOW_RUN_CANCEL_TYPE: &str = "kaname.workflow.run-cancel.v1";
@@ -70,6 +71,7 @@ pub const WORKFLOW_MATCH_TRACE_RECORDED_TYPE: &str = "kaname.workflow.match-trac
 pub const WORKFLOW_RUN_CANCELLATION_REQUESTED_TYPE: &str =
     "kaname.workflow.run-cancellation-requested.v1";
 pub const WORKFLOW_RUN_SETTLED_TYPE: &str = "kaname.workflow.run-settled.v1";
+pub const WORKFLOW_RUN_PURGED_TYPE: &str = "kaname.workflow.run-purged.v1";
 
 const PROTOBUF_CONTENT_TYPE: &str = "application/x-protobuf";
 const JSON_CONTENT_TYPE: &str = "application/json";
@@ -127,6 +129,7 @@ pub enum WorkflowRuntimeEvent {
     MatchTraceRecorded(v1::WorkflowMatchTraceRecorded),
     RunCancellationRequested(v1::WorkflowRunCancellationRequested),
     RunSettled(v1::WorkflowRunSettled),
+    RunPurged(v1::WorkflowRunPurged),
 }
 
 impl WorkflowRuntimeEvent {
@@ -156,6 +159,7 @@ impl WorkflowRuntimeEvent {
             Self::MatchTraceRecorded(payload) => &payload.run_id,
             Self::RunCancellationRequested(payload) => &payload.run_id,
             Self::RunSettled(payload) => &payload.run_id,
+            Self::RunPurged(payload) => &payload.run_id,
         }
     }
 }
@@ -400,6 +404,13 @@ pub fn decode_workflow_event(event: &v1::EventEnvelope) -> Result<WorkflowRuntim
             validate_run_settled(&payload)?;
             validate_event_context(event, &payload.run_id)?;
             Ok(WorkflowRuntimeEvent::RunSettled(payload))
+        }
+        WORKFLOW_RUN_PURGED_KIND => {
+            let payload: v1::WorkflowRunPurged =
+                decode_payload(event.payload.as_ref(), WORKFLOW_RUN_PURGED_TYPE)?;
+            validate_run_purged(&payload)?;
+            validate_event_context(event, &payload.run_id)?;
+            Ok(WorkflowRuntimeEvent::RunPurged(payload))
         }
         _ => Err(WorkflowRuntimeContractError::UnsupportedKind),
     }
@@ -1841,6 +1852,39 @@ fn validate_run_settled(payload: &v1::WorkflowRunSettled) -> Result<()> {
         MAXIMUM_PORT_BINDINGS,
         "final_emission_ids",
     )
+}
+
+fn validate_run_purged(payload: &v1::WorkflowRunPurged) -> Result<()> {
+    validate_identifier(&payload.run_id, 128, "run_id")?;
+    validate_identifier(&payload.purge_command_id, 128, "purge_command_id")?;
+    validate_identifier(&payload.workflow_id, 128, "workflow_id")?;
+    validate_identifier(&payload.revision_id, 128, "revision_id")?;
+    validate_digest(&payload.package_digest, "package_digest")?;
+    validate_digest(
+        &payload.preview_evidence_digest,
+        "purge_preview_evidence_digest",
+    )?;
+    if !payload.installation_id.is_empty() {
+        validate_identifier(&payload.installation_id, 128, "installation_id")?;
+    } else if payload.affected_file_handle_count > 0 {
+        return invalid("purge_storage_without_installation");
+    }
+    validate_identifier_list(
+        &payload.retained_promoted_handle_ids,
+        MAXIMUM_TRACE_IDENTIFIERS,
+        "retained_promoted_handle_ids",
+    )?;
+    let mode = v1::WorkflowRunPurgeMode::try_from(payload.mode)
+        .map_err(|_| invalid_error("purge_mode"))?;
+    if mode == v1::WorkflowRunPurgeMode::Unspecified
+        || payload.source_first_store_position == 0
+        || payload.source_last_store_position < payload.source_first_store_position
+        || payload.source_event_count == 0
+        || !payload.historical_revision_retained
+    {
+        return invalid("purge_contract");
+    }
+    Ok(())
 }
 
 fn validate_event_context(event: &v1::EventEnvelope, run_id: &str) -> Result<()> {

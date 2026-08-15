@@ -1,9 +1,9 @@
 use kaname_core::{
     v1::{
         CompileWorkflowRequest, FrozenWorkflowDraftImport, ImportFrozenWorkspaceRequest,
-        SchemaVersion, SetWorkflowActivationRequest, ValidateWorkflowRequest,
-        WorkflowLibraryQueryRequest, WorkflowPortfolioQuery, WorkflowRunInspectionQuery,
-        workflow_library_query_request,
+        PurgeWorkflowRunRequest, SchemaVersion, SetWorkflowActivationRequest,
+        ValidateWorkflowRequest, WorkflowLibraryQueryRequest, WorkflowPortfolioQuery,
+        WorkflowRunInspectionQuery, WorkflowRunPurgeMode, workflow_library_query_request,
     },
     workflow_protocol::{self, WorkflowProtocolError},
 };
@@ -128,6 +128,41 @@ fn run_inspection_queries_are_bounded_and_path_free() {
         workflow_protocol::decode_run_inspection_query(&invalid.encode_to_vec()),
         Err(WorkflowProtocolError::InspectionLimitOutOfBounds)
     );
+}
+
+#[test]
+fn run_purge_requests_bind_mode_preview_and_time_without_storage_paths() {
+    let request = PurgeWorkflowRunRequest {
+        schema_version: version(),
+        request_id: "purge:run-001".into(),
+        run_id: "run-001".into(),
+        mode: WorkflowRunPurgeMode::Manual as i32,
+        expected_preview_evidence_digest: "a".repeat(64),
+        requested_at_unix_millis: 1_700_000_000_000,
+    };
+    assert_eq!(
+        workflow_protocol::decode_run_purge_request(&request.encode_to_vec()).unwrap(),
+        request
+    );
+    for invalid in [
+        PurgeWorkflowRunRequest {
+            mode: 0,
+            ..request.clone()
+        },
+        PurgeWorkflowRunRequest {
+            expected_preview_evidence_digest: "A".repeat(64),
+            ..request.clone()
+        },
+        PurgeWorkflowRunRequest {
+            requested_at_unix_millis: -1,
+            ..request.clone()
+        },
+    ] {
+        assert_eq!(
+            workflow_protocol::decode_run_purge_request(&invalid.encode_to_vec()),
+            Err(WorkflowProtocolError::InvalidPurgeRequest)
+        );
+    }
 }
 
 #[test]

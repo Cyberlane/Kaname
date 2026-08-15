@@ -15,8 +15,10 @@ final class DesktopDurableWorkflowRunsViewModel: ObservableObject {
 
     @Published private(set) var state: State = .idle
     private let loader: DesktopWorkflowRunHistoryLoader
+    private let purgeClient: DesktopWorkflowRunPurgeClient
 
     init(runner: LocalCoreRunner) {
+        purgeClient = DesktopWorkflowRunPurgeClient(transport: runner)
         loader = DesktopWorkflowRunHistoryLoader(
             inspection: DesktopWorkflowRunInspectionClient(transport: runner),
             library: DesktopWorkflowV2LibraryClient(transport: runner)
@@ -38,6 +40,21 @@ final class DesktopDurableWorkflowRunsViewModel: ObservableObject {
     func reload() async {
         state = .idle
         await load()
+    }
+
+    func purge(_ run: DesktopDurableWorkflowRun) async {
+        guard run.purgePreview.manualEligible else { return }
+        state = .loading
+        do {
+            _ = try await purgeClient.purge(
+                run,
+                requestID: "workflow-purge:\(UUID().uuidString.lowercased())"
+            )
+            state = .idle
+            await load()
+        } catch {
+            state = .failed("The purge did not complete. Its durable tombstone and cleanup state will be recovered safely on retry.")
+        }
     }
 }
 
@@ -69,6 +86,7 @@ struct DesktopDurableWorkflowRunsView: View {
     @State private var llmSearchText = ""
     @State private var expandedLlmGroups: Set<String> = []
     @State private var showingPurgePreview = false
+    @State private var showingPurgeConfirmation = false
 
     init(runner: LocalCoreRunner) {
         _viewModel = StateObject(wrappedValue: DesktopDurableWorkflowRunsViewModel(runner: runner))
@@ -262,6 +280,12 @@ struct DesktopDurableWorkflowRunsView: View {
                     Text("Evidence \(preview.evidenceDigest)")
                         .font(.system(size: 9, design: .monospaced)).foregroundStyle(.secondary)
                         .lineLimit(1).textSelection(.enabled)
+                    Button("Delete retained run data", systemImage: "trash", role: .destructive) {
+                        showingPurgeConfirmation = true
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Nord.auroraRed)
+                    .disabled(!preview.manualEligible)
                 }
                 .padding(9)
                 .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
@@ -269,6 +293,18 @@ struct DesktopDurableWorkflowRunsView: View {
         }
         .padding(10)
         .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 10))
+        .confirmationDialog(
+            "Delete this run's retained data?",
+            isPresented: $showingPurgeConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Delete run data", role: .destructive) {
+                Task { await viewModel.purge(run) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The workflow revision and promoted case or workflow objects remain. Detailed run events, job values, and job files will be removed behind an auditable tombstone.")
+        }
     }
 
     @ViewBuilder
@@ -286,6 +322,7 @@ struct DesktopDurableWorkflowRunsView: View {
         case "approval_pending": "Approval-pending run protected"
         case "unknown_outcome": "Unknown outcome protected"
         case "run_not_settled": "Active run protected"
+        case "case_episode": "Case episode protected"
         default: "Run protected"
         }
     }

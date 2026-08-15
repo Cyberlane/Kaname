@@ -1385,6 +1385,36 @@ impl WorkflowScopedStorage {
             .map_err(Into::into)
     }
 
+    /// Resolves the installation owner from the storage authority itself. A
+    /// purge caller supplies only the run identity and cannot forge a broader
+    /// installation access context. The tombstone remains queryable after the
+    /// live namespace has been removed so restart recovery is deterministic.
+    pub fn job_namespace_installation_id(&self, run_id: &str) -> Result<Option<String>> {
+        validate_identifier(run_id, "run_id")?;
+        let live = self
+            .connection
+            .query_row(
+                "SELECT installation_id FROM storage_namespaces
+                 WHERE scope_kind = 'run' AND scope_id = ?1",
+                [run_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        if live.is_some() {
+            return Ok(live);
+        }
+        self.connection
+            .query_row(
+                "SELECT installation_id FROM storage_namespace_tombstones
+                 WHERE scope_kind = 'run' AND scope_id = ?1",
+                [run_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn inspect_handle(
         &self,
         access: &WorkflowStorageAccessContext,

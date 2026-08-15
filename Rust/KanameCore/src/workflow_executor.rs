@@ -8265,6 +8265,9 @@ fn recorded_run(journal: &Journal, run_id: &str) -> Result<RecordedRun> {
                     ));
                 }
             }
+            WorkflowRuntimeEvent::RunPurged(_) => {
+                return Err(WorkflowExecutionError::Lifecycle("run_purged".into()));
+            }
         }
     }
     state

@@ -2,12 +2,14 @@ use kaname_core::{
     fake_provider::{embedded_scenarios, run_scenario, run_scenario_at_path, scale_fixture},
     journal::{Journal, ReplayBasis as JournalReplayBasis},
     mobile::{EnrollmentAdmission, SyncAdmission},
-    open_workflow_library,
+    open_workflow_library, open_workflow_scoped_storage,
     policy::{ApprovalResolutionResult, LocalPolicyCore, approval_fingerprint},
     v1::{self, EventEnvelope},
     workflow_canonical, workflow_compiler,
     workflow_import::{ImportFrozenWorkflowDraft, ImportFrozenWorkspace},
+    workflow_object_store::WorkflowObjectStoreQuota,
     workflow_projection::WorkflowRunProjection,
+    workflow_purge::purge_workflow_run,
     workflow_schema::{self, WorkflowSchemaCheckRequest},
     workflow_versions::{
         SetWorkflowActivation, WorkflowExecutionSupport, WorkflowPortfolioState,
@@ -76,7 +78,12 @@ fn main() {
         [operation, journal_path, projection_path] if operation == "workflow-run-inspect" => {
             workflow_run_inspect(journal_path, projection_path)
         }
-        _ => Err("usage: kaname-local-core scenario <F-01..F-14> | scenario-store <F-01..F-14> <journal-path> | append-event <journal-path> < event-envelope.bin | authorize-action <journal-path> < approval-command.bin | record-review <journal-path> < command-envelope.bin | replay <journal-path> < replay-request.bin | mobile-propose <journal-path> < enrollment-challenge.bin | mobile-decide <journal-path> < enrollment-decision.bin | mobile-admit <journal-path> <recipient-device-id> <recipient-key-id> < encrypted-envelope.bin | scale <S-01..S-04> | workflow-schema-check < request.json | workflow-canonicalize < value.json | workflow-compile < compile-request.bin | workflow-library-query <application-support-root> < query-request.bin | workflow-library-activate <application-support-root> < activation-request.bin | workflow-library-import-frozen <application-support-root> < import-request.bin | workflow-run-inspect <journal-path> <projection-path> < query.bin".to_owned()),
+        [operation, journal_path, projection_path, application_support]
+            if operation == "workflow-run-purge" =>
+        {
+            workflow_run_purge(journal_path, projection_path, application_support)
+        }
+        _ => Err("usage: kaname-local-core scenario <F-01..F-14> | scenario-store <F-01..F-14> <journal-path> | append-event <journal-path> < event-envelope.bin | authorize-action <journal-path> < approval-command.bin | record-review <journal-path> < command-envelope.bin | replay <journal-path> < replay-request.bin | mobile-propose <journal-path> < enrollment-challenge.bin | mobile-decide <journal-path> < enrollment-decision.bin | mobile-admit <journal-path> <recipient-device-id> <recipient-key-id> < encrypted-envelope.bin | scale <S-01..S-04> | workflow-schema-check < request.json | workflow-canonicalize < value.json | workflow-compile < compile-request.bin | workflow-library-query <application-support-root> < query-request.bin | workflow-library-activate <application-support-root> < activation-request.bin | workflow-library-import-frozen <application-support-root> < import-request.bin | workflow-run-inspect <journal-path> <projection-path> < query.bin | workflow-run-purge <journal-path> <projection-path> <application-support-root> < request.bin".to_owned()),
     };
     match result {
         Ok(json) => println!("{json}"),
@@ -123,6 +130,28 @@ fn workflow_run_inspect(journal_path: &str, projection_path: &str) -> Result<Str
         }
         .encode_to_vec(),
     ))
+}
+
+fn workflow_run_purge(
+    journal_path: &str,
+    projection_path: &str,
+    application_support: &str,
+) -> Result<String, String> {
+    let wire = read_standard_input()?;
+    let request = kaname_core::workflow_protocol::decode_run_purge_request(&wire)
+        .map_err(|_| "workflow_run_purge_rejected".to_owned())?;
+    let mut journal = Journal::open(journal_path, &CURSOR_KEY)
+        .map_err(|_| "workflow_run_journal_unavailable".to_owned())?;
+    let (mut projection, _) = WorkflowRunProjection::open_or_rebuild(projection_path, &journal)
+        .map_err(|_| "workflow_run_projection_unavailable".to_owned())?;
+    let mut storage = open_workflow_scoped_storage(
+        application_support,
+        WorkflowObjectStoreQuota::local_default(),
+    )
+    .map_err(|_| "workflow_run_storage_unavailable".to_owned())?;
+    let response = purge_workflow_run(&mut journal, &mut projection, Some(&mut storage), request)
+        .map_err(|error| format!("workflow_run_purge_failed:{error}"))?;
+    Ok(hex::encode(response.encode_to_vec()))
 }
 
 fn workflow_canonicalize() -> Result<String, String> {

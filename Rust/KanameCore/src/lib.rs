@@ -25,6 +25,7 @@ pub mod workflow_object_store;
 pub mod workflow_projection;
 pub mod workflow_protocol;
 pub mod workflow_publication;
+pub mod workflow_purge;
 pub mod workflow_retention;
 pub mod workflow_runtime;
 pub mod workflow_schema;

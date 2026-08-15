@@ -117,6 +117,56 @@ struct DesktopWorkflowRunInspectionTests {
         #expect(DesktopWorkflowLlmInspectionPresentation.layout(for: 1_049) == .compact)
         #expect(DesktopWorkflowLlmInspectionPresentation.layout(for: 1_050) == .wide)
     }
+
+    @Test("manual purge binds the reviewed digest and accepts only a tombstone receipt")
+    func manualPurgeContract() async throws {
+        let page = try await DesktopWorkflowRunInspectionClient(
+            transport: HistoricalRunTransport()
+        ).runs(runID: "run-v2", limit: 1, requestID: "run:purge-source")
+        let run = try #require(page.runs.first)
+        let receipt = try await DesktopWorkflowRunPurgeClient(
+            transport: PurgeTransport()
+        ).purge(run, requestID: "purge:run-v2", requestedAtUnixMillis: 2_000)
+
+        #expect(receipt.tombstone.runID == "run-v2")
+        #expect(receipt.tombstone.previewEvidenceDigest == run.purgePreview.evidenceDigest)
+        #expect(receipt.tombstone.historicalRevisionRetained)
+        #expect(receipt.compactedJournalEventCount == 5)
+    }
+}
+
+private actor PurgeTransport: DesktopWorkflowRunPurgeTransport {
+    func purgeWorkflowRun(
+        _ request: Kaname_V1_PurgeWorkflowRunRequest,
+        timeout _: TimeInterval
+    ) async throws -> Kaname_V1_PurgeWorkflowRunResponse {
+        var tombstone = Kaname_V1_WorkflowRunPurged()
+        tombstone.runID = request.runID
+        tombstone.purgeCommandID = request.requestID
+        tombstone.workflowID = "workflow-one"
+        tombstone.revisionID = "revision-v2"
+        tombstone.packageDigest = String(repeating: "b", count: 64)
+        tombstone.mode = request.mode
+        tombstone.previewEvidenceDigest = request.expectedPreviewEvidenceDigest
+        tombstone.sourceFirstStorePosition = 11
+        tombstone.sourceLastStorePosition = 15
+        tombstone.sourceEventCount = 5
+        tombstone.affectedAttemptCount = 1
+        tombstone.affectedValueCount = 1
+        tombstone.affectedFileHandleCount = 1
+        tombstone.historicalRevisionRetained = true
+        var receipt = Kaname_V1_WorkflowRunPurgeReceipt()
+        receipt.purgeEventID = "purge-event-run-v2"
+        receipt.purgeStorePosition = 16
+        receipt.tombstone = tombstone
+        receipt.compactedJournalEventCount = 5
+        var response = Kaname_V1_PurgeWorkflowRunResponse()
+        response.schemaVersion.major = 1
+        response.requestID = request.requestID
+        response.receipt = receipt
+        response.projectionHighWaterMark = 16
+        return response
+    }
 }
 
 private actor HistoricalRunTransport:

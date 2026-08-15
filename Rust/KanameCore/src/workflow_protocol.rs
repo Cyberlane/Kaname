@@ -1,8 +1,9 @@
 use crate::{
     SCHEMA_MAJOR,
     v1::{
-        CompileWorkflowRequest, ImportFrozenWorkspaceRequest, SetWorkflowActivationRequest,
-        ValidateWorkflowRequest, WorkflowLibraryQueryRequest, WorkflowRunInspectionQuery,
+        self, CompileWorkflowRequest, ImportFrozenWorkspaceRequest, PurgeWorkflowRunRequest,
+        SetWorkflowActivationRequest, ValidateWorkflowRequest, WorkflowLibraryQueryRequest,
+        WorkflowRunInspectionQuery,
     },
 };
 use prost::Message;
@@ -22,6 +23,7 @@ pub enum WorkflowProtocolError {
     DiagnosticLimitOutOfBounds,
     MissingOperation,
     InspectionLimitOutOfBounds,
+    InvalidPurgeRequest,
 }
 
 pub fn decode_validate_request(
@@ -99,6 +101,28 @@ pub fn decode_run_inspection_query(
     Ok(request)
 }
 
+pub fn decode_run_purge_request(
+    wire: &[u8],
+) -> Result<PurgeWorkflowRunRequest, WorkflowProtocolError> {
+    let request: PurgeWorkflowRunRequest = decode_enveloped(wire)?;
+    if request.run_id.is_empty()
+        || request.run_id.len() > 128
+        || request.expected_preview_evidence_digest.len() != 64
+        || !request
+            .expected_preview_evidence_digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || request.requested_at_unix_millis < 0
+        || matches!(
+            v1::WorkflowRunPurgeMode::try_from(request.mode),
+            Ok(v1::WorkflowRunPurgeMode::Unspecified) | Err(_)
+        )
+    {
+        return Err(WorkflowProtocolError::InvalidPurgeRequest);
+    }
+    Ok(request)
+}
+
 trait WorkflowEnvelope {
     fn schema_major(&self) -> Option<u32>;
     fn request_id(&self) -> &str;
@@ -122,6 +146,7 @@ workflow_envelope!(WorkflowLibraryQueryRequest);
 workflow_envelope!(SetWorkflowActivationRequest);
 workflow_envelope!(ImportFrozenWorkspaceRequest);
 workflow_envelope!(WorkflowRunInspectionQuery);
+workflow_envelope!(PurgeWorkflowRunRequest);
 
 fn decode_enveloped<M>(wire: &[u8]) -> Result<M, WorkflowProtocolError>
 where

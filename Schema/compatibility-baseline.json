@@ -139,6 +139,11 @@
       "2": "WORKFLOW_RUN_OUTCOME_FAILED",
       "3": "WORKFLOW_RUN_OUTCOME_CANCELLED"
     },
+    "workflow_runtime.WorkflowRunPurgeMode": {
+      "0": "WORKFLOW_RUN_PURGE_MODE_UNSPECIFIED",
+      "1": "WORKFLOW_RUN_PURGE_MODE_MANUAL",
+      "2": "WORKFLOW_RUN_PURGE_MODE_AUTOMATIC"
+    },
     "workflow_runtime.WorkflowRunRetentionMode": {
       "0": "WORKFLOW_RUN_RETENTION_MODE_UNSPECIFIED",
       "1": "WORKFLOW_RUN_RETENTION_MODE_DURATION",
@@ -585,6 +590,21 @@
       "1": "string run_id",
       "2": "string run_token_id",
       "3": "string reason_code"
+    },
+    "workflow_runtime.PurgeWorkflowRunRequest": {
+      "1": "SchemaVersion schema_version",
+      "2": "string request_id",
+      "3": "string run_id",
+      "4": "WorkflowRunPurgeMode mode",
+      "5": "string expected_preview_evidence_digest",
+      "6": "int64 requested_at_unix_millis"
+    },
+    "workflow_runtime.PurgeWorkflowRunResponse": {
+      "1": "SchemaVersion schema_version",
+      "2": "string request_id",
+      "3": "WorkflowRunPurgeReceipt receipt",
+      "4": "bool duplicate",
+      "5": "uint64 projection_high_water_mark"
     },
     "workflow_runtime.RequestWorkflowRun": {
       "1": "string run_id",
@@ -1374,6 +1394,37 @@
       "7": "string affected_file_handle_ids",
       "8": "string retained_promoted_handle_ids",
       "9": "uint64 affected_value_bytes"
+    },
+    "workflow_runtime.WorkflowRunPurgeReceipt": {
+      "1": "string purge_event_id",
+      "10": "uint64 quarantined_object_bytes",
+      "2": "uint64 purge_store_position",
+      "3": "WorkflowRunPurged tombstone",
+      "4": "uint64 compacted_journal_event_count",
+      "5": "bool job_namespace_deleted",
+      "6": "uint64 deleted_storage_entry_count",
+      "7": "uint64 deleted_storage_version_count",
+      "8": "uint64 deleted_blob_reference_count",
+      "9": "uint64 quarantined_object_count"
+    },
+    "workflow_runtime.WorkflowRunPurged": {
+      "1": "string run_id",
+      "10": "uint64 source_event_count",
+      "11": "uint64 affected_attempt_count",
+      "12": "uint64 affected_value_count",
+      "13": "uint64 affected_file_handle_count",
+      "14": "string retained_promoted_handle_ids",
+      "15": "uint64 affected_value_bytes",
+      "16": "string installation_id",
+      "17": "bool historical_revision_retained",
+      "2": "string purge_command_id",
+      "3": "string workflow_id",
+      "4": "string revision_id",
+      "5": "string package_digest",
+      "6": "WorkflowRunPurgeMode mode",
+      "7": "string preview_evidence_digest",
+      "8": "uint64 source_first_store_position",
+      "9": "uint64 source_last_store_position"
     },
     "workflow_runtime.WorkflowRunRetentionPolicy": {
       "1": "WorkflowRunRetentionMode mode",

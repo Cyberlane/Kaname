@@ -726,6 +726,72 @@ message WorkflowRunSettled {
   reserved 7 to 20;
 }
 
+enum WorkflowRunPurgeMode {
+  WORKFLOW_RUN_PURGE_MODE_UNSPECIFIED = 0;
+  WORKFLOW_RUN_PURGE_MODE_MANUAL = 1;
+  WORKFLOW_RUN_PURGE_MODE_AUTOMATIC = 2;
+}
+
+// Bounded owner request to replace one settled run's detailed journal facts
+// with an auditable tombstone. The preview digest prevents a stale UI from
+// authorizing a materially different deletion set.
+message PurgeWorkflowRunRequest {
+  SchemaVersion schema_version = 1;
+  string request_id = 2;
+  string run_id = 3;
+  WorkflowRunPurgeMode mode = 4;
+  string expected_preview_evidence_digest = 5;
+  int64 requested_at_unix_millis = 6;
+  reserved 7 to 15;
+  reserved "journal_path", "projection_path", "storage_path", "credential";
+}
+
+// The sole authoritative fact retained after journal compaction. It contains
+// identities and aggregate counts only, never deleted payload bytes.
+message WorkflowRunPurged {
+  string run_id = 1;
+  string purge_command_id = 2;
+  string workflow_id = 3;
+  string revision_id = 4;
+  string package_digest = 5;
+  WorkflowRunPurgeMode mode = 6;
+  string preview_evidence_digest = 7;
+  uint64 source_first_store_position = 8;
+  uint64 source_last_store_position = 9;
+  uint64 source_event_count = 10;
+  uint64 affected_attempt_count = 11;
+  uint64 affected_value_count = 12;
+  uint64 affected_file_handle_count = 13;
+  repeated string retained_promoted_handle_ids = 14;
+  uint64 affected_value_bytes = 15;
+  string installation_id = 16;
+  bool historical_revision_retained = 17;
+  reserved 18 to 30;
+}
+
+message WorkflowRunPurgeReceipt {
+  string purge_event_id = 1;
+  uint64 purge_store_position = 2;
+  WorkflowRunPurged tombstone = 3;
+  uint64 compacted_journal_event_count = 4;
+  bool job_namespace_deleted = 5;
+  uint64 deleted_storage_entry_count = 6;
+  uint64 deleted_storage_version_count = 7;
+  uint64 deleted_blob_reference_count = 8;
+  uint64 quarantined_object_count = 9;
+  uint64 quarantined_object_bytes = 10;
+  reserved 11 to 20;
+}
+
+message PurgeWorkflowRunResponse {
+  SchemaVersion schema_version = 1;
+  string request_id = 2;
+  WorkflowRunPurgeReceipt receipt = 3;
+  bool duplicate = 4;
+  uint64 projection_high_water_mark = 5;
+  reserved 6 to 15;
+}
+
 // Bounded, read-only query over the disposable run projection. The journal
 // remains authoritative; callers never supply a database or host path.
 message WorkflowRunInspectionQuery {

@@ -9,7 +9,15 @@ public protocol DesktopWorkflowRunInspectionTransport: Sendable {
     ) async throws -> Kaname_V1_WorkflowRunInspectionResponse
 }
 
+public protocol DesktopWorkflowRunPurgeTransport: Sendable {
+    func purgeWorkflowRun(
+        _ request: Kaname_V1_PurgeWorkflowRunRequest,
+        timeout: TimeInterval
+    ) async throws -> Kaname_V1_PurgeWorkflowRunResponse
+}
+
 extension LocalCoreRunner: DesktopWorkflowRunInspectionTransport {}
+extension LocalCoreRunner: DesktopWorkflowRunPurgeTransport {}
 
 public enum DesktopWorkflowRunInspectionError: Error, Equatable, Sendable {
     case invalidRequest
@@ -1800,6 +1808,53 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
             eventID: item.eventID, kind: item.kind, storePosition: item.storePosition,
             streamSequence: item.streamSequence, occurredAtUnixMillis: item.occurredAtUnixMillis
         )
+    }
+}
+
+public struct DesktopWorkflowRunPurgeClient: Sendable {
+    private let transport: any DesktopWorkflowRunPurgeTransport
+    private let timeout: TimeInterval
+
+    public init(
+        transport: any DesktopWorkflowRunPurgeTransport,
+        timeout: TimeInterval = 15
+    ) {
+        self.transport = transport
+        self.timeout = timeout
+    }
+
+    public func purge(
+        _ run: DesktopDurableWorkflowRun,
+        requestID: String,
+        requestedAtUnixMillis: Int64 = Int64(Date().timeIntervalSince1970 * 1_000)
+    ) async throws -> Kaname_V1_WorkflowRunPurgeReceipt {
+        guard !requestID.isEmpty,
+              requestID.count <= 128,
+              run.purgePreview.manualEligible,
+              run.purgePreview.evidenceDigest.count == 64,
+              requestedAtUnixMillis >= 0 else {
+            throw DesktopWorkflowRunInspectionError.invalidRequest
+        }
+        var request = Kaname_V1_PurgeWorkflowRunRequest()
+        request.schemaVersion.major = 1
+        request.requestID = requestID
+        request.runID = run.runID
+        request.mode = .manual
+        request.expectedPreviewEvidenceDigest = run.purgePreview.evidenceDigest
+        request.requestedAtUnixMillis = requestedAtUnixMillis
+        let response = try await transport.purgeWorkflowRun(request, timeout: timeout)
+        guard response.schemaVersion.major == 1,
+              response.requestID == requestID,
+              response.hasReceipt,
+              response.receipt.hasTombstone,
+              response.receipt.tombstone.runID == run.runID,
+              response.receipt.tombstone.previewEvidenceDigest == run.purgePreview.evidenceDigest,
+              response.receipt.tombstone.historicalRevisionRetained,
+              !response.receipt.purgeEventID.isEmpty,
+              response.receipt.purgeStorePosition > run.lastStorePosition else {
+            throw DesktopWorkflowRunInspectionError.malformedResponse
+        }
+        return response.receipt
     }
 }
 
