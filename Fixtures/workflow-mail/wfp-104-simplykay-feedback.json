@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "caseId": "simplykay-case-001",
+  "expectedSenderFingerprint": "sha256:simplykay-synthetic-sender",
+  "events": [
+    {
+      "kind": "request",
+      "eventId": "feedback-event-001",
+      "messageFingerprint": "sha256:simplykay-request-001",
+      "senderFingerprint": "sha256:simplykay-synthetic-sender",
+      "request": "Create the synthetic monthly report as a DOCX attachment."
+    },
+    {
+      "kind": "result",
+      "eventId": "feedback-event-002",
+      "inReplyToMessageFingerprint": "sha256:simplykay-request-001",
+      "attachment": {
+        "handleId": "artifact-report-v1",
+        "filename": "synthetic-report-v1.docx",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "kind": "reply",
+      "eventId": "feedback-event-003",
+      "messageFingerprint": "sha256:simplykay-correction-001",
+      "senderFingerprint": "sha256:simplykay-synthetic-sender",
+      "inReplyToMessageFingerprint": "sha256:simplykay-request-001",
+      "correction": "Change the synthetic chart colour to blue."
+    },
+    {
+      "kind": "correction_result",
+      "eventId": "feedback-event-004",
+      "inReplyToMessageFingerprint": "sha256:simplykay-correction-001",
+      "attachment": {
+        "handleId": "artifact-report-v2",
+        "filename": "synthetic-report-v2.docx",
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    }
+  ]
+}

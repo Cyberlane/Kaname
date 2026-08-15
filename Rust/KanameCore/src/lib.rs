@@ -25,6 +25,7 @@ pub mod workflow_library;
 pub mod workflow_llm;
 pub mod workflow_mail;
 pub mod workflow_mail_artifacts;
+pub mod workflow_mail_feedback;
 pub mod workflow_mail_review;
 pub mod workflow_match;
 pub mod workflow_object_store;
