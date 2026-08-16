@@ -152,7 +152,7 @@ pub fn executable_mapping(expression: &Value) -> bool {
 /// Evaluates a mapping expression against the provided roots.
 pub fn evaluate(expression: &Value, roots: &ExpressionRoots) -> EvaluationResult {
     validate_shape(expression, "", 0)?;
-    let result = evaluate_at(expression, roots, "", 0)?;
+    let result = evaluate_at(expression, roots, "")?;
     let encoded = serde_json::to_vec(&result).map_err(|_| {
         ExpressionEvaluationError::new("mapping.result-encoding", "", "The result cannot encode.")
     })?;
@@ -214,14 +214,14 @@ fn validate_shape(
             let literal_type = literal.get("type").and_then(Value::as_str);
             let value = literal.get("value");
             let valid = literal.len() == 2
-                && match (literal_type, value) {
+                && matches!(
+                    (literal_type, value),
                     (Some("string"), Some(Value::String(_)))
-                    | (Some("number"), Some(Value::Number(_)))
-                    | (Some("boolean"), Some(Value::Bool(_)))
-                    | (Some("null"), Some(Value::Null))
-                    | (Some("json"), Some(_)) => true,
-                    _ => false,
-                };
+                        | (Some("number"), Some(Value::Number(_)))
+                        | (Some("boolean"), Some(Value::Bool(_)))
+                        | (Some("null"), Some(Value::Null))
+                        | (Some("json"), Some(_))
+                );
             if !valid {
                 return Err(malformed(&format!("{path}/literal")));
             }
@@ -305,12 +305,7 @@ fn validate_shape(
     Ok(())
 }
 
-fn evaluate_at(
-    expression: &Value,
-    roots: &ExpressionRoots,
-    path: &str,
-    depth: usize,
-) -> EvaluationResult {
+fn evaluate_at(expression: &Value, roots: &ExpressionRoots, path: &str) -> EvaluationResult {
     let object = expression.as_object().expect("validated expression");
     let (keyword, body) = object.iter().next().expect("validated expression");
     match keyword.as_str() {
@@ -326,7 +321,7 @@ fn evaluate_at(
             for (key, property) in body.as_object().expect("validated object") {
                 result.insert(
                     key.clone(),
-                    evaluate_at(property, roots, &format!("{path}/object/{}", escape(key)), depth + 1)?,
+                    evaluate_at(property, roots, &format!("{path}/object/{}", escape(key)))?,
                 );
             }
             Ok(Value::Object(result))
@@ -334,14 +329,14 @@ fn evaluate_at(
         "array" => {
             let mut result = Vec::new();
             for (index, item) in body.as_array().expect("validated array").iter().enumerate() {
-                result.push(evaluate_at(item, roots, &format!("{path}/array/{index}"), depth + 1)?);
+                result.push(evaluate_at(item, roots, &format!("{path}/array/{index}"))?);
             }
             Ok(Value::Array(result))
         }
         "coalesce" => {
             for (index, operand) in body.as_array().expect("validated coalesce").iter().enumerate()
             {
-                match evaluate_at(operand, roots, &format!("{path}/coalesce/{index}"), depth + 1) {
+                match evaluate_at(operand, roots, &format!("{path}/coalesce/{index}")) {
                     Ok(Value::Null) => {}
                     Ok(value) => return Ok(value),
                     Err(error) if error.is_absence() => {}
@@ -369,7 +364,6 @@ fn evaluate_at(
                             values.get(&name).expect("validated placeholder"),
                             roots,
                             &value_path,
-                            depth + 1,
                         )?;
                         match value {
                             Value::String(text) => rendered.push_str(&text),

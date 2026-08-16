@@ -4234,3 +4234,269 @@ fn run_token(journal: &Journal, run_id: &str) -> WorkflowRunTokenCreated {
         .unwrap();
     WorkflowRunTokenCreated::decode(event.payload.unwrap().value.as_slice()).unwrap()
 }
+
+const MAPPING_WORKFLOW_ID: &str = "018f7000-0001-7000-8000-000000000001";
+const MAPPING_REVISION_ID: &str = "revision-mapping-001";
+const MAPPING_MANUAL_ID: &str = "018f7000-0002-7000-8000-000000000002";
+const MAPPING_MAP_ID: &str = "018f7000-0003-7000-8000-000000000003";
+const MAPPING_COMPLETE_ID: &str = "018f7000-0004-7000-8000-000000000004";
+const MAPPING_FAIL_ID: &str = "018f7000-0005-7000-8000-000000000005";
+
+#[test]
+fn mapped_edge_and_data_map_derive_deterministic_values() {
+    let directory = tempdir().unwrap();
+    let (library, published) = published_mapping_library(directory.path());
+    let command = control_run_command(
+        "run-mapping-success-001",
+        &published,
+        MAPPING_WORKFLOW_ID,
+        MAPPING_REVISION_ID,
+        json!({"subject": "S-42", "amount": 12, "noise": "dropped"}),
+    );
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    let result = workflow_executor::execute(&mut journal, &library, &command).unwrap();
+    assert_eq!(result.outcome, DurableRunOutcome::Succeeded);
+
+    let emissions = run_events(&journal, "run-mapping-success-001")
+        .into_iter()
+        .filter_map(|event| match event {
+            kaname_core::workflow_runtime::WorkflowRuntimeEvent::PortEmitted(payload) => {
+                Some(payload)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let manual_success = emissions
+        .iter()
+        .find(|emission| emission.node_id == MAPPING_MANUAL_ID && emission.port_id == "success")
+        .unwrap();
+    let manual_value: Value =
+        serde_json::from_slice(&manual_success.value.as_ref().unwrap().inline_canonical_json)
+            .unwrap();
+    assert_eq!(manual_value["noise"], "dropped");
+
+    let map_success = emissions
+        .iter()
+        .find(|emission| emission.node_id == MAPPING_MAP_ID && emission.port_id == "success")
+        .unwrap();
+    let map_value: Value =
+        serde_json::from_slice(&map_success.value.as_ref().unwrap().inline_canonical_json)
+            .unwrap();
+    assert_eq!(map_value, json!("Invoice S-42 totals 12 via edge"));
+
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    projection.catch_up(&journal).unwrap();
+    assert_eq!(projection.row_count("runs").unwrap(), 1);
+    assert_eq!(projection.row_count("attempts").unwrap(), 3);
+}
+
+#[test]
+fn edge_mapping_failure_routes_to_the_target_error_port() {
+    let directory = tempdir().unwrap();
+    let (library, published) = published_mapping_library(directory.path());
+    let command = control_run_command(
+        "run-mapping-edge-failure-001",
+        &published,
+        MAPPING_WORKFLOW_ID,
+        MAPPING_REVISION_ID,
+        json!({"subject": "S-42"}),
+    );
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    let result = workflow_executor::execute(&mut journal, &library, &command).unwrap();
+    assert_eq!(result.outcome, DurableRunOutcome::Failed);
+    let settled = run_events(&journal, "run-mapping-edge-failure-001")
+        .into_iter()
+        .filter_map(|event| match event {
+            kaname_core::workflow_runtime::WorkflowRuntimeEvent::AttemptSettled(payload) => {
+                Some(payload)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let map_attempt = settled
+        .iter()
+        .find(|attempt| attempt.node_id == MAPPING_MAP_ID)
+        .unwrap();
+    assert_eq!(map_attempt.error_code, "mapping.pointer-unresolved");
+    let error_value: Value =
+        serde_json::from_slice(&map_attempt.error.as_ref().unwrap().inline_canonical_json)
+            .unwrap();
+    assert_eq!(error_value["code"], "mapping.pointer-unresolved");
+    assert!(error_value["context"].as_str().unwrap().starts_with("edge:"));
+    assert!(
+        settled
+            .iter()
+            .any(|attempt| attempt.node_id == MAPPING_FAIL_ID)
+    );
+}
+
+#[test]
+fn data_map_evaluation_failure_routes_to_its_error_port() {
+    let directory = tempdir().unwrap();
+    let (library, published) = published_mapping_library(directory.path());
+    let command = control_run_command(
+        "run-mapping-node-failure-001",
+        &published,
+        MAPPING_WORKFLOW_ID,
+        MAPPING_REVISION_ID,
+        json!({"subject": "S-42", "amount": null}),
+    );
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    let result = workflow_executor::execute(&mut journal, &library, &command).unwrap();
+    assert_eq!(result.outcome, DurableRunOutcome::Failed);
+    let settled = run_events(&journal, "run-mapping-node-failure-001")
+        .into_iter()
+        .filter_map(|event| match event {
+            kaname_core::workflow_runtime::WorkflowRuntimeEvent::AttemptSettled(payload) => {
+                Some(payload)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let map_attempt = settled
+        .iter()
+        .find(|attempt| attempt.node_id == MAPPING_MAP_ID)
+        .unwrap();
+    assert_eq!(map_attempt.error_code, "mapping.null-value");
+    let error_value: Value =
+        serde_json::from_slice(&map_attempt.error.as_ref().unwrap().inline_canonical_json)
+            .unwrap();
+    assert_eq!(error_value["context"], "mapping");
+}
+
+#[test]
+fn mapped_values_replay_identically_at_every_event_boundary() {
+    let directory = tempdir().unwrap();
+    let (library, published) = published_mapping_library(directory.path());
+    let command = control_run_command(
+        "run-mapping-crash-001",
+        &published,
+        MAPPING_WORKFLOW_ID,
+        MAPPING_REVISION_ID,
+        json!({"subject": "S-42", "amount": 12}),
+    );
+    let expected = {
+        let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+        let result = workflow_executor::execute(&mut journal, &library, &command).unwrap();
+        assert_eq!(result.outcome, DurableRunOutcome::Succeeded);
+        run_wires(&journal, "run-mapping-crash-001")
+    };
+    for boundary in 1..=expected.len() {
+        let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+        assert!(matches!(
+            workflow_executor::execute_with_fault_for_test(
+                &mut journal,
+                &library,
+                &command,
+                WorkflowExecutionFault::AfterNewEvent(boundary),
+            ),
+            Err(WorkflowExecutionError::InjectedInterruption)
+        ));
+        let resumed = workflow_executor::execute(&mut journal, &library, &command).unwrap();
+        assert_eq!(resumed.outcome, DurableRunOutcome::Succeeded);
+        assert_eq!(run_wires(&journal, "run-mapping-crash-001"), expected);
+    }
+}
+
+fn run_events(
+    journal: &Journal,
+    run_id: &str,
+) -> Vec<kaname_core::workflow_runtime::WorkflowRuntimeEvent> {
+    let page = journal
+        .replay(&format!("thread:workflow-run:{run_id}"), None, 500)
+        .unwrap();
+    page.events
+        .iter()
+        .map(|event| kaname_core::workflow_runtime::decode_workflow_event(event).unwrap())
+        .collect()
+}
+
+fn mapping_workflow_source() -> Value {
+    let node = |id: &str, key: &str, node_type: &str, config: Value| {
+        json!({
+            "id": id,
+            "key": key,
+            "name": key,
+            "type": node_type,
+            "typeVersion": 1,
+            "config": config
+        })
+    };
+    json!({
+        "formatVersion": 1,
+        "workflowId": MAPPING_WORKFLOW_ID,
+        "packageId": "dev.kaname.mapping-runtime",
+        "name": "Mapping runtime",
+        "summary": "Synthetic mapped edge and data.map fixture",
+        "graph": {
+            "entrypoints": [{
+                "id": "018f7000-0011-7000-8000-000000000011",
+                "nodeId": MAPPING_MANUAL_ID
+            }],
+            "nodes": [
+                node(MAPPING_MANUAL_ID, "manual", "trigger.manual", json!({})),
+                node(MAPPING_MAP_ID, "map", "data.map", json!({
+                    "mapping": {"format": {
+                        "template": "Invoice {subject} totals {amount} via {source}",
+                        "values": {
+                            "subject": {"select": {"root": "input", "pointer": "/subject"}},
+                            "amount": {"select": {"root": "input", "pointer": "/amount"}},
+                            "source": {"select": {"root": "input", "pointer": "/source"}}
+                        }
+                    }}
+                })),
+                node(MAPPING_COMPLETE_ID, "complete", "terminal.complete", json!({})),
+                node(MAPPING_FAIL_ID, "fail", "terminal.fail", json!({}))
+            ],
+            "edges": [
+                {
+                    "id": "018f7100-0001-7000-8000-000000000001",
+                    "from": {"nodeId": MAPPING_MANUAL_ID, "portId": "success"},
+                    "to": {"nodeId": MAPPING_MAP_ID, "portId": "input"},
+                    "mappingId": "018f7200-0001-7000-8000-000000000001",
+                    "mapping": {"object": {
+                        "subject": {"select": {"root": "input", "pointer": "/subject"}},
+                        "amount": {"select": {"root": "input", "pointer": "/amount"}},
+                        "source": {"literal": {"type": "string", "value": "edge"}}
+                    }}
+                },
+                {
+                    "id": "018f7100-0002-7000-8000-000000000002",
+                    "from": {"nodeId": MAPPING_MAP_ID, "portId": "success"},
+                    "to": {"nodeId": MAPPING_COMPLETE_ID, "portId": "input"},
+                    "mappingId": "018f7200-0002-7000-8000-000000000002",
+                    "mapping": {"whole": true}
+                },
+                {
+                    "id": "018f7100-0003-7000-8000-000000000003",
+                    "from": {"nodeId": MAPPING_MAP_ID, "portId": "error"},
+                    "to": {"nodeId": MAPPING_FAIL_ID, "portId": "input"},
+                    "mappingId": "018f7200-0003-7000-8000-000000000003",
+                    "mapping": {"whole": true}
+                }
+            ]
+        },
+        "interfaces": {},
+        "resources": {},
+        "policies": {},
+        "storage": {},
+        "metadata": {}
+    })
+}
+
+fn published_mapping_library(
+    application_support: &std::path::Path,
+) -> (
+    kaname_core::workflow_library::WorkflowLibraryStore,
+    PublishedWorkflowRevision,
+) {
+    publish_control_library(
+        application_support,
+        MAPPING_WORKFLOW_ID,
+        MAPPING_REVISION_ID,
+        "dev.kaname.mapping-runtime",
+        mapping_workflow_source(),
+        json!({"bundleVersion": 1, "schemas": []}),
+    )
+}
+

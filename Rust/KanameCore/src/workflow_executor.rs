@@ -3,9 +3,13 @@
 //! The executor consumes only a verified immutable compiled revision and the
 //! typed journal contracts. It advances one deterministic event boundary at a
 //! time, so resubmitting the same request after a process crash can only append
-//! the next missing fact. This bounded slice supports typed scoped storage and
+//! the next missing fact. This bounded slice supports typed scoped storage,
 //! version-pinned idempotent capabilities through an explicitly supplied host,
-//! but no connector, model, arbitrary mapping, or external effect.
+//! and deterministic mapping evaluation over the `input` root for edges,
+//! `data.map`, capability inputs, model prompts, and subflow inputs — but no
+//! connector or external effect. Mapped values are recomputed on replay from
+//! the compiled mapping and the journaled source value; they add no new
+//! journal facts.
 
 use crate::{
     journal::{Journal, JournalError, ReplayBasis},
@@ -21,6 +25,7 @@ use crate::{
         WorkflowLlmProviderDefinition, WorkflowLlmProviderResult, WorkflowLlmProviderToolResult,
         WorkflowLlmProviderTrace,
     },
+    workflow_expression::{self, ExpressionRoots},
     workflow_match::{self, EvaluationOutcome, MatchConfig, MatchRoots, TraceOutcome},
     workflow_retention::WorkflowRunRetentionPolicy,
     workflow_runtime::{self, WorkflowRuntimeCommand, WorkflowRuntimeEvent},
@@ -1207,7 +1212,7 @@ fn validate_capability_host(
     for node in capability_nodes {
         let (config, dependency, definition) =
             resolve_capability_definition(package, capabilities, node)?;
-        if config.input != json!({"whole": true})
+        if !workflow_expression::executable_mapping(&config.input)
             || !definition.idempotent
             || definition.timeout_milliseconds == 0
             || definition.timeout_milliseconds > 86_400_000
@@ -1349,7 +1354,7 @@ fn validate_llm_provider(
                 "minimal" | "low" | "medium" | "high"
             )
             || !matches!(config.conversation_scope.as_str(), "job" | "case")
-            || config.prompt != json!({"whole": true})
+            || !workflow_expression::executable_mapping(&config.prompt)
             || config.instructions.is_empty()
         {
             return Err(WorkflowExecutionError::Unsupported(
@@ -1598,6 +1603,7 @@ fn validate_compiled_subset(compiled: &CompiledWorkflow) -> Result<()> {
             || !matches!(
                 node.node_type.as_str(),
                 "trigger.manual"
+                    | "data.map"
                     | "data.validate"
                     | "data.case-context"
                     | "control.match"
@@ -1627,14 +1633,14 @@ fn validate_compiled_subset(compiled: &CompiledWorkflow) -> Result<()> {
         if !edge_ids.insert(edge.id.as_str())
             || edge.mapping_id.is_empty()
             || edge.ignored.unwrap_or(false)
-            || edge.mapping != json!({"whole": true})
+            || !workflow_expression::executable_mapping(&edge.mapping)
             || !nodes.contains_key(edge.from.node_id.as_str())
             || !nodes.contains_key(edge.to.node_id.as_str())
             || edge.from.port_id.is_empty()
             || edge.to.port_id.is_empty()
         {
             return Err(WorkflowExecutionError::Unsupported(
-                "whole_value_edges_only".into(),
+                "edge_mapping_not_executable".into(),
             ));
         }
     }
@@ -1648,7 +1654,7 @@ fn resolve_subflow_revision(
 ) -> Result<(SubflowConfig, WorkflowRevisionContent, CompiledWorkflow)> {
     let config: SubflowConfig = serde_json::from_value(node.config.clone())
         .map_err(|_| WorkflowExecutionError::Integrity("subflow_config".into()))?;
-    if config.input != json!({"whole": true}) {
+    if !workflow_expression::executable_mapping(&config.input) {
         return Err(WorkflowExecutionError::Unsupported(
             "subflow_input_mapping".into(),
         ));
@@ -2395,6 +2401,123 @@ fn next_events(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Applies a mapping to a flowing value. `whole` passes the value through
+/// untouched. Evaluation failures come back as the inner `Err` so callers can
+/// route them to the node's error port instead of failing the run.
+fn apply_mapping(
+    mapping: &Value,
+    value: &v1::WorkflowValueReference,
+    mapped_value_id: &str,
+) -> Result<
+    std::result::Result<
+        v1::WorkflowValueReference,
+        workflow_expression::ExpressionEvaluationError,
+    >,
+> {
+    if mapping == &json!({"whole": true}) {
+        return Ok(Ok(value.clone()));
+    }
+    let input = inline_json(value)?;
+    match workflow_expression::evaluate(mapping, &ExpressionRoots::with_input(input)) {
+        Ok(result) => Ok(Ok(value_from_json(mapped_value_id, &result)?)),
+        Err(error) => Ok(Err(error)),
+    }
+}
+
+fn mapping_failure_value(
+    request: &v1::RequestWorkflowRun,
+    node_id: &str,
+    context: &str,
+    error: &workflow_expression::ExpressionEvaluationError,
+) -> Result<v1::WorkflowValueReference> {
+    value_from_json(
+        &stable_id(
+            "value",
+            &[&request.run_id, node_id, context, "mapping-error"],
+        ),
+        &json!({
+            "code": error.code,
+            "context": context,
+            "expressionPath": error.expression_path,
+            "message": error.message,
+        }),
+    )
+}
+
+/// The node-config mapping the executor evaluates against the node's input
+/// before the node runs, if the node type declares one.
+fn node_config_mapping(node: &CompiledNode) -> Option<&Value> {
+    let field = match node.node_type.as_str() {
+        "compute.capability" | "control.subflow" => "input",
+        "compute.llm" => "prompt",
+        _ => return None,
+    };
+    node.config.get(field)
+}
+
+#[allow(clippy::type_complexity)]
+fn mapped_node_inputs<'a>(
+    package: &ExecutionPackage,
+    request: &v1::RequestWorkflowRun,
+    node: &CompiledNode,
+    raw_inputs: Vec<(
+        Option<&'a v1::WorkflowEdgeCheckpointed>,
+        v1::WorkflowValueReference,
+    )>,
+) -> Result<(
+    Vec<(
+        Option<&'a v1::WorkflowEdgeCheckpointed>,
+        v1::WorkflowValueReference,
+    )>,
+    Option<(String, v1::WorkflowValueReference)>,
+)> {
+    let mut inputs = Vec::with_capacity(raw_inputs.len());
+    for (edge, value) in raw_inputs {
+        let mapped = match edge {
+            Some(payload) => {
+                let compiled_edge = package
+                    .compiled
+                    .edges
+                    .iter()
+                    .find(|candidate| candidate.id == payload.edge_id)
+                    .ok_or_else(|| WorkflowExecutionError::Integrity("edge_identity".into()))?;
+                match apply_mapping(
+                    &compiled_edge.mapping,
+                    &value,
+                    &stable_id(
+                        "value",
+                        &[&request.run_id, &payload.edge_id, &payload.emission_id, "mapped"],
+                    ),
+                )? {
+                    Ok(mapped) => mapped,
+                    Err(error) => {
+                        let failure = mapping_failure_value(
+                            request,
+                            &node.id,
+                            &format!("edge:{}", payload.edge_id),
+                            &error,
+                        )?;
+                        inputs.push((edge, value));
+                        return Ok((inputs, Some((error.code, failure))));
+                    }
+                }
+            }
+            None => value,
+        };
+        inputs.push((edge, mapped));
+    }
+    if let Some(mapping) = node_config_mapping(node)
+        && mapping != &json!({"whole": true})
+        && let Some((_, input)) = inputs.last()
+        && let Err(error) =
+            workflow_expression::evaluate(mapping, &ExpressionRoots::with_input(inline_json(input)?))
+    {
+        let failure = mapping_failure_value(request, &node.id, "config", &error)?;
+        return Ok((inputs, Some((error.code, failure))));
+    }
+    Ok((inputs, None))
+}
+
 fn node_event_sequence(
     journal: &mut Journal,
     library: &WorkflowLibraryStore,
@@ -2413,13 +2536,15 @@ fn node_event_sequence(
     job_run_id: &str,
 ) -> Result<Vec<v1::EventEnvelope>> {
     let node = compiled_node(&package.compiled, &attempt.started.node_id)?;
-    let inputs = node_inputs(
+    let raw_inputs = node_inputs(
         request,
         state,
         &node.id,
         &attempt.started.execution_token_id,
     )?;
-    if node.node_type == "control.subflow"
+    let (inputs, mapping_failure) = mapped_node_inputs(package, request, node, raw_inputs)?;
+    if mapping_failure.is_none()
+        && node.node_type == "control.subflow"
         && let Some(events) = pending_subflow_event_sequence(
             journal,
             library,
@@ -2442,7 +2567,8 @@ fn node_event_sequence(
     {
         return Ok(events);
     }
-    if node.node_type == "compute.capability"
+    if mapping_failure.is_none()
+        && node.node_type == "compute.capability"
         && let Some(events) = pending_capability_event_sequence(
             package,
             capabilities,
@@ -2457,14 +2583,16 @@ fn node_event_sequence(
     {
         return Ok(events);
     }
-    if node.node_type == "compute.llm"
+    if mapping_failure.is_none()
+        && node.node_type == "compute.llm"
         && let Some(events) = pending_llm_event_sequence(
             package, llm, request, token_id, state, attempt, node, &inputs,
         )?
     {
         return Ok(events);
     }
-    if node.node_type == "control.for-each"
+    if mapping_failure.is_none()
+        && node.node_type == "control.for-each"
         && !state.iterations.iter().any(|iteration| {
             iteration.evaluated.as_ref().is_some_and(|evaluated| {
                 evaluated.resumed_execution_token_id == attempt.started.execution_token_id
@@ -2475,7 +2603,7 @@ fn node_event_sequence(
             package, command, request, token_id, state, attempt, node, &inputs,
         );
     }
-    if node.node_type == "control.retry" {
+    if mapping_failure.is_none() && node.node_type == "control.retry" {
         return retry_controller_event_sequence(
             package,
             command,
@@ -2488,7 +2616,7 @@ fn node_event_sequence(
             now_unix_millis,
         );
     }
-    if node.node_type == "control.wait" {
+    if mapping_failure.is_none() && node.node_type == "control.wait" {
         return wait_controller_event_sequence(
             package,
             command,
@@ -2501,7 +2629,9 @@ fn node_event_sequence(
             now_unix_millis,
         );
     }
-    let execution = if node.node_type == "compute.capability" {
+    let execution = if let Some((code, value)) = mapping_failure {
+        failure_output("error", &code, value)
+    } else if node.node_type == "compute.capability" {
         execute_settled_capability_node(request, state, attempt, node)?
     } else if node.node_type == "compute.llm" {
         execute_settled_llm_node(request, state, attempt, node)?
@@ -3654,13 +3784,22 @@ fn pending_subflow_event_sequence(
         &[&request.run_id, &attempt.started.attempt_id, &node.id],
     );
     let Some(recorded) = state.subflows.get(&invocation_id) else {
-        let input = inputs
+        let edge_input = inputs
             .last()
             .ok_or_else(|| WorkflowExecutionError::Lifecycle("subflow_input_missing".into()))?
             .1
             .clone();
         let (config, child_revision, _) =
             resolve_subflow_revision(library, &package.compiled, node)?;
+        let input = apply_mapping(
+            &config.input,
+            &edge_input,
+            &stable_id(
+                "value",
+                &[&request.run_id, &attempt.started.attempt_id, "subflow-input"],
+            ),
+        )?
+        .map_err(|_| WorkflowExecutionError::Integrity("subflow_input_mapping".into()))?;
         let child_run_id = stable_id("run", &[&request.run_id, &invocation_id, "child"]);
         let child_command_id = stable_id("command", &[&child_run_id, "request"]);
         let event_id = stable_id(
@@ -4067,13 +4206,22 @@ fn pending_capability_event_sequence(
     )],
 ) -> Result<Option<Vec<v1::EventEnvelope>>> {
     let invocation_id = capability_invocation_id(request, attempt, node);
-    let input = inputs
+    let edge_input = inputs
         .last()
         .ok_or_else(|| WorkflowExecutionError::Lifecycle("capability_input_missing".into()))?
         .1
         .clone();
     let (config, dependency, definition) =
         resolve_capability_definition(package, capabilities, node)?;
+    let input = apply_mapping(
+        &config.input,
+        &edge_input,
+        &stable_id(
+            "value",
+            &[&request.run_id, &attempt.started.attempt_id, "capability-input"],
+        ),
+    )?
+    .map_err(|_| WorkflowExecutionError::Integrity("capability_input_mapping".into()))?;
     let Some(recorded) = state.capability_attempts.get(&invocation_id) else {
         let configuration = capability_configuration(&config)?;
         let configuration_value = value_from_json(
@@ -4942,6 +5090,15 @@ fn compile_llm_context(
         Vec::new(),
         &mut reasons,
     ));
+    let prompt_instance = if config.prompt == json!({"whole": true}) {
+        capability_value_instance(input)?
+    } else {
+        workflow_expression::evaluate(
+            &config.prompt,
+            &ExpressionRoots::with_input(inline_json(input)?),
+        )
+        .map_err(|_| WorkflowExecutionError::Integrity("llm_prompt_mapping".into()))?
+    };
     pending.push(llm_group(
         "current-input",
         "current_input",
@@ -4949,7 +5106,7 @@ fn compile_llm_context(
         &format!("Node {} attempt {}", node.id, attempt.started.attempt_id),
         Some("user"),
         "Current typed workflow input",
-        capability_value_instance(input)?,
+        prompt_instance,
         Vec::new(),
         &mut reasons,
     ));
@@ -5960,6 +6117,23 @@ fn execute_node(
                     "case_episode_required",
                 ))?;
             Ok(success_output("success", context))
+        }
+        "data.map" => {
+            let mapping = node
+                .config
+                .get("mapping")
+                .ok_or_else(|| WorkflowExecutionError::Integrity("map_config".into()))?;
+            match apply_mapping(
+                mapping,
+                input,
+                &stable_id("value", &[&request.run_id, &node.id, attempt_id, "map-output"]),
+            )? {
+                Ok(value) => Ok(success_output("success", value)),
+                Err(error) => {
+                    let value = mapping_failure_value(request, &node.id, "mapping", &error)?;
+                    Ok(failure_output("error", &error.code, value))
+                }
+            }
         }
         "data.validate" => {
             let instance = inline_json(input)?;

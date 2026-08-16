@@ -409,10 +409,21 @@ fn execution_availability(node: &Node) -> &'static str {
             "executable"
         }
         "data.validate" | "data.case-context" => "executable",
+        "data.map"
+            if node
+                .config
+                .get("mapping")
+                .is_some_and(crate::workflow_expression::executable_mapping) =>
+        {
+            "executable"
+        }
         "compute.capability"
             if string_field(&node.config, "capabilityId").is_some()
                 && string_field(&node.config, "version").is_some()
-                && node.config.get("input") == Some(&serde_json::json!({"whole": true}))
+                && node
+                    .config
+                    .get("input")
+                    .is_some_and(crate::workflow_expression::executable_mapping)
                 && string_field(&node.config, "outputSchemaRef").is_some()
                 && node
                     .config
@@ -424,7 +435,10 @@ fn execution_availability(node: &Node) -> &'static str {
         "compute.llm"
             if string_field(&node.config, "modelClass").is_some()
                 && string_field(&node.config, "instructions").is_some()
-                && node.config.get("prompt") == Some(&serde_json::json!({"whole": true}))
+                && node
+                    .config
+                    .get("prompt")
+                    .is_some_and(crate::workflow_expression::executable_mapping)
                 && array_field(&node.config, "tools").is_some()
                 && string_field(&node.config, "outputSchemaRef").is_some()
                 && string_field(&node.config, "reasoningEffort").is_some()
@@ -450,7 +464,10 @@ fn execution_availability(node: &Node) -> &'static str {
             if string_field(&node.config, "packageId").is_some()
                 && string_field(&node.config, "revisionDigest").is_some()
                 && string_field(&node.config, "entrypoint").is_some()
-                && node.config.get("input") == Some(&serde_json::json!({"whole": true})) =>
+                && node
+                    .config
+                    .get("input")
+                    .is_some_and(crate::workflow_expression::executable_mapping) =>
         {
             "executable"
         }
