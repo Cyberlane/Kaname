@@ -1132,7 +1132,7 @@ fn json_type(value: &Value) -> JsonType {
     }
 }
 
-fn decode_pointer_token(token: &str) -> Option<String> {
+pub(crate) fn decode_pointer_token(token: &str) -> Option<String> {
     let mut decoded = String::with_capacity(token.len());
     let mut characters = token.chars();
     while let Some(character) = characters.next() {
