@@ -314,15 +314,16 @@ struct KanameDesktopWorkspace: View {
 
     @ViewBuilder
     private var workspaceStack: some View {
-        ZStack {
-            navigationLayout
-                .background(Nord.polarNight0)
-                .allowsHitTesting(!showsSettings && !showsGlobalSearch && !showsNewProject && !model.isRecoveryReadOnly)
-                .disabled(showsSettings || showsGlobalSearch || showsNewProject || model.isRecoveryReadOnly)
-                .dropDestination(for: URL.self) { urls, _ in
-                    prepareImport(urls: urls)
-                }
+        navigationLayout
+            .background(Nord.polarNight0)
+            .dropDestination(for: URL.self) { urls, _ in
+                prepareImport(urls: urls)
+            }
+    }
 
+    @ViewBuilder
+    private var modalPresentationLayer: some View {
+        ZStack {
             if showsSettings {
                 DesktopSettingsModal(
                     model: model,
@@ -374,9 +375,10 @@ struct KanameDesktopWorkspace: View {
                     model: model,
                     inspectDiagnostics: presentDiagnostics
                 )
-                    .zIndex(10)
+                .zIndex(10)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var presentedWorkspace: some View {
@@ -505,6 +507,9 @@ struct KanameDesktopWorkspace: View {
 
     var body: some View {
         primaryCommandWorkspace
+        .overlay {
+            modalPresentationLayer
+        }
         .onReceive(NotificationCenter.default.publisher(for: .kanameNavigate)) { notification in
             guard acceptsNonRecoveryCommands,
                   let rawDestination = notification.object as? String,
@@ -1508,7 +1513,6 @@ private struct DesktopModalBackdrop<Content: View>: View {
     var body: some View {
         ZStack {
             Color.black.opacity(0.46)
-                .ignoresSafeArea()
                 .contentShape(Rectangle())
                 .onTapGesture(perform: dismiss)
             content.padding(24)
@@ -10340,7 +10344,6 @@ private struct DesktopSettingsModal: View {
     var body: some View {
         ZStack {
             Color.black.opacity(0.58)
-                .ignoresSafeArea()
                 .contentShape(Rectangle())
                 .onTapGesture(perform: dismiss)
 
