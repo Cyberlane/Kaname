@@ -1,5 +1,6 @@
 # Unreleased
 
+- Make Automations the single workflow product surface: restore the accepted Workflows, Canvas-first Builder, Run history, Components, and Readiness design with installed workflow definitions, immutable revisions, canonical source, durable run evidence, capabilities, schedules-as-triggers, bindings, and migration gates; Email remains focused on Inbox and Drafts.
 - Run email and incremental Google Calendar observation, queued workflow execution, wait expiry, scheduled invocation, retry, and recovery from a one-shot background worker while the app is closed; the desktop lock prevents concurrent workspace writers.
 - Add quiet per-trigger health with last verified success, bounded cursor lag, exponential backoff, authentication state, next attempt, pause/resume, and action-required escalation.
 - Add cross-workflow sender/query ownership policies, durable conversation claims, protected and exclusive precedence, collision blocking, and audited owner overrides.

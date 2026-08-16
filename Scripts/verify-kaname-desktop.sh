@@ -120,14 +120,28 @@ run_qualified_app --desktop-destination email --snapshot "$output_directory/emai
 run_qualified_app \
     --desktop-destination automations \
     --desktop-workflow-fixture "$PWD/Examples/Workflows/generic-case-review.workflow.json" \
-    --snapshot "$output_directory/workflow-work.png"
+    --snapshot "$output_directory/automations-workflows.png"
 run_qualified_app \
     --desktop-destination automations \
-    --desktop-workflow-definitions \
+    --desktop-automation-product-builder \
     --desktop-workflow-fixture "$PWD/Examples/Workflows/generic-case-review.workflow.json" \
-    --snapshot "$output_directory/workflow-definitions.png"
+    --snapshot "$output_directory/automations-builder.png"
+run_qualified_app \
+    --desktop-destination automations \
+    --desktop-automation-product-runs \
+    --desktop-workflow-fixture "$PWD/Examples/Workflows/generic-case-review.workflow.json" \
+    --snapshot "$output_directory/automations-runs.png"
 run_qualified_app --desktop-destination calendar --snapshot "$output_directory/calendar.png"
-run_qualified_app --desktop-destination automations --desktop-automation-schedules --snapshot "$output_directory/automations.png"
+run_qualified_app \
+    --desktop-destination automations \
+    --desktop-automation-product-components \
+    --desktop-workflow-fixture "$PWD/Examples/Workflows/generic-case-review.workflow.json" \
+    --snapshot "$output_directory/automations-components.png"
+run_qualified_app \
+    --desktop-destination automations \
+    --desktop-automation-product-readiness \
+    --desktop-workflow-fixture "$PWD/Examples/Workflows/generic-case-review.workflow.json" \
+    --snapshot "$output_directory/automations-readiness.png"
 run_qualified_app --desktop-destination projects --snapshot "$output_directory/projects.png"
 run_qualified_app --desktop-new-conversation --snapshot "$output_directory/new-conversation.png"
 run_qualified_app --desktop-destination projects --desktop-project-id project-kaname --snapshot "$output_directory/project-overview.png"
@@ -186,10 +200,12 @@ for snapshot in \
     "$output_directory/threads-compact.png" \
     "$output_directory/local-core.png" \
     "$output_directory/email.png" \
-    "$output_directory/workflow-work.png" \
-    "$output_directory/workflow-definitions.png" \
+    "$output_directory/automations-workflows.png" \
+    "$output_directory/automations-builder.png" \
+    "$output_directory/automations-runs.png" \
     "$output_directory/calendar.png" \
-    "$output_directory/automations.png" \
+    "$output_directory/automations-components.png" \
+    "$output_directory/automations-readiness.png" \
     "$output_directory/projects.png" \
     "$output_directory/new-conversation.png" \
     "$output_directory/project-overview.png" \

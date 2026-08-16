@@ -640,7 +640,7 @@ struct WorkflowStudioSheet: View {
     @State private var selectedTriggers: Set<DesktopWorkflowTriggerKind> = [.manual]
     @State private var selectedPermissions = Set<DesktopWorkflowPermission>()
     @State private var message: String?
-    @State private var projection = Projection.outline
+    @State private var projection = Projection.canvas
     @State private var canvasPositions: [DesktopWorkflowCanvasNodePosition] = []
     @State private var sourceText = ""
     @State private var sourceMessage: String?
@@ -659,7 +659,7 @@ struct WorkflowStudioSheet: View {
                 Grid(alignment: .leading, verticalSpacing: 4) {
                     GridRow { Text(draft?.name ?? "Workflow Studio").font(.title2.weight(.bold)) }
                     GridRow {
-                        Text("Build a readable outline; Kaname generates and validates the exact graph and permission receipt.")
+                        Text("Build on the canvas, outline, or canonical source; every projection edits the same validated graph and permission receipt.")
                             .font(.callout).foregroundStyle(.secondary)
                     }
                 }
@@ -755,7 +755,7 @@ struct WorkflowStudioSheet: View {
                 }
             }
             .listStyle(.inset)
-            Text("The default outline is keyboard accessible. A canvas is optional and does not own the graph.")
+            Text("The outline is the keyboard-accessible representation of the same graph shown on the canvas.")
                 .font(.caption2).foregroundStyle(.secondary)
         } label: {
             HStack {

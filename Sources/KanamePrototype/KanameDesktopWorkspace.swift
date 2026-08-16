@@ -875,7 +875,6 @@ struct KanameDesktopWorkspace: View {
                     model: model,
                     integrations: personalIntegrations,
                     allowsAutomaticInitialRead: searchNavigationRequest?.target.kind != .emailThread,
-                    workflowManagementOnly: false,
                     openAutomations: { navigate(to: .automations) }
                 )
             case .calendar:
@@ -5398,7 +5397,7 @@ private final class DesktopUpdateViewModel: ObservableObject {
 }
 
 @MainActor
-private final class DesktopPersonalIntegrationViewModel: ObservableObject {
+final class DesktopPersonalIntegrationViewModel: ObservableObject {
     @Published private(set) var googleAccounts: [NativeGoogleAccountSnapshot] = []
     @Published private(set) var googleCalendars: [PersonalCalendarSourceSnapshot] = []
     @Published private(set) var mailThreads: [PersonalMailThreadSnapshot] = []
@@ -6359,7 +6358,6 @@ private struct DesktopEmailView: View {
     @ObservedObject var model: DesktopAppModel
     @ObservedObject var integrations: DesktopPersonalIntegrationViewModel
     let allowsAutomaticInitialRead: Bool
-    let workflowManagementOnly: Bool
     let openAutomations: () -> Void
     @StateObject private var mail = DesktopMailViewModel()
     @State private var showsComposer = false
@@ -6398,13 +6396,7 @@ private struct DesktopEmailView: View {
     }
 
     var body: some View {
-        Group {
-            if workflowManagementOnly {
-                workflowsWorkspace
-            } else {
-                emailWorkspace
-            }
-        }
+        emailWorkspace
         .background(Nord.polarNight0)
         .sheet(isPresented: $showsComposer) {
             NewEmailDraftSheet(model: model)
@@ -6454,8 +6446,7 @@ private struct DesktopEmailView: View {
             WorkflowConnectorBindingSheet(model: model, connector: connector)
         }
         .onAppear {
-            if !workflowManagementOnly,
-               allowsAutomaticInitialRead,
+            if allowsAutomaticInitialRead,
                mail.threads.isEmpty,
                !integrations.googleAccounts.isEmpty {
                 mail.search(accounts: googleAccounts, model: model)
@@ -7035,47 +7026,11 @@ private struct DesktopEmailView: View {
     }
 
     private func installWorkflowPackage() {
-        let panel = NSOpenPanel()
-        panel.title = "Install Kaname workflow package"
-        panel.message = "Choose a reusable workflow package or an encrypted private installation archive. Kaname reviews either locally and imports it disabled."
-        panel.allowedContentTypes = [
-            .json, DesktopWorkflowTransferUI.packageType,
-            DesktopWorkflowTransferUI.signedTemplateType, DesktopWorkflowTransferUI.installationType,
-        ]
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
-            let data = try Data(contentsOf: url, options: [.mappedIfSafe])
-            let registered = Set(model.workflowCapabilityInstallations.filter(\.enabled).map(\.capabilityID))
-                .union(model.snapshot.domains.skills.filter(\.enabled).map(\.id))
-            if url.pathExtension.lowercased() == "kanameinstallation" {
-                guard let passphrase = DesktopWorkflowTransferUI.requestImportPassphrase() else { return }
-                let payload = try model.previewWorkflowInstallation(data, passphrase: passphrase)
-                guard DesktopWorkflowTransferUI.confirmInstallationImport(payload) else { return }
-                let workflowID = try model.importWorkflowInstallation(payload, registeredCapabilityIDs: registered)
-                workflowImportMessage = "Imported \(workflowID) disabled. Rebind accounts and review capabilities, context, triggers, and effects before resuming."
-            } else if url.pathExtension.lowercased() == "kanametemplate" {
-                let envelope = try JSONDecoder().decode(DesktopWorkflowSignedTemplateEnvelope.self, from: data)
-                try DesktopWorkflowTemplateCodec.verify(envelope)
-                guard DesktopWorkflowTransferUI.confirmSignedTemplateImport(envelope) else { return }
-                let revisionID = try model.installSignedWorkflowTemplate(
-                    envelopeData: data, registeredCapabilityIDs: registered
-                )
-                workflowImportMessage = "Verified and installed signed revision \(revisionID) disabled. Review configuration, exact dependency locks, and permissions before enabling."
-            } else {
-                let manifest = try DesktopWorkflowPackageCodec.decode(data, registeredCapabilityIDs: registered)
-                let canonical = try DesktopWorkflowPackageCodec.canonicalData(manifest)
-                let digest = DesktopWorkflowPackageCodec.digest(canonical)
-                guard DesktopWorkflowTransferUI.confirmPackageImport(manifest, digest: digest) else { return }
-                let revisionID = try model.installWorkflowPackage(
-                    manifestData: canonical,
-                    registeredCapabilityIDs: registered,
-                    enable: false
-                )
-                workflowImportMessage = "Installed revision \(revisionID) disabled. Review its exact permissions and stages before enabling."
+            if let message = try DesktopWorkflowTransferUI.installPackage(model: model) {
+                workflowImportMessage = message
+                workflowCollection = .definitions
             }
-            workflowCollection = .definitions
         } catch {
             workflowImportMessage = "Installation failed safely: \(error.localizedDescription)"
         }
@@ -8589,7 +8544,7 @@ private struct WorkflowOwnershipPolicySummary: View {
     }
 }
 
-private struct WorkflowManualRunSheet: View {
+struct WorkflowManualRunSheet: View {
     let definition: DesktopWorkflowDefinitionRecord
     let revision: DesktopWorkflowRevisionRecord?
     let start: (String, String, Data) -> Bool
@@ -9317,286 +9272,24 @@ private struct CalendarEventMutationSheet: View {
     }
 }
 
-private enum AutomationManagementSection: String, CaseIterable {
-    case workflows
-    case schedules
-
-    var label: String { rawValue.capitalized }
-}
-
 private struct DesktopAutomationsView: View {
     @ObservedObject var model: DesktopAppModel
     @ObservedObject var scheduler: DesktopAutomationSchedulerViewModel
     @ObservedObject var integrations: DesktopPersonalIntegrationViewModel
-    @State private var section = CommandLine.arguments.contains("--desktop-automation-schedules")
-        ? AutomationManagementSection.schedules
-        : AutomationManagementSection.workflows
-    @State private var showsNewAutomation = false
-    @State private var editingAutomation: DesktopAutomationRule?
-    @State private var automationPendingDeletion: DesktopAutomationRule?
 
     var body: some View {
         Group {
             if CommandLine.arguments.contains("--desktop-automation-workflows-prototype") {
                 AutomationWorkflowDesignPreview()
             } else {
-                automationWorkspace
-            }
-        }
-    }
-
-    private var automationWorkspace: some View {
-        VStack(spacing: 0) {
-            SurfaceHeader(
-                title: "Automations",
-                detail: "Design, test, run, and understand repeatable work in one place",
-                symbol: DesktopDestination.automations.symbol
-            ) {
-                if section == .schedules {
-                    Button("New scheduled rule", systemImage: "plus.circle") { showsNewAutomation = true }
-                        .buttonStyle(.borderedProminent)
-                }
-            }
-            .padding(24)
-
-            HStack {
-                Text("View").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
-                Picker("", selection: $section) {
-                    ForEach(AutomationManagementSection.allCases, id: \.self) { Text($0.label).tag($0) }
-                }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-                .frame(width: 260)
-                Spacer()
-            }
-            .padding(.horizontal, 24)
-            .padding(.bottom, 16)
-
-            Divider()
-
-            switch section {
-            case .workflows:
-                DesktopEmailView(
+                AutomationWorkflowProductView(
                     model: model,
-                    integrations: integrations,
-                    allowsAutomaticInitialRead: false,
-                    workflowManagementOnly: true,
-                    openAutomations: {}
+                    scheduler: scheduler,
+                    integrations: integrations
                 )
-            case .schedules:
-                scheduleWorkspace
-            }
-        }
-        .background(Nord.polarNight0)
-    }
-
-    private var scheduleWorkspace: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                BoundaryCallout(
-                    title: "Safe default: skip missed runs",
-                    detail: model.snapshot.preferences.safeMode
-                        ? "Safe mode is on. Schedules remain inspectable, but only local notification rules can execute."
-                        : "Kaname never surprise-runs a backlog. A delay under two minutes is grace; older occurrences collapse to one skip receipt or one catch-up approval. New rules stay disabled until context, notifications, and authority are reviewed."
-                )
-
-                SectionHeading(
-                    title: "Workflow runs",
-                    detail: "Exact revision snapshots, durable node evidence, and read-only debugging"
-                )
-                if CommandLine.arguments.contains("--desktop-effect-lifecycle-fixture") {
-                    DesktopDurableWorkflowRunsView(
-                        snapshot: DesktopWorkflowEffectLifecycleFixture.unknownOutcomeHistory(),
-                        qualificationFixture: true
-                    )
-                } else if let runner = LocalCoreRunner.bundled() {
-                    DesktopDurableWorkflowRunsView(runner: runner)
-                } else {
-                    BoundaryCallout(
-                        title: "Durable run history unavailable",
-                        detail: "The signed local core service is not configured in this build. Kaname will not substitute fixture runs or display missing evidence as success."
-                    )
-                }
-
-                HStack {
-                    Label(scheduler.ownerState, systemImage: "lock.shield")
-                    Spacer()
-                    Button("Enable notifications") { scheduler.requestNotificationAccess() }
-                    Button("Check schedules now") { scheduler.evaluateNow() }
-                }
-                .font(.caption)
-                .panelStyle()
-
-                if model.snapshot.domains.automations.isEmpty {
-                    EmptyPanel(
-                        symbol: "clock.badge.questionmark",
-                        title: "No automations",
-                        detail: "Describe a schedule and local action. It will remain disabled until its policy is complete."
-                    )
-                    .frame(minHeight: 260)
-                } else {
-                    VStack(spacing: 12) {
-                        ForEach(model.snapshot.domains.automations) { rule in
-                            let hasRunningOccurrence = model.snapshot.operations.automationRuns.contains {
-                                $0.automationID == rule.id && $0.state == .running
-                            }
-                            let referenceDate = rule.nextRunAtUnixMillis.map {
-                                Date(timeIntervalSince1970: Double($0) / 1_000)
-                            } ?? Date(timeIntervalSince1970: Double(rule.createdAtUnixMillis ?? 0) / 1_000)
-                            let presentation = DesktopTimeZonePresenter.presentation(
-                                for: referenceDate,
-                                anchoredTimeZoneIdentifier: rule.timeZoneIdentifier
-                            )
-                            HStack(alignment: .top, spacing: 14) {
-                                Image(systemName: rule.status == .paused ? "pause.circle.fill" : "clock.arrow.2.circlepath")
-                                    .font(.title2)
-                                    .foregroundStyle(rule.status == .paused ? Nord.auroraYellow : Nord.frost1)
-                                VStack(alignment: .leading, spacing: 6) {
-                                    HStack {
-                                        Text(rule.name).font(.headline)
-                                        RecordStatusPill(state: rule.status)
-                                    }
-                                    Text(rule.schedule)
-                                        .font(.subheadline.weight(.medium))
-                                    Text(rule.actionSummary)
-                                        .font(.subheadline)
-                                        .foregroundStyle(.secondary)
-                                    HStack(spacing: 12) {
-                                        Label(rule.actionKind?.label ?? "Action incomplete", systemImage: "bolt")
-                                        Label(rule.authority?.label ?? "Authority incomplete", systemImage: "checkmark.shield")
-                                    }
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    if !(rule.skillIDs ?? []).isEmpty || !(rule.toolNames ?? []).isEmpty {
-                                        Text("Skills: \((rule.skillIDs ?? []).compactMap { id in model.snapshot.domains.skills.first { $0.id == id }?.name }.joined(separator: ", ")) · Tools: \((rule.toolNames ?? []).joined(separator: ", "))")
-                                            .font(.caption2).foregroundStyle(.tertiary)
-                                    }
-                                    HStack(spacing: 14) {
-                                        Label("Pinned: \(rule.timeZoneIdentifier)", systemImage: "globe")
-                                        Label(rule.missedRunPolicy.label, systemImage: "forward.end")
-                                        Label(rule.lastResult, systemImage: "list.bullet.clipboard")
-                                    }
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    if presentation?.differsFromViewer == true {
-                                        Text("Viewer zone: \(presentation?.viewerTimeZoneIdentifier ?? TimeZone.autoupdatingCurrent.identifier)")
-                                            .font(.caption2)
-                                            .foregroundStyle(.tertiary)
-                                    }
-                                }
-                                Spacer()
-                                VStack(alignment: .trailing, spacing: 8) {
-                                    Button("Dry run") {
-                                        _ = model.recordAutomationDryRun(id: rule.id)
-                                    }
-                                    .buttonStyle(.borderedProminent)
-                                    automationAuthorityAction(rule)
-                                    if rule.status == .ready {
-                                        Button("Pause") { model.setAutomationPaused(id: rule.id, paused: true) }
-                                            .buttonStyle(.bordered)
-                                    }
-                                    Button("Edit") { editingAutomation = rule }
-                                        .buttonStyle(.bordered)
-                                        .disabled(hasRunningOccurrence)
-                                    Button("Delete", role: .destructive) { automationPendingDeletion = rule }
-                                        .buttonStyle(.borderless)
-                                        .disabled(hasRunningOccurrence)
-                                }
-                            }
-                            .panelStyle()
-                        }
-                    }
-                }
-
-                if !model.snapshot.operations.automationRuns.isEmpty {
-                    SectionHeading(title: "Run history", detail: "Dry runs and future scheduled executions share durable evidence.")
-                    VStack(spacing: 0) {
-                        ForEach(Array(model.snapshot.operations.automationRuns.reversed().enumerated()), id: \.element.id) { index, run in
-                            HStack(spacing: 12) {
-                                Image(systemName: run.state == .completed ? "checkmark.circle.fill" : "clock")
-                                    .foregroundStyle(run.state == .completed ? Nord.auroraGreen : Nord.frost1)
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text(run.detail).font(.subheadline)
-                                    RelativeTime(unixMillis: run.scheduledAtUnixMillis)
-                                }
-                                Spacer()
-                                ActionStatePill(state: run.state)
-                                if run.state == .awaitingApproval,
-                                   let approvalID = run.approvalID,
-                                   model.snapshot.operations.approvals.first(where: { $0.id == approvalID })?.state == .approved {
-                                    Button("Run approved occurrence") { scheduler.executeApproved(runID: run.id) }
-                                }
-                            }
-                            .padding(.vertical, 12)
-                            if index < model.snapshot.operations.automationRuns.count - 1 { Divider() }
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 15))
-                }
-                if let schedulerMessage = scheduler.message {
-                    BoundaryCallout(title: "Scheduler status", detail: schedulerMessage)
-                }
-            }
-            .padding(24)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .background(Nord.polarNight0)
-        .sheet(isPresented: $showsNewAutomation) {
-            NewAutomationSheet(model: model)
-        }
-        .sheet(item: $editingAutomation) { rule in
-            NewAutomationSheet(model: model, editing: rule)
-        }
-        .confirmationDialog(
-            "Delete this automation?",
-            isPresented: Binding(
-                get: { automationPendingDeletion != nil },
-                set: { if !$0 { automationPendingDeletion = nil } }
-            ),
-            presenting: automationPendingDeletion
-        ) { rule in
-            Button("Delete “\(rule.name)”", role: .destructive) {
-                _ = model.deleteAutomation(id: rule.id)
-                automationPendingDeletion = nil
-            }
-        } message: { _ in
-            Text("The local rule and unfinished occurrences are removed. Historical run and audit receipts remain.")
-        }
-    }
-
-    @ViewBuilder
-    private func automationAuthorityAction(_ rule: DesktopAutomationRule) -> some View {
-        if rule.status == .draft || rule.status == .paused {
-            if rule.authority == .localOnly, rule.actionKind == .notification {
-                Button("Activate") { _ = model.activateAutomation(id: rule.id, approvalID: nil) }
-                    .buttonStyle(.bordered)
-            } else {
-                let target = model.automationAuthorityTarget(for: rule) ?? "automation:\(rule.id):invalid-contract"
-                let approval = model.snapshot.operations.approvals.last { $0.exactTarget == target }
-                if approval?.state == .approved {
-                    Button("Activate approved rule") { _ = model.activateAutomation(id: rule.id, approvalID: approval?.id) }
-                        .buttonStyle(.bordered)
-                } else if approval == nil || approval?.state == .rejected {
-                    Button("Review authority") {
-                        _ = model.createApproval(
-                            threadID: nil,
-                            title: "Activate automation: \(rule.name)",
-                            exactTarget: target,
-                            consequence: "Schedule \(rule.actionSummary) under \(rule.authority?.label ?? "explicit authority").",
-                            dataLeavingDevice: rule.actionKind == .notification ? "Nothing" : "Resolved project, prompt, skill, and tool references on each authorized run",
-                            reversible: true,
-                            expiresAtUnixMillis: nil
-                        )
-                    }
-                    .buttonStyle(.bordered)
-                } else {
-                    Label("Authority in Inbox", systemImage: "tray.full").font(.caption)
-                }
             }
         }
     }
-
 }
 
 private struct DesktopGitHubView: View {
@@ -12646,7 +12339,7 @@ private struct NewCalendarProposalSheet: View {
     }
 }
 
-private struct NewAutomationSheet: View {
+struct NewAutomationSheet: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var model: DesktopAppModel
     let editingID: String?
@@ -13868,7 +13561,7 @@ private extension SurfaceHeader where Actions == EmptyView {
     }
 }
 
-private struct EmptyPanel: View {
+struct EmptyPanel: View {
     let symbol: String
     let title: String
     let detail: String

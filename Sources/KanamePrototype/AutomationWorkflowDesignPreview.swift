@@ -1,7 +1,816 @@
 import KanameDesktop
 import KanameProtocol
 import KanamePrototypeUI
+import KanameWorkflowHost
 import SwiftUI
+
+struct AutomationWorkflowProductView: View {
+    private enum Section: String, CaseIterable {
+        case workflows = "Workflows"
+        case builder = "Builder"
+        case runs = "Run history"
+        case components = "Components"
+        case readiness = "Readiness"
+
+        var symbol: String {
+            switch self {
+            case .workflows: "square.stack.3d.up"
+            case .builder: "point.3.connected.trianglepath.dotted"
+            case .runs: "clock.arrow.circlepath"
+            case .components: "puzzlepiece.extension"
+            case .readiness: "checkmark.seal"
+            }
+        }
+
+        static func initial(arguments: [String]) -> Self {
+            if arguments.contains("--desktop-automation-product-builder") { return .builder }
+            if arguments.contains("--desktop-automation-product-runs") { return .runs }
+            if arguments.contains("--desktop-automation-product-readiness") { return .readiness }
+            if arguments.contains("--desktop-automation-product-components")
+                || arguments.contains("--desktop-automation-schedules") { return .components }
+            return .workflows
+        }
+    }
+
+    @ObservedObject var model: DesktopAppModel
+    @ObservedObject var scheduler: DesktopAutomationSchedulerViewModel
+    @ObservedObject var integrations: DesktopPersonalIntegrationViewModel
+    @StateObject private var mail = DesktopMailViewModel()
+    @State private var section = Section.initial(arguments: CommandLine.arguments)
+    @State private var selectedWorkflowID: String?
+    @State private var studioDraftID: String?
+    @State private var manualRunDefinition: DesktopWorkflowDefinitionRecord?
+    @State private var installationToConfigure: DesktopWorkflowInstallationRecord?
+    @State private var editingSchedule: DesktopAutomationRule?
+    @State private var showsNewSchedule = false
+    @State private var packageMessage: String?
+
+    private var definitions: [DesktopWorkflowDefinitionRecord] { model.workflowDefinitions }
+
+    private var selectedDefinition: DesktopWorkflowDefinitionRecord? {
+        definitions.first { $0.id == selectedWorkflowID } ?? definitions.first
+    }
+
+    private var selectedRevision: DesktopWorkflowRevisionRecord? {
+        guard let selectedDefinition else { return nil }
+        return model.snapshot.operations.workflows.revisions.first { $0.id == selectedDefinition.currentRevisionID }
+    }
+
+    private var workflowPresentations: [AutomationWorkflowPreview] {
+        definitions.map { definition in
+            let revision = model.snapshot.operations.workflows.revisions.first { $0.id == definition.currentRevisionID }
+            let workItems = model.workflowWorkItems.filter { $0.workflowID == definition.id }
+            let runIDs = Set(workItems.flatMap { item in model.workflowEpisodes(workItemID: item.id).flatMap { model.workflowRuns(episodeID: $0.id).map(\.id) } })
+            let runs = model.snapshot.operations.workflows.runs.filter { runIDs.contains($0.id) }
+            let readiness = model.workflowMigrationReadiness(workflowID: definition.id)
+            let activeState = workItems.map(\.state)
+            let state: AutomationPreviewState
+            if readiness.blockedCount > 0 { state = .blocked }
+            else if activeState.contains(where: { $0.needsAttention }) { state = .blocked }
+            else if activeState.contains(.running) || runs.contains(where: { $0.state == .running }) { state = .running }
+            else if activeState.contains(.waitingExternal) || runs.contains(where: { $0.state == .waiting }) { state = .waiting }
+            else if definition.enabled { state = .complete }
+            else { state = .planned }
+            let trigger = definition.triggerKinds.map(\.label).joined(separator: " + ")
+            let latestRun = runs.max { ($0.startedAtUnixMillis ?? 0) < ($1.startedAtUnixMillis ?? 0) }
+            let installations = model.workflowInstallations(workflowID: definition.id)
+            let progress = definition.enabled ? 4 : readiness.blockedCount == 0 ? 2 : 1
+            return AutomationWorkflowPreview(
+                id: definition.id,
+                name: definition.name,
+                summary: definition.summary,
+                symbol: definition.icon,
+                progress: progress,
+                state: state,
+                version: revision?.version ?? "Unknown",
+                trigger: trigger.isEmpty ? "Unconfigured" : trigger,
+                lastRun: latestRun.map { $0.state.label } ?? "Never",
+                retention: installations.isEmpty ? "Not configured" : "Per installation"
+            )
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            SurfaceHeader(
+                title: "Automations",
+                detail: "Design, test, run, and understand every repeatable workflow",
+                symbol: "point.3.connected.trianglepath.dotted"
+            ) {
+                Label("Local workspace", systemImage: "lock.shield")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                if section == .workflows {
+                    Button("New workflow", systemImage: "plus") { createWorkflow() }
+                        .buttonStyle(.borderedProminent)
+                } else if section == .components {
+                    Button("Install package…", systemImage: "shippingbox") { installPackage() }
+                        .buttonStyle(.borderedProminent)
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 22)
+            .padding(.bottom, 16)
+
+            Picker("Automations view", selection: $section) {
+                ForEach(Section.allCases, id: \.self) { item in
+                    Label(item.rawValue, systemImage: item.symbol).tag(item)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, 20)
+            .padding(.bottom, 16)
+
+            Divider()
+
+            Group {
+                switch section {
+                case .workflows:
+                    workflowsPage
+                case .builder:
+                    builderPage
+                case .runs:
+                    AutomationLiveRunsView(model: model, selectedWorkflowID: selectedWorkflowID)
+                case .components:
+                    AutomationComponentsView(
+                        model: model,
+                        scheduler: scheduler,
+                        packageMessage: packageMessage,
+                        createSchedule: { showsNewSchedule = true },
+                        editSchedule: { editingSchedule = $0 }
+                    )
+                case .readiness:
+                    AutomationReadinessView(
+                        model: model,
+                        integrations: integrations,
+                        selectedWorkflowID: $selectedWorkflowID,
+                        configureInstallation: { installationToConfigure = $0 }
+                    )
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .background(Nord.polarNight0)
+        .onAppear {
+            if selectedWorkflowID == nil { selectedWorkflowID = definitions.first?.id }
+        }
+        .onChange(of: definitions.map(\.id)) { ids in
+            if selectedWorkflowID == nil || !ids.contains(selectedWorkflowID ?? "") {
+                selectedWorkflowID = ids.first
+            }
+        }
+        .sheet(isPresented: Binding(
+            get: { studioDraftID != nil },
+            set: { if !$0 { studioDraftID = nil } }
+        )) {
+            if let studioDraftID {
+                WorkflowStudioSheet(model: model, draftID: studioDraftID) { workflowID in
+                    selectedWorkflowID = workflowID
+                    packageMessage = "Published \(workflowID) disabled. Review Readiness before enabling it."
+                }
+            }
+        }
+        .sheet(item: $manualRunDefinition) { definition in
+            WorkflowManualRunSheet(
+                definition: definition,
+                revision: model.snapshot.operations.workflows.revisions.first { $0.id == definition.currentRevisionID }
+            ) { title, request, input in
+                mail.runWorkflowManually(
+                    model: model, workflowID: definition.id,
+                    title: title, request: request, input: input
+                )
+            }
+        }
+        .sheet(item: $installationToConfigure) { installation in
+            WorkflowInstallationSetupSheet(
+                model: model,
+                installation: installation,
+                accounts: integrations.googleAccounts
+            )
+        }
+        .sheet(isPresented: $showsNewSchedule) { NewAutomationSheet(model: model) }
+        .sheet(item: $editingSchedule) { NewAutomationSheet(model: model, editing: $0) }
+    }
+
+    @ViewBuilder
+    private var workflowsPage: some View {
+        if workflowPresentations.isEmpty {
+            EmptyPanel(
+                symbol: "square.stack.3d.up",
+                title: "No workflows installed",
+                detail: "Create a workflow or install a reviewed package. New definitions remain disabled until Readiness is complete."
+            )
+            .padding(24)
+        } else {
+            ScrollView {
+                AutomationPipelinePreview(
+                    workflows: workflowPresentations,
+                    selectedWorkflowID: Binding(
+                        get: { selectedWorkflowID ?? workflowPresentations[0].id },
+                        set: { selectedWorkflowID = $0 }
+                    ),
+                    openBuilder: { section = .builder },
+                    openRunHistory: { section = .runs }
+                )
+                .padding(20)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var builderPage: some View {
+        if let definition = selectedDefinition, let revision = selectedRevision,
+           let workflow = workflowPresentations.first(where: { $0.id == definition.id }) {
+            ScrollView {
+                AutomationCanvasPreview(
+                    workflow: workflow,
+                    graph: AutomationCanvasGraph.live(revision: revision),
+                    revisions: model.snapshot.operations.workflows.revisions
+                        .filter { $0.workflowID == definition.id }
+                        .sorted { $0.installedAtUnixMillis > $1.installedAtUnixMillis },
+                    sourceLines: workflowSourceLines(definition.id),
+                    edit: { editWorkflow(definition) },
+                    run: definition.triggerKinds.contains(.manual) && definition.enabled
+                        ? { manualRunDefinition = definition }
+                        : nil
+                )
+                .padding(20)
+            }
+        } else {
+            EmptyPanel(
+                symbol: "point.3.connected.trianglepath.dotted",
+                title: "No workflow selected",
+                detail: "Create a workflow or install a reviewed package, then open it from Workflows."
+            )
+            .padding(24)
+        }
+    }
+
+    private func createWorkflow() {
+        studioDraftID = model.createWorkflowStudioDraft(
+            name: "Untitled workflow",
+            summary: "A reusable workflow created in Automations."
+        )
+    }
+
+    private func editWorkflow(_ definition: DesktopWorkflowDefinitionRecord) {
+        studioDraftID = model.editWorkflowRevisionInStudio(revisionID: definition.currentRevisionID)
+    }
+
+    private func installPackage() {
+        do {
+            packageMessage = try DesktopWorkflowTransferUI.installPackage(model: model)
+        } catch {
+            packageMessage = error.localizedDescription
+        }
+    }
+
+    private func workflowSourceLines(_ workflowID: String) -> [String] {
+        guard let canonical = try? model.exportWorkflowPackage(workflowID: workflowID),
+              let object = try? JSONSerialization.jsonObject(with: canonical),
+              let formatted = try? JSONSerialization.data(
+                withJSONObject: object,
+                options: [.prettyPrinted, .sortedKeys]
+              ),
+              let source = String(data: formatted, encoding: .utf8) else { return [] }
+        return source.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+    }
+}
+
+private struct AutomationLiveRunsView: View {
+    @ObservedObject var model: DesktopAppModel
+    let selectedWorkflowID: String?
+    @State private var selectedRunID: String?
+    @State private var search = ""
+
+    private var runs: [DesktopWorkflowRunRecord] {
+        let revisionsByID = Dictionary(uniqueKeysWithValues: model.snapshot.operations.workflows.revisions.map { ($0.id, $0) })
+        return model.snapshot.operations.workflows.runs
+            .filter { run in
+                let workflowMatches = selectedWorkflowID == nil
+                    || revisionsByID[run.workflowRevisionID]?.workflowID == selectedWorkflowID
+                let searchMatches = search.isEmpty
+                    || run.id.localizedCaseInsensitiveContains(search)
+                    || (revisionsByID[run.workflowRevisionID]?.workflowID.localizedCaseInsensitiveContains(search) ?? false)
+                return workflowMatches && searchMatches
+            }
+            .sorted { ($0.startedAtUnixMillis ?? 0, $0.id) > ($1.startedAtUnixMillis ?? 0, $1.id) }
+    }
+
+    private var selectedRun: DesktopWorkflowRunRecord? {
+        runs.first { $0.id == selectedRunID } ?? runs.first
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Run history").font(.title3.weight(.bold))
+                    Text("Every run stays pinned to its exact workflow revision and durable evidence.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                TextField("Search runs", text: $search)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 240)
+                Label("Read-only evidence", systemImage: "lock.fill")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            if runs.isEmpty {
+                EmptyPanel(
+                    symbol: "clock.arrow.circlepath",
+                    title: selectedWorkflowID == nil ? "No workflow runs" : "No runs for this workflow",
+                    detail: "Runs will appear here with their exact graph, attempts, transitions, artifacts, and reconciliation evidence."
+                )
+            } else {
+                HSplitView {
+                    runList.frame(minWidth: 250, idealWidth: 300, maxWidth: 360)
+                    runDetail.frame(minWidth: 650, maxWidth: .infinity)
+                }
+            }
+        }
+        .padding(20)
+        .onAppear { if selectedRunID == nil { selectedRunID = runs.first?.id } }
+        .onChange(of: runs.map(\.id)) { ids in
+            if selectedRunID == nil || !ids.contains(selectedRunID ?? "") { selectedRunID = ids.first }
+        }
+    }
+
+    private var runList: some View {
+        List(runs, selection: $selectedRunID) { run in
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text(workflowName(for: run)).font(.subheadline.weight(.semibold)).lineLimit(1)
+                    Spacer()
+                    Text(run.state.label).font(.caption2.weight(.bold)).foregroundStyle(runTint(run.state))
+                }
+                Text("\(run.id) · v\(revision(for: run)?.version ?? "Unknown")")
+                    .font(.system(.caption2, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1)
+                Text(run.startedAtUnixMillis.map(Self.dateLabel) ?? "Not started")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            .tag(run.id)
+            .padding(.vertical, 4)
+        }
+        .listStyle(.inset)
+    }
+
+    @ViewBuilder
+    private var runDetail: some View {
+        if let run = selectedRun, let revision = revision(for: run) {
+            let attempts = model.snapshot.operations.workflows.stepAttempts.filter { $0.runID == run.id }
+            let transitions = model.snapshot.operations.workflows.transitionRecords.filter { $0.runID == run.id }
+            let graph = AutomationCanvasGraph.live(revision: revision).withExecution(
+                run: run, attempts: attempts, transitions: transitions
+            )
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(workflowName(for: run)).font(.headline)
+                            Text("Run \(run.id) · immutable revision \(revision.version)")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Label(run.state.label, systemImage: runSymbol(run.state))
+                            .foregroundStyle(runTint(run.state))
+                    }
+                    HStack(spacing: 14) {
+                        Label("Graph", systemImage: "point.3.connected.trianglepath.dotted")
+                        Label("\(attempts.count) attempts", systemImage: "list.number")
+                        Label("\(transitions.count) checkpoints", systemImage: "arrow.left.arrow.right")
+                        Label("Trace \(run.traceID)", systemImage: "waveform.path.ecg")
+                    }
+                    .font(.caption).foregroundStyle(.secondary)
+                    AutomationRunGraph(graph: graph, active: run.state == .running || run.state == .waiting)
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Node evidence").font(.headline)
+                        if attempts.isEmpty {
+                            Text("No node attempt has been recorded for this run.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        ForEach(attempts) { attempt in
+                            HStack(alignment: .top, spacing: 10) {
+                                Image(systemName: runSymbol(attempt.state)).foregroundStyle(runTint(attempt.state))
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("\(attempt.stepID) · attempt \(attempt.attempt)").font(.caption.weight(.semibold))
+                                    Text("Input \(attempt.inputDigest.prefix(12)) · Output \(attempt.outputDigest?.prefix(12) ?? "pending")")
+                                        .font(.system(.caption2, design: .monospaced)).foregroundStyle(.secondary)
+                                    if let error = attempt.errorSummary { Text(error).font(.caption2).foregroundStyle(Nord.auroraRed) }
+                                }
+                                Spacer()
+                                Text(attempt.state.label).font(.caption2).foregroundStyle(runTint(attempt.state))
+                            }
+                            .padding(10)
+                            .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 10))
+                        }
+                    }
+                }
+                .padding(2)
+            }
+        }
+    }
+
+    private func revision(for run: DesktopWorkflowRunRecord) -> DesktopWorkflowRevisionRecord? {
+        model.snapshot.operations.workflows.revisions.first { $0.id == run.workflowRevisionID }
+    }
+
+    private func workflowName(for run: DesktopWorkflowRunRecord) -> String {
+        guard let workflowID = revision(for: run)?.workflowID else { return "Unknown workflow" }
+        return model.workflowDefinitions.first { $0.id == workflowID }?.name ?? workflowID
+    }
+
+    private static func dateLabel(_ milliseconds: Int64) -> String {
+        Date(timeIntervalSince1970: Double(milliseconds) / 1_000).formatted(date: .abbreviated, time: .shortened)
+    }
+}
+
+private struct AutomationRunGraph: View {
+    let graph: AutomationCanvasGraph
+    let active: Bool
+    @State private var selectedStepID: String
+    @State private var selectedEdgeID: String?
+
+    init(graph: AutomationCanvasGraph, active: Bool) {
+        self.graph = graph
+        self.active = active
+        _selectedStepID = State(initialValue: graph.defaultSelectedID)
+    }
+
+    var body: some View {
+        AutomationNodeCanvas(
+            graph: graph,
+            selectedStepID: $selectedStepID,
+            isSimulating: active,
+            viewportPreset: .readable,
+            selectedEdgeID: $selectedEdgeID
+        )
+        .frame(minHeight: 360)
+    }
+}
+
+private struct AutomationComponentsView: View {
+    @ObservedObject var model: DesktopAppModel
+    @ObservedObject var scheduler: DesktopAutomationSchedulerViewModel
+    let packageMessage: String?
+    let createSchedule: () -> Void
+    let editSchedule: (DesktopAutomationRule) -> Void
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Component library").font(.title3.weight(.bold))
+                        Text("Reusable triggers, capabilities, connectors, renderers, and version-pinned subflows.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Label("\(componentCount) installed", systemImage: "puzzlepiece.extension.fill")
+                        .font(.caption.weight(.semibold)).foregroundStyle(Nord.frost1)
+                }
+                if let packageMessage {
+                    BoundaryCallout(title: "Package operation", detail: packageMessage)
+                }
+                schedules
+                componentSection(
+                    title: "Capabilities",
+                    detail: "Deterministic processing and schema-constrained model or tool work",
+                    symbol: "cpu",
+                    empty: "No capabilities installed"
+                ) {
+                    ForEach(model.workflowCapabilityInstallations) { capability in
+                        componentRow(
+                            title: capability.name,
+                            detail: "\(capability.capabilityID) · \(capability.runtime.rawValue)",
+                            version: capability.version,
+                            ready: capability.enabled && capability.lastTestPassed,
+                            status: capability.enabled ? (capability.lastTestPassed ? "Enabled · tested" : "Enabled · test required") : "Disabled"
+                        )
+                    }
+                }
+                componentSection(
+                    title: "Trusted connectors",
+                    detail: "Credentialed network effects remain outside ordinary workflow capabilities",
+                    symbol: "network.badge.shield.half.filled",
+                    empty: "No trusted connectors installed"
+                ) {
+                    ForEach(model.snapshot.operations.workflows.connectorInstallations) { connector in
+                        componentRow(
+                            title: connector.name,
+                            detail: connector.effectKinds.joined(separator: " · "),
+                            version: connector.version,
+                            ready: connector.enabled && connector.qualified,
+                            status: connector.enabled ? (connector.qualified ? "Enabled · qualified" : "Qualification required") : "Disabled"
+                        )
+                    }
+                }
+                componentSection(
+                    title: "Renderers",
+                    detail: "Preview, recalculation, and range-selection adapters",
+                    symbol: "doc.richtext",
+                    empty: "No renderers installed"
+                ) {
+                    ForEach(model.snapshot.operations.workflows.rendererInstallations) { renderer in
+                        componentRow(
+                            title: renderer.name,
+                            detail: renderer.mediaTypes.joined(separator: " · "),
+                            version: renderer.version,
+                            ready: renderer.enabled && renderer.qualified,
+                            status: renderer.enabled ? (renderer.qualified ? "Enabled · qualified" : "Qualification required") : "Disabled"
+                        )
+                    }
+                }
+                componentSection(
+                    title: "Reusable subflows",
+                    detail: "Typed graph fragments pinned to an exact version",
+                    symbol: "square.stack.3d.up",
+                    empty: "No reusable subflows installed"
+                ) {
+                    ForEach(model.snapshot.operations.workflows.subflows) { subflow in
+                        componentRow(
+                            title: subflow.name,
+                            detail: "\(subflow.steps.count) nodes · \(subflow.summary)",
+                            version: subflow.version,
+                            ready: subflow.enabled,
+                            status: subflow.enabled ? "Available" : "Disabled"
+                        )
+                    }
+                }
+            }
+            .padding(20)
+        }
+    }
+
+    private var componentCount: Int {
+        model.workflowCapabilityInstallations.count
+            + model.snapshot.operations.workflows.connectorInstallations.count
+            + model.snapshot.operations.workflows.rendererInstallations.count
+            + model.snapshot.operations.workflows.subflows.count
+    }
+
+    private var schedules: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Label("Schedule triggers", systemImage: "calendar.badge.clock").font(.headline)
+                    Text("Schedules start workflows or local actions; they never grant effect authority.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Label(scheduler.ownerState, systemImage: "lock.shield")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("New schedule", systemImage: "plus", action: createSchedule)
+                    .buttonStyle(.bordered)
+            }
+            if model.snapshot.operations.workflows.scheduleBindings.isEmpty && model.snapshot.domains.automations.isEmpty {
+                Text("No schedule triggers configured.").font(.caption).foregroundStyle(.secondary)
+            }
+            ForEach(model.snapshot.operations.workflows.scheduleBindings) { binding in
+                componentRow(
+                    title: model.workflowDefinitions.first { $0.id == binding.workflowID }?.name ?? binding.workflowID,
+                    detail: "\(binding.spec.frequency.label) \(String(format: "%02d:%02d", binding.spec.hour, binding.spec.minute)) · \(binding.timeZoneIdentifier) · \(binding.missedRunPolicy.label)",
+                    version: "Workflow",
+                    ready: binding.enabled,
+                    status: binding.enabled ? "Enabled" : "Disabled"
+                )
+            }
+            ForEach(model.snapshot.domains.automations) { rule in
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: "calendar.badge.clock").foregroundStyle(rule.status == .paused ? .secondary : Nord.frost1)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(rule.name).font(.subheadline.weight(.semibold))
+                        Text("\(rule.schedule) · \(rule.timeZoneIdentifier)").font(.caption).foregroundStyle(.secondary)
+                        Text(rule.actionSummary).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+                    }
+                    Spacer()
+                    Button("Edit", systemImage: "slider.horizontal.3") { editSchedule(rule) }.buttonStyle(.bordered)
+                    Toggle("Enabled", isOn: Binding(
+                        get: { rule.status != .paused },
+                        set: { model.setAutomationPaused(id: rule.id, paused: !$0) }
+                    ))
+                    .labelsHidden()
+                }
+                .padding(12)
+                .background(Nord.polarNight2.opacity(0.55), in: RoundedRectangle(cornerRadius: 10))
+            }
+        }
+        .padding(14)
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private func componentSection<Content: View>(
+        title: String,
+        detail: String,
+        symbol: String,
+        empty: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(title, systemImage: symbol).font(.headline)
+            Text(detail).font(.caption).foregroundStyle(.secondary)
+            content()
+        }
+        .padding(14)
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+        .accessibilityHint(empty)
+    }
+
+    private func componentRow(
+        title: String,
+        detail: String,
+        version: String,
+        ready: Bool,
+        status: String
+    ) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: ready ? "checkmark.seal.fill" : "pause.circle")
+                .foregroundStyle(ready ? Nord.auroraGreen : .secondary)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).font(.subheadline.weight(.semibold))
+                Text(detail.isEmpty ? "No additional capabilities declared" : detail)
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+            }
+            Spacer()
+            VStack(alignment: .trailing, spacing: 3) {
+                Text(version).font(.system(.caption, design: .monospaced))
+                Text(status).font(.caption2).foregroundStyle(ready ? Nord.auroraGreen : .secondary)
+            }
+        }
+        .padding(10)
+        .background(Nord.polarNight2.opacity(0.55), in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+private struct AutomationReadinessView: View {
+    @ObservedObject var model: DesktopAppModel
+    @ObservedObject var integrations: DesktopPersonalIntegrationViewModel
+    @Binding var selectedWorkflowID: String?
+    let configureInstallation: (DesktopWorkflowInstallationRecord) -> Void
+
+    private var definition: DesktopWorkflowDefinitionRecord? {
+        model.workflowDefinitions.first { $0.id == selectedWorkflowID } ?? model.workflowDefinitions.first
+    }
+
+    var body: some View {
+        HSplitView {
+            workflowList.frame(minWidth: 250, idealWidth: 300, maxWidth: 360)
+            readinessDetail.frame(minWidth: 650, maxWidth: .infinity)
+        }
+        .padding(20)
+    }
+
+    private var workflowList: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Readiness").font(.title3.weight(.bold))
+            Text("Bindings, fixtures, permissions, connector health, and promotion gates.")
+                .font(.caption).foregroundStyle(.secondary)
+            List(model.workflowDefinitions, selection: $selectedWorkflowID) { definition in
+                let report = model.workflowMigrationReadiness(workflowID: definition.id)
+                HStack {
+                    Image(systemName: readinessSymbol(report.isReady ? .ready : .blocked))
+                        .foregroundStyle(readinessTint(report.isReady ? .ready : .blocked))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(definition.name).font(.subheadline.weight(.semibold)).lineLimit(1)
+                        Text(report.isReady ? "Ready to configure" : "\(report.blockedCount) blocked · \(report.attentionCount) attention")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                .tag(Optional(definition.id))
+            }
+            .listStyle(.inset)
+        }
+    }
+
+    @ViewBuilder
+    private var readinessDetail: some View {
+        if let definition {
+            let report = model.workflowMigrationReadiness(workflowID: definition.id)
+            let installations = model.workflowInstallations(workflowID: definition.id)
+            let bindings = model.workflowTriggerBindings(workflowID: definition.id)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(definition.name).font(.headline)
+                            Text("Published revision, private bindings, and authority remain separate.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Label(
+                            report.isReady ? "Ready to configure" : "Not ready",
+                            systemImage: readinessSymbol(report.isReady ? .ready : .blocked)
+                        )
+                        .foregroundStyle(readinessTint(report.isReady ? .ready : .blocked))
+                    }
+                    HStack(spacing: 12) {
+                        readinessMetric("Installations", value: installations.count)
+                        readinessMetric("Trigger bindings", value: bindings.count)
+                        readinessMetric("Google accounts", value: integrations.googleAccounts.count)
+                        readinessMetric(
+                            "Authority grants",
+                            value: model.snapshot.operations.workflows.authorityGrants.filter { $0.workflowID == definition.id }.count
+                        )
+                    }
+                    if installations.isEmpty {
+                        BoundaryCallout(
+                            title: "No private installation",
+                            detail: "Create or import an installation before binding accounts, configuration, retention, or authority. The portable workflow remains unchanged."
+                        )
+                    } else {
+                        ForEach(installations) { installation in
+                            HStack(alignment: .top, spacing: 12) {
+                                Image(systemName: installation.readinessIssues.isEmpty ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                                    .foregroundStyle(installation.readinessIssues.isEmpty ? Nord.auroraGreen : Nord.auroraYellow)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(installation.name).font(.subheadline.weight(.semibold))
+                                    Text(installation.readinessIssues.isEmpty
+                                        ? "Configuration and bindings are ready; authority remains separately gated."
+                                        : installation.readinessIssues.joined(separator: " · "))
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Button("Configure…") { configureInstallation(installation) }.buttonStyle(.bordered)
+                            }
+                            .padding(12)
+                            .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
+                        }
+                    }
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Acceptance gates").font(.headline)
+                        ForEach(report.checks) { check in
+                            HStack(alignment: .top, spacing: 10) {
+                                Image(systemName: readinessSymbol(check.state))
+                                    .foregroundStyle(readinessTint(check.state)).frame(width: 20)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(check.title).font(.subheadline.weight(.semibold))
+                                    Text(check.detail).font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Text(check.state.rawValue.capitalized)
+                                    .font(.caption2.weight(.bold)).foregroundStyle(readinessTint(check.state))
+                            }
+                            .padding(10)
+                            .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 10))
+                        }
+                    }
+                }
+                .padding(2)
+            }
+        } else {
+            EmptyPanel(symbol: "checkmark.seal", title: "No workflow selected", detail: "Install or create a workflow to inspect readiness.")
+        }
+    }
+
+    private func readinessMetric(_ label: String, value: Int) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(value, format: .number).font(.title3.weight(.bold))
+            Text(label).font(.caption2).foregroundStyle(.secondary)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+private func readinessSymbol(_ state: DesktopWorkflowMigrationReadinessState) -> String {
+    switch state {
+    case .ready: "checkmark.circle.fill"
+    case .attention: "exclamationmark.circle.fill"
+    case .blocked: "xmark.octagon.fill"
+    }
+}
+
+private func readinessTint(_ state: DesktopWorkflowMigrationReadinessState) -> Color {
+    switch state {
+    case .ready: Nord.auroraGreen
+    case .attention: Nord.auroraYellow
+    case .blocked: Nord.auroraRed
+    }
+}
+
+private func runSymbol(_ state: DesktopWorkflowRunState) -> String {
+    switch state {
+    case .queued: "clock"
+    case .running: "arrow.triangle.2.circlepath"
+    case .waiting: "pause.circle.fill"
+    case .completed: "checkmark.circle.fill"
+    case .failed: "xmark.octagon.fill"
+    case .cancelled: "slash.circle"
+    }
+}
+
+private func runTint(_ state: DesktopWorkflowRunState) -> Color {
+    switch state {
+    case .queued, .cancelled: .secondary
+    case .running: Nord.frost1
+    case .waiting: Nord.auroraYellow
+    case .completed: Nord.auroraGreen
+    case .failed: Nord.auroraRed
+    }
+}
 
 struct AutomationWorkflowDesignPreview: View {
     private enum Direction: String, CaseIterable {
@@ -95,6 +904,7 @@ struct AutomationWorkflowDesignPreview: View {
                             }
                         case .portfolio:
                             AutomationPipelinePreview(
+                                workflows: AutomationWorkflowPreview.portfolio,
                                 selectedWorkflowID: $selectedWorkflowID,
                                 openBuilder: { direction = .canvas },
                                 openRunHistory: { direction = .operations }
@@ -946,21 +1756,21 @@ private struct AutomationWorkflowPreview: Identifiable {
     let symbol: String
     let progress: Int
     let state: AutomationPreviewState
-    let version: Int
+    let version: String
     let trigger: String
     let lastRun: String
     let retention: String
 
     static let portfolio: [Self] = [
-        .init(id: "reply-driven", name: "Reply-driven reporting", summary: "Produce, deliver, and revise artifacts through email", symbol: "arrow.trianglehead.2.clockwise.rotate.90", progress: 3, state: .waiting, version: 6, trigger: "Email reply", lastRun: "Waiting · 12 min", retention: "30 days"),
-        .init(id: "mailbox-review", name: "Mailbox review", summary: "Review and classify incoming mail", symbol: "tray.full", progress: 3, state: .running, version: 4, trigger: "Every hour", lastRun: "Running · now", retention: "30 days"),
-        .init(id: "approved-cleanup", name: "Approved cleanup", summary: "Apply reviewed labels and archive", symbol: "archivebox", progress: 2, state: .waiting, version: 3, trigger: "Manual", lastRun: "Waiting · 2 h", retention: "30 days"),
-        .init(id: "sender-cleanup", name: "Sender cleanup", summary: "Exact-scope recurring cleanup", symbol: "scope", progress: 1, state: .planned, version: 1, trigger: "Daily 09:00", lastRun: "Never", retention: "After success"),
-        .init(id: "financial-filing", name: "Financial filing", summary: "Preserve and file financial mail", symbol: "doc.text", progress: 2, state: .waiting, version: 5, trigger: "New mail", lastRun: "Passed · yesterday", retention: "Forever"),
-        .init(id: "structured-ingestion", name: "Structured ingestion", summary: "Parse messages into a dataset", symbol: "tablecells", progress: 2, state: .blocked, version: 2, trigger: "New mail", lastRun: "Blocked · 3 d", retention: "30 days"),
-        .init(id: "newsletter", name: "Newsletter management", summary: "Review subscriptions and cleanup", symbol: "newspaper", progress: 1, state: .planned, version: 1, trigger: "Weekly", lastRun: "Never", retention: "30 days"),
-        .init(id: "correspondence", name: "Correspondence", summary: "Draft, review, reply, and forward", symbol: "arrowshape.turn.up.left", progress: 1, state: .planned, version: 2, trigger: "Manual", lastRun: "Passed · 8 d", retention: "30 days"),
-        .init(id: "filter-management", name: "Filter management", summary: "Preview and reconcile provider rules", symbol: "line.3.horizontal.decrease.circle", progress: 1, state: .planned, version: 1, trigger: "Manual", lastRun: "Never", retention: "After success"),
+        .init(id: "reply-driven", name: "Reply-driven reporting", summary: "Produce, deliver, and revise artifacts through email", symbol: "arrow.trianglehead.2.clockwise.rotate.90", progress: 3, state: .waiting, version: "6", trigger: "Email reply", lastRun: "Waiting · 12 min", retention: "30 days"),
+        .init(id: "mailbox-review", name: "Mailbox review", summary: "Review and classify incoming mail", symbol: "tray.full", progress: 3, state: .running, version: "4", trigger: "Every hour", lastRun: "Running · now", retention: "30 days"),
+        .init(id: "approved-cleanup", name: "Approved cleanup", summary: "Apply reviewed labels and archive", symbol: "archivebox", progress: 2, state: .waiting, version: "3", trigger: "Manual", lastRun: "Waiting · 2 h", retention: "30 days"),
+        .init(id: "sender-cleanup", name: "Sender cleanup", summary: "Exact-scope recurring cleanup", symbol: "scope", progress: 1, state: .planned, version: "1", trigger: "Daily 09:00", lastRun: "Never", retention: "After success"),
+        .init(id: "financial-filing", name: "Financial filing", summary: "Preserve and file financial mail", symbol: "doc.text", progress: 2, state: .waiting, version: "5", trigger: "New mail", lastRun: "Passed · yesterday", retention: "Forever"),
+        .init(id: "structured-ingestion", name: "Structured ingestion", summary: "Parse messages into a dataset", symbol: "tablecells", progress: 2, state: .blocked, version: "2", trigger: "New mail", lastRun: "Blocked · 3 d", retention: "30 days"),
+        .init(id: "newsletter", name: "Newsletter management", summary: "Review subscriptions and cleanup", symbol: "newspaper", progress: 1, state: .planned, version: "1", trigger: "Weekly", lastRun: "Never", retention: "30 days"),
+        .init(id: "correspondence", name: "Correspondence", summary: "Draft, review, reply, and forward", symbol: "arrowshape.turn.up.left", progress: 1, state: .planned, version: "2", trigger: "Manual", lastRun: "Passed · 8 d", retention: "30 days"),
+        .init(id: "filter-management", name: "Filter management", summary: "Preview and reconcile provider rules", symbol: "line.3.horizontal.decrease.circle", progress: 1, state: .planned, version: "1", trigger: "Manual", lastRun: "Never", retention: "After success"),
     ]
 }
 
@@ -983,6 +1793,7 @@ private struct AutomationMigrationProgress: View {
 }
 
 private struct AutomationPipelinePreview: View {
+    let workflows: [AutomationWorkflowPreview]
     @Binding var selectedWorkflowID: String
     let openBuilder: () -> Void
     let openRunHistory: () -> Void
@@ -997,12 +1808,13 @@ private struct AutomationPipelinePreview: View {
     }
 
     private var selectedWorkflow: AutomationWorkflowPreview {
-        AutomationWorkflowPreview.portfolio.first(where: { $0.id == selectedWorkflowID })
+        workflows.first(where: { $0.id == selectedWorkflowID })
+            ?? workflows.first
             ?? AutomationWorkflowPreview.portfolio[0]
     }
 
     private var visibleWorkflows: [AutomationWorkflowPreview] {
-        AutomationWorkflowPreview.portfolio.filter { workflow in
+        workflows.filter { workflow in
             let searchMatches = search.isEmpty
                 || workflow.name.localizedCaseInsensitiveContains(search)
                 || workflow.summary.localizedCaseInsensitiveContains(search)
@@ -1457,6 +2269,12 @@ private struct AutomationCanvasPreview: View {
     private let workflowID: String
     private let viewportPreset: AutomationCanvasViewportPreset
     private let builderDesignPanel: AutomationBuilderDesignPanel
+    private let liveWorkflow: AutomationWorkflowPreview?
+    private let liveGraph: AutomationCanvasGraph?
+    private let liveRevisions: [DesktopWorkflowRevisionRecord]
+    private let liveSourceLines: [String]
+    private let editAction: (() -> Void)?
+    private let runAction: (() -> Void)?
     @State private var pattern: AutomationCanvasPattern
     @State private var selectedStepID: String
     @State private var selectedEdgeID: String?
@@ -1472,6 +2290,12 @@ private struct AutomationCanvasPreview: View {
 
     init(workflowID: String) {
         self.workflowID = workflowID
+        liveWorkflow = nil
+        liveGraph = nil
+        liveRevisions = []
+        liveSourceLines = []
+        editAction = nil
+        runAction = nil
         let arguments = CommandLine.arguments
         builderDesignPanel = AutomationBuilderDesignPanel(arguments: arguments)
         if arguments.contains("--desktop-automation-small-readable") {
@@ -1534,11 +2358,43 @@ private struct AutomationCanvasPreview: View {
         )
     }
 
-    private var graph: AutomationCanvasGraph { pattern.graph }
+    init(
+        workflow: AutomationWorkflowPreview,
+        graph: AutomationCanvasGraph,
+        revisions: [DesktopWorkflowRevisionRecord],
+        sourceLines: [String],
+        edit: @escaping () -> Void,
+        run: (() -> Void)?
+    ) {
+        workflowID = workflow.id
+        viewportPreset = .readable
+        builderDesignPanel = .standard
+        liveWorkflow = workflow
+        liveGraph = graph
+        liveRevisions = revisions
+        liveSourceLines = sourceLines
+        editAction = edit
+        runAction = run
+        _pattern = State(initialValue: .decision)
+        _selectedStepID = State(initialValue: graph.defaultSelectedID)
+        _selectedEdgeID = State(initialValue: nil)
+        _editorMode = State(initialValue: .canvas)
+        _isEditing = State(initialValue: false)
+        _showsVersionHistory = State(initialValue: false)
+        _selectedProblemID = State(initialValue: nil)
+        _problemsExpanded = State(initialValue: false)
+        _isSimulating = State(initialValue: false)
+    }
+
+    private var isLive: Bool { liveGraph != nil }
+    private var graph: AutomationCanvasGraph { liveGraph ?? pattern.graph }
     private var workflow: AutomationWorkflowPreview {
-        AutomationWorkflowPreview.portfolio.first(where: { $0.id == workflowID })
+        liveWorkflow
+            ?? AutomationWorkflowPreview.portfolio.first(where: { $0.id == workflowID })
             ?? AutomationWorkflowPreview.portfolio[0]
     }
+    private var numericVersion: Int { Int(workflow.version.split(separator: ".").first ?? "1") ?? 1 }
+    private var nextVersionLabel: String { isLive ? "next version" : "v\(numericVersion + 1)" }
     private var selectedStep: AutomationCanvasStep {
         graph.steps.first(where: { $0.id == selectedStepID })
             ?? graph.steps.first(where: { $0.id == graph.defaultSelectedID })
@@ -1571,6 +2427,7 @@ private struct AutomationCanvasPreview: View {
         }
         .frame(minHeight: 510)
         .onChange(of: pattern) { newPattern in
+            guard !isLive else { return }
             selectedStepID = newPattern.graph.defaultSelectedID
             inspectorSection = newPattern == .feedback ? .history : .configuration
         }
@@ -1603,19 +2460,24 @@ private struct AutomationCanvasPreview: View {
         case .test:
             AutomationNodeTestDesignPanel()
         case .publish:
-            AutomationPublishReviewDesignPanel(currentVersion: workflow.version)
+            AutomationPublishReviewDesignPanel(currentVersion: numericVersion)
         case .storage:
             AutomationStorageAccessDesignPanel()
         case .storagePromotion:
             AutomationStoragePromotionDesignPanel()
         case .standard, .problems, .newWorkflow:
             if showsVersionHistory {
-                AutomationVersionHistoryPanel(currentVersion: workflow.version)
+                if isLive {
+                    AutomationLiveVersionHistoryPanel(revisions: liveRevisions)
+                } else {
+                    AutomationVersionHistoryPanel(currentVersion: numericVersion)
+                }
             } else {
                 AutomationNodeInspector(
                     step: selectedStep,
                     section: $inspectorSection,
-                    showsCaseHistory: pattern == .feedback
+                    showsCaseHistory: !isLive && pattern == .feedback,
+                    isLive: isLive
                 )
             }
         }
@@ -1671,7 +2533,10 @@ private struct AutomationCanvasPreview: View {
                 case .outline:
                     AutomationOutlinePreview(graph: graph, selectedStepID: $selectedStepID)
                 case .source:
-                    AutomationSourceDiagnosticPreview(diagnostic: selectedDiagnostic)
+                    AutomationSourceDiagnosticPreview(
+                        diagnostic: selectedDiagnostic,
+                        lines: isLive ? liveSourceLines : nil
+                    )
                 }
             }
             .frame(minHeight: minimumHeight)
@@ -1721,8 +2586,9 @@ private struct AutomationCanvasPreview: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(workflow.name).font(.title3.weight(.bold))
                 HStack(spacing: 7) {
-                    Text(pattern.title + " · " + pattern.summary).font(.caption).foregroundStyle(.secondary)
-                    Text(isEditing ? "DRAFT v\(workflow.version + 1)" : "PUBLISHED v\(workflow.version)")
+                    Text(isLive ? workflow.summary : pattern.title + " · " + pattern.summary)
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text(isEditing ? "DRAFT \(nextVersionLabel.uppercased())" : "PUBLISHED v\(workflow.version)")
                         .font(.system(size: 9, weight: .bold))
                         .foregroundStyle(isEditing ? Nord.auroraYellow : Nord.auroraGreen)
                         .padding(.horizontal, 6)
@@ -1731,25 +2597,34 @@ private struct AutomationCanvasPreview: View {
                 }
             }
             Spacer()
-            Picker("Canvas pattern", selection: $pattern) {
-                ForEach(AutomationCanvasPattern.allCases) { item in
-                    Text(item.rawValue).tag(item)
+            if !isLive {
+                Picker("Canvas pattern", selection: $pattern) {
+                    ForEach(AutomationCanvasPattern.allCases) { item in
+                        Text(item.rawValue).tag(item)
+                    }
                 }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 390)
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 390)
+            if let runAction {
+                Button("Run…", systemImage: "play.fill", action: runAction)
+                    .buttonStyle(.bordered)
+            }
             Button("Versions", systemImage: "clock.arrow.circlepath") {
                 showsVersionHistory.toggle()
             }
             .buttonStyle(.bordered)
             Button(
-                isEditing ? "Finish draft" : "Edit as v\(workflow.version + 1)",
+                isEditing ? "Finish draft" : "Edit as \(nextVersionLabel)",
                 systemImage: isEditing ? "checkmark" : "square.and.pencil"
             ) {
-                isEditing.toggle()
-                showsVersionHistory = false
-                isSimulating = false
+                if let editAction { editAction() }
+                else {
+                    isEditing.toggle()
+                    showsVersionHistory = false
+                    isSimulating = false
+                }
             }
             .buttonStyle(.borderedProminent)
         }
@@ -1759,7 +2634,7 @@ private struct AutomationCanvasPreview: View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
                 Text(workflow.name).font(.headline.weight(.bold))
-                Text(isEditing ? "Reply-driven case · DRAFT v\(workflow.version + 1)" : "Reply-driven case · PUBLISHED v\(workflow.version)")
+                Text(isEditing ? "DRAFT \(nextVersionLabel.uppercased())" : "PUBLISHED v\(workflow.version)")
                     .font(.caption)
                     .foregroundStyle(isEditing ? Nord.auroraYellow : .secondary)
             }
@@ -1774,7 +2649,10 @@ private struct AutomationCanvasPreview: View {
                 Button("Add", systemImage: "plus") {}.buttonStyle(.bordered).controlSize(.small)
                 Button("Inspect", systemImage: "sidebar.right") {}.buttonStyle(.bordered).controlSize(.small)
             } else {
-                Button("Edit", systemImage: "square.and.pencil") {}.buttonStyle(.bordered).controlSize(.small)
+                Button("Edit", systemImage: "square.and.pencil") {
+                    if let editAction { editAction() } else { isEditing = true }
+                }
+                .buttonStyle(.bordered).controlSize(.small)
             }
         }
     }
@@ -1825,7 +2703,7 @@ private struct AutomationCanvasPreview: View {
             }
             .foregroundStyle(.secondary)
             if !compact {
-                Label("Autosaved", systemImage: "checkmark.circle")
+                Label(isLive ? "Published" : "Autosaved", systemImage: "checkmark.circle")
                     .foregroundStyle(Nord.auroraGreen)
             }
         }
@@ -1843,7 +2721,9 @@ private struct AutomationCanvasPreview: View {
             }
             Spacer()
             if !compact {
-                Text(editorMode == .canvas ? "Animated dashes show the active fixture path" : "Branches remain explicit in incoming and outgoing routes")
+                Text(editorMode == .canvas
+                    ? (isLive ? "Published graph · open a run to overlay its execution path" : "Animated dashes show the active fixture path")
+                    : "Branches remain explicit in incoming and outgoing routes")
                     .foregroundStyle(.secondary)
             }
         }
@@ -1940,8 +2820,9 @@ private struct AutomationOutlinePreview: View {
 
 private struct AutomationSourceDiagnosticPreview: View {
     let diagnostic: DesktopWorkflowDiagnosticPresentation?
+    private let lines: [String]
 
-    private let lines = [
+    private static let fixtureLines = [
         "{",
         "  \"schemaVersion\": 1,",
         "  \"graph\": {",
@@ -1955,6 +2836,11 @@ private struct AutomationSourceDiagnosticPreview: View {
         "  }",
         "}",
     ]
+
+    init(diagnostic: DesktopWorkflowDiagnosticPresentation?, lines: [String]? = nil) {
+        self.diagnostic = diagnostic
+        self.lines = lines ?? Self.fixtureLines
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -2206,6 +3092,217 @@ private struct AutomationCanvasGraph {
     let groups: [AutomationCanvasGroup]
     let steps: [AutomationCanvasStep]
     let edges: [AutomationCanvasEdge]
+
+    static func live(revision: DesktopWorkflowRevisionRecord) -> Self {
+        let definitions = revision.steps
+        guard !definitions.isEmpty else {
+            let empty = AutomationCanvasStep(
+                id: "empty", title: "No nodes", subtitle: "Edit this workflow to add its first node",
+                symbol: "plus.circle", kind: .data, x: 0.5, y: 0.5, state: .planned,
+                input: "No input", output: "No output", authority: "No authority"
+            )
+            return Self(defaultSelectedID: empty.id, groups: [], steps: [empty], edges: [])
+        }
+
+        let ids = Set(definitions.map(\.id))
+        var levelByID: [String: Int] = [:]
+        let incoming = Dictionary(grouping: definitions.flatMap { step in
+            (step.transitions ?? []).map(\.targetStepID).filter { ids.contains($0) }
+        }, by: { $0 })
+        var queue = definitions.filter { incoming[$0.id] == nil }.map(\.id)
+        if queue.isEmpty, let first = definitions.first?.id { queue = [first] }
+        for root in queue { levelByID[root] = 0 }
+        var cursor = 0
+        while cursor < queue.count {
+            let sourceID = queue[cursor]
+            cursor += 1
+            guard let source = definitions.first(where: { $0.id == sourceID }) else { continue }
+            let nextLevel = (levelByID[sourceID] ?? 0) + 1
+            for target in (source.transitions ?? []).map(\.targetStepID) where ids.contains(target) {
+                guard levelByID[target] == nil else { continue }
+                levelByID[target] = nextLevel
+                queue.append(target)
+            }
+        }
+        var fallbackLevel = (levelByID.values.max() ?? -1) + 1
+        for step in definitions where levelByID[step.id] == nil {
+            levelByID[step.id] = fallbackLevel
+            fallbackLevel += 1
+        }
+        let maximumLevel = max(1, levelByID.values.max() ?? 1)
+        let byLevel = Dictionary(grouping: definitions, by: { levelByID[$0.id] ?? 0 })
+        let nodes = definitions.map { step -> AutomationCanvasStep in
+            let level = levelByID[step.id] ?? 0
+            let peers = byLevel[level] ?? [step]
+            let row = peers.firstIndex(where: { $0.id == step.id }) ?? 0
+            let y = peers.count == 1 ? 0.5 : 0.14 + (0.72 * CGFloat(row) / CGFloat(peers.count - 1))
+            return AutomationCanvasStep(
+                id: step.id,
+                title: step.name,
+                subtitle: step.kind.label,
+                symbol: step.kind.automationSymbol,
+                kind: step.kind.automationKind,
+                x: 0.08 + (0.84 * CGFloat(level) / CGFloat(maximumLevel)),
+                y: y,
+                state: .planned,
+                input: step.inputSchemaReference ?? "\(step.inputMappings?.count ?? 0) mapped inputs",
+                output: step.outputSchemaReference ?? "Typed output",
+                authority: step.automationAuthority
+            )
+        }
+        var connections = definitions.flatMap { source in
+            (source.transitions ?? []).filter { ids.contains($0.targetStepID) }.map { transition in
+                AutomationCanvasEdge(
+                    source.id,
+                    transition.targetStepID,
+                    label: transition.outcome.rawValue,
+                    kind: transition.outcome.automationEdgeKind,
+                    active: false
+                )
+            }
+        }
+        if connections.isEmpty, definitions.count > 1 {
+            connections = zip(definitions, definitions.dropFirst()).map { source, target in
+                AutomationCanvasEdge(source.id, target.id, label: "next", kind: .data, active: false)
+            }
+        }
+        return Self(
+            defaultSelectedID: definitions[0].id,
+            groups: [
+                .init(
+                    id: "published", title: "PUBLISHED REVISION \(revision.version)",
+                    x: 0.015, y: 0.05, width: 0.97, height: 0.90, tint: Nord.frost1
+                ),
+            ],
+            steps: nodes,
+            edges: connections
+        )
+    }
+
+    func sourceLines(workflow: AutomationWorkflowPreview) -> [String] {
+        let escapedName = workflow.name.replacingOccurrences(of: "\"", with: "\\\"")
+        var result = [
+            "{",
+            "  \"id\": \"\(workflow.id)\",",
+            "  \"name\": \"\(escapedName)\",",
+            "  \"version\": \"\(workflow.version)\",",
+            "  \"nodes\": [",
+        ]
+        for (index, step) in steps.enumerated() {
+            let suffix = index == steps.count - 1 ? "" : ","
+            result.append("    { \"id\": \"\(step.id)\", \"type\": \"\(step.kind.label.lowercased())\" }\(suffix)")
+        }
+        result += ["  ],", "  \"connections\": \(edges.count)", "}"]
+        return result
+    }
+
+    func withExecution(
+        run: DesktopWorkflowRunRecord,
+        attempts: [DesktopWorkflowStepAttemptRecord],
+        transitions: [DesktopWorkflowTransitionRecord]
+    ) -> Self {
+        let latestAttempt = Dictionary(grouping: attempts, by: \.stepID).compactMapValues { records in
+            records.max { ($0.attempt, $0.startedAtUnixMillis) < ($1.attempt, $1.startedAtUnixMillis) }
+        }
+        let activeEdges = Set(transitions.compactMap { transition -> String? in
+            guard let target = transition.toStepID else { return nil }
+            return "\(transition.fromStepID)-\(target)-\(transition.outcome.rawValue)"
+        })
+        let executionSteps = steps.map { step -> AutomationCanvasStep in
+            let state: AutomationPreviewState
+            if let attempt = latestAttempt[step.id] {
+                switch attempt.state {
+                case .completed: state = .complete
+                case .running: state = .running
+                case .waiting, .queued: state = .waiting
+                case .failed, .cancelled: state = .blocked
+                }
+            } else if run.currentStepID == step.id {
+                state = run.state == .failed ? .blocked : run.state == .waiting ? .waiting : .running
+            } else {
+                state = .planned
+            }
+            return AutomationCanvasStep(
+                id: step.id, title: step.title, subtitle: step.subtitle, symbol: step.symbol,
+                kind: step.kind, x: step.x, y: step.y, state: state,
+                input: step.input, output: step.output, authority: step.authority
+            )
+        }
+        let executionEdges = edges.map { edge in
+            AutomationCanvasEdge(
+                edge.sourceID, edge.targetID, label: edge.label, kind: edge.kind,
+                active: activeEdges.contains(edge.id)
+            )
+        }
+        return Self(defaultSelectedID: run.currentStepID ?? defaultSelectedID, groups: groups, steps: executionSteps, edges: executionEdges)
+    }
+}
+
+private extension DesktopWorkflowStepKind {
+    var automationKind: AutomationCanvasNodeKind {
+        switch self {
+        case .classifyEvent: .trigger
+        case .correlateWork, .branch: .decision
+        case .compileContext: .context
+        case .structuredModel, .agent: .ai
+        case .invokeTool: .subflow
+        case .registerArtifact: .data
+        case .validate: .policy
+        case .forEach: .loop
+        case .effect, .sendEmail: .effect
+        case .humanReview, .requestApproval: .human
+        case .createEmailDraft: .data
+        case .waitForEmail: .wait
+        case .complete: .receipt
+        }
+    }
+
+    var automationSymbol: String {
+        switch self {
+        case .classifyEvent: "bolt.fill"
+        case .correlateWork: "link"
+        case .compileContext: "text.append"
+        case .structuredModel: "sparkles"
+        case .invokeTool: "wrench.and.screwdriver"
+        case .registerArtifact: "doc.badge.plus"
+        case .validate: "checkmark.seal"
+        case .branch: "arrow.triangle.branch"
+        case .forEach: "repeat"
+        case .agent: "cpu"
+        case .effect: "checkmark.shield"
+        case .humanReview: "person.crop.circle"
+        case .requestApproval: "person.crop.circle.badge.checkmark"
+        case .createEmailDraft: "square.and.pencil"
+        case .sendEmail: "paperplane.fill"
+        case .waitForEmail: "clock.badge"
+        case .complete: "checkmark.circle.fill"
+        }
+    }
+}
+
+private extension DesktopWorkflowStepDefinition {
+    var automationAuthority: String {
+        switch kind {
+        case .effect: "Trusted connector approval"
+        case .sendEmail: "Exact send approval"
+        case .createEmailDraft: "Draft only"
+        case .humanReview, .requestApproval: "Human decision"
+        case .waitForEmail, .classifyEvent: "Observe only"
+        case .structuredModel, .agent: "Declared model egress"
+        default: "No external effect"
+        }
+    }
+}
+
+private extension DesktopWorkflowTransitionOutcome {
+    var automationEdgeKind: AutomationCanvasEdge.Kind {
+        switch self {
+        case .matched, .approved, .selected, .acknowledged, .succeeded: .success
+        case .notMatched, .rejected, .edited, .timedOut, .cancelled: .conditional
+        case .failed: .error
+        case .always: .data
+        }
+    }
 }
 
 private struct AutomationNodeCanvas: View {
@@ -3706,10 +4803,71 @@ private struct AutomationVersionHistoryPanel: View {
     }
 }
 
+private struct AutomationLiveVersionHistoryPanel: View {
+    let revisions: [DesktopWorkflowRevisionRecord]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Versions").font(.headline)
+                Spacer()
+                Text("\(revisions.count) retained").font(.caption2).foregroundStyle(.secondary)
+            }
+            Text("Each publish creates an immutable revision. Runs keep the exact graph and settings they used.")
+                .font(.caption).foregroundStyle(.secondary)
+            Divider()
+            if revisions.isEmpty {
+                Text("No published revisions")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(Array(revisions.enumerated()), id: \.element.id) { index, revision in
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("v\(revision.version)")
+                                .font(.system(.caption, design: .monospaced).weight(.bold))
+                            Text(index == 0 ? "Current" : "Published")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(index == 0 ? Nord.auroraGreen : .secondary)
+                            Spacer()
+                            if index == 0 {
+                                Image(systemName: "checkmark.circle.fill").foregroundStyle(Nord.auroraGreen)
+                            }
+                        }
+                        Text(installedLabel(revision.installedAtUnixMillis))
+                            .font(.caption2).foregroundStyle(.secondary)
+                        Text(String(revision.manifestDigest.prefix(12)))
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(Nord.frost1)
+                    }
+                    .padding(9)
+                    .background(
+                        index == 0 ? Nord.frost1.opacity(0.12) : Nord.polarNight2.opacity(0.7),
+                        in: RoundedRectangle(cornerRadius: 9)
+                    )
+                }
+            }
+            Spacer(minLength: 0)
+            Divider()
+            Label("Published versions cannot be edited", systemImage: "lock.fill")
+                .font(.caption2).foregroundStyle(.secondary)
+        }
+        .padding(13)
+        .frame(minHeight: 566, alignment: .topLeading)
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private func installedLabel(_ unixMillis: Int64) -> String {
+        Date(timeIntervalSince1970: Double(unixMillis) / 1_000)
+            .formatted(date: .abbreviated, time: .shortened)
+    }
+}
+
 private struct AutomationNodeInspector: View {
     let step: AutomationCanvasStep
     @Binding var section: AutomationInspectorSection
     let showsCaseHistory: Bool
+    var isLive = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -3735,9 +4893,9 @@ private struct AutomationNodeInspector: View {
             inspectorContent
             Spacer(minLength: 0)
             Divider()
-            Label("Fixture contract passed", systemImage: "checkmark.seal.fill")
+            Label(isLive ? "Installed contract" : "Fixture contract passed", systemImage: "checkmark.seal.fill")
                 .foregroundStyle(Nord.auroraGreen)
-            Label("No live connections", systemImage: "network.slash")
+            Label(isLive ? "Bindings and authority are managed in Readiness" : "No live connections", systemImage: "network.slash")
                 .foregroundStyle(.secondary)
         }
         .font(.caption)

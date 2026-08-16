@@ -145,6 +145,27 @@ struct DesktopWorkflowOperationsTests {
     }
 
     @Test
+    func editingPublishedWorkflowCreatesNextRevisionForSameIdentity() throws {
+        let model = DesktopAppModel(store: OperationsMemoryStore(), now: { 1_000 })
+        try installFixtureWorkflow(model)
+        let definition = try #require(model.workflowDefinitions.first { $0.id == "org.example.operations" })
+        let draftID = try #require(model.editWorkflowRevisionInStudio(revisionID: definition.currentRevisionID))
+        let draft = try #require(model.snapshot.operations.workflows.studioDrafts.first { $0.id == draftID })
+        #expect(draft.workflowID == definition.id)
+        #expect(draft.name == definition.name)
+        #expect(draft.version == "1.0.1")
+        #expect(draft.steps.map(\.id) == ["prepare", "complete"])
+
+        let publishedID = try #require(model.publishWorkflowStudioDraft(id: draftID))
+        #expect(publishedID == definition.id)
+        #expect(model.workflowDefinitions.count == 1)
+        let updated = try #require(model.workflowDefinitions.first)
+        let revision = try #require(model.snapshot.operations.workflows.revisions.first { $0.id == updated.currentRevisionID })
+        #expect(revision.version == "1.0.1")
+        #expect(!updated.enabled)
+    }
+
+    @Test
     func schedulesAdvanceBeforeDispatchAndMigrationCannotSkipEvidence() throws {
         var clock: Int64 = 1_000
         let model = DesktopAppModel(store: OperationsMemoryStore(), now: { clock })

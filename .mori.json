@@ -2,7 +2,7 @@
   "profile": "review",
   "threshold": 0.85,
   "min_tokens": 40,
-  "max_groups": 500,
+  "max_groups": 0,
   "max_occurrences": 10,
   "comparison_domain": "code",
   "ranking": "review",

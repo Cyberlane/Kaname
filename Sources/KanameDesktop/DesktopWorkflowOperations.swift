@@ -742,11 +742,41 @@ public extension DesktopAppModel {
     func forkWorkflowRevisionToStudio(revisionID: String) -> String? {
         guard let revision = snapshot.operations.workflows.revisions.first(where: { $0.id == revisionID }),
               let definition = snapshot.operations.workflows.definitions.first(where: { $0.id == revision.workflowID }) else { return nil }
+        return createWorkflowStudioDraft(
+            definition: definition,
+            revision: revision,
+            workflowIdentity: { "local.\($0)" },
+            name: definition.name + " copy",
+            version: revision.version
+        )
+    }
+
+    @discardableResult
+    func editWorkflowRevisionInStudio(revisionID: String) -> String? {
+        guard let revision = snapshot.operations.workflows.revisions.first(where: { $0.id == revisionID }),
+              let definition = snapshot.operations.workflows.definitions.first(where: { $0.id == revision.workflowID }),
+              let nextVersion = Self.nextWorkflowVersion(revision.version) else { return nil }
+        return createWorkflowStudioDraft(
+            definition: definition,
+            revision: revision,
+            workflowIdentity: { _ in definition.id },
+            name: definition.name,
+            version: nextVersion
+        )
+    }
+
+    private func createWorkflowStudioDraft(
+        definition: DesktopWorkflowDefinitionRecord,
+        revision: DesktopWorkflowRevisionRecord,
+        workflowIdentity: (String) -> String,
+        name: String,
+        version: String
+    ) -> String? {
         let timestamp = now()
         let id = UUID().uuidString.lowercased()
         var draft = DesktopWorkflowStudioDraftRecord(
-            id: id, workflowID: "local.\(id)", name: definition.name + " copy",
-            summary: definition.summary, icon: definition.icon, version: revision.version,
+            id: id, workflowID: workflowIdentity(id), name: name,
+            summary: definition.summary, icon: definition.icon, version: version,
             triggerKinds: definition.triggerKinds, steps: revision.steps, permissions: revision.permissions,
             subflows: [], validationSummary: nil, createdAtUnixMillis: timestamp, updatedAtUnixMillis: timestamp
         )
@@ -1194,6 +1224,14 @@ public extension DesktopAppModel {
 
     private static func validVersion(_ value: String) -> Bool {
         value.range(of: #"^[0-9]+(?:\.[0-9]+){0,3}$"#, options: .regularExpression) != nil
+    }
+
+    private static func nextWorkflowVersion(_ value: String) -> String? {
+        guard validVersion(value) else { return nil }
+        var components = value.split(separator: ".").compactMap { Int($0) }
+        guard !components.isEmpty, let last = components.last, last < Int.max else { return nil }
+        components[components.count - 1] = last + 1
+        return components.map(String.init).joined(separator: ".")
     }
 
     private static func validDigest(_ value: String) -> Bool {

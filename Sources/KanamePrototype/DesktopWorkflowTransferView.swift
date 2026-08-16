@@ -9,6 +9,47 @@ enum DesktopWorkflowTransferUI {
     static let signedTemplateType = UTType(exportedAs: "com.cyberlane.kaname.workflow-template")
     static let installationType = UTType(exportedAs: "com.cyberlane.kaname.workflow-installation")
 
+    static func installPackage(model: DesktopAppModel) throws -> String? {
+        let panel = NSOpenPanel()
+        panel.title = "Install Kaname workflow package"
+        panel.message = "Choose a reusable workflow package or an encrypted private installation archive. Kaname reviews either locally and imports it disabled."
+        panel.allowedContentTypes = [.json, packageType, signedTemplateType, installationType]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return nil }
+
+        let data = try Data(contentsOf: url, options: [.mappedIfSafe])
+        let registered = Set(model.workflowCapabilityInstallations.filter(\.enabled).map(\.capabilityID))
+            .union(model.snapshot.domains.skills.filter(\.enabled).map(\.id))
+        if url.pathExtension.lowercased() == "kanameinstallation" {
+            guard let passphrase = requestImportPassphrase() else { return nil }
+            let payload = try model.previewWorkflowInstallation(data, passphrase: passphrase)
+            guard confirmInstallationImport(payload) else { return nil }
+            let workflowID = try model.importWorkflowInstallation(payload, registeredCapabilityIDs: registered)
+            return "Imported \(workflowID) disabled. Rebind accounts and review capabilities, context, triggers, and effects before resuming."
+        }
+        if url.pathExtension.lowercased() == "kanametemplate" {
+            let envelope = try JSONDecoder().decode(DesktopWorkflowSignedTemplateEnvelope.self, from: data)
+            try DesktopWorkflowTemplateCodec.verify(envelope)
+            guard confirmSignedTemplateImport(envelope) else { return nil }
+            let revisionID = try model.installSignedWorkflowTemplate(
+                envelopeData: data, registeredCapabilityIDs: registered
+            )
+            return "Verified and installed signed revision \(revisionID) disabled. Review configuration, exact dependency locks, and permissions before enabling."
+        }
+
+        let manifest = try DesktopWorkflowPackageCodec.decode(data, registeredCapabilityIDs: registered)
+        let canonical = try DesktopWorkflowPackageCodec.canonicalData(manifest)
+        let digest = DesktopWorkflowPackageCodec.digest(canonical)
+        guard confirmPackageImport(manifest, digest: digest) else { return nil }
+        let revisionID = try model.installWorkflowPackage(
+            manifestData: canonical,
+            registeredCapabilityIDs: registered,
+            enable: false
+        )
+        return "Installed revision \(revisionID) disabled. Review every trigger, dependency, binding, and permission before enabling it."
+    }
+
     static func exportPackage(model: DesktopAppModel, definition: DesktopWorkflowDefinitionRecord) throws -> String? {
         let data = try model.exportWorkflowPackage(workflowID: definition.id)
         let panel = NSSavePanel()
