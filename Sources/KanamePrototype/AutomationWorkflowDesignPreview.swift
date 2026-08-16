@@ -332,6 +332,7 @@ private struct AutomationLiveRunsView: View {
             }
         }
         .padding(20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onAppear { if selectedRunID == nil { selectedRunID = runs.first?.id } }
         .onChange(of: runs.map(\.id)) { ids in
             if selectedRunID == nil || !ids.contains(selectedRunID ?? "") { selectedRunID = ids.first }
@@ -474,6 +475,7 @@ private struct AutomationComponentsView: View {
                 if let packageMessage {
                     BoundaryCallout(title: "Package operation", detail: packageMessage)
                 }
+                componentGuide
                 schedules
                 componentSection(
                     title: "Capabilities",
@@ -541,6 +543,7 @@ private struct AutomationComponentsView: View {
                 }
             }
             .padding(20)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -549,6 +552,60 @@ private struct AutomationComponentsView: View {
             + model.snapshot.operations.workflows.connectorInstallations.count
             + model.snapshot.operations.workflows.rendererInstallations.count
             + model.snapshot.operations.workflows.subflows.count
+    }
+
+    private var componentGuide: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Label("How components work together", systemImage: "point.3.connected.trianglepath.dotted")
+                    .font(.headline)
+                Text("A workflow coordinates small, versioned building blocks. Each component has one bounded job, so data handling, credentials, presentation, and reusable orchestration stay independently reviewable.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 210), spacing: 10)], spacing: 10) {
+                componentGuideCard(
+                    title: "Capabilities",
+                    symbol: "cpu",
+                    detail: "Transform, validate, or interpret typed data. They do not receive ambient credentials or effect authority."
+                )
+                componentGuideCard(
+                    title: "Trusted connectors",
+                    symbol: "network.badge.shield.half.filled",
+                    detail: "Own authenticated provider access and remote effects, with explicit qualification and authority checks."
+                )
+                componentGuideCard(
+                    title: "Renderers",
+                    symbol: "doc.richtext",
+                    detail: "Turn artifacts into inspectable previews or recalculated output without changing the workflow definition."
+                )
+                componentGuideCard(
+                    title: "Reusable subflows",
+                    symbol: "square.stack.3d.up",
+                    detail: "Package a reviewed sequence of typed steps so multiple workflows can reuse an exact pinned version."
+                )
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private func componentGuideCard(title: String, symbol: String, detail: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: symbol)
+                .foregroundStyle(Nord.frost1)
+                .frame(width: 24, height: 24)
+                .background(Nord.frost1.opacity(0.12), in: RoundedRectangle(cornerRadius: 7))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).font(.caption.weight(.semibold))
+                Text(detail).font(.caption2).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(Nord.polarNight2.opacity(0.55), in: RoundedRectangle(cornerRadius: 10))
     }
 
     private var schedules: some View {
@@ -598,6 +655,7 @@ private struct AutomationComponentsView: View {
             }
         }
         .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
     }
 
@@ -614,6 +672,7 @@ private struct AutomationComponentsView: View {
             content()
         }
         .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
         .accessibilityHint(empty)
     }
@@ -640,6 +699,7 @@ private struct AutomationComponentsView: View {
             }
         }
         .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(Nord.polarNight2.opacity(0.55), in: RoundedRectangle(cornerRadius: 10))
     }
 }
@@ -2265,6 +2325,11 @@ private enum AutomationCanvasViewportPreset {
     }
 }
 
+private enum AutomationCompactBuilderPanel: Equatable {
+    case palette
+    case inspector
+}
+
 private struct AutomationCanvasPreview: View {
     private let workflowID: String
     private let viewportPreset: AutomationCanvasViewportPreset
@@ -2287,6 +2352,7 @@ private struct AutomationCanvasPreview: View {
     @State private var diagnosticNavigation = DesktopWorkflowDiagnosticNavigationState()
     @State private var problemFocusMessage: String?
     @State private var problemsExpanded: Bool
+    @State private var compactPanel: AutomationCompactBuilderPanel?
 
     init(workflowID: String) {
         self.workflowID = workflowID
@@ -2356,6 +2422,7 @@ private struct AutomationCanvasPreview: View {
         _problemsExpanded = State(
             initialValue: !arguments.contains("--desktop-automation-builder-problems-collapsed")
         )
+        _compactPanel = State(initialValue: nil)
     }
 
     init(
@@ -2384,6 +2451,7 @@ private struct AutomationCanvasPreview: View {
         _selectedProblemID = State(initialValue: nil)
         _problemsExpanded = State(initialValue: false)
         _isSimulating = State(initialValue: false)
+        _compactPanel = State(initialValue: nil)
     }
 
     private var isLive: Bool { liveGraph != nil }
@@ -2409,23 +2477,21 @@ private struct AutomationCanvasPreview: View {
             if builderDesignPanel == .newWorkflow {
                 AutomationNewWorkflowDesign()
             } else {
-                GeometryReader { proxy in
+                ViewThatFits(in: .horizontal) {
                     VStack(alignment: .leading, spacing: 12) {
-                        if proxy.size.width >= 1_050 {
-                            canvasHeader
-                        } else {
-                            compactCanvasHeader
-                        }
-                        if proxy.size.width >= 1_050 {
-                            fullCanvasWorkspace
-                        } else {
-                            compactCanvasWorkspace
-                        }
+                        canvasHeader
+                        fullCanvasWorkspace
+                    }
+                    .frame(minWidth: 1_050, alignment: .topLeading)
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        compactCanvasHeader
+                        compactCanvasWorkspace
                     }
                 }
             }
         }
-        .frame(minHeight: 510)
+        .frame(maxWidth: .infinity, minHeight: 510, alignment: .topLeading)
         .onChange(of: pattern) { newPattern in
             guard !isLive else { return }
             selectedStepID = newPattern.graph.defaultSelectedID
@@ -2485,6 +2551,9 @@ private struct AutomationCanvasPreview: View {
 
     private var compactCanvasWorkspace: some View {
         VStack(spacing: 8) {
+            if let compactPanel {
+                compactPanelContent(compactPanel)
+            }
             ZStack(alignment: .bottom) {
                 canvasSurface(minimumHeight: 350, compact: true)
                 if builderDesignPanel == .problems {
@@ -2508,6 +2577,29 @@ private struct AutomationCanvasPreview: View {
             .font(.caption)
             .padding(.horizontal, 4)
         }
+    }
+
+    @ViewBuilder
+    private func compactPanelContent(_ panel: AutomationCompactBuilderPanel) -> some View {
+        ZStack(alignment: .topTrailing) {
+            switch panel {
+            case .palette:
+                AutomationNodePalette(isEditing: isEditing, showsHeader: false)
+            case .inspector:
+                builderInspector
+            }
+            Button {
+                compactPanel = nil
+            } label: {
+                Label("Close panel", systemImage: "xmark.circle.fill")
+                    .labelStyle(.iconOnly)
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .padding(10)
+        }
+        .transition(.opacity.combined(with: .move(edge: .top)))
     }
 
     private func canvasSurface(minimumHeight: CGFloat, compact: Bool) -> some View {
@@ -2639,16 +2731,17 @@ private struct AutomationCanvasPreview: View {
                     .foregroundStyle(isEditing ? Nord.auroraYellow : .secondary)
             }
             Spacer()
-            Label(viewportPreset.title, systemImage: "viewfinder")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(Nord.frost1)
-                .padding(.horizontal, 9)
-                .padding(.vertical, 5)
-                .background(Nord.frost1.opacity(0.12), in: Capsule())
-            if isEditing {
-                Button("Add", systemImage: "plus") {}.buttonStyle(.bordered).controlSize(.small)
-                Button("Inspect", systemImage: "sidebar.right") {}.buttonStyle(.bordered).controlSize(.small)
-            } else {
+            Button("Add", systemImage: "plus") {
+                compactPanel = compactPanel == .palette ? nil : .palette
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            Button("Inspect", systemImage: "sidebar.right") {
+                compactPanel = compactPanel == .inspector ? nil : .inspector
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            if !isEditing {
                 Button("Edit", systemImage: "square.and.pencil") {
                     if let editAction { editAction() } else { isEditing = true }
                 }
@@ -2901,13 +2994,16 @@ private struct AutomationSourceDiagnosticPreview: View {
 
 private struct AutomationNodePalette: View {
     let isEditing: Bool
+    var showsHeader = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Add").font(.headline)
-                Spacer()
-                Image(systemName: "square.grid.2x2").foregroundStyle(.secondary)
+            if showsHeader {
+                HStack {
+                    Text("Add").font(.headline)
+                    Spacer()
+                    Image(systemName: "square.grid.2x2").foregroundStyle(.secondary)
+                }
             }
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
@@ -2943,7 +3039,8 @@ private struct AutomationNodePalette: View {
                 ("Email feedback", "envelope.arrow.triangle.branch"),
                 ("Approval + wait", "person.badge.clock"),
             ])
-            Spacer(minLength: 0)
+            Divider()
+                .padding(.top, 4)
             Label(
                 isEditing ? "Drag or press Return to add" : "Edit to change this graph",
                 systemImage: isEditing ? "keyboard" : "lock.fill"
@@ -2952,7 +3049,8 @@ private struct AutomationNodePalette: View {
             .foregroundStyle(isEditing ? Nord.frost1 : .secondary)
         }
         .padding(13)
-        .frame(minHeight: 566, alignment: .topLeading)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
         .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
     }
 
