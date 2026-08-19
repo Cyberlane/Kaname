@@ -2,6 +2,9 @@ import Foundation
 import Testing
 @testable import KanameConnectivity
 @testable import KanameDomain
+#if os(macOS)
+import Security
+#endif
 #if canImport(EventKit)
 import EventKit
 #endif
@@ -355,22 +358,42 @@ struct ProviderConnectivityTests {
     }
 
     @Test
-    func stableAndCandidateDesktopEnvironmentsNeverShareMutableState() {
+    func desktopEnvironmentsNeverShareMutableState() {
         let base = URL(fileURLWithPath: "/tmp/kaname-environment-test", isDirectory: true)
         let stable = KanameDesktopEnvironment(channel: .stable, applicationSupportDirectory: base)
         let candidate = KanameDesktopEnvironment(channel: .candidate, applicationSupportDirectory: base)
+        let development = KanameDesktopEnvironment(channel: .development, applicationSupportDirectory: base)
 
         #expect(stable.bundleIdentifier == "com.cyberlane.kaname.desktop")
         #expect(candidate.bundleIdentifier == "com.cyberlane.kaname.desktop.candidate")
+        #expect(development.bundleIdentifier == "com.cyberlane.kaname.desktop.dev")
         #expect(stable.applicationSupportRoot != candidate.applicationSupportRoot)
+        #expect(stable.applicationSupportRoot != development.applicationSupportRoot)
+        #expect(candidate.applicationSupportRoot != development.applicationSupportRoot)
         #expect(stable.instanceLockURL != candidate.instanceLockURL)
+        #expect(stable.instanceLockURL != development.instanceLockURL)
+        #expect(candidate.instanceLockURL != development.instanceLockURL)
         #expect(stable.workspaceFileURL != candidate.workspaceFileURL)
+        #expect(stable.workspaceFileURL != development.workspaceFileURL)
+        #expect(candidate.workspaceFileURL != development.workspaceFileURL)
         #expect(stable.providerStateDirectory != candidate.providerStateDirectory)
+        #expect(stable.providerStateDirectory != development.providerStateDirectory)
+        #expect(candidate.providerStateDirectory != development.providerStateDirectory)
         #expect(stable.connectivityDirectory != candidate.connectivityDirectory)
+        #expect(stable.connectivityDirectory != development.connectivityDirectory)
+        #expect(candidate.connectivityDirectory != development.connectivityDirectory)
         #expect(stable.googleDirectory != candidate.googleDirectory)
+        #expect(stable.googleDirectory != development.googleDirectory)
+        #expect(candidate.googleDirectory != development.googleDirectory)
         #expect(stable.googleKeychainService != candidate.googleKeychainService)
+        #expect(stable.googleKeychainService != development.googleKeychainService)
+        #expect(candidate.googleKeychainService != development.googleKeychainService)
         #expect(stable.localCoreMachService != candidate.localCoreMachService)
+        #expect(stable.localCoreMachService != development.localCoreMachService)
+        #expect(candidate.localCoreMachService != development.localCoreMachService)
         #expect(stable.activationNotificationName != candidate.activationNotificationName)
+        #expect(stable.activationNotificationName != development.activationNotificationName)
+        #expect(candidate.activationNotificationName != development.activationNotificationName)
     }
 
     @Test
@@ -652,6 +675,26 @@ struct ProviderConnectivityTests {
                 allowInteraction: false
             )
         }
+    }
+
+    @Test
+    func nonInteractiveGoogleTokenQueriesDisableAuthenticationUIForEveryBackend() {
+        let store = GoogleTokenKeychainStore(service: "com.cyberlane.kaname.google-oauth-test")
+        let dataProtection = store.lookup(
+            accountID: "test-account",
+            backend: .dataProtection,
+            allowInteraction: false
+        )
+        let traditional = store.lookup(
+            accountID: "test-account",
+            backend: .traditional,
+            allowInteraction: false
+        )
+
+        #expect(dataProtection[kSecUseDataProtectionKeychain] as? Bool == true)
+        #expect(dataProtection[kSecUseAuthenticationContext] != nil)
+        #expect(traditional[kSecUseDataProtectionKeychain] == nil)
+        #expect(traditional[kSecUseAuthenticationContext] != nil)
     }
 #endif
 

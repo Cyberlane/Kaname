@@ -223,7 +223,7 @@ private struct GoogleUserInfo: Decodable {
 }
 
 final class GoogleTokenKeychainStore: @unchecked Sendable {
-    private enum Backend {
+    enum Backend {
         case dataProtection
         case traditional
     }
@@ -303,7 +303,7 @@ final class GoogleTokenKeychainStore: @unchecked Sendable {
         return (status, result as? Data)
     }
 
-    private func lookup(
+    func lookup(
         accountID: String,
         backend: Backend,
         allowInteraction: Bool
@@ -315,7 +315,8 @@ final class GoogleTokenKeychainStore: @unchecked Sendable {
         ]
         if backend == .dataProtection {
             query[kSecUseDataProtectionKeychain] = true
-        } else if !allowInteraction {
+        }
+        if !allowInteraction {
             let context = LAContext()
             context.interactionNotAllowed = true
             query[kSecUseAuthenticationContext] = context

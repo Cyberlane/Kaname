@@ -8,6 +8,12 @@ import KanamePrototypeUI
 #if os(macOS)
 import AppKit
 import Darwin
+
+#if DEBUG
+private let kanameDesktopWindowTitle = "Kaname - Dev"
+#else
+private let kanameDesktopWindowTitle = "Kaname"
+#endif
 #endif
 
 #if os(macOS)
@@ -17,7 +23,7 @@ struct KanamePrototypeApp: App {
     private let singleInstance = KanameDesktopSingleInstanceCoordinator.acquireOrExit()
 
     var body: some Scene {
-        Window("Kaname", id: "main") {
+        Window(kanameDesktopWindowTitle, id: "main") {
             KanameDesktopWorkspace()
                 .tint(Nord.frost2)
                 .preferredColorScheme(.dark)
@@ -237,6 +243,7 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
     @discardableResult
     private func ensureVisibleWindow(allowCreation: Bool) -> Bool {
         if let existing = NSApplication.shared.windows.first(where: { $0.canBecomeMain }) {
+            existing.title = kanameDesktopWindowTitle
             existing.sharingType = .readOnly
             existing.styleMask.insert(.resizable)
             existing.minSize = NSSize(width: 1_080, height: 700)
@@ -258,7 +265,7 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
                 .preferredColorScheme(.dark)
         )
         let window = NSWindow(contentViewController: controller)
-        window.title = KanameDesktopEnvironment.current.displayName
+        window.title = kanameDesktopWindowTitle
         window.sharingType = .readOnly
         window.styleMask.insert(.resizable)
         window.setContentSize(requestedWindowSize ?? NSSize(width: 1_520, height: 940))

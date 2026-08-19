@@ -4,6 +4,7 @@ public struct KanameDesktopEnvironment: Equatable, Sendable {
     public enum Channel: String, Codable, Sendable {
         case stable
         case candidate
+        case development
     }
 
     public let channel: Channel
@@ -13,10 +14,12 @@ public struct KanameDesktopEnvironment: Equatable, Sendable {
         self.channel = channel
         let base = applicationSupportDirectory
             ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        applicationSupportRoot = base.appending(
-            path: channel == .stable ? "Kaname" : "Kaname Candidate",
-            directoryHint: .isDirectory
-        )
+        let applicationSupportName = switch channel {
+        case .stable: "Kaname"
+        case .candidate: "Kaname Candidate"
+        case .development: "Kaname Dev"
+        }
+        applicationSupportRoot = base.appending(path: applicationSupportName, directoryHint: .isDirectory)
     }
 
     public static var current: KanameDesktopEnvironment {
@@ -38,10 +41,20 @@ public struct KanameDesktopEnvironment: Equatable, Sendable {
     }
 
     public var bundleIdentifier: String {
-        channel == .stable ? "com.cyberlane.kaname.desktop" : "com.cyberlane.kaname.desktop.candidate"
+        switch channel {
+        case .stable: "com.cyberlane.kaname.desktop"
+        case .candidate: "com.cyberlane.kaname.desktop.candidate"
+        case .development: "com.cyberlane.kaname.desktop.dev"
+        }
     }
 
-    public var displayName: String { channel == .stable ? "Kaname" : "Kaname Candidate" }
+    public var displayName: String {
+        switch channel {
+        case .stable: "Kaname"
+        case .candidate: "Kaname Candidate"
+        case .development: "Kaname - Dev"
+        }
+    }
     public var localCoreMachService: String { "\(bundleIdentifier).localcore.service" }
     public var googleKeychainService: String { "\(bundleIdentifier).google-oauth" }
     public var activationNotificationName: String { "\(bundleIdentifier).activate-existing-instance" }
