@@ -4,6 +4,182 @@ import KanamePrototypeUI
 import KanameWorkflowHost
 import SwiftUI
 
+private struct AutomationWorkflowStarterTemplate: Identifiable {
+    let id: String
+    let title: String
+    let summary: String
+    let symbol: String
+    let tint: Color
+    let triggerKinds: [DesktopWorkflowTriggerKind]
+    let steps: [DesktopWorkflowStepDefinition]
+
+    var canvasPositions: [DesktopWorkflowCanvasNodePosition] {
+        steps.enumerated().map { index, step in
+            .init(
+                stepID: step.id,
+                x: Double(index) * 210 + 30,
+                y: 40
+            )
+        }
+    }
+
+    static var patterns: [Self] {
+        let complete = DesktopWorkflowStepDefinition(id: "complete", name: "Complete", kind: .complete)
+        return [
+            .init(
+                id: "email-feedback",
+                title: "Email feedback loop",
+                summary: "Keep one durable conversation across replies and human review.",
+                symbol: "envelope.arrow.triangle.branch",
+                tint: Nord.frost1,
+                triggerKinds: [.email],
+                steps: [
+                    .init(
+                        id: "receive", name: "Receive email", kind: .classifyEvent,
+                        transitions: [.init(outcome: .always, targetStepID: "correlate")]
+                    ),
+                    .init(
+                        id: "correlate", name: "Correlate conversation", kind: .correlateWork,
+                        transitions: [.init(outcome: .always, targetStepID: "wait")]
+                    ),
+                    .init(
+                        id: "wait", name: "Wait for reply", kind: .waitForEmail,
+                        transitions: [
+                            .init(outcome: .succeeded, targetStepID: "review"),
+                            .init(outcome: .timedOut, targetStepID: "complete"),
+                        ],
+                        waitContract: .init(connectorID: "kaname.mail", source: "mail")
+                    ),
+                    .init(
+                        id: "review", name: "Review reply", kind: .humanReview,
+                        transitions: [
+                            .init(outcome: .approved, targetStepID: "complete"),
+                            .init(outcome: .rejected, targetStepID: "complete"),
+                        ],
+                        reviewContract: makeWorkflowStudioReviewContract(title: "Review reply")
+                    ),
+                    complete,
+                ]
+            ),
+            .init(
+                id: "classify-route",
+                title: "Classify and route",
+                summary: "Choose typed matched and fallback paths from one decision.",
+                symbol: "arrow.triangle.branch",
+                tint: Nord.auroraYellow,
+                triggerKinds: [.manual],
+                steps: [
+                    .init(
+                        id: "route", name: "Classify and route", kind: .branch,
+                        transitions: [
+                            .init(
+                                outcome: .matched,
+                                targetStepID: "review",
+                                predicates: [.init(pointer: "/matched", operation: .equals, value: "true")]
+                            ),
+                            .init(outcome: .notMatched, targetStepID: "complete"),
+                        ]
+                    ),
+                    .init(
+                        id: "review", name: "Review match", kind: .humanReview,
+                        transitions: [
+                            .init(outcome: .approved, targetStepID: "complete"),
+                            .init(outcome: .rejected, targetStepID: "complete"),
+                        ],
+                        reviewContract: makeWorkflowStudioReviewContract(title: "Review match")
+                    ),
+                    complete,
+                ]
+            ),
+            .init(
+                id: "parallel-review",
+                title: "Parallel review",
+                summary: "Run a bounded collection concurrently, then review the aggregate.",
+                symbol: "arrow.triangle.2.circlepath",
+                tint: Nord.auroraPurple,
+                triggerKinds: [.manual],
+                steps: [
+                    .init(
+                        id: "items", name: "Run independent checks", kind: .forEach,
+                        transitions: [
+                            .init(outcome: .succeeded, targetStepID: "review"),
+                            .init(outcome: .failed, targetStepID: "complete"),
+                        ],
+                        batchPolicy: .init(maximumItems: 100, maximumConcurrency: 4)
+                    ),
+                    .init(
+                        id: "review", name: "Review aggregate", kind: .humanReview,
+                        transitions: [
+                            .init(outcome: .approved, targetStepID: "complete"),
+                            .init(outcome: .rejected, targetStepID: "complete"),
+                        ],
+                        reviewContract: makeWorkflowStudioReviewContract(title: "Review aggregate")
+                    ),
+                    complete,
+                ]
+            ),
+            .init(
+                id: "approval-gate",
+                title: "Approval gate",
+                summary: "Place an explicit approval barrier before adding a reviewed effect.",
+                symbol: "checkmark.shield",
+                tint: Nord.auroraGreen,
+                triggerKinds: [.manual],
+                steps: [
+                    .init(
+                        id: "prepare", name: "Prepare proposal", kind: .classifyEvent,
+                        transitions: [.init(outcome: .always, targetStepID: "approval")]
+                    ),
+                    .init(
+                        id: "approval", name: "Request approval", kind: .requestApproval,
+                        transitions: [.init(outcome: .approved, targetStepID: "complete")]
+                    ),
+                    complete,
+                ]
+            ),
+            .init(
+                id: "batch-processing",
+                title: "Batch processing",
+                summary: "Process a bounded collection with controlled concurrency and aggregation.",
+                symbol: "square.stack.3d.up",
+                tint: Nord.frost2,
+                triggerKinds: [.manual],
+                steps: [
+                    .init(
+                        id: "prepare", name: "Prepare items", kind: .classifyEvent,
+                        transitions: [.init(outcome: .always, targetStepID: "items")]
+                    ),
+                    .init(
+                        id: "items", name: "Process items", kind: .forEach,
+                        transitions: [
+                            .init(outcome: .succeeded, targetStepID: "complete"),
+                            .init(outcome: .failed, targetStepID: "complete"),
+                        ],
+                        batchPolicy: .init(maximumItems: 100, maximumConcurrency: 4)
+                    ),
+                    complete,
+                ]
+            ),
+            .init(
+                id: "blank",
+                title: "Blank workflow",
+                summary: "Start with one typed input node and a terminal node.",
+                symbol: "plus.rectangle.on.rectangle",
+                tint: Color.secondary,
+                triggerKinds: [.manual],
+                steps: [
+                    .init(
+                        id: "prepare", name: "Receive input", kind: .classifyEvent,
+                        transitions: [.init(outcome: .always, targetStepID: "complete")]
+                    ),
+                    complete,
+                ]
+            ),
+        ]
+    }
+
+}
+
 struct AutomationWorkflowProductView: View {
     private enum Section: String, CaseIterable {
         case workflows = "Workflows"
@@ -23,7 +199,9 @@ struct AutomationWorkflowProductView: View {
         }
 
         static func initial(arguments: [String]) -> Self {
-            if arguments.contains("--desktop-automation-product-builder") { return .builder }
+            if arguments.contains("--desktop-automation-product-builder")
+                || arguments.contains("--desktop-automation-product-new-workflow")
+                || arguments.contains("--desktop-automation-product-studio") { return .builder }
             if arguments.contains("--desktop-automation-product-runs") { return .runs }
             if arguments.contains("--desktop-automation-product-readiness") { return .readiness }
             if arguments.contains("--desktop-automation-product-components")
@@ -39,6 +217,9 @@ struct AutomationWorkflowProductView: View {
     @State private var section = Section.initial(arguments: CommandLine.arguments)
     @State private var selectedWorkflowID: String?
     @State private var studioDraftID: String?
+    @State private var showsWorkflowStarter = CommandLine.arguments.contains("--desktop-automation-product-new-workflow")
+    @State private var workflowStarterMessage: String?
+    @State private var preparedStudioQualificationFixture = false
     @State private var manualRunDefinition: DesktopWorkflowDefinitionRecord?
     @State private var installationToConfigure: DesktopWorkflowInstallationRecord?
     @State private var editingSchedule: DesktopAutomationRule?
@@ -154,21 +335,11 @@ struct AutomationWorkflowProductView: View {
         .background(Nord.polarNight0)
         .onAppear {
             if selectedWorkflowID == nil { selectedWorkflowID = definitions.first?.id }
+            prepareStudioQualificationFixtureIfRequested()
         }
         .onChange(of: definitions.map(\.id)) { ids in
             if selectedWorkflowID == nil || !ids.contains(selectedWorkflowID ?? "") {
                 selectedWorkflowID = ids.first
-            }
-        }
-        .sheet(isPresented: Binding(
-            get: { studioDraftID != nil },
-            set: { if !$0 { studioDraftID = nil } }
-        )) {
-            if let studioDraftID {
-                WorkflowStudioSheet(model: model, draftID: studioDraftID) { workflowID in
-                    selectedWorkflowID = workflowID
-                    packageMessage = "Published \(workflowID) disabled. Review Readiness before enabling it."
-                }
             }
         }
         .sheet(item: $manualRunDefinition) { definition in
@@ -211,7 +382,8 @@ struct AutomationWorkflowProductView: View {
                         set: { selectedWorkflowID = $0 }
                     ),
                     openBuilder: { section = .builder },
-                    openRunHistory: { section = .runs }
+                    openRunHistory: { section = .runs },
+                    createWorkflow: createWorkflow
                 )
                 .padding(20)
             }
@@ -220,7 +392,34 @@ struct AutomationWorkflowProductView: View {
 
     @ViewBuilder
     private var builderPage: some View {
-        if let definition = selectedDefinition, let revision = selectedRevision,
+        if showsWorkflowStarter {
+            ScrollView {
+                AutomationNewWorkflowDesign(
+                    workflows: definitions,
+                    message: workflowStarterMessage,
+                    onUseTemplate: createWorkflow(from:),
+                    onDuplicate: duplicateWorkflow(_:),
+                    onImportSource: importWorkflowSource(_:),
+                    onCancel: cancelWorkflowStarter
+                )
+                .padding(20)
+            }
+        } else if let studioDraftID {
+            WorkflowStudioSheet(
+                model: model,
+                draftID: studioDraftID,
+                presentation: .embedded,
+                onCancel: {
+                    self.studioDraftID = nil
+                    section = .workflows
+                }
+            ) { workflowID in
+                selectedWorkflowID = workflowID
+                self.studioDraftID = nil
+                packageMessage = "Published \(workflowID) disabled. Review Readiness before enabling it."
+            }
+            .id(studioDraftID)
+        } else if let definition = selectedDefinition, let revision = selectedRevision,
            let workflow = workflowPresentations.first(where: { $0.id == definition.id }) {
             ScrollView {
                 AutomationCanvasPreview(
@@ -248,13 +447,84 @@ struct AutomationWorkflowProductView: View {
     }
 
     private func createWorkflow() {
-        studioDraftID = model.createWorkflowStudioDraft(
-            name: "Untitled workflow",
-            summary: "A reusable workflow created in Automations."
-        )
+        workflowStarterMessage = nil
+        studioDraftID = nil
+        showsWorkflowStarter = true
+        section = .builder
+    }
+
+    private func createWorkflow(from template: AutomationWorkflowStarterTemplate) {
+        guard let draftID = model.createWorkflowStudioDraft(
+            name: template.title,
+            summary: template.summary,
+            icon: template.symbol
+        ), let draft = model.snapshot.operations.workflows.studioDrafts.first(where: { $0.id == draftID }) else {
+            workflowStarterMessage = "Kaname could not create the workflow draft."
+            return
+        }
+        guard model.updateWorkflowStudioDraft(
+            id: draftID,
+            triggerKinds: template.triggerKinds,
+            steps: template.steps,
+            permissions: .init(),
+            subflows: [],
+            canvasPositions: template.canvasPositions,
+            manifestMetadata: draft.manifestMetadata
+        ), model.snapshot.operations.workflows.studioDrafts
+            .first(where: { $0.id == draftID })?.validationSummary == nil else {
+            _ = model.discardWorkflowStudioDraft(id: draftID)
+            workflowStarterMessage = "The selected pattern could not be converted into a valid draft."
+            return
+        }
+        workflowStarterMessage = nil
+        studioDraftID = draftID
+        showsWorkflowStarter = false
+    }
+
+    private func duplicateWorkflow(_ definition: DesktopWorkflowDefinitionRecord) {
+        guard let draftID = model.forkWorkflowRevisionToStudio(revisionID: definition.currentRevisionID) else {
+            workflowStarterMessage = "Kaname could not duplicate the selected published revision."
+            return
+        }
+        workflowStarterMessage = nil
+        studioDraftID = draftID
+        showsWorkflowStarter = false
+    }
+
+    private func importWorkflowSource(_ source: String) -> Bool {
+        guard let draftID = model.createWorkflowStudioDraft(
+            name: "Imported workflow",
+            summary: "A workflow authored from canonical source."
+        ) else {
+            workflowStarterMessage = "Kaname could not create an import draft."
+            return false
+        }
+        guard model.replaceWorkflowStudioDraftSource(id: draftID, source: source) else {
+            _ = model.discardWorkflowStudioDraft(id: draftID)
+            workflowStarterMessage = "The source is invalid, unsafe, oversized, or refers to unavailable capabilities."
+            return false
+        }
+        workflowStarterMessage = nil
+        studioDraftID = draftID
+        showsWorkflowStarter = false
+        return true
+    }
+
+    private func cancelWorkflowStarter() {
+        showsWorkflowStarter = false
+        workflowStarterMessage = nil
+        section = .workflows
+    }
+
+    private func prepareStudioQualificationFixtureIfRequested() {
+        guard CommandLine.arguments.contains("--desktop-automation-product-studio"),
+              !preparedStudioQualificationFixture else { return }
+        preparedStudioQualificationFixture = true
+        createWorkflow(from: AutomationWorkflowStarterTemplate.patterns[0])
     }
 
     private func editWorkflow(_ definition: DesktopWorkflowDefinitionRecord) {
+        showsWorkflowStarter = false
         studioDraftID = model.editWorkflowRevisionInStudio(revisionID: definition.currentRevisionID)
     }
 
@@ -967,7 +1237,8 @@ struct AutomationWorkflowDesignPreview: View {
                                 workflows: AutomationWorkflowPreview.portfolio,
                                 selectedWorkflowID: $selectedWorkflowID,
                                 openBuilder: { direction = .canvas },
-                                openRunHistory: { direction = .operations }
+                                openRunHistory: { direction = .operations },
+                                createWorkflow: nil
                             )
                         case .operations:
                             AutomationRunsPreview()
@@ -1857,6 +2128,7 @@ private struct AutomationPipelinePreview: View {
     @Binding var selectedWorkflowID: String
     let openBuilder: () -> Void
     let openRunHistory: () -> Void
+    let createWorkflow: (() -> Void)?
     @State private var search = ""
     @State private var filter = WorkflowLibraryFilter.all
 
@@ -1934,9 +2206,9 @@ private struct AutomationPipelinePreview: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .frame(maxWidth: 280)
-            Button("New workflow", systemImage: "plus") {}
+            Button("New workflow", systemImage: "plus") { createWorkflow?() }
                 .buttonStyle(.borderedProminent)
-                .disabled(true)
+                .disabled(createWorkflow == nil)
         }
     }
 
@@ -4176,14 +4448,69 @@ private struct AutomationStorageResourceCard: View {
 }
 
 private struct AutomationNewWorkflowDesign: View {
-    private let templates: [(String, String, String, Color)] = [
-        ("Email feedback loop", "Keep one durable conversation across revisions and replies", "envelope.arrow.triangle.branch", Nord.frost1),
-        ("Classify and route", "Choose one typed path from a bounded classification", "arrow.triangle.branch", Nord.auroraYellow),
-        ("Parallel review", "Run independent checks and join their results", "arrow.triangle.2.circlepath", Nord.auroraPurple),
-        ("Approval and effect", "Preview an exact effect, wait for approval, then reconcile", "checkmark.shield", Nord.auroraGreen),
-        ("Batch processing", "Process a bounded collection with visible aggregation", "square.stack.3d.up", Nord.frost2),
-        ("Blank workflow", "Start with a trigger and add only compatible nodes", "plus.rectangle.on.rectangle", Color.secondary),
-    ]
+    private enum StarterSection: String, CaseIterable {
+        case patterns = "Patterns"
+        case workflows = "My workflows"
+        case source = "Source"
+
+        var symbol: String {
+            switch self {
+            case .patterns: "square.grid.2x2.fill"
+            case .workflows: "doc.on.doc"
+            case .source: "chevron.left.forwardslash.chevron.right"
+            }
+        }
+    }
+
+    let workflows: [DesktopWorkflowDefinitionRecord]
+    let message: String?
+    let onUseTemplate: ((AutomationWorkflowStarterTemplate) -> Void)?
+    let onDuplicate: ((DesktopWorkflowDefinitionRecord) -> Void)?
+    let onImportSource: ((String) -> Bool)?
+    let onCancel: (() -> Void)?
+    @State private var section = StarterSection.patterns
+    @State private var search = ""
+    @State private var selectedTemplateID = AutomationWorkflowStarterTemplate.patterns[0].id
+    @State private var sourceText: String
+    @State private var sourceMessage: String?
+
+    init(
+        workflows: [DesktopWorkflowDefinitionRecord] = [],
+        message: String? = nil,
+        onUseTemplate: ((AutomationWorkflowStarterTemplate) -> Void)? = nil,
+        onDuplicate: ((DesktopWorkflowDefinitionRecord) -> Void)? = nil,
+        onImportSource: ((String) -> Bool)? = nil,
+        onCancel: (() -> Void)? = nil
+    ) {
+        self.workflows = workflows
+        self.message = message
+        self.onUseTemplate = onUseTemplate
+        self.onDuplicate = onDuplicate
+        self.onImportSource = onImportSource
+        self.onCancel = onCancel
+        _sourceText = State(initialValue: DesktopWorkflowStudioScaffold.blankSource)
+    }
+
+    private var visibleTemplates: [AutomationWorkflowStarterTemplate] {
+        AutomationWorkflowStarterTemplate.patterns.filter {
+            search.isEmpty
+                || $0.title.localizedCaseInsensitiveContains(search)
+                || $0.summary.localizedCaseInsensitiveContains(search)
+        }
+    }
+
+    private var visibleWorkflows: [DesktopWorkflowDefinitionRecord] {
+        workflows.filter {
+            search.isEmpty
+                || $0.name.localizedCaseInsensitiveContains(search)
+                || $0.summary.localizedCaseInsensitiveContains(search)
+        }
+    }
+
+    private var selectedTemplate: AutomationWorkflowStarterTemplate {
+        AutomationWorkflowStarterTemplate.patterns.first { $0.id == selectedTemplateID }
+            ?? AutomationWorkflowStarterTemplate.patterns[0]
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -4194,64 +4521,188 @@ private struct AutomationNewWorkflowDesign: View {
                         .font(.callout).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button("Cancel") {}.buttonStyle(.bordered)
+                Button("Cancel") { onCancel?() }
+                    .buttonStyle(.bordered)
+                    .disabled(onCancel == nil)
             }
 
-            HStack(spacing: 10) {
-                Label("Patterns", systemImage: "square.grid.2x2.fill")
-                    .foregroundStyle(Nord.frost1)
-                Text("My workflows").foregroundStyle(.secondary)
-                Text("Imported source").foregroundStyle(.secondary)
-                Spacer()
-                HStack(spacing: 7) {
-                    Image(systemName: "magnifyingglass")
-                    Text("Search patterns")
-                }
-                .font(.caption).foregroundStyle(.secondary)
-                .padding(.horizontal, 10).padding(.vertical, 7)
-                .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 8))
-            }
-            .font(.caption.weight(.semibold))
-
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: 12)], spacing: 12) {
-                ForEach(templates, id: \.0) { template in
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            Image(systemName: template.2)
-                                .foregroundStyle(template.3)
-                                .frame(width: 30, height: 30)
-                                .background(template.3.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
-                            Spacer()
-                            Image(systemName: "arrow.up.right").foregroundStyle(.secondary)
-                        }
-                        Text(template.0).font(.headline)
-                        Text(template.1).font(.caption).foregroundStyle(.secondary)
-                            .frame(minHeight: 32, alignment: .topLeading)
-                        Divider()
-                        HStack {
-                            Label(template.0 == "Blank workflow" ? "1 starting node" : "Editable copy", systemImage: "doc.on.doc")
-                            Spacer()
-                            Text("Use pattern").foregroundStyle(Nord.frost1)
-                        }
-                        .font(.caption2.weight(.semibold))
+            HStack(spacing: 12) {
+                Picker("Starting point", selection: $section) {
+                    ForEach(StarterSection.allCases, id: \.self) { item in
+                        Label(item.rawValue, systemImage: item.symbol).tag(item)
                     }
-                    .padding(14)
-                    .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
-                    .overlay { RoundedRectangle(cornerRadius: 12).stroke(template.0 == "Email feedback loop" ? Nord.frost1 : Nord.polarNight3) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(maxWidth: 500)
+                Spacer()
+                if section != .source {
+                    TextField(section == .patterns ? "Search patterns" : "Search workflows", text: $search)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 250)
+                }
+            }
+
+            if let message {
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(Nord.auroraYellow)
+            }
+
+            starterContent
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, minHeight: 520, alignment: .topLeading)
+        .background(Nord.polarNight0)
+    }
+
+    @ViewBuilder
+    private var starterContent: some View {
+        switch section {
+        case .patterns:
+            patternContent
+        case .workflows:
+            workflowContent
+        case .source:
+            sourceContent
+        }
+    }
+
+    private var patternContent: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: 12)], spacing: 12) {
+                ForEach(visibleTemplates) { template in
+                    Button {
+                        selectedTemplateID = template.id
+                    } label: {
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack {
+                                Image(systemName: template.symbol)
+                                    .foregroundStyle(template.tint)
+                                    .frame(width: 30, height: 30)
+                                    .background(template.tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                                Spacer()
+                                Image(systemName: selectedTemplateID == template.id
+                                    ? "checkmark.circle.fill" : "circle")
+                                    .foregroundStyle(selectedTemplateID == template.id ? template.tint : .secondary)
+                            }
+                            Text(template.title).font(.headline)
+                            Text(template.summary)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .frame(minHeight: 32, alignment: .topLeading)
+                            Divider()
+                            HStack {
+                                Label("\(template.steps.count) nodes", systemImage: "point.3.connected.trianglepath.dotted")
+                                Spacer()
+                                Text(template.triggerKinds.map(\.label).joined(separator: " + "))
+                            }
+                            .font(.caption2.weight(.semibold))
+                        }
+                        .padding(14)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(selectedTemplateID == template.id ? template.tint : Nord.polarNight3,
+                                        lineWidth: selectedTemplateID == template.id ? 2 : 1)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Selects this editable workflow pattern")
                 }
             }
 
             HStack {
-                Label("Patterns create an editable draft. Linked subflows remain version-pinned.", systemImage: "info.circle")
+                Label("Patterns create ordinary editable drafts; every block and connection can be changed.", systemImage: "info.circle")
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button("Create draft from Email feedback loop", systemImage: "arrow.right") {}
-                    .buttonStyle(.borderedProminent)
+                Button("Create draft from \(selectedTemplate.title)", systemImage: "arrow.right") {
+                    onUseTemplate?(selectedTemplate)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(onUseTemplate == nil)
             }
             .font(.caption)
         }
-        .padding(18)
-        .background(Nord.polarNight0)
+    }
+
+    private var workflowContent: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Duplicate a published version into a new local workflow. The original remains unchanged.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            if visibleWorkflows.isEmpty {
+                BoundaryCallout(
+                    title: workflows.isEmpty ? "No published workflows yet" : "No matching workflows",
+                    detail: workflows.isEmpty
+                        ? "Choose a pattern or source to create the first workflow."
+                        : "Clear the search to see all published workflows."
+                )
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 24)
+            } else {
+                ForEach(visibleWorkflows) { workflow in
+                    HStack(spacing: 12) {
+                        Image(systemName: workflow.icon)
+                            .foregroundStyle(Nord.frost1)
+                            .frame(width: 32, height: 32)
+                            .background(Nord.frost1.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(workflow.name).font(.headline)
+                            Text(workflow.summary).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                            Text(workflow.triggerKinds.map(\.label).joined(separator: " + "))
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Duplicate", systemImage: "doc.on.doc") { onDuplicate?(workflow) }
+                            .disabled(onDuplicate == nil)
+                    }
+                    .padding(14)
+                    .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
+                }
+            }
+        }
+    }
+
+    private var sourceContent: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Canonical workflow source").font(.headline)
+                    Text("Paste or edit the complete manifest. A successful import opens the exact same canvas and outline draft.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Reset example") {
+                    sourceText = DesktopWorkflowStudioScaffold.blankSource
+                    sourceMessage = nil
+                }
+            }
+            WorkflowJSONSourceEditor(
+                text: $sourceText,
+                minimumHeight: 330,
+                accessibilityLabel: "Canonical workflow source"
+            )
+            if let sourceMessage {
+                Label(sourceMessage, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(Nord.auroraYellow)
+            }
+            HStack {
+                Label("Import is bounded, schema-validated, and capability-checked.", systemImage: "lock.shield")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("Validate and open draft", systemImage: "arrow.right") {
+                    guard let onImportSource else { return }
+                    sourceMessage = onImportSource(sourceText)
+                        ? nil
+                        : "Source was not imported. Review the validation message above."
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(onImportSource == nil || sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
     }
 }
 

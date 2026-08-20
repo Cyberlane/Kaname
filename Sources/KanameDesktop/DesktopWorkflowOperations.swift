@@ -684,6 +684,16 @@ public extension DesktopAppModel {
     }
 
     @discardableResult
+    func discardWorkflowStudioDraft(id: String) -> Bool {
+        guard snapshot.operations.workflows.studioDrafts.contains(where: { $0.id == id }) else {
+            return false
+        }
+        return mutate { state in
+            state.operations.workflows.studioDrafts.removeAll { $0.id == id }
+        }
+    }
+
+    @discardableResult
     func updateWorkflowStudioDraft(
         id: String,
         triggerKinds: [DesktopWorkflowTriggerKind],

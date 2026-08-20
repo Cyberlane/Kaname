@@ -7,6 +7,326 @@ import SwiftUI
 import Security
 #endif
 
+func makeWorkflowStudioReviewContract(
+    title: String = "Review result"
+) -> DesktopWorkflowReviewContract {
+    .init(
+        title: title,
+        summary: "Inspect the structured result before continuing.",
+        inputSchema: #"{"type":"object"}"#,
+        outputSchema: #"{"type":"object"}"#,
+        actions: [
+            .init(id: "approve", label: "Approve", kind: .approve, isPrimary: true),
+            .init(id: "reject", label: "Reject", kind: .reject),
+        ]
+    )
+}
+
+struct WorkflowJSONSourceEditor: View {
+    @Binding var text: String
+    let minimumHeight: CGFloat
+    let accessibilityLabel: String
+
+    private var formattedSource: String? {
+        DesktopWorkflowSourceFormatting.prettyPrintedJSON(text)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Label("JSON", systemImage: "curlybraces")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Nord.frost1)
+                Text("Syntax highlighted · formats automatically")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button {
+                    if let formattedSource { text = formattedSource }
+                } label: {
+                    Label("Format", systemImage: "text.alignleft")
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .disabled(formattedSource == nil || formattedSource == text)
+                .help("Format valid JSON while preserving key order")
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 32)
+
+            Divider()
+
+            WorkflowJSONTextView(text: $text, accessibilityLabel: accessibilityLabel)
+        }
+        .frame(minHeight: minimumHeight, maxHeight: .infinity)
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 10))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Nord.polarNight3, lineWidth: 1)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+@MainActor
+private struct WorkflowJSONTextView: NSViewRepresentable {
+    @Binding var text: String
+    let accessibilityLabel: String
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(binding: $text)
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+
+        let textView = NSTextView(frame: .zero)
+        textView.delegate = context.coordinator
+        textView.isRichText = false
+        textView.importsGraphics = false
+        textView.allowsUndo = true
+        textView.usesFindBar = true
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
+        textView.isAutomaticSpellingCorrectionEnabled = false
+        textView.isContinuousSpellCheckingEnabled = false
+        textView.drawsBackground = false
+        textView.insertionPointColor = .controlAccentColor
+        textView.textContainerInset = NSSize(width: 10, height: 10)
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.textContainer?.containerSize = NSSize(
+            width: scrollView.contentSize.width,
+            height: .greatestFiniteMagnitude
+        )
+        textView.textContainer?.widthTracksTextView = true
+        textView.minSize = NSSize(width: 0, height: scrollView.contentSize.height)
+        textView.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.isHorizontallyResizable = false
+        textView.isVerticallyResizable = true
+        textView.autoresizingMask = [.width]
+        textView.setAccessibilityLabel(accessibilityLabel)
+
+        scrollView.documentView = textView
+        context.coordinator.replaceExternalText(text, in: textView)
+        context.coordinator.scheduleAutoformat(in: textView)
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        context.coordinator.update(binding: $text)
+        guard let textView = scrollView.documentView as? NSTextView,
+              textView.string != text else { return }
+        context.coordinator.replaceExternalText(text, in: textView)
+        context.coordinator.scheduleAutoformat(in: textView)
+    }
+
+    static func dismantleNSView(_ scrollView: NSScrollView, coordinator: Coordinator) {
+        coordinator.cancelAutoformat()
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        private var binding: Binding<String>
+        private var isApplyingText = false
+        private var autoformatTask: Task<Void, Never>?
+
+        init(binding: Binding<String>) {
+            self.binding = binding
+        }
+
+        func update(binding: Binding<String>) {
+            self.binding = binding
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard !isApplyingText, let textView = notification.object as? NSTextView else { return }
+            binding.wrappedValue = textView.string
+            WorkflowJSONSyntaxHighlighter.apply(to: textView)
+            scheduleAutoformat(in: textView)
+        }
+
+        func textDidEndEditing(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            cancelAutoformat()
+            formatIfPossible(textView.string, in: textView, registerUndo: true)
+        }
+
+        func replaceExternalText(_ source: String, in textView: NSTextView) {
+            let selection = mappedSelection(
+                textView.selectedRange(),
+                from: textView.string,
+                to: source
+            )
+            isApplyingText = true
+            textView.string = source
+            isApplyingText = false
+            WorkflowJSONSyntaxHighlighter.apply(to: textView)
+            textView.setSelectedRange(selection)
+        }
+
+        func scheduleAutoformat(in textView: NSTextView) {
+            cancelAutoformat()
+            let source = textView.string
+            autoformatTask = Task { @MainActor [weak self, weak textView] in
+                do {
+                    try await Task.sleep(nanoseconds: 450_000_000)
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled, let self, let textView, textView.string == source else { return }
+                self.formatIfPossible(source, in: textView, registerUndo: true)
+            }
+        }
+
+        func cancelAutoformat() {
+            autoformatTask?.cancel()
+            autoformatTask = nil
+        }
+
+        private func formatIfPossible(_ source: String, in textView: NSTextView, registerUndo: Bool) {
+            guard let formatted = DesktopWorkflowSourceFormatting.prettyPrintedJSON(source),
+                  formatted != source else { return }
+            let selection = mappedSelection(textView.selectedRange(), from: source, to: formatted)
+            let replacementRange = NSRange(location: 0, length: (source as NSString).length)
+
+            isApplyingText = true
+            if registerUndo {
+                guard textView.shouldChangeText(in: replacementRange, replacementString: formatted) else {
+                    isApplyingText = false
+                    return
+                }
+                textView.textStorage?.replaceCharacters(in: replacementRange, with: formatted)
+                textView.didChangeText()
+            } else {
+                textView.string = formatted
+            }
+            isApplyingText = false
+
+            WorkflowJSONSyntaxHighlighter.apply(to: textView)
+            textView.setSelectedRange(selection)
+            textView.scrollRangeToVisible(selection)
+            binding.wrappedValue = formatted
+        }
+
+        private func mappedSelection(_ selection: NSRange, from source: String, to replacement: String) -> NSRange {
+            let sourceText = source as NSString
+            let replacementText = replacement as NSString
+            let startOffset = semanticOffset(in: sourceText, through: selection.location)
+            let endOffset = semanticOffset(
+                in: sourceText,
+                through: min(sourceText.length, selection.location + selection.length)
+            )
+            let start = location(forSemanticOffset: startOffset, in: replacementText)
+            let end = location(forSemanticOffset: endOffset, in: replacementText)
+            return NSRange(location: start, length: max(0, end - start))
+        }
+
+        private func semanticOffset(in text: NSString, through location: Int) -> Int {
+            var offset = 0
+            var inString = false
+            var escaped = false
+            for index in 0..<min(location, text.length) {
+                let character = text.character(at: index)
+                if inString {
+                    offset += 1
+                    if escaped {
+                        escaped = false
+                    } else if character == 92 {
+                        escaped = true
+                    } else if character == 34 {
+                        inString = false
+                    }
+                } else if character == 34 {
+                    inString = true
+                    offset += 1
+                } else if !isJSONWhitespace(character) {
+                    offset += 1
+                }
+            }
+            return offset
+        }
+
+        private func location(forSemanticOffset target: Int, in text: NSString) -> Int {
+            guard target > 0 else { return 0 }
+            var offset = 0
+            var inString = false
+            var escaped = false
+            for index in 0..<text.length {
+                let character = text.character(at: index)
+                let contributes: Bool
+                if inString {
+                    contributes = true
+                    if escaped {
+                        escaped = false
+                    } else if character == 92 {
+                        escaped = true
+                    } else if character == 34 {
+                        inString = false
+                    }
+                } else if character == 34 {
+                    inString = true
+                    contributes = true
+                } else {
+                    contributes = !isJSONWhitespace(character)
+                }
+                if contributes {
+                    offset += 1
+                    if offset == target { return index + 1 }
+                }
+            }
+            return text.length
+        }
+
+        private func isJSONWhitespace(_ character: unichar) -> Bool {
+            character == 9 || character == 10 || character == 13 || character == 32
+        }
+    }
+}
+
+@MainActor
+private enum WorkflowJSONSyntaxHighlighter {
+    static func apply(to textView: NSTextView) {
+        guard let textStorage = textView.textStorage else { return }
+        let fullRange = NSRange(location: 0, length: (textStorage.string as NSString).length)
+        let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineSpacing = 2
+        paragraph.defaultTabInterval = 24
+        let baseAttributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: NSColor.labelColor,
+            .paragraphStyle: paragraph,
+        ]
+
+        textStorage.beginEditing()
+        textStorage.setAttributes(baseAttributes, range: fullRange)
+        for token in DesktopWorkflowSourceSyntax.tokens(in: textStorage.string) {
+            let color: NSColor = switch token.kind {
+            case .key: .systemTeal
+            case .string: .systemGreen
+            case .number: .systemOrange
+            case .literal: .systemPurple
+            case .punctuation: .secondaryLabelColor
+            }
+            textStorage.addAttribute(
+                .foregroundColor,
+                value: color,
+                range: NSRange(location: token.location, length: token.length)
+            )
+        }
+        textStorage.endEditing()
+        textView.typingAttributes = baseAttributes
+    }
+}
+
 struct WorkflowSchemaFormView: View {
     let fields: [DesktopWorkflowFormField]
     @Binding var values: [String: String]
@@ -628,10 +948,17 @@ struct WorkflowQualificationSummaryRow: View {
     }
 }
 
+enum WorkflowStudioPresentation: Equatable {
+    case sheet
+    case embedded
+}
+
 struct WorkflowStudioSheet: View {
     private enum Projection: String, CaseIterable { case outline = "Outline"; case canvas = "Canvas"; case source = "Source" }
     @ObservedObject var model: DesktopAppModel
     let draftID: String
+    let presentation: WorkflowStudioPresentation
+    let onCancel: (() -> Void)?
     let onPublished: (String) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var steps: [DesktopWorkflowStepDefinition] = []
@@ -644,6 +971,23 @@ struct WorkflowStudioSheet: View {
     @State private var canvasPositions: [DesktopWorkflowCanvasNodePosition] = []
     @State private var sourceText = ""
     @State private var sourceMessage: String?
+    @State private var paletteSearch = ""
+    @State private var showsProblems = false
+    @State private var confirmsDiscard = false
+
+    init(
+        model: DesktopAppModel,
+        draftID: String,
+        presentation: WorkflowStudioPresentation = .sheet,
+        onCancel: (() -> Void)? = nil,
+        onPublished: @escaping (String) -> Void
+    ) {
+        self.model = model
+        self.draftID = draftID
+        self.presentation = presentation
+        self.onCancel = onCancel
+        self.onPublished = onPublished
+    }
 
     private var draft: DesktopWorkflowStudioDraftRecord? {
         model.snapshot.operations.workflows.studioDrafts.first { $0.id == draftID }
@@ -654,109 +998,366 @@ struct WorkflowStudioSheet: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(alignment: .top) {
-                Grid(alignment: .leading, verticalSpacing: 4) {
-                    GridRow { Text(draft?.name ?? "Workflow Studio").font(.title2.weight(.bold)) }
-                    GridRow {
-                        Text("Build on the canvas, outline, or canonical source; every projection edits the same validated graph and permission receipt.")
-                            .font(.callout).foregroundStyle(.secondary)
-                    }
-                }
-                Spacer()
-                if let summary = draft?.validationSummary {
-                    Label(summary, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption).foregroundStyle(Nord.auroraYellow).frame(maxWidth: 300, alignment: .trailing)
-                } else {
-                    Label("Ready to publish", systemImage: "checkmark.seal.fill")
-                        .font(.caption).foregroundStyle(Nord.auroraGreen)
-                }
+        GeometryReader { proxy in
+            let headerHeight: CGFloat = 80
+            let footerHeight: CGFloat = 56
+            let viewportHeight = max(0, proxy.size.height - headerHeight - footerHeight - 2)
+
+            VStack(spacing: 0) {
+                studioHeader
+                    .frame(height: headerHeight)
+                Divider()
+                studioWorkspace(width: proxy.size.width, height: viewportHeight)
+                    .frame(height: viewportHeight)
+                    .clipped()
+                Divider()
+                studioFooter
+                    .frame(height: footerHeight)
             }
-            .padding(20)
-            Divider()
-            HSplitView {
-                VStack(spacing: 10) {
-                    Picker("Projection", selection: $projection) {
-                        ForEach(Projection.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
-                    switch projection {
-                    case .outline: studioOutline
-                    case .canvas:
-                        WorkflowStudioCanvas(
-                            steps: $steps, positions: $canvasPositions, selection: $selectedStepID,
-                            onChange: { save() }
-                        )
-                    case .source: studioSource
-                    }
-                }
-                .padding(18)
-                .frame(minWidth: 430, idealWidth: 520)
-                studioInspector.frame(minWidth: 360, idealWidth: 430)
-            }
-            Divider()
-            HStack {
-                if let message { Label(message, systemImage: "info.circle").font(.caption).foregroundStyle(.secondary) }
-                Button("Undo", systemImage: "arrow.uturn.backward") {
-                    if model.undoWorkflowStudioDraft(id: draftID) { load() }
-                }
-                .keyboardShortcut("z", modifiers: [.command])
-                .disabled(draft?.undoHistory?.isEmpty != false)
-                Button("Redo", systemImage: "arrow.uturn.forward") {
-                    if model.redoWorkflowStudioDraft(id: draftID) { load() }
-                }
-                .keyboardShortcut("z", modifiers: [.command, .shift])
-                .disabled(draft?.redoHistory?.isEmpty != false)
-                Spacer()
-                Button("Cancel", role: .cancel) { dismiss() }
-                Button("Publish disabled") {
-                    save()
-                    if let workflowID = model.publishWorkflowStudioDraft(id: draftID) {
-                        onPublished(workflowID)
-                        dismiss()
-                    } else { message = "Resolve the validation summary before publishing." }
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(draft?.validationSummary != nil)
-            }
-            .padding(16)
         }
-        .frame(width: 900, height: 650)
+        .frame(
+            minWidth: presentation == .sheet ? 900 : 720,
+            maxWidth: presentation == .sheet ? 900 : .infinity,
+            minHeight: presentation == .sheet ? 650 : 520,
+            maxHeight: presentation == .sheet ? 650 : .infinity
+        )
+        .clipped()
         .onAppear(perform: load)
+        .confirmationDialog(
+            "Discard this workflow draft?",
+            isPresented: $confirmsDiscard,
+            titleVisibility: .visible
+        ) {
+            Button("Discard draft", role: .destructive, action: discardDraft)
+        } message: {
+            Text("The unpublished graph and its undo history will be removed. Published workflows are not affected.")
+        }
+    }
+
+    private var studioHeader: some View {
+        HStack(alignment: .center, spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(draft?.name ?? "Workflow Studio")
+                    .font(.title2.weight(.bold))
+                Text("Build on the canvas, outline, or canonical source. Every view edits the same disabled draft.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if let summary = draft?.validationSummary {
+                Button {
+                    showsProblems = true
+                } label: {
+                    Label(summary, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(Nord.auroraYellow)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.trailing)
+                        .frame(maxWidth: 300, alignment: .trailing)
+                }
+                .buttonStyle(.plain)
+            } else {
+                Label("Ready to publish", systemImage: "checkmark.seal.fill")
+                    .font(.caption)
+                    .foregroundStyle(Nord.auroraGreen)
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
+    }
+
+    @ViewBuilder
+    private func studioWorkspace(width: CGFloat, height: CGFloat) -> some View {
+        if presentation == .embedded, width >= 1_080 {
+            HStack(spacing: 0) {
+                studioPalette
+                    .frame(width: 210)
+                    .frame(maxHeight: .infinity, alignment: .topLeading)
+                Divider()
+                studioProjectionColumn
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                Divider()
+                studioInspector
+                    .frame(width: 360)
+                    .frame(maxHeight: .infinity, alignment: .topLeading)
+            }
+            .frame(height: height)
+        } else {
+            ScrollView(.vertical) {
+                HStack(spacing: 0) {
+                    studioProjectionColumn
+                        .frame(width: min(max(430, width * 0.52), 560), alignment: .topLeading)
+                        .frame(maxHeight: .infinity, alignment: .topLeading)
+                    Divider()
+                    studioInspector
+                        .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                }
+                .frame(minHeight: height, alignment: .top)
+            }
+            .scrollIndicators(.visible)
+            .frame(maxWidth: .infinity)
+        }
+    }
+
+    private var studioProjectionColumn: some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 10) {
+                Picker("Projection", selection: $projection) {
+                    ForEach(Projection.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                Menu("Add node", systemImage: "plus") {
+                    ForEach(editableKinds, id: \.self) { kind in
+                        Button(kind.label) { addStep(kind) }
+                    }
+                }
+                .fixedSize()
+            }
+            .padding(.horizontal, 18)
+            .padding(.top, 14)
+
+            Divider()
+
+            studioProjection
+                .padding(18)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+    }
+
+    private var studioFooter: some View {
+        HStack(spacing: 10) {
+            if let message {
+                Label(message, systemImage: "info.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .frame(maxWidth: 280, alignment: .leading)
+            }
+            Button("Undo", systemImage: "arrow.uturn.backward") {
+                if model.undoWorkflowStudioDraft(id: draftID) { load() }
+            }
+            .keyboardShortcut("z", modifiers: [.command])
+            .disabled(draft?.undoHistory?.isEmpty != false)
+            Button("Redo", systemImage: "arrow.uturn.forward") {
+                if model.redoWorkflowStudioDraft(id: draftID) { load() }
+            }
+            .keyboardShortcut("z", modifiers: [.command, .shift])
+            .disabled(draft?.redoHistory?.isEmpty != false)
+            Button("Problems \(studioProblemCount)", systemImage: "exclamationmark.triangle") {
+                showsProblems.toggle()
+            }
+            .popover(isPresented: $showsProblems) {
+                studioProblems
+            }
+            Spacer(minLength: 12)
+            if presentation == .embedded {
+                Button("Discard draft", role: .destructive) { confirmsDiscard = true }
+            } else {
+                Button("Cancel", role: .cancel) { dismiss() }
+            }
+            Button("Publish as disabled") {
+                save()
+                if let workflowID = model.publishWorkflowStudioDraft(id: draftID) {
+                    onPublished(workflowID)
+                    if presentation == .sheet { dismiss() }
+                } else {
+                    message = "Resolve the validation summary before publishing."
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(draft?.validationSummary != nil)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+    }
+
+    private var studioPalette: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                Label("Add", systemImage: "plus.square.on.square")
+                    .font(.headline)
+                TextField("Search nodes", text: $paletteSearch)
+                    .textFieldStyle(.roundedBorder)
+                paletteSection("INPUT", kinds: [.classifyEvent, .correlateWork])
+                paletteSection("PROCESS", kinds: [
+                    .compileContext, .structuredModel, .invokeTool, .registerArtifact, .validate, .agent,
+                ])
+                paletteSection("FLOW", kinds: [.branch, .forEach, .waitForEmail])
+                paletteSection("HUMAN", kinds: [.humanReview, .requestApproval])
+                paletteSection("EFFECTS", kinds: [.createEmailDraft, .sendEmail, .effect])
+                Divider()
+                Label("Add a node, then drag from its output port to a compatible target.", systemImage: "point.3.connected.trianglepath.dotted")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .scrollIndicators(.visible)
+        .background(Nord.polarNight1.opacity(0.45))
+    }
+
+    @ViewBuilder
+    private func paletteSection(_ title: String, kinds: [DesktopWorkflowStepKind]) -> some View {
+        let visibleKinds = kinds.filter {
+            paletteSearch.isEmpty || $0.label.localizedCaseInsensitiveContains(paletteSearch)
+        }
+        if !visibleKinds.isEmpty {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 3)
+                ForEach(visibleKinds, id: \.self) { kind in
+                    Button {
+                        addStep(kind)
+                    } label: {
+                        HStack(spacing: 7) {
+                            Image(systemName: studioSymbol(kind)).frame(width: 16)
+                            Text(kind.label).lineLimit(1)
+                            Spacer(minLength: 0)
+                            Image(systemName: "plus.circle")
+                                .foregroundStyle(Nord.frost1)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .font(.caption.weight(.medium))
+                    .padding(.vertical, 3)
+                    .accessibilityHint("Adds this node after the selected node")
+                }
+            }
+        }
+    }
+
+    private var studioDiagnostics: [DesktopWorkflowStudioDiagnostic] {
+        model.workflowStudioDiagnostics(draftID: draftID)
+    }
+
+    private var studioProblemCount: Int {
+        if studioDiagnostics.isEmpty, draft?.validationSummary != nil { return 1 }
+        return studioDiagnostics.count
+    }
+
+    private var studioProblems: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Workflow problems").font(.headline)
+            if studioDiagnostics.isEmpty, let summary = draft?.validationSummary {
+                Label(summary, systemImage: "xmark.octagon.fill")
+                    .foregroundStyle(Nord.auroraRed)
+            } else if studioDiagnostics.isEmpty {
+                Label("No blocking problems", systemImage: "checkmark.seal.fill")
+                    .foregroundStyle(Nord.auroraGreen)
+            } else {
+                ForEach(studioDiagnostics) { diagnostic in
+                    Button {
+                        focus(diagnostic)
+                        showsProblems = false
+                    } label: {
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: diagnostic.severity == .error
+                                ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
+                                .foregroundStyle(diagnostic.severity == .error ? Nord.auroraRed : Nord.auroraYellow)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(diagnostic.message)
+                                    .multilineTextAlignment(.leading)
+                                Text(diagnostic.path)
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(16)
+        .frame(width: 430, alignment: .topLeading)
+    }
+
+    private func focus(_ diagnostic: DesktopWorkflowStudioDiagnostic) {
+        let components = diagnostic.path.split(separator: "/")
+        if let stepsIndex = components.firstIndex(of: "steps"),
+           components.indices.contains(stepsIndex + 1),
+           let index = Int(components[stepsIndex + 1]),
+           steps.indices.contains(index) {
+            selectedStepID = steps[index].id
+            projection = .canvas
+        } else if diagnostic.path.hasPrefix("/steps") {
+            projection = .outline
+        } else {
+            projection = .source
+        }
+    }
+
+    private func discardDraft() {
+        guard model.discardWorkflowStudioDraft(id: draftID) else {
+            message = "The draft could not be discarded."
+            return
+        }
+        if let onCancel {
+            onCancel()
+        } else {
+            dismiss()
+        }
+    }
+
+    @ViewBuilder
+    private var studioProjection: some View {
+        switch projection {
+        case .outline:
+            studioOutline
+        case .canvas:
+            WorkflowStudioCanvas(
+                steps: $steps, positions: $canvasPositions, selection: $selectedStepID,
+                onChange: { save() }
+            )
+        case .source:
+            studioSource
+        }
     }
 
     private var studioOutline: some View {
         GroupBox {
-            List(selection: $selectedStepID) {
-                ForEach(Array(steps.enumerated()), id: \.element.id) { index, step in
-                    HStack {
-                        Text("\(index + 1)").font(.caption2.monospacedDigit()).foregroundStyle(.secondary).frame(width: 22)
-                        Image(systemName: studioSymbol(step.kind)).foregroundStyle(Nord.frost1).frame(width: 22)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(step.name)
-                            Text(step.kind.label).font(.caption2).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 8) {
+                List(selection: $selectedStepID) {
+                    ForEach(Array(steps.enumerated()), id: \.element.id) { index, step in
+                        HStack {
+                            Text("\(index + 1)").font(.caption2.monospacedDigit()).foregroundStyle(.secondary).frame(width: 22)
+                            Image(systemName: studioSymbol(step.kind)).foregroundStyle(Nord.frost1).frame(width: 22)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(step.name)
+                                Text(step.kind.label).font(.caption2).foregroundStyle(.secondary)
+                            }
                         }
+                        .tag(step.id)
                     }
-                    .tag(step.id)
-                }
-                .onMove { source, destination in
-                    steps.move(fromOffsets: source, toOffset: destination)
-                    save()
-                }
-                .onDelete { offsets in
-                    let removed = Set(offsets.map { steps[$0].id })
-                    steps.remove(atOffsets: offsets)
-                    for index in steps.indices {
-                        steps[index].transitions?.removeAll { removed.contains($0.targetStepID) }
+                    .onMove { source, destination in
+                        steps.move(fromOffsets: source, toOffset: destination)
+                        save()
                     }
-                    canvasPositions.removeAll { removed.contains($0.stepID) }
-                    selectedStepID = steps.first?.id
-                    save()
+                    .onDelete { offsets in
+                        let removed = Set(offsets.map { steps[$0].id })
+                        steps.remove(atOffsets: offsets)
+                        for index in steps.indices {
+                            steps[index].transitions?.removeAll { removed.contains($0.targetStepID) }
+                        }
+                        canvasPositions.removeAll { removed.contains($0.stepID) }
+                        selectedStepID = steps.first?.id
+                        save()
+                    }
                 }
+                .listStyle(.inset)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                Text("The outline is the keyboard-accessible representation of the same graph shown on the canvas.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
-            .listStyle(.inset)
-            Text("The outline is the keyboard-accessible representation of the same graph shown on the canvas.")
-                .font(.caption2).foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } label: {
             HStack {
                 Text("Outline").font(.headline)
@@ -773,10 +1374,11 @@ struct WorkflowStudioSheet: View {
     private var studioSource: some View {
         GroupBox("Canonical manifest source") {
             VStack(alignment: .leading, spacing: 10) {
-                TextEditor(text: $sourceText)
-                    .font(.system(.caption, design: .monospaced))
-                    .frame(minHeight: 450)
-                    .accessibilityLabel("Workflow manifest source")
+                WorkflowJSONSourceEditor(
+                    text: $sourceText,
+                    minimumHeight: 240,
+                    accessibilityLabel: "Workflow manifest source"
+                )
                 if let sourceMessage {
                     Label(sourceMessage, systemImage: "exclamationmark.triangle.fill")
                         .font(.caption).foregroundStyle(Nord.auroraYellow)
@@ -795,7 +1397,9 @@ struct WorkflowStudioSheet: View {
                     .buttonStyle(.borderedProminent)
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     @ViewBuilder
@@ -882,7 +1486,10 @@ struct WorkflowStudioSheet: View {
                 }
             }
             .padding(18)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .scrollIndicators(.visible)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     @ViewBuilder
@@ -1158,10 +1765,36 @@ struct WorkflowStudioSheet: View {
 
     private func addStep(_ kind: DesktopWorkflowStepKind) {
         let id = "step-\(UUID().uuidString.lowercased().prefix(8))"
+        var targetID = steps.first(where: { $0.kind == .complete })?.id ?? "complete"
+        var sourcePosition: DesktopWorkflowCanvasNodePosition?
+        var sourceIndex = selectedStepID.flatMap { selectedID in
+            steps.firstIndex { $0.id == selectedID && $0.kind != .complete }
+        }
+
+        if sourceIndex == nil, let terminalID = steps.first(where: { $0.kind == .complete })?.id {
+            sourceIndex = steps.firstIndex { step in
+                step.kind != .complete && (step.transitions ?? []).contains { $0.targetStepID == terminalID }
+            }
+        }
+        if let sourceIndex {
+            sourcePosition = canvasPositions.first { $0.stepID == steps[sourceIndex].id }
+            let outcome = DesktopWorkflowStudioGraphEditing.suggestedOutcome(
+                from: steps[sourceIndex].id,
+                in: steps
+            ) ?? .always
+            if let routeIndex = steps[sourceIndex].transitions?.firstIndex(where: { $0.outcome == outcome }) {
+                targetID = steps[sourceIndex].transitions?[routeIndex].targetStepID ?? targetID
+                steps[sourceIndex].transitions?[routeIndex].targetStepID = id
+            } else {
+                if steps[sourceIndex].transitions == nil { steps[sourceIndex].transitions = [] }
+                steps[sourceIndex].transitions?.append(.init(outcome: outcome, targetStepID: id))
+            }
+        }
+
         let step = DesktopWorkflowStepDefinition(
             id: id, name: kind.label, kind: kind, capabilityID: defaultCapability(for: kind),
-            transitions: [.init(outcome: .always, targetStepID: steps.first(where: { $0.kind == .complete })?.id ?? "complete")],
-            reviewContract: kind == .humanReview ? defaultReviewContract() : nil,
+            transitions: [.init(outcome: .always, targetStepID: targetID)],
+            reviewContract: kind == .humanReview ? makeWorkflowStudioReviewContract() : nil,
             waitContract: kind == .waitForEmail ? defaultWaitContract() : nil,
             executionPolicy: defaultExecutionPolicy(for: kind),
             agentPolicy: kind == .agent ? defaultAgentPolicy() : nil,
@@ -1170,14 +1803,18 @@ struct WorkflowStudioSheet: View {
         if let terminal = steps.firstIndex(where: { $0.kind == .complete }) { steps.insert(step, at: terminal) }
         else { steps.append(step); steps.append(.init(id: "complete", name: "Complete", kind: .complete)) }
         selectedStepID = id
-        canvasPositions.append(.init(stepID: id, x: 40, y: Double(canvasPositions.count) * 110 + 40))
+        let x = min(880, (sourcePosition?.x ?? 30) + 230)
+        let y = sourcePosition?.y ?? (Double(canvasPositions.count) * 110 + 40)
+        canvasPositions.append(.init(stepID: id, x: x, y: y))
         save()
     }
 
     private func replaceKind(at index: Int, with kind: DesktopWorkflowStepKind) {
         steps[index].kind = kind
         steps[index].capabilityID = defaultCapability(for: kind)
-        steps[index].reviewContract = kind == .humanReview ? (steps[index].reviewContract ?? defaultReviewContract()) : nil
+        steps[index].reviewContract = kind == .humanReview
+            ? (steps[index].reviewContract ?? makeWorkflowStudioReviewContract())
+            : nil
         steps[index].waitContract = kind == .waitForEmail ? (steps[index].waitContract ?? defaultWaitContract()) : nil
         steps[index].agentPolicy = kind == .agent ? (steps[index].agentPolicy ?? defaultAgentPolicy()) : nil
         steps[index].batchPolicy = kind == .forEach ? (steps[index].batchPolicy ?? .init()) : nil
@@ -1236,15 +1873,6 @@ struct WorkflowStudioSheet: View {
         .init(allowedCapabilityIDs: ["kaname.context.compile"], maximumModelTokens: 8_000, maximumToolCalls: 8, timeoutSeconds: 120, allowDirectEffects: false)
     }
 
-    private func defaultReviewContract() -> DesktopWorkflowReviewContract {
-        .init(
-            title: "Review result", summary: "Inspect the structured result before continuing.",
-            inputSchema: #"{"type":"object"}"#, outputSchema: #"{"type":"object"}"#,
-            actions: [.init(id: "approve", label: "Approve", kind: .approve, isPrimary: true),
-                      .init(id: "reject", label: "Reject", kind: .reject)]
-        )
-    }
-
     private func defaultWaitContract() -> DesktopWorkflowWaitContract {
         .init(connectorID: "kaname.mail", source: "mail", timeoutSeconds: 604_800)
     }
@@ -1287,19 +1915,53 @@ private struct WorkflowStudioCanvas: View {
     @Binding var selection: String?
     let onChange: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var connectionSourceID: String?
+    @State private var connectionPoint: CGPoint?
+
+    private let nodeWidth: CGFloat = 190
+    private let nodeHeight: CGFloat = 80
+    private let canvasWidth: CGFloat = 1_100
+    private let canvasHeight: CGFloat = 720
 
     var body: some View {
-        GroupBox("Semantic graph canvas") {
+        GroupBox {
             ScrollView([.horizontal, .vertical]) {
                 ZStack(alignment: .topLeading) {
                     ForEach(edges, id: \.id) { edge in
-                        Path { path in
-                            path.move(to: point(edge.from))
-                            path.addLine(to: point(edge.to))
-                        }
+                        connectionPath(
+                            from: outputPoint(edge.from),
+                            to: inputPoint(edge.to),
+                            laneOffset: edge.laneOffset
+                        )
                         .stroke(Nord.frost0.opacity(0.7), style: StrokeStyle(lineWidth: 2, dash: edge.outcome == .always ? [] : [6, 4]))
                         .accessibilityHidden(true)
+
+                        Button {
+                            selection = edge.from
+                        } label: {
+                            Text(edge.outcome.rawValue)
+                                .font(.system(size: 9, weight: .semibold, design: .rounded))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 3)
+                                .background(Nord.polarNight0.opacity(0.92), in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .position(edgeLabelPoint(edge))
+                        .zIndex(2)
+                        .accessibilityLabel("Connection from \(stepName(edge.from)) to \(stepName(edge.to))")
+                        .accessibilityValue(edge.outcome.rawValue)
+                        .accessibilityHint("Selects the source node so this connection can be edited")
                     }
+
+                    if let sourceID = connectionSourceID, let connectionPoint {
+                        connectionPath(from: outputPoint(sourceID), to: connectionPoint, laneOffset: 0)
+                            .stroke(
+                                Nord.frost1,
+                                style: StrokeStyle(lineWidth: 2.5, dash: [7, 5])
+                            )
+                            .accessibilityHidden(true)
+                    }
+
                     ForEach(steps) { step in
                         let position = point(step.id)
                         Button {
@@ -1315,25 +1977,76 @@ private struct WorkflowStudioCanvas: View {
                                     .font(.caption2).foregroundStyle(.secondary)
                             }
                             .padding(10)
-                            .frame(width: 190, alignment: .leading)
+                            .frame(width: nodeWidth, alignment: .leading)
                             .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 10))
                             .overlay(RoundedRectangle(cornerRadius: 10).stroke(selection == step.id ? Nord.frost1 : Nord.polarNight3, lineWidth: selection == step.id ? 3 : 1))
                         }
                         .buttonStyle(.plain)
-                        .position(x: position.x + 95, y: position.y + 40)
-                        .gesture(DragGesture().onChanged { value in
-                            setPosition(stepID: step.id, point: value.location)
-                        }.onEnded { _ in onChange() })
+                        .position(x: position.x + nodeWidth / 2, y: position.y + nodeHeight / 2)
+                        .gesture(
+                            DragGesture(coordinateSpace: .named("workflow-studio-canvas"))
+                                .onChanged { value in
+                                    setPosition(stepID: step.id, point: value.location)
+                                }
+                                .onEnded { _ in onChange() }
+                        )
                         .accessibilityLabel("\(step.name), \(step.kind.label)")
                         .accessibilityValue("\(step.transitions?.count ?? 0) outgoing routes")
                         .accessibilityHint("Selects this workflow step for editing")
+
+                        Circle()
+                            .fill(Nord.polarNight0)
+                            .overlay(Circle().stroke(Nord.frost0, lineWidth: 2))
+                            .frame(width: 12, height: 12)
+                            .position(inputPoint(step.id))
+                            .accessibilityHidden(true)
+
+                        if step.kind != .complete {
+                            Circle()
+                                .fill(connectionSourceID == step.id ? Nord.frost1 : Nord.polarNight0)
+                                .overlay(Circle().stroke(Nord.frost1, lineWidth: 2))
+                                .frame(width: 14, height: 14)
+                                .contentShape(Rectangle().inset(by: -8))
+                                .position(outputPoint(step.id))
+                                .gesture(
+                                    DragGesture(minimumDistance: 1, coordinateSpace: .named("workflow-studio-canvas"))
+                                        .onChanged { value in
+                                            connectionSourceID = step.id
+                                            connectionPoint = value.location
+                                        }
+                                        .onEnded { value in
+                                            finishConnection(from: step.id, at: value.location)
+                                        }
+                                )
+                                .accessibilityLabel("Connect from \(step.name)")
+                                .accessibilityHint("Drag to another node, or use Connect selected in the canvas header")
+                        }
                     }
                 }
-                .frame(width: 1_100, height: 720)
+                .frame(width: canvasWidth, height: canvasHeight)
+                .coordinateSpace(name: "workflow-studio-canvas")
             }
             .accessibilityLabel("Workflow graph canvas. The synchronized outline provides the complete keyboard representation.")
+        } label: {
+            HStack {
+                Text("Semantic graph canvas")
+                Spacer()
+                if let selection,
+                   steps.first(where: { $0.id == selection })?.kind != .complete {
+                    Menu("Connect selected", systemImage: "point.3.connected.trianglepath.dotted") {
+                        ForEach(steps.filter { $0.id != selection }) { target in
+                            Button("\(target.name)") {
+                                connect(from: selection, to: target.id)
+                            }
+                        }
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                }
+            }
         }
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: positions)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.12), value: connectionSourceID)
     }
 
     private struct Edge: Identifiable {
@@ -1341,11 +2054,29 @@ private struct WorkflowStudioCanvas: View {
         var from: String
         var to: String
         var outcome: DesktopWorkflowTransitionOutcome
+        var laneIndex: Int
+        var laneCount: Int
+
+        var laneOffset: CGFloat {
+            CGFloat(laneIndex) * 18 - CGFloat(laneCount - 1) * 9
+        }
     }
 
     private var edges: [Edge] {
         steps.flatMap { step in
-            (step.transitions ?? []).map { .init(from: step.id, to: $0.targetStepID, outcome: $0.outcome) }
+            let transitions = step.transitions ?? []
+            return transitions.enumerated().map { transitionIndex, transition in
+                let siblingIndices = transitions.indices.filter {
+                    transitions[$0].targetStepID == transition.targetStepID
+                }
+                return Edge(
+                    from: step.id,
+                    to: transition.targetStepID,
+                    outcome: transition.outcome,
+                    laneIndex: siblingIndices.firstIndex(of: transitionIndex) ?? 0,
+                    laneCount: siblingIndices.count
+                )
+            }
         }
     }
 
@@ -1355,9 +2086,80 @@ private struct WorkflowStudioCanvas: View {
         return CGPoint(x: Double(index % 4) * 230 + 30, y: Double(index / 4) * 130 + 30)
     }
 
+    private func inputPoint(_ stepID: String) -> CGPoint {
+        let position = point(stepID)
+        return CGPoint(x: position.x, y: position.y + nodeHeight / 2)
+    }
+
+    private func outputPoint(_ stepID: String) -> CGPoint {
+        let position = point(stepID)
+        return CGPoint(x: position.x + nodeWidth, y: position.y + nodeHeight / 2)
+    }
+
+    private func edgeLabelPoint(_ edge: Edge) -> CGPoint {
+        let from = outputPoint(edge.from)
+        let to = inputPoint(edge.to)
+        let labelXOffset = CGFloat(edge.laneIndex) * 50 - CGFloat(edge.laneCount - 1) * 25
+        let midpointX = (from.x + to.x) / 2 + labelXOffset
+        let midpointY = (from.y + to.y) / 2
+        let labelY = abs(from.y - to.y) < nodeHeight
+            ? min(from.y, to.y) - nodeHeight / 2 - 10
+            : midpointY - 14
+        return CGPoint(x: midpointX, y: max(12, labelY))
+    }
+
+    private func connectionPath(from: CGPoint, to: CGPoint, laneOffset: CGFloat) -> Path {
+        Path { path in
+            path.move(to: from)
+            let distance = max(48, abs(to.x - from.x) * 0.45)
+            let direction: CGFloat = to.x >= from.x ? 1 : -1
+            path.addCurve(
+                to: to,
+                control1: CGPoint(x: from.x + distance * direction, y: from.y + laneOffset),
+                control2: CGPoint(x: to.x - distance * direction, y: to.y + laneOffset)
+            )
+        }
+    }
+
+    private func finishConnection(from sourceID: String, at location: CGPoint) {
+        defer {
+            connectionSourceID = nil
+            connectionPoint = nil
+        }
+        guard let target = steps.first(where: { step in
+            guard step.id != sourceID else { return false }
+            let position = point(step.id)
+            return CGRect(
+                x: position.x - 16,
+                y: position.y - 16,
+                width: nodeWidth + 32,
+                height: nodeHeight + 32
+            ).contains(location)
+        }) else { return }
+        connect(from: sourceID, to: target.id)
+    }
+
+    private func connect(from sourceID: String, to targetID: String) {
+        guard let outcome = DesktopWorkflowStudioGraphEditing.suggestedOutcome(
+            from: sourceID,
+            in: steps
+        ), DesktopWorkflowStudioGraphEditing.connect(
+            from: sourceID,
+            to: targetID,
+            outcome: outcome,
+            in: &steps
+        ) else { return }
+        selection = sourceID
+        onChange()
+    }
+
+    private func stepName(_ stepID: String) -> String {
+        steps.first(where: { $0.id == stepID })?.name ?? stepID
+    }
+
     private func setPosition(stepID: String, point: CGPoint) {
-        let x = max(0, min(900, point.x - 95))
-        let y = max(0, min(620, point.y - 40))
+        let x = max(0, min(canvasWidth - nodeWidth, point.x - nodeWidth / 2))
+        let y = max(0, min(canvasHeight - nodeHeight, point.y - nodeHeight / 2))
         if let index = positions.firstIndex(where: { $0.stepID == stepID }) {
             positions[index].x = x
             positions[index].y = y

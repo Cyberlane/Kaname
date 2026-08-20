@@ -66,6 +66,113 @@ struct DesktopWorkflowStudioGraphTests {
     }
 
     @Test
+    func visualConnectionsUseTypedOutcomesAndDraftsCanBeDiscarded() throws {
+        var steps = [
+            DesktopWorkflowStepDefinition(id: "route", name: "Route", kind: .branch),
+            DesktopWorkflowStepDefinition(id: "review", name: "Review", kind: .humanReview),
+            DesktopWorkflowStepDefinition(id: "complete", name: "Complete", kind: .complete),
+        ]
+
+        #expect(DesktopWorkflowStudioGraphEditing.suggestedOutcome(from: "route", in: steps) == .matched)
+        #expect(DesktopWorkflowStudioGraphEditing.connect(
+            from: "route", to: "review", outcome: .matched, in: &steps
+        ))
+        #expect(DesktopWorkflowStudioGraphEditing.suggestedOutcome(from: "route", in: steps) == .notMatched)
+        #expect(DesktopWorkflowStudioGraphEditing.connect(
+            from: "route", to: "complete", outcome: .notMatched, in: &steps
+        ))
+        #expect(!DesktopWorkflowStudioGraphEditing.connect(
+            from: "route", to: "review", outcome: .matched, in: &steps
+        ))
+        #expect(steps[0].transitions?.map(\.outcome) == [.matched, .notMatched])
+        #expect(DesktopWorkflowStudioGraphEditing.connect(
+            from: "route", to: "review", outcome: .selected, in: &steps
+        ))
+        #expect(DesktopWorkflowStudioGraphEditing.suggestedOutcome(from: "route", in: steps) == nil)
+        #expect(DesktopWorkflowStudioGraphEditing.disconnect(
+            from: "route", to: "review", outcome: .matched, in: &steps
+        ))
+
+        var linear = [
+            DesktopWorkflowStepDefinition(
+                id: "start", name: "Start", kind: .classifyEvent,
+                transitions: [.init(outcome: .always, targetStepID: "review")]
+            ),
+            DesktopWorkflowStepDefinition(id: "review", name: "Review", kind: .humanReview),
+            DesktopWorkflowStepDefinition(id: "complete", name: "Complete", kind: .complete),
+        ]
+        #expect(DesktopWorkflowStudioGraphEditing.connect(
+            from: "start", to: "complete", outcome: .always, in: &linear
+        ))
+        #expect(linear[0].transitions == [.init(outcome: .always, targetStepID: "complete")])
+
+        let model = try makeModel(prefix: "kaname-studio-discard")
+        let draftID = try #require(model.createWorkflowStudioDraft(name: "Temporary", summary: "Fixture"))
+        #expect(model.discardWorkflowStudioDraft(id: draftID))
+        #expect(!model.discardWorkflowStudioDraft(id: draftID))
+        #expect(model.snapshot.operations.workflows.studioDrafts.isEmpty)
+    }
+
+    @Test
+    func blankSourceScaffoldImportsAndPublishesAsDisabled() throws {
+        let model = try makeModel(prefix: "kaname-studio-source-scaffold")
+        let draftID = try #require(model.createWorkflowStudioDraft(name: "Source", summary: "Fixture"))
+
+        #expect(model.replaceWorkflowStudioDraftSource(
+            id: draftID,
+            source: DesktopWorkflowStudioScaffold.blankSource
+        ))
+        let draft = try #require(model.snapshot.operations.workflows.studioDrafts.first { $0.id == draftID })
+        #expect(draft.name == "Imported workflow")
+        #expect(draft.steps.map(\.id) == ["prepare", "complete"])
+        #expect(draft.validationSummary == nil)
+        #expect(model.workflowStudioDiagnostics(draftID: draftID).isEmpty)
+        #expect(model.publishWorkflowStudioDraft(id: draftID) == "local.imported-workflow")
+        #expect(model.workflowDefinitions.first { $0.id == "local.imported-workflow" }?.enabled == false)
+    }
+
+    @Test
+    func sourceFormattingPreservesOrderAndStringContents() throws {
+        let compact = #"{"z":"punctuation: [kept], spaces stay","a":[true,false,null,{"n":2}],"empty":{}}"#
+        let formatted = try #require(DesktopWorkflowSourceFormatting.prettyPrintedJSON(compact))
+
+        #expect(formatted == #"""
+        {
+          "z": "punctuation: [kept], spaces stay",
+          "a": [
+            true,
+            false,
+            null,
+            {
+              "n": 2
+            }
+          ],
+          "empty": {}
+        }
+        """#)
+        #expect(DesktopWorkflowSourceFormatting.prettyPrintedJSON(formatted) == formatted)
+        #expect(DesktopWorkflowSourceFormatting.prettyPrintedJSON(#"{"incomplete":}"#) == nil)
+    }
+
+    @Test
+    func sourceSyntaxClassifiesJSONTokensAndIncompleteStrings() {
+        let source = #"{"name":"A","enabled":true,"count":2,"missing":null}"#
+        let tokens = DesktopWorkflowSourceSyntax.tokens(in: source)
+        let meaningful = tokens.filter { $0.kind != .punctuation }
+
+        #expect(meaningful.map(\.kind) == [
+            .key, .string,
+            .key, .literal,
+            .key, .number,
+            .key, .literal,
+        ])
+        #expect(meaningful.map {
+            (source as NSString).substring(with: NSRange(location: $0.location, length: $0.length))
+        } == ["\"name\"", "\"A\"", "\"enabled\"", "true", "\"count\"", "2", "\"missing\"", "null"])
+        #expect(DesktopWorkflowSourceSyntax.tokens(in: #"{"draft":"unfinished"#).last?.kind == .string)
+    }
+
+    @Test
     func boundedBatchPersistsPerItemProgressAndRunProjection() async throws {
         let model = try makeModel(prefix: "kaname-studio-batch")
         let manifest = DesktopWorkflowPackageManifest(

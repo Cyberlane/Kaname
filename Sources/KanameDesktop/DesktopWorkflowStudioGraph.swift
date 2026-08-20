@@ -182,6 +182,295 @@ public struct DesktopWorkflowStudioSnapshot: Codable, Equatable, Sendable {
     public var metadata: DesktopWorkflowStudioManifestMetadata
 }
 
+public enum DesktopWorkflowStudioGraphEditing {
+    @discardableResult
+    public static func connect(
+        from sourceStepID: String,
+        to targetStepID: String,
+        outcome: DesktopWorkflowTransitionOutcome,
+        in steps: inout [DesktopWorkflowStepDefinition]
+    ) -> Bool {
+        guard sourceStepID != targetStepID,
+              let sourceIndex = steps.firstIndex(where: { $0.id == sourceStepID }),
+              steps[sourceIndex].kind != .complete,
+              steps.contains(where: { $0.id == targetStepID }) else { return false }
+
+        var transitions = steps[sourceIndex].transitions ?? []
+        guard !transitions.contains(where: {
+            $0.outcome == outcome && $0.targetStepID == targetStepID
+        }) else { return false }
+
+        if let unconditionedIndex = transitions.firstIndex(where: {
+            $0.outcome == outcome && $0.predicates.isEmpty
+        }) {
+            transitions[unconditionedIndex].targetStepID = targetStepID
+        } else {
+            transitions.append(.init(outcome: outcome, targetStepID: targetStepID))
+        }
+        steps[sourceIndex].transitions = transitions
+        return true
+    }
+
+    @discardableResult
+    public static func disconnect(
+        from sourceStepID: String,
+        to targetStepID: String,
+        outcome: DesktopWorkflowTransitionOutcome,
+        in steps: inout [DesktopWorkflowStepDefinition]
+    ) -> Bool {
+        guard let sourceIndex = steps.firstIndex(where: { $0.id == sourceStepID }),
+              var transitions = steps[sourceIndex].transitions,
+              let transitionIndex = transitions.firstIndex(where: {
+                  $0.outcome == outcome && $0.targetStepID == targetStepID
+              }) else { return false }
+        transitions.remove(at: transitionIndex)
+        steps[sourceIndex].transitions = transitions.isEmpty ? nil : transitions
+        return true
+    }
+
+    public static func suggestedOutcome(
+        from sourceStepID: String,
+        in steps: [DesktopWorkflowStepDefinition]
+    ) -> DesktopWorkflowTransitionOutcome? {
+        guard let step = steps.first(where: { $0.id == sourceStepID }), step.kind != .complete else {
+            return nil
+        }
+        let existing = Set((step.transitions ?? []).map(\.outcome))
+        let candidates: [DesktopWorkflowTransitionOutcome] = switch step.kind {
+        case .branch:
+            [.matched, .notMatched, .selected]
+        case .humanReview, .requestApproval:
+            [.approved, .rejected, .edited]
+        case .effect, .createEmailDraft, .sendEmail, .validate:
+            [.succeeded, .failed, .timedOut]
+        case .waitForEmail:
+            [.succeeded, .timedOut, .failed]
+        default:
+            [.always]
+        }
+        return candidates.first(where: { !existing.contains($0) })
+    }
+}
+
+public enum DesktopWorkflowSourceFormatting {
+    public static func prettyPrintedJSON(_ source: String) -> String? {
+        guard let data = source.data(using: .utf8),
+              (try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])) != nil else {
+            return nil
+        }
+
+        let characters = Array(source)
+        var nextSignificant = [Character?](repeating: nil, count: characters.count)
+        var next: Character?
+        for index in characters.indices.reversed() {
+            nextSignificant[index] = next
+            if !characters[index].isWhitespace { next = characters[index] }
+        }
+
+        var output = ""
+        var indentation = 0
+        var inString = false
+        var escaped = false
+        var previousSignificant: Character?
+
+        func appendLineBreak() {
+            output.append("\n")
+            output.append(String(repeating: "  ", count: indentation))
+        }
+
+        for index in characters.indices {
+            let character = characters[index]
+            if inString {
+                output.append(character)
+                if escaped {
+                    escaped = false
+                } else if character == "\\" {
+                    escaped = true
+                } else if character == "\"" {
+                    inString = false
+                }
+                previousSignificant = character
+                continue
+            }
+
+            if character == "\"" {
+                inString = true
+                output.append(character)
+                previousSignificant = character
+                continue
+            }
+            if character.isWhitespace { continue }
+
+            switch character {
+            case "{", "[":
+                output.append(character)
+                indentation += 1
+                let closingCharacter: Character = character == "{" ? "}" : "]"
+                if nextSignificant[index] != closingCharacter { appendLineBreak() }
+            case "}", "]":
+                indentation = max(0, indentation - 1)
+                let openingCharacter: Character = character == "}" ? "{" : "["
+                if previousSignificant != openingCharacter { appendLineBreak() }
+                output.append(character)
+            case ",":
+                output.append(character)
+                appendLineBreak()
+            case ":":
+                output.append(": ")
+            default:
+                output.append(character)
+            }
+            previousSignificant = character
+        }
+        return output
+    }
+}
+
+public enum DesktopWorkflowSourceTokenKind: String, Equatable, Sendable {
+    case key
+    case string
+    case number
+    case literal
+    case punctuation
+}
+
+public struct DesktopWorkflowSourceToken: Equatable, Sendable {
+    public let kind: DesktopWorkflowSourceTokenKind
+    public let location: Int
+    public let length: Int
+
+    public init(kind: DesktopWorkflowSourceTokenKind, location: Int, length: Int) {
+        self.kind = kind
+        self.location = location
+        self.length = length
+    }
+}
+
+public enum DesktopWorkflowSourceSyntax {
+    public static func tokens(in source: String) -> [DesktopWorkflowSourceToken] {
+        let text = source as NSString
+        var tokens: [DesktopWorkflowSourceToken] = []
+        var index = 0
+
+        while index < text.length {
+            let character = text.character(at: index)
+            if isWhitespace(character) {
+                index += 1
+            } else if character == 34 {
+                let start = index
+                index += 1
+                var escaped = false
+                while index < text.length {
+                    let current = text.character(at: index)
+                    index += 1
+                    if escaped {
+                        escaped = false
+                    } else if current == 92 {
+                        escaped = true
+                    } else if current == 34 {
+                        break
+                    }
+                }
+                var cursor = index
+                while cursor < text.length, isWhitespace(text.character(at: cursor)) { cursor += 1 }
+                tokens.append(.init(
+                    kind: cursor < text.length && text.character(at: cursor) == 58 ? .key : .string,
+                    location: start,
+                    length: index - start
+                ))
+            } else if isNumberCharacter(character) {
+                let start = index
+                repeat { index += 1 } while index < text.length && isNumberCharacter(text.character(at: index))
+                tokens.append(.init(kind: .number, location: start, length: index - start))
+            } else if isLetter(character) {
+                let start = index
+                repeat { index += 1 } while index < text.length && isLetter(text.character(at: index))
+                let value = text.substring(with: NSRange(location: start, length: index - start))
+                if value == "true" || value == "false" || value == "null" {
+                    tokens.append(.init(kind: .literal, location: start, length: index - start))
+                }
+            } else if isPunctuation(character) {
+                tokens.append(.init(kind: .punctuation, location: index, length: 1))
+                index += 1
+            } else {
+                index += 1
+            }
+        }
+        return tokens
+    }
+
+    private static func isWhitespace(_ character: unichar) -> Bool {
+        character == 9 || character == 10 || character == 13 || character == 32
+    }
+
+    private static func isNumberCharacter(_ character: unichar) -> Bool {
+        character == 43 || character == 45 || character == 46
+            || (character >= 48 && character <= 57)
+            || character == 69 || character == 101
+    }
+
+    private static func isLetter(_ character: unichar) -> Bool {
+        (character >= 65 && character <= 90) || (character >= 97 && character <= 122)
+    }
+
+    private static func isPunctuation(_ character: unichar) -> Bool {
+        character == 44 || character == 58
+            || character == 91 || character == 93
+            || character == 123 || character == 125
+    }
+}
+
+public enum DesktopWorkflowStudioScaffold {
+    public static let blankSource = #"""
+    {
+      "completionSummary": "Finish at the declared terminal node.",
+      "contextSummary": "Use only declared workflow input and artifacts.",
+      "correlationSummary": "Manual input starts one workflow run.",
+      "icon": "point.3.connected.trianglepath.dotted",
+      "hostCompatibility": { "minimumWorkspaceSchema": 24 },
+      "id": "local.imported-workflow",
+      "license": "Private",
+      "name": "Imported workflow",
+      "permissions": {
+        "accountIDs": [],
+        "capabilityIDs": [],
+        "dataClassesLeavingDevice": [],
+        "filesystemScopes": [],
+        "networkDestinations": [],
+        "permissions": []
+      },
+      "provenance": { "buildSystem": "Kaname Workflow Studio" },
+      "publisher": { "identifier": "local.author", "name": "Local author" },
+      "schemaVersion": 3,
+      "source": "Kaname Workflow Studio",
+      "steps": [
+        {
+          "blocking": true,
+          "id": "prepare",
+          "isIdempotent": true,
+          "kind": "classifyEvent",
+          "name": "Receive input",
+          "retryLimit": 0,
+          "transitions": [
+            { "outcome": "always", "predicates": [], "targetStepID": "complete" }
+          ]
+        },
+        {
+          "blocking": true,
+          "id": "complete",
+          "isIdempotent": true,
+          "kind": "complete",
+          "name": "Complete",
+          "retryLimit": 0
+        }
+      ],
+      "summary": "A workflow authored from canonical source.",
+      "triggers": ["manual"],
+      "version": "1.0.0"
+    }
+    """#
+}
+
 public enum DesktopWorkflowStudioDiagnosticSeverity: String, Codable, Equatable, Sendable {
     case error
     case warning
