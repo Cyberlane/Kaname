@@ -1,6 +1,15 @@
 {
-  "originHash" : "e2219a77c2e276ce6e7ea7e312ead070e80bac652daa795b09e339e080c89dab",
+  "originHash" : "e81c27cbeb99e174f6fd07896f54458b931c23dc476baf91ddd559d84429b929",
   "pins" : [
+    {
+      "identity" : "swift-flow",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/1amageek/swift-flow.git",
+      "state" : {
+        "revision" : "78106e3ed6771fff3e39099eb418511af2fac92a",
+        "version" : "0.20.3"
+      }
+    },
     {
       "identity" : "swift-protobuf",
       "kind" : "remoteSourceControl",

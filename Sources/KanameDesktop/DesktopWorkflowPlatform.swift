@@ -19,6 +19,7 @@ public enum DesktopWorkflowStepKind: String, Codable, CaseIterable, Equatable, S
     case registerArtifact
     case validate
     case branch
+    case match
     case forEach
     case agent
     case effect
@@ -38,7 +39,8 @@ public enum DesktopWorkflowStepKind: String, Codable, CaseIterable, Equatable, S
         case .invokeTool: "Invoke tool"
         case .registerArtifact: "Register artifact"
         case .validate: "Validate"
-        case .branch: "Decision branch"
+        case .branch: "Decision"
+        case .match: "Match"
         case .forEach: "For each / batch"
         case .agent: "Bounded agent"
         case .effect: "Connector effect"

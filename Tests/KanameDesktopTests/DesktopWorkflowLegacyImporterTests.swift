@@ -51,7 +51,7 @@ struct DesktopWorkflowLegacyImporterTests {
     }
 
     @Test
-    func decisionImportExposesStableCasePortsAndACompleteSanitizedLossReport() throws {
+    func decisionImportExposesFixedYesNoPortsAndACompleteSanitizedLossReport() throws {
         var (_, source) = try installedSource()
         source.definition.triggerKinds = [.email, .manual]
         source.revision.permissions = .init(
@@ -86,16 +86,49 @@ struct DesktopWorkflowLegacyImporterTests {
         #expect(!first.canonicalLayoutSource.contains("private-account-token"))
         #expect(first.workflow.graph.nodes.filter { $0.type.hasPrefix("trigger.") }.count == 2)
 
+        let decision = try #require(first.workflow.graph.nodes.first { $0.type == "control.decision" })
+        let routedPorts = Set(first.workflow.graph.edges.compactMap { edge in
+            edge.from.nodeId == decision.id ? edge.from.portId : nil
+        })
+        #expect(routedPorts == ["matched", "not-matched"])
+        #expect(decision.key.range(of: #"^[a-z][a-z0-9-]{0,63}$"#, options: .regularExpression) != nil)
+        #expect(!decision.key.contains("日"))
+    }
+
+    @Test
+    func matchImportExposesStableOrderedCasePorts() throws {
+        var (_, source) = try installedSource()
+        source.revision.steps = [
+            .init(
+                id: "switch", name: "Switch route", kind: .match,
+                transitions: [
+                    .init(
+                        routeID: "vip", label: "VIP", outcome: .selected, targetStepID: "priority",
+                        predicates: [.init(pointer: "/tier", operation: .equals, value: "vip")]
+                    ),
+                    .init(
+                        routeID: "otherwise", label: "Otherwise", outcome: .notMatched,
+                        targetStepID: "ordinary"
+                    ),
+                ]
+            ),
+            .init(id: "priority", name: "Priority", kind: .complete),
+            .init(id: "ordinary", name: "Ordinary", kind: .complete),
+        ]
+
+        let first = try DesktopWorkflowLegacyImporter.importSource(source)
+        let second = try DesktopWorkflowLegacyImporter.importSource(source)
         let match = try #require(first.workflow.graph.nodes.first { $0.type == "control.match" })
         let configuredCaseIDs = matchCaseIDs(match.config)
         let routedCaseIDs = Set(first.workflow.graph.edges.compactMap { edge -> String? in
             guard edge.from.nodeId == match.id, edge.from.portId.hasPrefix("case-") else { return nil }
             return String(edge.from.portId.dropFirst("case-".count))
         })
+
+        #expect(first == second)
         #expect(configuredCaseIDs.count == 2)
         #expect(routedCaseIDs == configuredCaseIDs)
-        #expect(match.key.range(of: #"^[a-z][a-z0-9-]{0,63}$"#, options: .regularExpression) != nil)
-        #expect(!match.key.contains("日"))
+        #expect(first.losses.map(\.code).contains("legacy.match.routing-contract"))
     }
 
     @Test

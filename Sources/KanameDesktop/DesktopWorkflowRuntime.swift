@@ -332,7 +332,9 @@ public final class DesktopWorkflowRuntime {
             }
         }
         guard let capabilityID = step.capabilityID else {
-            let structuralKinds: Set<DesktopWorkflowStepKind> = [.classifyEvent, .correlateWork, .branch, .registerArtifact]
+            let structuralKinds: Set<DesktopWorkflowStepKind> = [
+                .classifyEvent, .correlateWork, .branch, .match, .registerArtifact,
+            ]
             guard structuralKinds.contains(step.kind) else {
                 let reason = "The step has no registered capability binding."
                 _ = model.completeWorkflowStep(attemptID: attemptID, outputDigest: nil, error: reason)
@@ -343,6 +345,9 @@ public final class DesktopWorkflowRuntime {
                 if step.kind == .branch {
                     outcome = DesktopWorkflowGraphResolver.transition(from: step, outcome: .matched, value: input) == nil
                         ? .notMatched : .matched
+                } else if step.kind == .match {
+                    outcome = DesktopWorkflowGraphResolver.transition(from: step, outcome: .selected, value: input) == nil
+                        ? .notMatched : .selected
                 } else {
                     outcome = .succeeded
                 }

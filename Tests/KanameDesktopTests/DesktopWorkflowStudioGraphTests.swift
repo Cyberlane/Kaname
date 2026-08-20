@@ -114,6 +114,143 @@ struct DesktopWorkflowStudioGraphTests {
     }
 
     @Test
+    func newDecisionAndMatchNodesExposeStableDisconnectedOutputs() throws {
+        let decision = DesktopWorkflowStudioGraphEditing.initialTransitions(for: .branch)
+        #expect(decision.map(\.displayLabel) == ["Yes", "No"])
+        #expect(decision.map(\.outcome) == [.matched, .notMatched])
+        #expect(decision.allSatisfy { !$0.isConnected })
+        #expect(Set(decision.map(\.id)).count == decision.count)
+
+        let match = DesktopWorkflowStudioGraphEditing.initialTransitions(for: .match)
+        #expect(match.map(\.displayLabel) == ["Case 1", "Case 2", "Otherwise"])
+        #expect(match.map(\.outcome) == [.selected, .selected, .notMatched])
+        #expect(match.allSatisfy { !$0.isConnected })
+        #expect(Set(match.map(\.id)).count == match.count)
+        #expect((decision + match).allSatisfy { $0.id.hasPrefix("route-") })
+    }
+
+    @Test
+    func routeIdentitySurvivesConnectDisconnectAndStepDeletion() throws {
+        var steps = [
+            DesktopWorkflowStepDefinition(
+                id: "route", name: "Route", kind: .match,
+                transitions: DesktopWorkflowStudioGraphEditing.initialTransitions(for: .match)
+            ),
+            DesktopWorkflowStepDefinition(
+                id: "review", name: "Review", kind: .humanReview,
+                transitions: DesktopWorkflowStudioGraphEditing.initialTransitions(for: .humanReview)
+            ),
+            DesktopWorkflowStepDefinition(id: "complete", name: "Complete", kind: .complete),
+        ]
+        let routeID = try #require(steps[0].transitions?.first?.routeID)
+
+        #expect(DesktopWorkflowStudioGraphEditing.connect(routeID: routeID, to: "review", in: &steps))
+        #expect(steps[0].transitions?.first?.targetStepID == "review")
+        #expect(steps[0].transitions?.first?.routeID == routeID)
+        #expect(DesktopWorkflowStudioGraphEditing.disconnect(routeID: routeID, in: &steps))
+        #expect(steps[0].transitions?.first?.targetStepID == "")
+        #expect(steps[0].transitions?.first?.routeID == routeID)
+
+        #expect(DesktopWorkflowStudioGraphEditing.connect(routeID: routeID, to: "review", in: &steps))
+        #expect(DesktopWorkflowStudioGraphEditing.removeSteps(["review"], in: &steps))
+        #expect(steps.map(\.id) == ["route", "complete"])
+        #expect(steps[0].transitions?.first?.targetStepID == "")
+        #expect(steps[0].transitions?.first?.routeID == routeID)
+        #expect(!DesktopWorkflowStudioGraphEditing.removeSteps(["missing"], in: &steps))
+    }
+
+    @Test
+    func routeNormalizationRepairsMissingAndDuplicateIDsOnce() throws {
+        var steps = [
+            DesktopWorkflowStepDefinition(
+                id: "route", name: "Route", kind: .match,
+                transitions: [
+                    .init(routeID: "stable", label: "First", outcome: .selected, targetStepID: ""),
+                    .init(routeID: "stable", label: "Second", outcome: .selected, targetStepID: ""),
+                    .init(label: "Otherwise", outcome: .notMatched, targetStepID: ""),
+                ]
+            ),
+            DesktopWorkflowStepDefinition(id: "complete", name: "Complete", kind: .complete),
+        ]
+
+        #expect(DesktopWorkflowStudioGraphEditing.normalizeRouteIDs(in: &steps))
+        let routeIDs = try #require(steps[0].transitions).compactMap(\.routeID)
+        #expect(routeIDs.count == 3)
+        #expect(Set(routeIDs).count == 3)
+        #expect(routeIDs.first == "stable")
+        #expect(!DesktopWorkflowStudioGraphEditing.normalizeRouteIDs(in: &steps))
+        #expect(steps[0].transitions?.compactMap(\.routeID) == routeIDs)
+    }
+
+    @Test
+    func canvasPositionNormalizationRepairsLegacyCollisionsOnce() {
+        let steps = [
+            DesktopWorkflowStepDefinition(
+                id: "receive", name: "Receive", kind: .classifyEvent,
+                transitions: DesktopWorkflowStudioGraphEditing.initialTransitions(for: .classifyEvent)
+            ),
+            DesktopWorkflowStepDefinition(
+                id: "review", name: "Review", kind: .humanReview,
+                transitions: DesktopWorkflowStudioGraphEditing.initialTransitions(for: .humanReview)
+            ),
+            DesktopWorkflowStepDefinition(
+                id: "route", name: "Route", kind: .match,
+                transitions: DesktopWorkflowStudioGraphEditing.initialTransitions(for: .match)
+            ),
+            DesktopWorkflowStepDefinition(id: "complete", name: "Complete", kind: .complete),
+        ]
+        var legacy = [
+            DesktopWorkflowCanvasNodePosition(stepID: "receive", x: 30, y: 40),
+            DesktopWorkflowCanvasNodePosition(stepID: "review", x: 240, y: 40),
+            DesktopWorkflowCanvasNodePosition(stepID: "route", x: 450, y: 40),
+            DesktopWorkflowCanvasNodePosition(stepID: "complete", x: 660, y: 40),
+        ]
+
+        #expect(DesktopWorkflowStudioGraphEditing.normalizeCanvasPositions(&legacy, for: steps))
+        #expect(legacy == DesktopWorkflowStudioGraphEditing.defaultCanvasPositions(for: steps))
+        #expect(!DesktopWorkflowStudioGraphEditing.normalizeCanvasPositions(&legacy, for: steps))
+    }
+
+    @Test
+    func canvasPositionNormalizationPreservesReadableCustomLayouts() {
+        let steps = [
+            DesktopWorkflowStepDefinition(id: "start", name: "Start", kind: .classifyEvent),
+            DesktopWorkflowStepDefinition(id: "complete", name: "Complete", kind: .complete),
+        ]
+        var custom = [
+            DesktopWorkflowCanvasNodePosition(stepID: "start", x: -120, y: 80),
+            DesktopWorkflowCanvasNodePosition(stepID: "complete", x: 260, y: 260),
+        ]
+        let original = custom
+
+        #expect(!DesktopWorkflowStudioGraphEditing.normalizeCanvasPositions(&custom, for: steps))
+        #expect(custom == original)
+    }
+
+    @Test
+    func matchResolverUsesTheFirstMatchingCaseAndFallsBackOtherwise() throws {
+        let step = DesktopWorkflowStepDefinition(
+            id: "switch", name: "Route priority", kind: .match,
+            transitions: [
+                .init(
+                    routeID: "urgent", label: "Urgent", outcome: .selected, targetStepID: "page",
+                    predicates: [.init(pointer: "/score", operation: .greaterThanOrEqual, value: "8")]
+                ),
+                .init(
+                    routeID: "apac", label: "APAC", outcome: .selected, targetStepID: "regional",
+                    predicates: [.init(pointer: "/region", operation: .equals, value: "APAC")]
+                ),
+                .init(routeID: "otherwise", label: "Otherwise", outcome: .notMatched, targetStepID: "normal"),
+            ]
+        )
+
+        let both = Data(#"{"score":9,"region":"APAC"}"#.utf8)
+        let neither = Data(#"{"score":2,"region":"EMEA"}"#.utf8)
+        #expect(DesktopWorkflowGraphResolver.transition(from: step, outcome: .selected, value: both)?.id == "urgent")
+        #expect(DesktopWorkflowGraphResolver.transition(from: step, outcome: .notMatched, value: neither)?.id == "otherwise")
+    }
+
+    @Test
     func blankSourceScaffoldImportsAndPublishesAsDisabled() throws {
         let model = try makeModel(prefix: "kaname-studio-source-scaffold")
         let draftID = try #require(model.createWorkflowStudioDraft(name: "Source", summary: "Fixture"))

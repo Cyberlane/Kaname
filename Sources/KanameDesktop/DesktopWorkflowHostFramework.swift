@@ -42,19 +42,42 @@ public enum DesktopWorkflowTransitionOutcome: String, Codable, CaseIterable, Equ
 }
 
 public struct DesktopWorkflowTransitionDefinition: Codable, Equatable, Identifiable, Sendable {
-    public var id: String { "\(outcome.rawValue):\(targetStepID)" }
+    public var id: String { routeID ?? "\(outcome.rawValue):\(targetStepID)" }
+    public var routeID: String?
+    public var label: String?
     public var outcome: DesktopWorkflowTransitionOutcome
     public var targetStepID: String
     public var predicates: [DesktopWorkflowPredicate]
 
     public init(
+        routeID: String? = nil,
+        label: String? = nil,
         outcome: DesktopWorkflowTransitionOutcome,
         targetStepID: String,
         predicates: [DesktopWorkflowPredicate] = []
     ) {
+        self.routeID = routeID
+        self.label = label
         self.outcome = outcome
         self.targetStepID = targetStepID
         self.predicates = predicates
+    }
+
+    public var displayLabel: String {
+        if let label, !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return label
+        }
+        return switch outcome {
+        case .always: "Next"
+        case .matched: "Yes"
+        case .notMatched: "No"
+        case .timedOut: "Timed out"
+        default: outcome.rawValue.capitalized
+        }
+    }
+
+    public var isConnected: Bool {
+        !targetStepID.isEmpty
     }
 }
 
@@ -674,7 +697,12 @@ public enum DesktopWorkflowHostContractValidation {
         var visiting = Set<String>()
         var visited = Set<String>()
         func visit(_ id: String) throws {
-            guard let step = byID[id], !visiting.contains(id) else {
+            guard let step = byID[id] else {
+                throw DesktopWorkflowHostFrameworkError.invalidContract(
+                    id.isEmpty ? "every workflow output must be connected" : "transition target \(id) does not exist"
+                )
+            }
+            guard !visiting.contains(id) else {
                 throw DesktopWorkflowHostFrameworkError.invalidContract("workflow graphs cannot contain unbounded cycles")
             }
             guard !visited.contains(id) else { return }
@@ -687,7 +715,14 @@ public enum DesktopWorkflowHostContractValidation {
                 guard let transitions = step.transitions, !transitions.isEmpty else {
                     throw DesktopWorkflowHostFrameworkError.invalidContract("every non-terminal node needs an edge")
                 }
-                for transition in transitions { try visit(transition.targetStepID) }
+                for transition in transitions {
+                    guard transition.isConnected else {
+                        throw DesktopWorkflowHostFrameworkError.invalidContract(
+                            "the \(transition.displayLabel) output on \(step.name) is not connected"
+                        )
+                    }
+                    try visit(transition.targetStepID)
+                }
             }
             visiting.remove(id)
             visited.insert(id)
@@ -704,6 +739,29 @@ public enum DesktopWorkflowHostContractValidation {
                   transitions.allSatisfy({ stepIDs.contains($0.targetStepID) && $0.predicates.count <= 32 }),
                   Set(transitions.map(\.id)).count == transitions.count else {
                 throw DesktopWorkflowHostFrameworkError.invalidContract("step \(step.id) has invalid transitions")
+            }
+            if step.kind == .branch {
+                guard transitions.count == 2,
+                      transitions.filter({ $0.outcome == .matched }).count == 1,
+                      transitions.filter({ $0.outcome == .notMatched }).count == 1,
+                      transitions.first(where: { $0.outcome == .matched })?.predicates.isEmpty == false else {
+                    throw DesktopWorkflowHostFrameworkError.invalidContract(
+                        "Decision step \(step.id) needs one conditioned Yes output and one No output"
+                    )
+                }
+            }
+            if step.kind == .match {
+                let cases = transitions.filter { $0.outcome == .selected }
+                let otherwise = transitions.filter { $0.outcome == .notMatched }
+                guard !cases.isEmpty,
+                      cases.allSatisfy({ !$0.predicates.isEmpty }),
+                      otherwise.count == 1,
+                      otherwise[0].predicates.isEmpty,
+                      transitions.last?.id == otherwise[0].id else {
+                    throw DesktopWorkflowHostFrameworkError.invalidContract(
+                        "Match step \(step.id) needs conditioned cases followed by one Otherwise output"
+                    )
+                }
             }
             for transition in transitions {
                 for predicate in transition.predicates {

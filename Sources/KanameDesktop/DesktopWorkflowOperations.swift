@@ -790,7 +790,7 @@ public extension DesktopAppModel {
             triggerKinds: definition.triggerKinds, steps: revision.steps, permissions: revision.permissions,
             subflows: [], validationSummary: nil, createdAtUnixMillis: timestamp, updatedAtUnixMillis: timestamp
         )
-        draft.canvasPositions = Self.defaultCanvasPositions(revision.steps)
+        draft.canvasPositions = DesktopWorkflowStudioGraphEditing.defaultCanvasPositions(for: revision.steps)
         draft.manifestMetadata = Self.studioMetadata(definition: definition, revision: revision)
         let diagnostics = DesktopWorkflowStudioValidation.diagnostics(
             steps: revision.steps, metadata: draft.manifestMetadata ?? .newDraft
@@ -840,7 +840,7 @@ public extension DesktopAppModel {
             stored.steps = manifest.steps
             stored.permissions = manifest.permissions
             stored.subflows = []
-            stored.canvasPositions = Self.defaultCanvasPositions(manifest.steps)
+            stored.canvasPositions = DesktopWorkflowStudioGraphEditing.defaultCanvasPositions(for: manifest.steps)
             stored.manifestMetadata = Self.studioMetadata(manifest)
             stored.validationSummary = nil
             stored.updatedAtUnixMillis = now()
@@ -952,12 +952,6 @@ public extension DesktopAppModel {
         draft.validationSummary = DesktopWorkflowStudioValidation.diagnostics(
             steps: snapshot.steps, metadata: snapshot.metadata
         ).first(where: { $0.severity == .error })?.message
-    }
-
-    private static func defaultCanvasPositions(_ steps: [DesktopWorkflowStepDefinition]) -> [DesktopWorkflowCanvasNodePosition] {
-        steps.enumerated().map { index, step in
-            .init(stepID: step.id, x: Double(index % 4) * 230 + 30, y: Double(index / 4) * 130 + 30)
-        }
     }
 
     private func flattenedStudioSteps(_ draft: DesktopWorkflowStudioDraftRecord) -> [DesktopWorkflowStepDefinition]? {

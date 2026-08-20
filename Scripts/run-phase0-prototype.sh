@@ -35,7 +35,7 @@ plutil -replace CFBundleDisplayName -string "$display_name" "$info_plist"
 plutil -replace CFBundlePackageType -string APPL "$info_plist"
 plutil -replace CFBundleShortVersionString -string 0.0.0 "$info_plist"
 plutil -replace CFBundleVersion -string 1 "$info_plist"
-plutil -replace LSMinimumSystemVersion -string 13.0 "$info_plist"
+plutil -replace LSMinimumSystemVersion -string 26.0 "$info_plist"
 plutil -replace NSHighResolutionCapable -bool YES "$info_plist"
 plutil -replace KanameDesktopChannel -string development "$info_plist"
 

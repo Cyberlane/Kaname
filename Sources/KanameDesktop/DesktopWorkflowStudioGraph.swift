@@ -183,6 +183,232 @@ public struct DesktopWorkflowStudioSnapshot: Codable, Equatable, Sendable {
 }
 
 public enum DesktopWorkflowStudioGraphEditing {
+    private static let canvasColumns = 3
+    private static let canvasOrigin = 30.0
+    private static let canvasColumnStride = 310.0
+    private static let canvasNodeWidth = 244.0
+    private static let canvasMinimumNodeHeight = 96.0
+    private static let canvasOutputTop = 58.0
+    private static let canvasOutputSpacing = 34.0
+    private static let canvasHorizontalGap = 36.0
+    private static let canvasVerticalGap = 50.0
+
+    public static func defaultCanvasPositions(
+        for steps: [DesktopWorkflowStepDefinition]
+    ) -> [DesktopWorkflowCanvasNodePosition] {
+        var positions: [DesktopWorkflowCanvasNodePosition] = []
+        var rowOrigin = canvasOrigin
+
+        for rowStart in stride(from: 0, to: steps.count, by: canvasColumns) {
+            let rowEnd = min(rowStart + canvasColumns, steps.count)
+            let rowSteps = steps[rowStart..<rowEnd]
+            for (column, step) in rowSteps.enumerated() {
+                positions.append(.init(
+                    stepID: step.id,
+                    x: canvasOrigin + Double(column) * canvasColumnStride,
+                    y: rowOrigin
+                ))
+            }
+            rowOrigin += rowSteps.map(canvasNodeHeight).max() ?? canvasMinimumNodeHeight
+            rowOrigin += canvasVerticalGap
+        }
+
+        return positions
+    }
+
+    @discardableResult
+    public static func normalizeCanvasPositions(
+        _ positions: inout [DesktopWorkflowCanvasNodePosition],
+        for steps: [DesktopWorkflowStepDefinition]
+    ) -> Bool {
+        let validStepIDs = Set(steps.map(\.id))
+        var storedByStepID: [String: DesktopWorkflowCanvasNodePosition] = [:]
+        for position in positions where validStepIDs.contains(position.stepID) {
+            guard position.x.isFinite, position.y.isFinite,
+                  storedByStepID[position.stepID] == nil else { continue }
+            storedByStepID[position.stepID] = position
+        }
+
+        let defaults = defaultCanvasPositions(for: steps)
+        let defaultsByStepID = Dictionary(uniqueKeysWithValues: defaults.map { ($0.stepID, $0) })
+        var normalized = steps.compactMap { step in
+            storedByStepID[step.id] ?? defaultsByStepID[step.id]
+        }
+
+        if containsCanvasCollision(normalized, steps: steps) {
+            normalized = defaults
+        }
+
+        guard normalized != positions else { return false }
+        positions = normalized
+        return true
+    }
+
+    public static func initialTransitions(
+        for kind: DesktopWorkflowStepKind
+    ) -> [DesktopWorkflowTransitionDefinition] {
+        switch kind {
+        case .complete:
+            []
+        case .branch:
+            [
+                route(label: "Yes", outcome: .matched),
+                route(label: "No", outcome: .notMatched),
+            ]
+        case .match:
+            [
+                route(label: "Case 1", outcome: .selected),
+                route(label: "Case 2", outcome: .selected),
+                route(label: "Otherwise", outcome: .notMatched),
+            ]
+        case .humanReview, .requestApproval:
+            [
+                route(label: "Approved", outcome: .approved),
+                route(label: "Rejected", outcome: .rejected),
+            ]
+        case .effect, .createEmailDraft, .sendEmail, .validate:
+            [
+                route(label: "Succeeded", outcome: .succeeded),
+                route(label: "Failed", outcome: .failed),
+            ]
+        case .waitForEmail:
+            [
+                route(label: "Resumed", outcome: .succeeded),
+                route(label: "Timed out", outcome: .timedOut),
+                route(label: "Failed", outcome: .failed),
+            ]
+        default:
+            [route(label: "Next", outcome: .always)]
+        }
+    }
+
+    public static func route(
+        label: String,
+        outcome: DesktopWorkflowTransitionOutcome,
+        targetStepID: String = "",
+        predicates: [DesktopWorkflowPredicate] = []
+    ) -> DesktopWorkflowTransitionDefinition {
+        .init(
+            routeID: newRouteID(),
+            label: label,
+            outcome: outcome,
+            targetStepID: targetStepID,
+            predicates: predicates
+        )
+    }
+
+    @discardableResult
+    public static func normalizeRouteIDs(
+        in steps: inout [DesktopWorkflowStepDefinition]
+    ) -> Bool {
+        var changed = false
+        var seen = Set<String>()
+        for stepIndex in steps.indices {
+            guard var transitions = steps[stepIndex].transitions else { continue }
+            for transitionIndex in transitions.indices {
+                if let routeID = transitions[transitionIndex].routeID,
+                   !routeID.isEmpty,
+                   seen.insert(routeID).inserted {
+                    continue
+                }
+                let routeID = newRouteID()
+                transitions[transitionIndex].routeID = routeID
+                seen.insert(routeID)
+                changed = true
+            }
+            steps[stepIndex].transitions = transitions
+        }
+        return changed
+    }
+
+    @discardableResult
+    public static func connect(
+        routeID: String,
+        to targetStepID: String,
+        in steps: inout [DesktopWorkflowStepDefinition]
+    ) -> Bool {
+        guard let sourceIndex = steps.firstIndex(where: { step in
+            (step.transitions ?? []).contains { $0.routeID == routeID }
+        }),
+        steps[sourceIndex].id != targetStepID,
+        steps.contains(where: { $0.id == targetStepID }),
+        let transitionIndex = steps[sourceIndex].transitions?.firstIndex(where: {
+            $0.routeID == routeID
+        }) else { return false }
+        guard steps[sourceIndex].transitions?[transitionIndex].targetStepID != targetStepID else {
+            return false
+        }
+        steps[sourceIndex].transitions?[transitionIndex].targetStepID = targetStepID
+        return true
+    }
+
+    @discardableResult
+    public static func disconnect(
+        routeID: String,
+        in steps: inout [DesktopWorkflowStepDefinition]
+    ) -> Bool {
+        guard let sourceIndex = steps.firstIndex(where: { step in
+            (step.transitions ?? []).contains { $0.routeID == routeID }
+        }),
+        let transitionIndex = steps[sourceIndex].transitions?.firstIndex(where: {
+            $0.routeID == routeID
+        }),
+        steps[sourceIndex].transitions?[transitionIndex].isConnected == true else { return false }
+        steps[sourceIndex].transitions?[transitionIndex].targetStepID = ""
+        return true
+    }
+
+    @discardableResult
+    public static func removeSteps(
+        _ stepIDs: Set<String>,
+        in steps: inout [DesktopWorkflowStepDefinition]
+    ) -> Bool {
+        let existingIDs = Set(steps.map(\.id))
+        let removedIDs = stepIDs.intersection(existingIDs)
+        guard !removedIDs.isEmpty else { return false }
+
+        steps.removeAll { removedIDs.contains($0.id) }
+        for stepIndex in steps.indices {
+            guard var transitions = steps[stepIndex].transitions else { continue }
+            for transitionIndex in transitions.indices where removedIDs.contains(
+                transitions[transitionIndex].targetStepID
+            ) {
+                transitions[transitionIndex].targetStepID = ""
+            }
+            steps[stepIndex].transitions = transitions
+        }
+        return true
+    }
+
+    private static func containsCanvasCollision(
+        _ positions: [DesktopWorkflowCanvasNodePosition],
+        steps: [DesktopWorkflowStepDefinition]
+    ) -> Bool {
+        let stepsByID = Dictionary(uniqueKeysWithValues: steps.map { ($0.id, $0) })
+        for firstIndex in positions.indices {
+            guard let firstStep = stepsByID[positions[firstIndex].stepID] else { continue }
+            let first = positions[firstIndex]
+            let firstHeight = canvasNodeHeight(firstStep)
+            for secondIndex in positions.indices where secondIndex > firstIndex {
+                guard let secondStep = stepsByID[positions[secondIndex].stepID] else { continue }
+                let second = positions[secondIndex]
+                let separatedHorizontally = first.x + canvasNodeWidth + canvasHorizontalGap <= second.x
+                    || second.x + canvasNodeWidth + canvasHorizontalGap <= first.x
+                let separatedVertically = first.y + firstHeight + canvasVerticalGap <= second.y
+                    || second.y + canvasNodeHeight(secondStep) + canvasVerticalGap <= first.y
+                if !separatedHorizontally && !separatedVertically { return true }
+            }
+        }
+        return false
+    }
+
+    private static func canvasNodeHeight(_ step: DesktopWorkflowStepDefinition) -> Double {
+        max(
+            canvasMinimumNodeHeight,
+            canvasOutputTop + Double(step.transitions?.count ?? 0) * canvasOutputSpacing + 8
+        )
+    }
+
     @discardableResult
     public static func connect(
         from sourceStepID: String,
@@ -205,7 +431,11 @@ public enum DesktopWorkflowStudioGraphEditing {
         }) {
             transitions[unconditionedIndex].targetStepID = targetStepID
         } else {
-            transitions.append(.init(outcome: outcome, targetStepID: targetStepID))
+            transitions.append(route(
+                label: outcome == .always ? "Next" : outcome.rawValue.capitalized,
+                outcome: outcome,
+                targetStepID: targetStepID
+            ))
         }
         steps[sourceIndex].transitions = transitions
         return true
@@ -239,6 +469,8 @@ public enum DesktopWorkflowStudioGraphEditing {
         let candidates: [DesktopWorkflowTransitionOutcome] = switch step.kind {
         case .branch:
             [.matched, .notMatched, .selected]
+        case .match:
+            [.selected]
         case .humanReview, .requestApproval:
             [.approved, .rejected, .edited]
         case .effect, .createEmailDraft, .sendEmail, .validate:
@@ -249,6 +481,10 @@ public enum DesktopWorkflowStudioGraphEditing {
             [.always]
         }
         return candidates.first(where: { !existing.contains($0) })
+    }
+
+    private static func newRouteID() -> String {
+        "route-\(UUID().uuidString.lowercased())"
     }
 }
 

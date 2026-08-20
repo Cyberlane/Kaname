@@ -2,6 +2,7 @@ import AppKit
 import KanameConnectivity
 import KanameDesktop
 import KanamePrototypeUI
+import SwiftFlow
 import SwiftUI
 #if canImport(Security)
 import Security
@@ -953,6 +954,21 @@ enum WorkflowStudioPresentation: Equatable {
     case embedded
 }
 
+private func workflowStudioSymbol(for kind: DesktopWorkflowStepKind) -> String {
+    switch kind {
+    case .complete: "checkmark.circle"
+    case .branch: "arrow.triangle.branch"
+    case .match: "arrow.triangle.swap"
+    case .forEach: "square.stack.3d.down.right"
+    case .effect, .sendEmail, .createEmailDraft: "bolt.horizontal.circle"
+    case .humanReview, .requestApproval: "person.crop.circle.badge.checkmark"
+    case .waitForEmail: "clock.badge"
+    case .validate: "checkmark.shield"
+    case .structuredModel, .agent: "brain"
+    default: "square.stack.3d.forward.dottedline"
+    }
+}
+
 struct WorkflowStudioSheet: View {
     private enum Projection: String, CaseIterable { case outline = "Outline"; case canvas = "Canvas"; case source = "Source" }
     @ObservedObject var model: DesktopAppModel
@@ -963,6 +979,7 @@ struct WorkflowStudioSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var steps: [DesktopWorkflowStepDefinition] = []
     @State private var selectedStepID: String?
+    @State private var selectedTransitionID: String?
     @State private var selectedSubflowIDs = Set<String>()
     @State private var selectedTriggers: Set<DesktopWorkflowTriggerKind> = [.manual]
     @State private var selectedPermissions = Set<DesktopWorkflowPermission>()
@@ -995,6 +1012,18 @@ struct WorkflowStudioSheet: View {
 
     private var selectedStepIndex: Int? {
         selectedStepID.flatMap { id in steps.firstIndex { $0.id == id } }
+    }
+
+    private var selectedConnection: (stepIndex: Int, transitionIndex: Int)? {
+        guard let selectedTransitionID else { return nil }
+        for stepIndex in steps.indices {
+            if let transitionIndex = steps[stepIndex].transitions?.firstIndex(where: {
+                $0.id == selectedTransitionID
+            }) {
+                return (stepIndex, transitionIndex)
+            }
+        }
+        return nil
     }
 
     var body: some View {
@@ -1070,10 +1099,10 @@ struct WorkflowStudioSheet: View {
 
     @ViewBuilder
     private func studioWorkspace(width: CGFloat, height: CGFloat) -> some View {
-        if presentation == .embedded, width >= 1_080 {
+        if presentation == .embedded, width >= 1_180 {
             HStack(spacing: 0) {
                 studioPalette
-                    .frame(width: 210)
+                    .frame(width: 260)
                     .frame(maxHeight: .infinity, alignment: .topLeading)
                 Divider()
                 studioProjectionColumn
@@ -1184,7 +1213,7 @@ struct WorkflowStudioSheet: View {
                 paletteSection("PROCESS", kinds: [
                     .compileContext, .structuredModel, .invokeTool, .registerArtifact, .validate, .agent,
                 ])
-                paletteSection("FLOW", kinds: [.branch, .forEach, .waitForEmail])
+                paletteSection("FLOW", kinds: [.branch, .match, .forEach, .waitForEmail])
                 paletteSection("HUMAN", kinds: [.humanReview, .requestApproval])
                 paletteSection("EFFECTS", kinds: [.createEmailDraft, .sendEmail, .effect])
                 Divider()
@@ -1207,7 +1236,7 @@ struct WorkflowStudioSheet: View {
         if !visibleKinds.isEmpty {
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
-                    .font(.caption2.weight(.bold))
+                    .font(.caption.weight(.bold))
                     .foregroundStyle(.secondary)
                     .padding(.top, 3)
                 ForEach(visibleKinds, id: \.self) { kind in
@@ -1215,7 +1244,7 @@ struct WorkflowStudioSheet: View {
                         addStep(kind)
                     } label: {
                         HStack(spacing: 7) {
-                            Image(systemName: studioSymbol(kind)).frame(width: 16)
+                            Image(systemName: workflowStudioSymbol(for: kind)).frame(width: 16)
                             Text(kind.label).lineLimit(1)
                             Spacer(minLength: 0)
                             Image(systemName: "plus.circle")
@@ -1224,9 +1253,11 @@ struct WorkflowStudioSheet: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .font(.caption.weight(.medium))
-                    .padding(.vertical, 3)
-                    .accessibilityHint("Adds this node after the selected node")
+                    .font(.callout.weight(.medium))
+                    .padding(.horizontal, 8)
+                    .frame(minHeight: 38)
+                    .background(Nord.polarNight2.opacity(0.55), in: RoundedRectangle(cornerRadius: 7))
+                    .accessibilityHint("Adds this node to the canvas without connecting it")
                 }
             }
         }
@@ -1312,7 +1343,10 @@ struct WorkflowStudioSheet: View {
             studioOutline
         case .canvas:
             WorkflowStudioCanvas(
-                steps: $steps, positions: $canvasPositions, selection: $selectedStepID,
+                steps: $steps,
+                positions: $canvasPositions,
+                selectedStepID: $selectedStepID,
+                selectedTransitionID: $selectedTransitionID,
                 onChange: { save() }
             )
         case .source:
@@ -1327,7 +1361,7 @@ struct WorkflowStudioSheet: View {
                     ForEach(Array(steps.enumerated()), id: \.element.id) { index, step in
                         HStack {
                             Text("\(index + 1)").font(.caption2.monospacedDigit()).foregroundStyle(.secondary).frame(width: 22)
-                            Image(systemName: studioSymbol(step.kind)).foregroundStyle(Nord.frost1).frame(width: 22)
+                            Image(systemName: workflowStudioSymbol(for: step.kind)).foregroundStyle(Nord.frost1).frame(width: 22)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(step.name)
                                 Text(step.kind.label).font(.caption2).foregroundStyle(.secondary)
@@ -1341,12 +1375,13 @@ struct WorkflowStudioSheet: View {
                     }
                     .onDelete { offsets in
                         let removed = Set(offsets.map { steps[$0].id })
-                        steps.remove(atOffsets: offsets)
-                        for index in steps.indices {
-                            steps[index].transitions?.removeAll { removed.contains($0.targetStepID) }
-                        }
+                        guard DesktopWorkflowStudioGraphEditing.removeSteps(removed, in: &steps) else { return }
                         canvasPositions.removeAll { removed.contains($0.stepID) }
                         selectedStepID = steps.first?.id
+                        selectedTransitionID = nil
+                        message = removed.count == 1
+                            ? "Deleted the selected step and disconnected its incoming lines."
+                            : "Deleted \(removed.count) steps and disconnected their incoming lines."
                         save()
                     }
                 }
@@ -1406,7 +1441,12 @@ struct WorkflowStudioSheet: View {
     private var studioInspector: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                if let index = selectedStepIndex {
+                if let connection = selectedConnection {
+                    studioConnectionInspector(
+                        stepIndex: connection.stepIndex,
+                        transitionIndex: connection.transitionIndex
+                    )
+                } else if let index = selectedStepIndex {
                     Text("Step inspector").font(.headline)
                     TextField("Step name", text: Binding(
                         get: { steps[index].name },
@@ -1492,63 +1532,146 @@ struct WorkflowStudioSheet: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    private func studioConnectionInspector(
+        stepIndex: Int,
+        transitionIndex: Int
+    ) -> some View {
+        let stepID = steps[stepIndex].id
+        let transition = steps[stepIndex].transitions?[transitionIndex]
+        return VStack(alignment: .leading, spacing: 12) {
+            Label("Connection", systemImage: "arrow.right")
+                .font(.headline)
+            Text("\(steps[stepIndex].name) · \(transition?.displayLabel ?? "Output")")
+                .font(.callout.weight(.semibold))
+            TextField("Output name", text: Binding(
+                get: { steps[stepIndex].transitions?[transitionIndex].label ?? "" },
+                set: { steps[stepIndex].transitions?[transitionIndex].label = $0; save() }
+            ))
+            Picker("Destination", selection: Binding(
+                get: { steps[stepIndex].transitions?[transitionIndex].targetStepID ?? "" },
+                set: { steps[stepIndex].transitions?[transitionIndex].targetStepID = $0; save() }
+            )) {
+                Text("Not connected").tag("")
+                ForEach(steps.filter { $0.id != stepID }) { target in
+                    Text(target.name).tag(target.id)
+                }
+            }
+            if transition?.isConnected == true {
+                Button("Disconnect", systemImage: "link.badge.minus") {
+                    disconnectTransition(stepIndex: stepIndex, transitionIndex: transitionIndex)
+                }
+                .buttonStyle(.bordered)
+            }
+            Text("Drag this output to another node to reconnect it, or press Delete to disconnect it.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
     @ViewBuilder
     private func studioStepContracts(index: Int) -> some View {
         let stepID = steps[index].id
-        DisclosureGroup("Transitions · \(steps[index].transitions?.count ?? 0)") {
+        DisclosureGroup("Outputs · \(steps[index].transitions?.count ?? 0)") {
             VStack(alignment: .leading, spacing: 10) {
                 ForEach(Array((steps[index].transitions ?? []).enumerated()), id: \.offset) { transitionIndex, _ in
-                    HStack {
-                        Picker("Outcome", selection: Binding(
-                            get: { steps[index].transitions?[transitionIndex].outcome ?? .always },
-                            set: { steps[index].transitions?[transitionIndex].outcome = $0; save() }
-                        )) {
-                            ForEach(DesktopWorkflowTransitionOutcome.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-                        }
-                        Picker("Target", selection: Binding(
-                            get: { steps[index].transitions?[transitionIndex].targetStepID ?? "" },
-                            set: { steps[index].transitions?[transitionIndex].targetStepID = $0; save() }
-                        )) {
-                            ForEach(steps.filter { $0.id != stepID }) { Text($0.name).tag($0.id) }
-                        }
-                        Button("Remove", systemImage: "minus.circle") {
-                            steps[index].transitions?.remove(at: transitionIndex); save()
-                        }
-                        .labelStyle(.iconOnly)
-                    }
-                    let predicateCount = steps[index].transitions?[transitionIndex].predicates.count ?? 0
-                    ForEach(0..<predicateCount, id: \.self) { predicateIndex in
-                        HStack {
-                            TextField("JSON Pointer", text: Binding(
-                                get: { steps[index].transitions?[transitionIndex].predicates[predicateIndex].pointer ?? "" },
-                                set: { steps[index].transitions?[transitionIndex].predicates[predicateIndex].pointer = $0; save() }
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 8) {
+                            TextField("Output name", text: Binding(
+                                get: { steps[index].transitions?[transitionIndex].label ?? "" },
+                                set: { steps[index].transitions?[transitionIndex].label = $0; save() }
                             ))
-                            Picker("Predicate", selection: Binding(
-                                get: { steps[index].transitions?[transitionIndex].predicates[predicateIndex].operation ?? .exists },
-                                set: { steps[index].transitions?[transitionIndex].predicates[predicateIndex].operation = $0; save() }
+                            Picker("Result", selection: Binding(
+                                get: { steps[index].transitions?[transitionIndex].outcome ?? .always },
+                                set: { steps[index].transitions?[transitionIndex].outcome = $0; save() }
                             )) {
-                                ForEach(DesktopWorkflowPredicateOperator.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                                ForEach(DesktopWorkflowTransitionOutcome.allCases, id: \.self) {
+                                    Text($0.rawValue).tag($0)
+                                }
                             }
-                            TextField("Value", text: Binding(
-                                get: { steps[index].transitions?[transitionIndex].predicates[predicateIndex].value ?? "" },
-                                set: { steps[index].transitions?[transitionIndex].predicates[predicateIndex].value = $0.isEmpty ? nil : $0; save() }
-                            ))
-                            Button("Remove predicate", systemImage: "minus.circle") {
-                                steps[index].transitions?[transitionIndex].predicates.remove(at: predicateIndex); save()
+                            Picker("Destination", selection: Binding(
+                                get: { steps[index].transitions?[transitionIndex].targetStepID ?? "" },
+                                set: { steps[index].transitions?[transitionIndex].targetStepID = $0; save() }
+                            )) {
+                                Text("Not connected").tag("")
+                                ForEach(steps.filter { $0.id != stepID }) { Text($0.name).tag($0.id) }
                             }
-                            .labelStyle(.iconOnly)
+                            HStack {
+                                if steps[index].transitions?[transitionIndex].isConnected == true {
+                                    Button("Disconnect", systemImage: "link.badge.minus") {
+                                        disconnectTransition(stepIndex: index, transitionIndex: transitionIndex)
+                                    }
+                                }
+                                Spacer()
+                                Button("Remove output", systemImage: "trash", role: .destructive) {
+                                    let removedID = steps[index].transitions?[transitionIndex].id
+                                    steps[index].transitions?.remove(at: transitionIndex)
+                                    if selectedTransitionID == removedID { selectedTransitionID = nil }
+                                    save()
+                                }
+                            }
                         }
-                    }
-                    Button("Add predicate") {
-                        steps[index].transitions?[transitionIndex].predicates.append(.init(pointer: "", operation: .exists)); save()
+                        Divider()
+                        let predicateCount = steps[index].transitions?[transitionIndex].predicates.count ?? 0
+                        ForEach(0..<predicateCount, id: \.self) { predicateIndex in
+                            VStack(alignment: .leading, spacing: 6) {
+                                TextField("Input field (JSON Pointer)", text: Binding(
+                                    get: { steps[index].transitions?[transitionIndex].predicates[predicateIndex].pointer ?? "" },
+                                    set: { steps[index].transitions?[transitionIndex].predicates[predicateIndex].pointer = $0; save() }
+                                ))
+                                HStack {
+                                    Picker("Condition", selection: Binding(
+                                        get: { steps[index].transitions?[transitionIndex].predicates[predicateIndex].operation ?? .exists },
+                                        set: { steps[index].transitions?[transitionIndex].predicates[predicateIndex].operation = $0; save() }
+                                    )) {
+                                        ForEach(DesktopWorkflowPredicateOperator.allCases, id: \.self) {
+                                            Text($0.rawValue).tag($0)
+                                        }
+                                    }
+                                    TextField("Value", text: Binding(
+                                        get: { steps[index].transitions?[transitionIndex].predicates[predicateIndex].value ?? "" },
+                                        set: { steps[index].transitions?[transitionIndex].predicates[predicateIndex].value = $0.isEmpty ? nil : $0; save() }
+                                    ))
+                                    Button("Remove condition", systemImage: "minus.circle") {
+                                        steps[index].transitions?[transitionIndex].predicates.remove(at: predicateIndex); save()
+                                    }
+                                    .labelStyle(.iconOnly)
+                                }
+                            }
+                        }
+                        Button("Add condition", systemImage: "plus") {
+                            steps[index].transitions?[transitionIndex].predicates.append(
+                                .init(pointer: "", operation: .exists)
+                            )
+                            save()
+                        }
+                    } label: {
+                        Text(steps[index].transitions?[transitionIndex].displayLabel ?? "Output")
+                            .font(.callout.weight(.semibold))
                     }
                 }
-                Button("Add transition") {
-                    guard let target = steps.first(where: { $0.id != stepID })?.id else { return }
+                if steps[index].kind != .complete && steps[index].kind != .branch {
+                    Button(steps[index].kind == .match ? "Add case" : "Add output", systemImage: "plus") {
                     if steps[index].transitions == nil { steps[index].transitions = [] }
-                    steps[index].transitions?.append(.init(outcome: .always, targetStepID: target)); save()
+                        let outcome: DesktopWorkflowTransitionOutcome = steps[index].kind == .match ? .selected : .always
+                        let count = steps[index].transitions?.filter { $0.outcome == outcome }.count ?? 0
+                        let route = DesktopWorkflowStudioGraphEditing.route(
+                            label: steps[index].kind == .match ? "Case \(count + 1)" : "Output \(count + 1)",
+                            outcome: outcome
+                        )
+                        if steps[index].kind == .match,
+                           let fallback = steps[index].transitions?.firstIndex(where: { $0.outcome == .notMatched }) {
+                            steps[index].transitions?.insert(route, at: fallback)
+                        } else {
+                            steps[index].transitions?.append(route)
+                        }
+                        save()
+                    }
                 }
-                .disabled(steps[index].kind == .complete || steps.count < 2)
+                Text(steps[index].kind == .match
+                     ? "Match checks named cases from top to bottom and follows the first matching output. Otherwise handles a valid value that matched no case."
+                     : "Drag an output port to a node. Selecting a line lets you reconnect or disconnect it explicitly.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             .padding(.top, 8)
         }
@@ -1750,50 +1873,46 @@ struct WorkflowStudioSheet: View {
         selectedPermissions = Set(draft.permissions.permissions)
         selectedSubflowIDs = Set(draft.subflows.map { "\($0.subflowID)@\($0.version)" })
         steps = draft.steps
-        canvasPositions = draft.canvasPositions ?? defaultCanvasPositions()
-        sourceText = model.workflowStudioCanonicalSource(draftID: draftID) ?? ""
+        var needsSave = DesktopWorkflowStudioGraphEditing.normalizeRouteIDs(in: &steps)
+        for index in steps.indices where steps[index].kind != .complete {
+            if steps[index].transitions?.isEmpty != false {
+                steps[index].transitions = DesktopWorkflowStudioGraphEditing.initialTransitions(
+                    for: steps[index].kind
+                )
+                needsSave = true
+            }
+        }
         if steps.isEmpty {
             steps = [
                 .init(id: "prepare", name: "Prepare input", kind: .classifyEvent,
-                      transitions: [.init(outcome: .always, targetStepID: "complete")]),
+                      transitions: DesktopWorkflowStudioGraphEditing.initialTransitions(for: .classifyEvent)),
                 .init(id: "complete", name: "Complete", kind: .complete),
             ]
-            save()
+            needsSave = true
         }
+        canvasPositions = draft.canvasPositions
+            ?? DesktopWorkflowStudioGraphEditing.defaultCanvasPositions(for: steps)
+        if draft.canvasPositions == nil || DesktopWorkflowStudioGraphEditing.normalizeCanvasPositions(
+            &canvasPositions,
+            for: steps
+        ) {
+            needsSave = true
+        }
+        sourceText = model.workflowStudioCanonicalSource(draftID: draftID) ?? ""
         selectedStepID = steps.first?.id
+        selectedTransitionID = nil
+        if needsSave { save(recordUndo: false) }
     }
 
     private func addStep(_ kind: DesktopWorkflowStepKind) {
         let id = "step-\(UUID().uuidString.lowercased().prefix(8))"
-        var targetID = steps.first(where: { $0.kind == .complete })?.id ?? "complete"
-        var sourcePosition: DesktopWorkflowCanvasNodePosition?
-        var sourceIndex = selectedStepID.flatMap { selectedID in
-            steps.firstIndex { $0.id == selectedID && $0.kind != .complete }
-        }
-
-        if sourceIndex == nil, let terminalID = steps.first(where: { $0.kind == .complete })?.id {
-            sourceIndex = steps.firstIndex { step in
-                step.kind != .complete && (step.transitions ?? []).contains { $0.targetStepID == terminalID }
-            }
-        }
-        if let sourceIndex {
-            sourcePosition = canvasPositions.first { $0.stepID == steps[sourceIndex].id }
-            let outcome = DesktopWorkflowStudioGraphEditing.suggestedOutcome(
-                from: steps[sourceIndex].id,
-                in: steps
-            ) ?? .always
-            if let routeIndex = steps[sourceIndex].transitions?.firstIndex(where: { $0.outcome == outcome }) {
-                targetID = steps[sourceIndex].transitions?[routeIndex].targetStepID ?? targetID
-                steps[sourceIndex].transitions?[routeIndex].targetStepID = id
-            } else {
-                if steps[sourceIndex].transitions == nil { steps[sourceIndex].transitions = [] }
-                steps[sourceIndex].transitions?.append(.init(outcome: outcome, targetStepID: id))
-            }
+        let sourcePosition = selectedStepID.flatMap { selectedID in
+            canvasPositions.first { $0.stepID == selectedID }
         }
 
         let step = DesktopWorkflowStepDefinition(
             id: id, name: kind.label, kind: kind, capabilityID: defaultCapability(for: kind),
-            transitions: [.init(outcome: .always, targetStepID: targetID)],
+            transitions: DesktopWorkflowStudioGraphEditing.initialTransitions(for: kind),
             reviewContract: kind == .humanReview ? makeWorkflowStudioReviewContract() : nil,
             waitContract: kind == .waitForEmail ? defaultWaitContract() : nil,
             executionPolicy: defaultExecutionPolicy(for: kind),
@@ -1803,14 +1922,22 @@ struct WorkflowStudioSheet: View {
         if let terminal = steps.firstIndex(where: { $0.kind == .complete }) { steps.insert(step, at: terminal) }
         else { steps.append(step); steps.append(.init(id: "complete", name: "Complete", kind: .complete)) }
         selectedStepID = id
-        let x = min(880, (sourcePosition?.x ?? 30) + 230)
-        let y = sourcePosition?.y ?? (Double(canvasPositions.count) * 110 + 40)
-        canvasPositions.append(.init(stepID: id, x: x, y: y))
+        selectedTransitionID = nil
+        canvasPositions.append(nextDetachedPosition(near: sourcePosition, stepID: id))
+        message = "Added \(kind.label) without connecting it. Drag one of its output ports when you are ready."
         save()
     }
 
     private func replaceKind(at index: Int, with kind: DesktopWorkflowStepKind) {
+        let connectedTargets = (steps[index].transitions ?? [])
+            .map(\.targetStepID)
+            .filter { !$0.isEmpty }
         steps[index].kind = kind
+        var replacementRoutes = DesktopWorkflowStudioGraphEditing.initialTransitions(for: kind)
+        for routeIndex in replacementRoutes.indices where connectedTargets.indices.contains(routeIndex) {
+            replacementRoutes[routeIndex].targetStepID = connectedTargets[routeIndex]
+        }
+        steps[index].transitions = replacementRoutes.isEmpty ? nil : replacementRoutes
         steps[index].capabilityID = defaultCapability(for: kind)
         steps[index].reviewContract = kind == .humanReview
             ? (steps[index].reviewContract ?? makeWorkflowStudioReviewContract())
@@ -1827,6 +1954,23 @@ struct WorkflowStudioSheet: View {
             }
         }
         save()
+    }
+
+    private func nextDetachedPosition(
+        near source: DesktopWorkflowCanvasNodePosition?,
+        stepID: String
+    ) -> DesktopWorkflowCanvasNodePosition {
+        var x = (source?.x ?? 30) + (source == nil ? 0 : 310)
+        var y = source?.y ?? (Double(canvasPositions.count / 3) * 220 + 30)
+        let occupied = canvasPositions.map { CGPoint(x: $0.x, y: $0.y) }
+        while occupied.contains(where: { abs($0.x - x) < 280 && abs($0.y - y) < 190 }) {
+            y += 220
+            if y > 910 {
+                y = 30
+                x += 310
+            }
+        }
+        return .init(stepID: stepID, x: x, y: y)
     }
 
     private func save(recordUndo: Bool = true) {
@@ -1849,6 +1993,12 @@ struct WorkflowStudioSheet: View {
             manifestMetadata: draft?.manifestMetadata, recordUndo: recordUndo
         )
         sourceText = model.workflowStudioCanonicalSource(draftID: draftID) ?? sourceText
+    }
+
+    private func disconnectTransition(stepIndex: Int, transitionIndex: Int) {
+        guard let routeID = steps[stepIndex].transitions?[transitionIndex].routeID,
+              DesktopWorkflowStudioGraphEditing.disconnect(routeID: routeID, in: &steps) else { return }
+        save()
     }
 
     private func defaultCapability(for kind: DesktopWorkflowStepKind) -> String? {
@@ -1877,12 +2027,6 @@ struct WorkflowStudioSheet: View {
         .init(connectorID: "kaname.mail", source: "mail", timeoutSeconds: 604_800)
     }
 
-    private func defaultCanvasPositions() -> [DesktopWorkflowCanvasNodePosition] {
-        steps.enumerated().map { index, step in
-            .init(stepID: step.id, x: Double(index % 3) * 230 + 30, y: Double(index / 3) * 130 + 30)
-        }
-    }
-
     private func setBinding<Value: Hashable>(
         _ value: Value,
         in selection: Binding<Set<Value>>,
@@ -1898,342 +2042,579 @@ struct WorkflowStudioSheet: View {
         )
     }
 
-    private func studioSymbol(_ kind: DesktopWorkflowStepKind) -> String {
-        switch kind {
-        case .complete: "checkmark.circle"
-        case .effect, .sendEmail, .createEmailDraft: "bolt.horizontal.circle"
-        case .validate: "checkmark.shield"
-        case .structuredModel, .agent: "brain"
-        default: "square.stack.3d.forward.dottedline"
-        }
-    }
 }
 
+private struct WorkflowStudioCanvasItem: Codable, Hashable, Sendable {
+    enum Role: String, Codable, Hashable, Sendable {
+        case step
+        case output
+    }
+
+    var role: Role
+    var stepID: String
+    var transitionID: String?
+    var title: String
+    var subtitle: String
+    var symbol: String
+    var connected: Bool
+}
+
+@MainActor
 private struct WorkflowStudioCanvas: View {
     @Binding var steps: [DesktopWorkflowStepDefinition]
     @Binding var positions: [DesktopWorkflowCanvasNodePosition]
-    @Binding var selection: String?
+    @Binding var selectedStepID: String?
+    @Binding var selectedTransitionID: String?
     let onChange: () -> Void
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var connectionSourceID: String?
-    @State private var connectionPoint: CGPoint?
-    @GestureState private var nodeDrag: NodeDrag?
 
-    private let nodeWidth: CGFloat = 190
-    private let nodeHeight: CGFloat = 80
-    private let canvasWidth: CGFloat = 1_100
-    private let canvasHeight: CGFloat = 720
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var store: FlowStore<WorkflowStudioCanvasItem>
+    @State private var canvasSize = CGSize.zero
+    @State private var canvasMessage: String?
+    @State private var hasFittedInitialViewport = false
+
+    private static let stepWidth: CGFloat = 244
+    private static let minimumStepHeight: CGFloat = 96
+    private static let outputWidth: CGFloat = 126
+    private static let outputHeight: CGFloat = 28
+    private static let outputSpacing: CGFloat = 34
+    private static let outputTop: CGFloat = 58
+
+    init(
+        steps: Binding<[DesktopWorkflowStepDefinition]>,
+        positions: Binding<[DesktopWorkflowCanvasNodePosition]>,
+        selectedStepID: Binding<String?>,
+        selectedTransitionID: Binding<String?>,
+        onChange: @escaping () -> Void
+    ) {
+        _steps = steps
+        _positions = positions
+        _selectedStepID = selectedStepID
+        _selectedTransitionID = selectedTransitionID
+        self.onChange = onChange
+        let document = Self.document(
+            steps: steps.wrappedValue,
+            positions: positions.wrappedValue,
+            viewport: Viewport(offset: CGPoint(x: 36, y: 36), zoom: 1)
+        )
+        _store = State(initialValue: FlowStore(
+            nodes: document.nodes,
+            edges: document.edges,
+            viewport: document.viewport,
+            configuration: Self.configuration
+        ))
+    }
 
     var body: some View {
         GroupBox {
-            ScrollView([.horizontal, .vertical]) {
-                ZStack(alignment: .topLeading) {
-                    ForEach(edges, id: \.id) { edge in
-                        connectionPath(
-                            from: outputPoint(edge.from),
-                            to: inputPoint(edge.to),
-                            laneOffset: edge.laneOffset
-                        )
-                        .stroke(Nord.frost0.opacity(0.7), style: StrokeStyle(lineWidth: 2, dash: edge.outcome == .always ? [] : [6, 4]))
-                        .accessibilityHidden(true)
-
-                        Button {
-                            selection = edge.from
-                        } label: {
-                            Text(edge.outcome.rawValue)
-                                .font(.system(size: 9, weight: .semibold, design: .rounded))
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 3)
-                                .background(Nord.polarNight0.opacity(0.92), in: Capsule())
-                        }
-                        .buttonStyle(.plain)
-                        .position(edgeLabelPoint(edge))
-                        .zIndex(2)
-                        .accessibilityLabel("Connection from \(stepName(edge.from)) to \(stepName(edge.to))")
-                        .accessibilityValue(edge.outcome.rawValue)
-                        .accessibilityHint("Selects the source node so this connection can be edited")
+            GeometryReader { proxy in
+                ZStack(alignment: .bottomTrailing) {
+                    FlowCanvas(store: store) { node, context in
+                        canvasNode(node, context: context)
+                    } edgeContent: { edge, geometry in
+                        canvasEdge(edge, geometry: geometry)
                     }
-
-                    if let sourceID = connectionSourceID, let connectionPoint {
-                        connectionPath(from: outputPoint(sourceID), to: connectionPoint, laneOffset: 0)
-                            .stroke(
-                                Nord.frost1,
-                                style: StrokeStyle(lineWidth: 2.5, dash: [7, 5])
-                            )
-                            .accessibilityHidden(true)
+                    .deleteAction { _ in
+                        deleteCanvasSelection()
                     }
+                    .accessibilityLabel(
+                        "Workflow graph canvas. Drag output ports to node inputs. Select a node or line and press Delete to remove it."
+                    )
 
-                    ForEach(steps) { step in
-                        let position = point(step.id)
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Image(systemName: studioCanvasSymbol(step.kind))
-                                Text(step.name).font(.caption.weight(.semibold)).lineLimit(1)
-                            }
-                            Text(step.kind.label).font(.caption2).foregroundStyle(.secondary)
-                            Text("\(step.transitions?.count ?? 0) route(s)")
-                                .font(.caption2).foregroundStyle(.secondary)
-                        }
-                        .padding(10)
-                        .frame(width: nodeWidth, alignment: .leading)
-                        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 10))
-                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(selection == step.id ? Nord.frost1 : Nord.polarNight3, lineWidth: selection == step.id ? 3 : 1))
-                        .contentShape(RoundedRectangle(cornerRadius: 10))
-                        .position(x: position.x + nodeWidth / 2, y: position.y + nodeHeight / 2)
-                        .gesture(
-                            DragGesture(coordinateSpace: .named("workflow-studio-canvas"))
-                                .updating($nodeDrag) { value, state, transaction in
-                                    transaction.disablesAnimations = true
-                                    state = NodeDrag(
-                                        stepID: step.id,
-                                        position: draggedPosition(
-                                            stepID: step.id,
-                                            translation: value.translation
-                                        )
-                                    )
-                                }
-                                .onEnded { value in
-                                    finishNodeDrag(stepID: step.id, translation: value.translation)
-                                }
-                        )
-                        .onTapGesture {
-                            selection = step.id
-                        }
-                        .accessibilityElement(children: .ignore)
-                        .accessibilityAddTraits(.isButton)
-                        .accessibilityLabel("\(step.name), \(step.kind.label)")
-                        .accessibilityValue("\(step.transitions?.count ?? 0) outgoing routes")
-                        .accessibilityHint("Selects this workflow step for editing")
-                        .accessibilityAction {
-                            selection = step.id
-                        }
+                    MiniMap(
+                        store: store,
+                        canvasSize: proxy.size,
+                        minimapSize: CGSize(width: 156, height: 104)
+                    )
+                    .padding(12)
+                    .accessibilityLabel("Workflow minimap")
 
-                        Circle()
-                            .fill(Nord.polarNight0)
-                            .overlay(Circle().stroke(Nord.frost0, lineWidth: 2))
-                            .frame(width: 12, height: 12)
-                            .position(inputPoint(step.id))
-                            .accessibilityHidden(true)
-
-                        if step.kind != .complete {
-                            Circle()
-                                .fill(connectionSourceID == step.id ? Nord.frost1 : Nord.polarNight0)
-                                .overlay(Circle().stroke(Nord.frost1, lineWidth: 2))
-                                .frame(width: 14, height: 14)
-                                .contentShape(Rectangle().inset(by: -8))
-                                .position(outputPoint(step.id))
-                                .gesture(
-                                    DragGesture(minimumDistance: 1, coordinateSpace: .named("workflow-studio-canvas"))
-                                        .onChanged { value in
-                                            connectionSourceID = step.id
-                                            connectionPoint = value.location
-                                        }
-                                        .onEnded { value in
-                                            finishConnection(from: step.id, at: value.location)
-                                        }
-                                )
-                                .accessibilityLabel("Connect from \(step.name)")
-                                .accessibilityHint("Drag to another node, or use Connect selected in the canvas header")
-                        }
+                    if let canvasMessage {
+                        Text(canvasMessage)
+                            .font(.caption)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 7)
+                            .background(.regularMaterial, in: Capsule())
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                            .padding(.top, 10)
+                            .allowsHitTesting(false)
                     }
                 }
-                .frame(width: canvasWidth, height: canvasHeight)
-                .coordinateSpace(name: "workflow-studio-canvas")
+                .onAppear {
+                    canvasSize = proxy.size
+                    configureStoreCallbacks()
+                    synchronizeStoreSelection()
+                }
+                .onChange(of: proxy.size) { _, newSize in
+                    canvasSize = newSize
+                }
             }
-            .accessibilityLabel("Workflow graph canvas. The synchronized outline provides the complete keyboard representation.")
         } label: {
-            HStack {
-                Text("Semantic graph canvas")
+            HStack(spacing: 10) {
+                Text("Workflow canvas")
+                Text("Drag ports to connect · click lines to select · Delete removes")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Spacer()
-                if let selection,
-                   steps.first(where: { $0.id == selection })?.kind != .complete {
-                    Menu("Connect selected", systemImage: "point.3.connected.trianglepath.dotted") {
-                        ForEach(steps.filter { $0.id != selection }) { target in
-                            Button("\(target.name)") {
-                                connect(from: selection, to: target.id)
-                            }
-                        }
-                    }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
+                Button("100%") {
+                    setViewport(Viewport(offset: CGPoint(x: 36, y: 36), zoom: 1))
                 }
+                .buttonStyle(.borderless)
+                Button("Fit", systemImage: "arrow.up.left.and.arrow.down.right") {
+                    fitViewportToContent(canvasSize: canvasSize, animated: !reduceMotion)
+                }
+                .buttonStyle(.borderless)
             }
         }
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.12), value: connectionSourceID)
-    }
-
-    private struct Edge: Identifiable {
-        var id: String { "\(from):\(outcome.rawValue):\(to)" }
-        var from: String
-        var to: String
-        var outcome: DesktopWorkflowTransitionOutcome
-        var laneIndex: Int
-        var laneCount: Int
-
-        var laneOffset: CGFloat {
-            CGFloat(laneIndex) * 18 - CGFloat(laneCount - 1) * 9
+        .onChange(of: steps) { _, _ in reloadStore() }
+        .onChange(of: positions) { _, _ in reloadStore() }
+        .onChange(of: selectedStepID) { _, _ in synchronizeStoreSelection() }
+        .onChange(of: selectedTransitionID) { _, _ in synchronizeStoreSelection() }
+        .onChange(of: store.selectedNodeIDs) { _, selectedIDs in
+            handleNodeSelection(selectedIDs)
         }
-    }
-
-    private struct NodeDrag {
-        var stepID: String
-        var position: CGPoint
-    }
-
-    private var edges: [Edge] {
-        steps.flatMap { step in
-            let transitions = step.transitions ?? []
-            return transitions.enumerated().map { transitionIndex, transition in
-                let siblingIndices = transitions.indices.filter {
-                    transitions[$0].targetStepID == transition.targetStepID
-                }
-                return Edge(
-                    from: step.id,
-                    to: transition.targetStepID,
-                    outcome: transition.outcome,
-                    laneIndex: siblingIndices.firstIndex(of: transitionIndex) ?? 0,
-                    laneCount: siblingIndices.count
-                )
+        .onChange(of: store.selectedEdgeIDs) { _, selectedIDs in
+            handleEdgeSelection(selectedIDs)
+        }
+        .onChange(of: store.activeInteraction) { oldValue, newValue in
+            if oldValue != nil, newValue == nil {
+                persistStorePositionsIfNeeded()
             }
         }
-    }
-
-    private func point(_ stepID: String) -> CGPoint {
-        if let nodeDrag, nodeDrag.stepID == stepID {
-            return nodeDrag.position
-        }
-        return storedPoint(stepID)
-    }
-
-    private func storedPoint(_ stepID: String) -> CGPoint {
-        if let value = positions.first(where: { $0.stepID == stepID }) { return CGPoint(x: value.x, y: value.y) }
-        let index = steps.firstIndex(where: { $0.id == stepID }) ?? 0
-        return CGPoint(x: Double(index % 4) * 230 + 30, y: Double(index / 4) * 130 + 30)
-    }
-
-    private func inputPoint(_ stepID: String) -> CGPoint {
-        let position = point(stepID)
-        return CGPoint(x: position.x, y: position.y + nodeHeight / 2)
-    }
-
-    private func outputPoint(_ stepID: String) -> CGPoint {
-        let position = point(stepID)
-        return CGPoint(x: position.x + nodeWidth, y: position.y + nodeHeight / 2)
-    }
-
-    private func edgeLabelPoint(_ edge: Edge) -> CGPoint {
-        let from = outputPoint(edge.from)
-        let to = inputPoint(edge.to)
-        let labelXOffset = CGFloat(edge.laneIndex) * 50 - CGFloat(edge.laneCount - 1) * 25
-        let midpointX = (from.x + to.x) / 2 + labelXOffset
-        let midpointY = (from.y + to.y) / 2
-        let labelY = abs(from.y - to.y) < nodeHeight
-            ? min(from.y, to.y) - nodeHeight / 2 - 10
-            : midpointY - 14
-        return CGPoint(x: midpointX, y: max(12, labelY))
-    }
-
-    private func connectionPath(from: CGPoint, to: CGPoint, laneOffset: CGFloat) -> Path {
-        Path { path in
-            path.move(to: from)
-            let distance = max(48, abs(to.x - from.x) * 0.45)
-            let direction: CGFloat = to.x >= from.x ? 1 : -1
-            path.addCurve(
-                to: to,
-                control1: CGPoint(x: from.x + distance * direction, y: from.y + laneOffset),
-                control2: CGPoint(x: to.x - distance * direction, y: to.y + laneOffset)
-            )
+        .task(id: canvasSize) {
+            guard !hasFittedInitialViewport,
+                  canvasSize.width > 0,
+                  canvasSize.height > 0 else { return }
+            do {
+                try await Task.sleep(for: .milliseconds(250))
+            } catch {
+                return
+            }
+            guard !hasFittedInitialViewport else { return }
+            hasFittedInitialViewport = true
+            fitViewportToContent(canvasSize: canvasSize, animated: false)
         }
     }
 
-    private func finishConnection(from sourceID: String, at location: CGPoint) {
-        defer {
-            connectionSourceID = nil
-            connectionPoint = nil
-        }
-        guard let target = steps.first(where: { step in
-            guard step.id != sourceID else { return false }
-            let position = point(step.id)
-            return CGRect(
-                x: position.x - 16,
-                y: position.y - 16,
-                width: nodeWidth + 32,
-                height: nodeHeight + 32
-            ).contains(location)
-        }) else { return }
-        connect(from: sourceID, to: target.id)
-    }
-
-    private func connect(from sourceID: String, to targetID: String) {
-        guard let outcome = DesktopWorkflowStudioGraphEditing.suggestedOutcome(
-            from: sourceID,
-            in: steps
-        ), DesktopWorkflowStudioGraphEditing.connect(
-            from: sourceID,
-            to: targetID,
-            outcome: outcome,
-            in: &steps
-        ) else { return }
-        selection = sourceID
-        onChange()
-    }
-
-    private func stepName(_ stepID: String) -> String {
-        steps.first(where: { $0.id == stepID })?.name ?? stepID
-    }
-
-    private func finishNodeDrag(stepID: String, translation: CGSize) {
-        let position = draggedPosition(stepID: stepID, translation: translation)
-        withoutNodeAnimation {
-            persistPosition(stepID: stepID, position: position)
-        }
-        onChange()
-    }
-
-    private func draggedPosition(stepID: String, translation: CGSize) -> CGPoint {
-        let origin = storedPoint(stepID)
-        return clampedNodePosition(
-            CGPoint(x: origin.x + translation.width, y: origin.y + translation.height)
-        )
-    }
-
-    private func withoutNodeAnimation(_ updates: () -> Void) {
-        var transaction = Transaction()
-        transaction.disablesAnimations = true
-        withTransaction(transaction) {
-            updates()
-        }
-    }
-
-    private func clampedNodePosition(_ position: CGPoint) -> CGPoint {
-        CGPoint(
-            x: max(0, min(canvasWidth - nodeWidth, position.x)),
-            y: max(0, min(canvasHeight - nodeHeight, position.y))
-        )
-    }
-
-    private func persistPosition(stepID: String, position: CGPoint) {
-        if let index = positions.firstIndex(where: { $0.stepID == stepID }) {
-            positions[index].x = position.x
-            positions[index].y = position.y
+    private func fitViewportToContent(canvasSize: CGSize, animated: Bool) {
+        guard canvasSize.width > 0, canvasSize.height > 0 else { return }
+        if animated {
+            store.fitToContent(canvasSize: canvasSize, padding: 48, animation: .smooth)
         } else {
-            positions.append(.init(stepID: stepID, x: position.x, y: position.y))
+            store.fitToContent(canvasSize: canvasSize, padding: 48)
         }
     }
 
-    private func studioCanvasSymbol(_ kind: DesktopWorkflowStepKind) -> String {
-        switch kind {
-        case .complete: "checkmark.circle"
-        case .branch: "arrow.triangle.branch"
-        case .forEach: "square.stack.3d.down.right"
-        case .effect, .sendEmail, .createEmailDraft: "bolt.horizontal.circle"
-        case .humanReview, .requestApproval: "person.crop.circle.badge.checkmark"
-        case .waitForEmail: "clock.badge"
-        case .validate: "checkmark.shield"
-        case .structuredModel, .agent: "brain"
-        default: "square.stack.3d.forward.dottedline"
+    private static var configuration: FlowConfiguration {
+        FlowConfiguration(
+            defaultEdgePathType: .bezier,
+            edgeStyle: EdgeStyle(
+                strokeColor: Nord.frost0.opacity(0.8),
+                selectedStrokeColor: Nord.frost1,
+                lineWidth: 2,
+                selectedLineWidth: 3
+            ),
+            backgroundStyle: BackgroundStyle(
+                pattern: .dot,
+                color: Nord.polarNight3.opacity(0.65),
+                spacing: 22,
+                dotRadius: 1.2
+            ),
+            snapToGrid: true,
+            gridSize: 10,
+            minZoom: 0.45,
+            maxZoom: 2.2
+        )
+    }
+
+    private static func document(
+        steps: [DesktopWorkflowStepDefinition],
+        positions: [DesktopWorkflowCanvasNodePosition],
+        viewport: Viewport
+    ) -> FlowDocument<WorkflowStudioCanvasItem> {
+        let positionsByID = Dictionary(uniqueKeysWithValues: positions.map { ($0.stepID, $0) })
+        let defaultsByID = Dictionary(uniqueKeysWithValues:
+            DesktopWorkflowStudioGraphEditing.defaultCanvasPositions(for: steps).map { ($0.stepID, $0) }
+        )
+        var nodes: [FlowNode<WorkflowStudioCanvasItem>] = []
+        var edges: [FlowEdge] = []
+
+        for step in steps {
+            let point: CGPoint
+            if let stored = positionsByID[step.id] {
+                point = CGPoint(x: stored.x, y: stored.y)
+            } else {
+                let fallback = defaultsByID[step.id] ?? .init(stepID: step.id, x: 30, y: 30)
+                point = CGPoint(x: fallback.x, y: fallback.y)
+            }
+            let transitions = step.transitions ?? []
+            let stepHeight = max(
+                minimumStepHeight,
+                outputTop + CGFloat(transitions.count) * outputSpacing + 8
+            )
+            let stepNodeID = nodeID(for: step.id)
+            nodes.append(FlowNode(
+                id: stepNodeID,
+                position: point,
+                size: CGSize(width: stepWidth, height: stepHeight),
+                    data: WorkflowStudioCanvasItem(
+                        role: .step,
+                        stepID: step.id,
+                        transitionID: nil,
+                        title: step.name,
+                        subtitle: subtitle(for: step.kind),
+                    symbol: workflowStudioSymbol(for: step.kind),
+                        connected: false
+                    ),
+                acceptsChildren: true,
+                handles: [
+                    HandleDeclaration(
+                        id: "input",
+                        type: .target,
+                        position: .left,
+                        connectionStartArea: .point(radius: 20),
+                        connectionTargetArea: .point(radius: 34)
+                    ),
+                ]
+            ))
+
+            for (transitionIndex, transition) in transitions.enumerated() {
+                let transitionID = transition.id
+                let outputNodeID = routeNodeID(for: transitionID)
+                nodes.append(FlowNode(
+                    id: outputNodeID,
+                    position: CGPoint(
+                        x: point.x + stepWidth - outputWidth - 10,
+                        y: point.y + outputTop + CGFloat(transitionIndex) * outputSpacing
+                    ),
+                    size: CGSize(width: outputWidth, height: outputHeight),
+                    data: WorkflowStudioCanvasItem(
+                        role: .output,
+                        stepID: step.id,
+                        transitionID: transitionID,
+                        title: transition.displayLabel,
+                        subtitle: transition.outcome.rawValue,
+                        symbol: "arrow.right",
+                        connected: transition.isConnected
+                    ),
+                    parentID: stepNodeID,
+                    persistence: .transient,
+                    isDraggable: false,
+                    zIndex: 2,
+                    handles: [
+                        HandleDeclaration(
+                            id: "output",
+                            type: .source,
+                            position: .right,
+                            connectionStartArea: .point(radius: 24),
+                            connectionTargetArea: .disabled
+                        ),
+                    ]
+                ))
+
+                if transition.isConnected,
+                   steps.contains(where: { $0.id == transition.targetStepID }) {
+                    edges.append(FlowEdge(
+                        id: transitionID,
+                        sourceNodeID: outputNodeID,
+                        sourceHandleID: "output",
+                        targetNodeID: nodeID(for: transition.targetStepID),
+                        targetHandleID: "input",
+                        pathType: .bezier,
+                        label: transition.displayLabel
+                    ))
+                }
+            }
+        }
+        return FlowDocument(nodes: nodes, edges: edges, viewport: viewport)
+    }
+
+    @ViewBuilder
+    private func canvasNode(
+        _ node: FlowNode<WorkflowStudioCanvasItem>,
+        context: NodeRenderContext
+    ) -> some View {
+        let selected = node.data.transitionID.map { $0 == selectedTransitionID }
+            ?? (node.data.stepID == selectedStepID && selectedTransitionID == nil)
+        Group {
+            switch node.data.role {
+            case .step:
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Image(systemName: node.data.symbol)
+                            .foregroundStyle(Nord.frost1)
+                        Text(node.data.title)
+                            .font(.callout.weight(.semibold))
+                            .lineLimit(1)
+                    }
+                    Text(node.data.subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("Outputs")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                        .padding(.top, 7)
+                    Spacer(minLength: 0)
+                }
+                .padding(12)
+                .frame(width: node.size.width, height: node.size.height, alignment: .topLeading)
+                .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(selected ? Nord.frost1 : Nord.polarNight3, lineWidth: selected ? 3 : 1)
+                }
+            case .output:
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(node.data.connected ? Nord.auroraGreen : Nord.auroraYellow)
+                        .frame(width: 7, height: 7)
+                    Text(node.data.title)
+                        .font(.caption.weight(.semibold))
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 8)
+                .frame(width: node.size.width, height: node.size.height)
+                .background(Nord.polarNight2, in: RoundedRectangle(cornerRadius: 7))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 7)
+                        .stroke(selected ? Nord.frost1 : Nord.polarNight3, lineWidth: selected ? 2 : 1)
+                }
+            }
+        }
+        .padding(FlowHandle.diameter / 2)
+        .overlay {
+            FlowNodeHandles(node: node, context: context)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(
+            node.data.role == .step
+                ? "\(node.data.title), \(node.data.subtitle)"
+                : "\(node.data.title) output, \(node.data.connected ? "connected" : "not connected")"
+        )
+        .accessibilityHint(
+            node.data.role == .step
+                ? "Selects and moves this workflow node"
+                : "Drag this output to a node input to connect or reconnect it"
+        )
+    }
+
+    private func canvasEdge(_ edge: FlowEdge, geometry: EdgeGeometry) -> some View {
+        let color = edge.isSelected ? Nord.frost1 : Nord.frost0.opacity(0.9)
+        return ZStack(alignment: .topLeading) {
+            geometry.path
+                .stroke(color, style: StrokeStyle(lineWidth: edge.isSelected ? 3 : 2, lineCap: .round))
+            arrowhead(at: geometry.targetPoint, targetPosition: geometry.targetPosition)
+                .fill(color)
+            if let label = edge.label {
+                Text(label)
+                    .font(.system(size: 9, weight: .semibold, design: .rounded))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Nord.polarNight0.opacity(0.94), in: Capsule())
+                    .position(geometry.labelPosition)
+            }
         }
     }
+
+    private func arrowhead(at point: CGPoint, targetPosition: HandlePosition) -> Path {
+        let length: CGFloat = 10
+        let halfWidth: CGFloat = 5
+        return Path { path in
+            path.move(to: point)
+            switch targetPosition {
+            case .left:
+                path.addLine(to: CGPoint(x: point.x - length, y: point.y - halfWidth))
+                path.addLine(to: CGPoint(x: point.x - length, y: point.y + halfWidth))
+            case .right:
+                path.addLine(to: CGPoint(x: point.x + length, y: point.y - halfWidth))
+                path.addLine(to: CGPoint(x: point.x + length, y: point.y + halfWidth))
+            case .top:
+                path.addLine(to: CGPoint(x: point.x - halfWidth, y: point.y - length))
+                path.addLine(to: CGPoint(x: point.x + halfWidth, y: point.y - length))
+            case .bottom:
+                path.addLine(to: CGPoint(x: point.x - halfWidth, y: point.y + length))
+                path.addLine(to: CGPoint(x: point.x + halfWidth, y: point.y + length))
+            case .center:
+                path.addLine(to: CGPoint(x: point.x - length, y: point.y - halfWidth))
+                path.addLine(to: CGPoint(x: point.x - length, y: point.y + halfWidth))
+            }
+            path.closeSubpath()
+        }
+    }
+
+    private func configureStoreCallbacks() {
+        store.onConnect = { proposal in
+            handleConnection(proposal)
+        }
+        store.onConnectionRejected = { _ in
+            canvasMessage = "That connection is not compatible. Drag from an output to another node's input."
+        }
+    }
+
+    private func handleConnection(_ proposal: ConnectionProposal) {
+        guard let source = store.nodeLookup[proposal.sourceNodeID]?.data,
+              source.role == .output,
+              let transitionID = source.transitionID,
+              let target = store.nodeLookup[proposal.targetNodeID]?.data,
+              target.role == .step,
+              source.stepID != target.stepID,
+              DesktopWorkflowStudioGraphEditing.connect(
+                  routeID: transitionID,
+                  to: target.stepID,
+                  in: &steps
+              ) else {
+            canvasMessage = "Connect an output to a different workflow node."
+            return
+        }
+        selectedStepID = source.stepID
+        selectedTransitionID = transitionID
+        canvasMessage = "Connected \(source.title) to \(target.title)."
+        onChange()
+    }
+
+    private func handleNodeSelection(_ selectedIDs: Set<String>) {
+        guard store.selectedEdgeIDs.isEmpty,
+              let selectedID = selectedIDs.sorted().first,
+              let item = store.nodeLookup[selectedID]?.data else { return }
+        selectedStepID = item.stepID
+        selectedTransitionID = item.transitionID
+    }
+
+    private func handleEdgeSelection(_ selectedIDs: Set<String>) {
+        guard let transitionID = selectedIDs.sorted().first,
+              let step = steps.first(where: { step in
+                  (step.transitions ?? []).contains { $0.id == transitionID }
+              }) else { return }
+        selectedStepID = step.id
+        selectedTransitionID = transitionID
+    }
+
+    private func deleteCanvasSelection() -> Bool {
+        let selectedEdges = store.selectedEdgeIDs
+        if !selectedEdges.isEmpty {
+            var changed = false
+            for transitionID in selectedEdges {
+                changed = DesktopWorkflowStudioGraphEditing.disconnect(
+                    routeID: transitionID,
+                    in: &steps
+                ) || changed
+            }
+            if changed {
+                canvasMessage = selectedEdges.count == 1
+                    ? "Disconnected the selected line."
+                    : "Disconnected \(selectedEdges.count) selected lines."
+                onChange()
+            }
+            return changed
+        }
+
+        let selectedItems = store.selectedNodeIDs.compactMap { store.nodeLookup[$0]?.data }
+        let selectedStepIDs = Set(selectedItems.filter { $0.role == .step }.map(\.stepID))
+        if !selectedStepIDs.isEmpty {
+            guard DesktopWorkflowStudioGraphEditing.removeSteps(selectedStepIDs, in: &steps) else {
+                return false
+            }
+            positions.removeAll { selectedStepIDs.contains($0.stepID) }
+            selectedStepID = steps.first?.id
+            selectedTransitionID = nil
+            canvasMessage = selectedStepIDs.count == 1
+                ? "Deleted the selected node and disconnected its lines."
+                : "Deleted \(selectedStepIDs.count) selected nodes and disconnected their lines."
+            onChange()
+            return true
+        }
+
+        let selectedOutputs = selectedItems.compactMap(\.transitionID)
+        guard !selectedOutputs.isEmpty else { return false }
+        var changed = false
+        for transitionID in selectedOutputs {
+            if DesktopWorkflowStudioGraphEditing.disconnect(routeID: transitionID, in: &steps) {
+                changed = true
+                continue
+            }
+            for stepIndex in steps.indices {
+                let oldCount = steps[stepIndex].transitions?.count ?? 0
+                steps[stepIndex].transitions?.removeAll { $0.id == transitionID }
+                changed = changed || (steps[stepIndex].transitions?.count ?? 0) != oldCount
+            }
+        }
+        if changed {
+            selectedTransitionID = nil
+            canvasMessage = "Removed the selected output."
+            onChange()
+        }
+        return changed
+    }
+
+    private func reloadStore() {
+        let viewport = store.viewport
+        store.load(Self.document(steps: steps, positions: positions, viewport: viewport))
+        configureStoreCallbacks()
+        synchronizeStoreSelection()
+    }
+
+    private func synchronizeStoreSelection() {
+        if let selectedTransitionID {
+            if store.edges.contains(where: { $0.id == selectedTransitionID }) {
+                if store.selectedEdgeIDs != Set([selectedTransitionID]) {
+                    store.selectEdge(selectedTransitionID)
+                }
+                return
+            }
+            let outputNodeID = Self.routeNodeID(for: selectedTransitionID)
+            if store.nodeLookup[outputNodeID] != nil {
+                if store.selectedNodeIDs != Set([outputNodeID]) {
+                    store.selectNode(outputNodeID)
+                }
+                return
+            }
+        }
+        if let selectedStepID {
+            let stepNodeID = Self.nodeID(for: selectedStepID)
+            if store.nodeLookup[stepNodeID] != nil,
+               store.selectedNodeIDs != Set([stepNodeID]) {
+                store.selectNode(stepNodeID)
+            }
+        }
+    }
+
+    private func persistStorePositionsIfNeeded() {
+        var updated: [DesktopWorkflowCanvasNodePosition] = []
+        for step in steps {
+            guard let node = store.nodeLookup[Self.nodeID(for: step.id)] else { continue }
+            updated.append(.init(stepID: step.id, x: node.position.x, y: node.position.y))
+        }
+        guard updated != positions else { return }
+        positions = updated
+        onChange()
+    }
+
+    private func setViewport(_ viewport: Viewport) {
+        if reduceMotion {
+            store.viewport = viewport
+        } else {
+            store.setViewport(viewport, animation: .smooth)
+        }
+    }
+
+    private static func nodeID(for stepID: String) -> String {
+        "kaname.step.\(stepID)"
+    }
+
+    private static func routeNodeID(for transitionID: String) -> String {
+        "kaname.route.\(transitionID)"
+    }
+
+    private static func subtitle(for kind: DesktopWorkflowStepKind) -> String {
+        switch kind {
+        case .branch: "Decision · one input · Yes / No"
+        case .match: "Match · one input · first match wins"
+        case .complete: "Complete · no outputs"
+        default: kind.label
+        }
+    }
+
 }
 
 struct WorkflowHumanReviewRow: View {

@@ -5,7 +5,7 @@ import PackageDescription
 let package = Package(
     name: "Kaname",
     platforms: [
-        .macOS(.v13),
+        .macOS(.v26),
         .iOS(.v17),
     ],
     products: [
@@ -45,6 +45,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-protobuf.git", exact: "1.38.1"),
+        .package(url: "https://github.com/1amageek/swift-flow.git", exact: "0.20.3"),
     ],
     targets: [
         .target(name: "KanameDomain"),
@@ -111,6 +112,7 @@ let package = Package(
                 "KanameLocalCore",
                 "KanameConnectivity",
                 "KanameWorkflowHost",
+                .product(name: "SwiftFlow", package: "swift-flow"),
             ]
         ),
         .executableTarget(

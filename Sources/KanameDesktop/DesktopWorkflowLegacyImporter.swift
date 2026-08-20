@@ -363,6 +363,20 @@ public enum DesktopWorkflowLegacyImporter {
                 )
             }
         case .branch:
+            type = "control.decision"
+            let decisionTransition = (step.transitions ?? []).first {
+                $0.outcome == .matched
+            } ?? step.transitions?.first
+            config = .object([
+                "when": condition(decisionTransition?.predicates ?? []),
+            ])
+            appendLoss(
+                "legacy.decision.routing-contract",
+                pointer + "/config",
+                "The legacy Decision predicates require strict typed review before v2 publication.",
+                to: &losses
+            )
+        case .match:
             type = "control.match"
             config = matchConfiguration(
                 step: step,
@@ -372,9 +386,9 @@ public enum DesktopWorkflowLegacyImporter {
                 losses: &losses
             )
             appendLoss(
-                "legacy.branch.routing-contract",
+                "legacy.match.routing-contract",
                 pointer + "/config",
-                "The legacy branch does not declare the typed source value and hit policy required by v2 Match.",
+                "The legacy Match routes require strict typed source and hit-policy review before v2 publication.",
                 to: &losses
             )
         case .forEach:
@@ -580,7 +594,8 @@ public enum DesktopWorkflowLegacyImporter {
     ) -> DesktopWorkflowJSONValue {
         let transitions = step.transitions ?? []
         let finalFallbackIndex = transitions.indices.last.flatMap { index in
-            transitions[index].outcome == .always && transitions[index].predicates.isEmpty
+            [.always, .notMatched].contains(transitions[index].outcome)
+                && transitions[index].predicates.isEmpty
                 && transitions.count > 1 ? index : nil
         }
         var cases: [DesktopWorkflowJSONValue] = []
@@ -689,7 +704,7 @@ public enum DesktopWorkflowLegacyImporter {
         .object([
             "id": .string(caseID),
             "key": .string(stableKey("\(transition.outcome.rawValue)-\(index + 1)", seed: caseID)),
-            "label": .string(transition.outcome.rawValue),
+            "label": .string(transition.displayLabel),
         ])
     }
 
@@ -699,10 +714,17 @@ public enum DesktopWorkflowLegacyImporter {
         transitionIndex: Int,
         identitySeed: String
     ) -> String {
-        if step.kind == .branch {
+        if step.kind == .match {
             let nodeID = stableUUID(seed: "node|\(identitySeed)|\(step.id)")
             let seed = "case|\(identitySeed)|\(nodeID)|\(transition.id)|\(transitionIndex)"
             return "case-\(stableUUID(seed: seed))"
+        }
+        if step.kind == .branch {
+            return switch transition.outcome {
+            case .matched: "matched"
+            case .notMatched, .always: "not-matched"
+            default: "error"
+            }
         }
         if step.kind == .waitForEmail {
             if transition.outcome == .timedOut { return "expired" }
@@ -733,7 +755,7 @@ public enum DesktopWorkflowLegacyImporter {
             )
         }
         let grouped = Dictionary(grouping: portPairs, by: \.port)
-        if step.kind != .branch, grouped.values.contains(where: { $0.count > 1 }) {
+        if step.kind != .match, grouped.values.contains(where: { $0.count > 1 }) {
             appendLoss(
                 "legacy.transition.output-fanout",
                 "/graph/nodes/\(index)/transitions",
@@ -750,7 +772,7 @@ public enum DesktopWorkflowLegacyImporter {
                     to: &losses
                 )
             }
-            if step.kind != .branch,
+            if ![.branch, .match].contains(step.kind),
                ![.always, .succeeded, .failed, .timedOut, .cancelled].contains(transition.outcome) {
                 appendLoss(
                     "legacy.transition.outcome-specialized",

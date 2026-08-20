@@ -324,16 +324,6 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
             self?.applyRequestedWindowSize(to: window)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                 let captureWindow = window.attachedSheet ?? window
-                if let capture = CGWindowListCreateImage(
-                    .null,
-                    .optionIncludingWindow,
-                    CGWindowID(captureWindow.windowNumber),
-                    [.boundsIgnoreFraming, .bestResolution]
-                ),
-                let png = NSBitmapImageRep(cgImage: capture)
-                    .representation(using: .png, properties: [:]) {
-                    finishSnapshotCapture(png, at: outputURL)
-                }
                 guard let contentView = captureWindow.contentView else {
                     finishSnapshotCapture(nil, at: outputURL)
                 }

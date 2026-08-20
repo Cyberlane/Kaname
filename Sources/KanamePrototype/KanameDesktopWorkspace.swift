@@ -8800,6 +8800,7 @@ private extension DesktopWorkflowStepKind {
         case .registerArtifact: "doc.badge.plus"
         case .validate: "checkmark.shield"
         case .branch: "arrow.triangle.branch"
+        case .match: "arrow.triangle.swap"
         case .forEach: "square.stack.3d.down.right"
         case .agent: "brain.head.profile"
         case .effect: "bolt.horizontal.circle"

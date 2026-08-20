@@ -3612,7 +3612,7 @@ private extension DesktopWorkflowStepKind {
     var automationKind: AutomationCanvasNodeKind {
         switch self {
         case .classifyEvent: .trigger
-        case .correlateWork, .branch: .decision
+        case .correlateWork, .branch, .match: .decision
         case .compileContext: .context
         case .structuredModel, .agent: .ai
         case .invokeTool: .subflow
@@ -3637,6 +3637,7 @@ private extension DesktopWorkflowStepKind {
         case .registerArtifact: "doc.badge.plus"
         case .validate: "checkmark.seal"
         case .branch: "arrow.triangle.branch"
+        case .match: "arrow.triangle.swap"
         case .forEach: "repeat"
         case .agent: "cpu"
         case .effect: "checkmark.shield"
