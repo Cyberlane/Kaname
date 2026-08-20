@@ -1917,6 +1917,7 @@ private struct WorkflowStudioCanvas: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var connectionSourceID: String?
     @State private var connectionPoint: CGPoint?
+    @GestureState private var nodeDrag: NodeDrag?
 
     private let nodeWidth: CGFloat = 190
     private let nodeHeight: CGFloat = 80
@@ -1964,35 +1965,48 @@ private struct WorkflowStudioCanvas: View {
 
                     ForEach(steps) { step in
                         let position = point(step.id)
-                        Button {
-                            selection = step.id
-                        } label: {
-                            VStack(alignment: .leading, spacing: 4) {
-                                HStack {
-                                    Image(systemName: studioCanvasSymbol(step.kind))
-                                    Text(step.name).font(.caption.weight(.semibold)).lineLimit(1)
-                                }
-                                Text(step.kind.label).font(.caption2).foregroundStyle(.secondary)
-                                Text("\(step.transitions?.count ?? 0) route(s)")
-                                    .font(.caption2).foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Image(systemName: studioCanvasSymbol(step.kind))
+                                Text(step.name).font(.caption.weight(.semibold)).lineLimit(1)
                             }
-                            .padding(10)
-                            .frame(width: nodeWidth, alignment: .leading)
-                            .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 10))
-                            .overlay(RoundedRectangle(cornerRadius: 10).stroke(selection == step.id ? Nord.frost1 : Nord.polarNight3, lineWidth: selection == step.id ? 3 : 1))
+                            Text(step.kind.label).font(.caption2).foregroundStyle(.secondary)
+                            Text("\(step.transitions?.count ?? 0) route(s)")
+                                .font(.caption2).foregroundStyle(.secondary)
                         }
-                        .buttonStyle(.plain)
+                        .padding(10)
+                        .frame(width: nodeWidth, alignment: .leading)
+                        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 10))
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(selection == step.id ? Nord.frost1 : Nord.polarNight3, lineWidth: selection == step.id ? 3 : 1))
+                        .contentShape(RoundedRectangle(cornerRadius: 10))
                         .position(x: position.x + nodeWidth / 2, y: position.y + nodeHeight / 2)
                         .gesture(
                             DragGesture(coordinateSpace: .named("workflow-studio-canvas"))
-                                .onChanged { value in
-                                    setPosition(stepID: step.id, point: value.location)
+                                .updating($nodeDrag) { value, state, transaction in
+                                    transaction.disablesAnimations = true
+                                    state = NodeDrag(
+                                        stepID: step.id,
+                                        position: draggedPosition(
+                                            stepID: step.id,
+                                            translation: value.translation
+                                        )
+                                    )
                                 }
-                                .onEnded { _ in onChange() }
+                                .onEnded { value in
+                                    finishNodeDrag(stepID: step.id, translation: value.translation)
+                                }
                         )
+                        .onTapGesture {
+                            selection = step.id
+                        }
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityAddTraits(.isButton)
                         .accessibilityLabel("\(step.name), \(step.kind.label)")
                         .accessibilityValue("\(step.transitions?.count ?? 0) outgoing routes")
                         .accessibilityHint("Selects this workflow step for editing")
+                        .accessibilityAction {
+                            selection = step.id
+                        }
 
                         Circle()
                             .fill(Nord.polarNight0)
@@ -2045,7 +2059,6 @@ private struct WorkflowStudioCanvas: View {
                 }
             }
         }
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: positions)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.12), value: connectionSourceID)
     }
 
@@ -2060,6 +2073,11 @@ private struct WorkflowStudioCanvas: View {
         var laneOffset: CGFloat {
             CGFloat(laneIndex) * 18 - CGFloat(laneCount - 1) * 9
         }
+    }
+
+    private struct NodeDrag {
+        var stepID: String
+        var position: CGPoint
     }
 
     private var edges: [Edge] {
@@ -2081,6 +2099,13 @@ private struct WorkflowStudioCanvas: View {
     }
 
     private func point(_ stepID: String) -> CGPoint {
+        if let nodeDrag, nodeDrag.stepID == stepID {
+            return nodeDrag.position
+        }
+        return storedPoint(stepID)
+    }
+
+    private func storedPoint(_ stepID: String) -> CGPoint {
         if let value = positions.first(where: { $0.stepID == stepID }) { return CGPoint(x: value.x, y: value.y) }
         let index = steps.firstIndex(where: { $0.id == stepID }) ?? 0
         return CGPoint(x: Double(index % 4) * 230 + 30, y: Double(index / 4) * 130 + 30)
@@ -2157,14 +2182,42 @@ private struct WorkflowStudioCanvas: View {
         steps.first(where: { $0.id == stepID })?.name ?? stepID
     }
 
-    private func setPosition(stepID: String, point: CGPoint) {
-        let x = max(0, min(canvasWidth - nodeWidth, point.x - nodeWidth / 2))
-        let y = max(0, min(canvasHeight - nodeHeight, point.y - nodeHeight / 2))
+    private func finishNodeDrag(stepID: String, translation: CGSize) {
+        let position = draggedPosition(stepID: stepID, translation: translation)
+        withoutNodeAnimation {
+            persistPosition(stepID: stepID, position: position)
+        }
+        onChange()
+    }
+
+    private func draggedPosition(stepID: String, translation: CGSize) -> CGPoint {
+        let origin = storedPoint(stepID)
+        return clampedNodePosition(
+            CGPoint(x: origin.x + translation.width, y: origin.y + translation.height)
+        )
+    }
+
+    private func withoutNodeAnimation(_ updates: () -> Void) {
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            updates()
+        }
+    }
+
+    private func clampedNodePosition(_ position: CGPoint) -> CGPoint {
+        CGPoint(
+            x: max(0, min(canvasWidth - nodeWidth, position.x)),
+            y: max(0, min(canvasHeight - nodeHeight, position.y))
+        )
+    }
+
+    private func persistPosition(stepID: String, position: CGPoint) {
         if let index = positions.firstIndex(where: { $0.stepID == stepID }) {
-            positions[index].x = x
-            positions[index].y = y
+            positions[index].x = position.x
+            positions[index].y = position.y
         } else {
-            positions.append(.init(stepID: stepID, x: x, y: y))
+            positions.append(.init(stepID: stepID, x: position.x, y: position.y))
         }
     }
 
