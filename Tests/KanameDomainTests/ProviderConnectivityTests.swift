@@ -83,6 +83,47 @@ struct ProviderConnectivityTests {
     }
 
     @Test
+    func projectFolderBrowserListsDirectoriesAndResolvesTypedPaths() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "kaname-project-folder-browser-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: root.appending(path: "Alpha", directoryHint: .isDirectory),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: root.appending(path: "Beta", directoryHint: .isDirectory),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: root.appending(path: ".hidden", directoryHint: .isDirectory),
+            withIntermediateDirectories: true
+        )
+        try Data("file".utf8).write(to: root.appending(path: "not-a-folder.txt"))
+
+        let browser = DesktopProjectFolderBrowser()
+        let rootSnapshot = try await browser.browse(path: root.path)
+        #expect(rootSnapshot.directoryPath == root.path)
+        #expect(rootSnapshot.existingDirectoryPath == root.path)
+        #expect(rootSnapshot.entries.map(\.name) == ["..", "Alpha", "Beta"])
+
+        let partialSnapshot = try await browser.browse(path: root.appending(path: "al").path)
+        #expect(partialSnapshot.directoryPath == root.path)
+        #expect(partialSnapshot.existingDirectoryPath == nil)
+        #expect(partialSnapshot.entries.map(\.name) == ["..", "Alpha"])
+        #expect(partialSnapshot.displayPath.hasSuffix("/al"))
+
+        let hiddenSnapshot = try await browser.browse(path: root.appending(path: ".h").path)
+        #expect(hiddenSnapshot.entries.map(\.name) == ["..", ".hidden"])
+
+        let childSnapshot = try await browser.browse(path: root.appending(path: "Alpha").path)
+        #expect(childSnapshot.existingDirectoryPath == root.appending(path: "Alpha").path)
+        #expect(childSnapshot.parentDirectoryPath == root.path)
+        #expect(childSnapshot.entries.first?.isParent == true)
+    }
+
+    @Test
     func projectIntakeCanonicalizesSelectionAndFindsRepositoryInstructions() async throws {
         let root = FileManager.default.temporaryDirectory
             .appending(path: "kaname-project-intake-\(UUID().uuidString)", directoryHint: .isDirectory)

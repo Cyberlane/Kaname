@@ -159,9 +159,14 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
         let build = (buildValue as? String) ?? "0"
         let payload: [String: Any] = [
             "channel": environment.channel.rawValue,
+            "bundleIdentifier": Bundle.main.bundleIdentifier ?? environment.bundleIdentifier,
+            "executablePath": Bundle.main.executableURL?.resolvingSymlinksInPath().path ?? "",
             "version": version,
             "build": build,
             "processID": ProcessInfo.processInfo.processIdentifier,
+            "windowID": NSApplication.shared.keyWindow?.windowNumber
+                ?? NSApplication.shared.windows.first(where: \.isVisible)?.windowNumber
+                ?? 0,
             "healthyAtUnixMillis": Int64(Date().timeIntervalSince1970 * 1_000),
             "workspaceSchemaVersion": KanameDesktopStateSchema.currentVersion,
             "healthNonce": commandLineValue(after: "--kaname-update-nonce") ?? "",

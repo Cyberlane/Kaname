@@ -84,6 +84,68 @@ private final class DesktopProjectIntakeViewModel: ObservableObject {
         task = nil
         isWorking = false
     }
+
+    func reset() {
+        cancel()
+        inspection = nil
+        errorMessage = nil
+    }
+}
+
+@MainActor
+private final class DesktopProjectFolderBrowserViewModel: ObservableObject {
+    @Published var path = DesktopProjectFolderBrowser.defaultPath()
+    @Published var snapshot: DesktopProjectFolderBrowserSnapshot?
+    @Published var errorMessage: String?
+    @Published var isWorking = false
+
+    private let service = DesktopProjectFolderBrowser()
+    private var task: Task<Void, Never>?
+
+    var existingDirectoryPath: String? { snapshot?.existingDirectoryPath }
+
+    func browse() {
+        browse(path: path)
+    }
+
+    func browse(path requestedPath: String) {
+        task?.cancel()
+        path = requestedPath
+        snapshot = nil
+        errorMessage = nil
+        isWorking = true
+        task = Task {
+            do {
+                let result = try await service.browse(path: requestedPath)
+                try Task.checkCancellation()
+                snapshot = result
+                path = result.displayPath
+            } catch is CancellationError {
+                return
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+            if !Task.isCancelled { isWorking = false }
+        }
+    }
+
+    func prepare(path: String) {
+        task?.cancel()
+        self.path = path
+        snapshot = nil
+        errorMessage = nil
+        isWorking = false
+    }
+
+    func reset() {
+        prepare(path: DesktopProjectFolderBrowser.defaultPath())
+    }
+
+    func cancel() {
+        task?.cancel()
+        task = nil
+        isWorking = false
+    }
 }
 
 struct DesktopProjectCreationPalette: View {
@@ -92,9 +154,11 @@ struct DesktopProjectCreationPalette: View {
     let created: (String) -> Void
 
     @StateObject private var intake = DesktopProjectIntakeViewModel()
+    @StateObject private var folderBrowser = DesktopProjectFolderBrowserViewModel()
     @State private var query = ""
     @State private var selectedSource: ProjectCreationSource = .local
     @State private var activeSource: ProjectCreationSource?
+    @State private var selectedFolderEntryPath: String?
     @State private var name = ""
     @State private var summary = ""
     @State private var kind: DesktopWorkKind = .coding
@@ -105,6 +169,7 @@ struct DesktopProjectCreationPalette: View {
     @State private var remoteReference: DesktopRemoteProjectReference?
     @State private var creationError: String?
     @FocusState private var searchFocused: Bool
+    @FocusState private var localFolderPathFocused: Bool
     @FocusState private var nameFocused: Bool
 
     private var visibleSources: [ProjectCreationSource] {
@@ -139,7 +204,7 @@ struct DesktopProjectCreationPalette: View {
                     switch activeSource {
                     case .github, .gitURL: remoteEntry(activeSource)
                     case .folderless: folderlessEntry
-                    case .local: localInspectionState
+                    case .local: localFolderBrowserEntry
                     }
                 } else {
                     sourceList
@@ -157,7 +222,10 @@ struct DesktopProjectCreationPalette: View {
         }
         .shadow(color: .black.opacity(0.38), radius: 34, y: 16)
         .onAppear { DispatchQueue.main.async { searchFocused = true } }
-        .onDisappear { intake.cancel() }
+        .onDisappear {
+            intake.cancel()
+            folderBrowser.cancel()
+        }
         .onChange(of: intake.inspection) { inspection in
             guard let inspection else { return }
             name = inspection.suggestedName
@@ -170,18 +238,34 @@ struct DesktopProjectCreationPalette: View {
             instructionReferences = Set(availableInstructionReferences)
         }
         .onMoveCommand { direction in
-            guard activeSource == nil, intake.inspection == nil else { return }
-            moveSelection(direction)
+            if activeSource == nil, intake.inspection == nil {
+                moveSelection(direction)
+            } else if activeSource == .local, intake.inspection == nil, !localFolderPathFocused {
+                moveFolderSelection(direction)
+            }
         }
         .background {
-            DesktopPaletteKeyMonitor { direction in
-                guard activeSource == nil, intake.inspection == nil else { return }
-                switch direction {
-                case .previous: moveSelection(.up)
-                case .next: moveSelection(.down)
+            if activeSource == nil, intake.inspection == nil {
+                DesktopPaletteKeyMonitor { direction in
+                    guard activeSource == nil, intake.inspection == nil else { return }
+                    switch direction {
+                    case .previous: moveSelection(.up)
+                    case .next: moveSelection(.down)
+                    }
                 }
+                .frame(width: 0, height: 0)
             }
-            .frame(width: 0, height: 0)
+        }
+        .background {
+            if activeSource == .local, intake.inspection == nil {
+                DesktopProjectFolderKeyMonitor(
+                    isPathFocused: localFolderPathFocused,
+                    move: moveFolderSelection,
+                    activate: openSelectedFolder,
+                    parent: browseParentFolder
+                )
+                .frame(width: 0, height: 0)
+            }
         }
         .onExitCommand(perform: goBackOrDismiss)
         .accessibilityElement(children: .contain)
@@ -319,23 +403,114 @@ struct DesktopProjectCreationPalette: View {
         }
     }
 
-    private var localInspectionState: some View {
-        VStack(spacing: 14) {
-            if intake.isWorking {
-                ProgressView("Inspecting the selected folder…")
-            } else {
-                Image(systemName: "exclamationmark.triangle")
-                    .font(.title2)
-                    .foregroundStyle(Nord.auroraYellow)
-                Text(intake.errorMessage ?? "The selected folder could not be inspected.")
-                    .multilineTextAlignment(.center)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: 480)
-                Button("Choose another folder", action: chooseLocalFolder)
+    private var localFolderBrowserEntry: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                TextField("Enter path (e.g. ~/Projects/my-app)", text: $folderBrowser.path)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($localFolderPathFocused)
+                    .onSubmit { browseLocalFolderPath() }
+                    .accessibilityLabel("Local folder path")
+                Button("Add", systemImage: "arrow.right", action: inspectLocalFolder)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(folderBrowser.existingDirectoryPath == nil || folderBrowser.isWorking || intake.isWorking)
+                    .keyboardShortcut(.defaultAction)
+                    .accessibilityHint("Review this folder before adding the project")
             }
+            .padding(.horizontal, 20)
+            .padding(.top, 18)
+            .padding(.bottom, 12)
+
+            if folderBrowser.isWorking {
+                ProgressView("Loading directories…")
+                    .controlSize(.small)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 22)
+                    .padding(.bottom, 8)
+            }
+
+            if let message = folderBrowser.errorMessage ?? intake.errorMessage {
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(Nord.auroraRed)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 22)
+                    .padding(.bottom, 8)
+            }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 3) {
+                    if let snapshot = folderBrowser.snapshot, !snapshot.entries.isEmpty {
+                        ForEach(snapshot.entries) { entry in
+                            localFolderRow(entry)
+                        }
+                    } else if !folderBrowser.isWorking && folderBrowser.errorMessage == nil {
+                        Text("No directories in this folder.")
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(28)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.bottom, 14)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .onChange(of: folderBrowser.snapshot?.entries.map(\.path) ?? []) { _, paths in
+                if let selectedFolderEntryPath, paths.contains(selectedFolderEntryPath) {
+                    return
+                } else {
+                    selectedFolderEntryPath = paths.first
+                }
+            }
+
+            Text("Choose an existing folder to review. Kaname will not modify it while adding the project.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 20)
+                .padding(.bottom, 14)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(24)
+        .onAppear {
+            if folderBrowser.snapshot == nil && !folderBrowser.isWorking {
+                folderBrowser.browse()
+            }
+            DispatchQueue.main.async { localFolderPathFocused = true }
+        }
+    }
+
+    private func localFolderRow(_ entry: DesktopProjectFolderEntry) -> some View {
+        let selected = entry.path == selectedFolderEntryPath
+        return Button(action: { openFolder(entry) }) {
+            HStack(spacing: 10) {
+                Image(systemName: entry.isParent ? "arrow.turn.up.left" : "folder")
+                    .frame(width: 18)
+                Text(entry.name)
+                    .fontWeight(entry.isParent ? .regular : .medium)
+                Spacer()
+                if entry.isParent {
+                    Text("Parent")
+                        .font(.caption2)
+                        .opacity(0.72)
+                }
+            }
+            .foregroundStyle(selected ? Nord.polarNight0 : Nord.frost1)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .contentShape(Rectangle())
+            .background(
+                selected ? Nord.frost1 : Nord.polarNight1.opacity(0.42),
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            if hovering { selectedFolderEntryPath = entry.path }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(entry.isParent ? "Parent folder" : "\(entry.name) folder")
+        .accessibilityHint(entry.isParent ? "Go up one folder" : "Open this folder")
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
     private func intakeCard(_ inspection: DesktopProjectIntakeSnapshot) -> some View {
@@ -439,7 +614,7 @@ struct DesktopProjectCreationPalette: View {
                 .foregroundStyle(Nord.auroraGreen)
             Spacer()
             if intake.inspection != nil {
-                Button("Change folder", action: chooseLocalFolder)
+                Button("Change folder", action: showLocalFolderBrowser)
                     .buttonStyle(.plain)
                 Button("Add project", action: createInspectedProject)
                     .buttonStyle(.borderedProminent)
@@ -455,6 +630,12 @@ struct DesktopProjectCreationPalette: View {
                     .buttonStyle(.borderedProminent)
                     .disabled(remoteReference == nil || remoteParentPath.isEmpty || intake.isWorking)
                     .keyboardShortcut(.defaultAction)
+            } else if activeSource == .local {
+                Text("↑↓ Navigate   ↩ Open   ⌫ Parent   esc Close")
+                    .foregroundStyle(.tertiary)
+                Spacer()
+                Button("Open in Finder", action: openLocalFolderInFinder)
+                    .buttonStyle(.plain)
             } else if activeSource == nil {
                 Text("↑↓ Navigate   ↩ Select   esc Close").foregroundStyle(.tertiary)
             } else {
@@ -494,7 +675,7 @@ struct DesktopProjectCreationPalette: View {
         creationError = nil
         switch source {
         case .local:
-            chooseLocalFolder()
+            showLocalFolderBrowser()
         case .github, .gitURL:
             activeSource = source
         case .folderless:
@@ -503,14 +684,58 @@ struct DesktopProjectCreationPalette: View {
         }
     }
 
-    private func chooseLocalFolder() {
+    private func showLocalFolderBrowser() {
+        intake.reset()
+        folderBrowser.reset()
+        selectedFolderEntryPath = nil
+        activeSource = .local
+        creationError = nil
+        folderBrowser.browse()
+        DispatchQueue.main.async { localFolderPathFocused = true }
+    }
+
+    private func browseLocalFolderPath() {
+        selectedFolderEntryPath = nil
+        folderBrowser.browse()
+    }
+
+    private func inspectLocalFolder() {
+        guard let path = folderBrowser.existingDirectoryPath else { return }
+        intake.inspect(path: path)
+    }
+
+    private func openFolder(_ entry: DesktopProjectFolderEntry) {
+        selectedFolderEntryPath = entry.path
+        folderBrowser.browse(path: entry.path)
+        DispatchQueue.main.async { localFolderPathFocused = false }
+    }
+
+    private func browseParentFolder() {
+        guard let parent = folderBrowser.snapshot?.parentDirectoryPath else { return }
+        folderBrowser.browse(path: parent)
+        selectedFolderEntryPath = nil
+    }
+
+    private func openSelectedFolder() {
+        guard let selectedFolderEntryPath,
+              let entry = folderBrowser.snapshot?.entries.first(where: { $0.path == selectedFolderEntryPath }) else {
+            return
+        }
+        openFolder(entry)
+    }
+
+    private func openLocalFolderInFinder() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
         panel.canCreateDirectories = false
         panel.prompt = "Review project"
+        if let existingPath = folderBrowser.existingDirectoryPath {
+            panel.directoryURL = URL(fileURLWithPath: existingPath, isDirectory: true)
+        }
         guard panel.runModal() == .OK, let path = panel.url?.path else { return }
+        folderBrowser.prepare(path: path)
         activeSource = .local
         intake.inspect(path: path)
     }
@@ -585,15 +810,36 @@ struct DesktopProjectCreationPalette: View {
         }
     }
 
+    private func moveFolderSelection(_ direction: MoveCommandDirection) {
+        guard let entries = folderBrowser.snapshot?.entries, !entries.isEmpty else { return }
+        let currentIndex = entries.firstIndex { $0.path == selectedFolderEntryPath } ?? 0
+        switch direction {
+        case .up:
+            selectedFolderEntryPath = entries[max(0, currentIndex - 1)].path
+        case .down:
+            selectedFolderEntryPath = entries[min(entries.count - 1, currentIndex + 1)].path
+        default:
+            break
+        }
+    }
+
     private func goBackOrDismiss() {
-        if activeSource != nil || intake.inspection != nil { goBack() }
-        else { close() }
+        if activeSource == .local, intake.inspection == nil {
+            close()
+        } else if activeSource != nil || intake.inspection != nil {
+            goBack()
+        } else {
+            close()
+        }
     }
 
     private func goBack() {
-        intake.cancel()
-        intake.inspection = nil
-        intake.errorMessage = nil
+        if activeSource == .local, intake.inspection != nil {
+            showLocalFolderBrowser()
+            return
+        }
+        intake.reset()
+        folderBrowser.cancel()
         activeSource = nil
         creationError = nil
         DispatchQueue.main.async { searchFocused = true }
@@ -601,6 +847,92 @@ struct DesktopProjectCreationPalette: View {
 
     private func close() {
         intake.cancel()
+        folderBrowser.cancel()
         dismiss()
     }
 }
+
+#if os(macOS)
+private struct DesktopProjectFolderKeyMonitor: NSViewRepresentable {
+    let isPathFocused: Bool
+    let move: (MoveCommandDirection) -> Void
+    let activate: () -> Void
+    let parent: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(
+            isPathFocused: isPathFocused,
+            move: move,
+            activate: activate,
+            parent: parent
+        )
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        context.coordinator.install()
+        return NSView(frame: .zero)
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.isPathFocused = isPathFocused
+        context.coordinator.move = move
+        context.coordinator.activate = activate
+        context.coordinator.parent = parent
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.remove()
+    }
+
+    @MainActor
+    final class Coordinator {
+        var isPathFocused: Bool
+        var move: (MoveCommandDirection) -> Void
+        var activate: () -> Void
+        var parent: () -> Void
+        private var monitor: Any?
+
+        init(
+            isPathFocused: Bool,
+            move: @escaping (MoveCommandDirection) -> Void,
+            activate: @escaping () -> Void,
+            parent: @escaping () -> Void
+        ) {
+            self.isPathFocused = isPathFocused
+            self.move = move
+            self.activate = activate
+            self.parent = parent
+        }
+
+        func install() {
+            guard monitor == nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self, !self.isPathFocused else { return event }
+                let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+                guard modifiers.isEmpty else { return event }
+                switch event.keyCode {
+                case 125:
+                    self.move(.down)
+                    return nil
+                case 126:
+                    self.move(.up)
+                    return nil
+                case 36, 76:
+                    self.activate()
+                    return nil
+                case 51:
+                    self.parent()
+                    return nil
+                default:
+                    return event
+                }
+            }
+        }
+
+        func remove() {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+            monitor = nil
+        }
+    }
+}
+#endif
