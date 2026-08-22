@@ -11,6 +11,54 @@ import EventKit
 
 struct ProviderConnectivityTests {
     @Test
+    func savedGoogleAccountsLoadSynchronouslyWithoutReadingKeychain() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "kaname-google-account-index-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data(
+            """
+            {
+              "accounts": [
+                {
+                  "id": "account-1",
+                  "identity": "first@example.test",
+                  "displayName": "First",
+                  "capabilities": ["Gmail read-only"]
+                },
+                {
+                  "id": "account-2",
+                  "identity": "second@example.test",
+                  "displayName": "Second",
+                  "capabilities": ["Gmail read-only"],
+                  "authorizationVersion": 2
+                }
+              ]
+            }
+            """.utf8
+        ).write(to: root.appending(path: "accounts.json"))
+
+        let accounts = try NativeGoogleIntegrationService.savedAccounts(rootDirectory: root)
+
+        #expect(accounts.map(\.id) == ["account-1", "account-2"])
+        #expect(accounts[0].authorizationVersion == nil)
+        #expect(accounts[1].authorizationVersion == 2)
+    }
+
+    @Test
+    func savedGoogleAccountReadFailureIsNotReportedAsNoConnections() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "kaname-google-account-index-invalid-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data("{not-json".utf8).write(to: root.appending(path: "accounts.json"))
+
+        #expect(throws: NativeGoogleIntegrationError.self) {
+            try NativeGoogleIntegrationService.savedAccounts(rootDirectory: root)
+        }
+    }
+
+    @Test
     func projectIntakeParsesGitHubHTTPSAndSSHReferencesWithoutEmbeddedCredentials() throws {
         let slug = try DesktopProjectIntakeService.parseRemoteReference("Cyberlane/Kaname")
         let suffixedSlug = try DesktopProjectIntakeService.parseRemoteReference("Cyberlane/Kaname.git")

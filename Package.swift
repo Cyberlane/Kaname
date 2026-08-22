@@ -46,6 +46,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/apple/swift-protobuf.git", exact: "1.38.1"),
         .package(url: "https://github.com/1amageek/swift-flow.git", exact: "0.20.3"),
+        .package(url: "https://github.com/scinfu/SwiftSoup.git", exact: "2.13.7"),
     ],
     targets: [
         .target(name: "KanameDomain"),
@@ -73,6 +74,7 @@ let package = Package(
                 "KanameDomain",
                 "KanameLocalCore",
                 "KanameProtocol",
+                "SwiftSoup",
                 .product(name: "SwiftProtobuf", package: "swift-protobuf"),
             ]
         ),

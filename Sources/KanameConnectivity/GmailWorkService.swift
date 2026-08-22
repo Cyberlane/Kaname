@@ -17,7 +17,22 @@ public struct GmailMessageSnapshot: Equatable, Identifiable, Sendable {
     public let recipients: String
     public let subject: String
     public let dateDescription: String
+    /// Canonical readable text used by summaries, workflows, and other semantic consumers.
     public let body: String
+    /// A bounded, DOM-derived Reader representation for first-party presentation only.
+    public let readerMarkdown: String?
+    /// The bounded original HTML representation. It is never substituted for `body`.
+    public let htmlBody: String?
+    /// An inert, allowlisted HTML document for the isolated mail viewer.
+    public let sanitizedHTML: String?
+    /// A separately sanitized variant that permits direct HTTPS image loads.
+    /// It is presentation-only and must require an explicit per-message action.
+    public let directRemoteImagesHTML: String?
+    public let remoteImageCount: Int
+    public let insecureRemoteImageCount: Int
+    public let embeddedImageCount: Int
+    /// Explains when Kaname had to fall back from the full message representation.
+    public let bodyDisplayNotice: String?
     public let labels: [String]
     public let attachments: [GmailAttachmentSnapshot]
     public let inReplyTo: String
@@ -25,6 +40,70 @@ public struct GmailMessageSnapshot: Equatable, Identifiable, Sendable {
     /// A deliberately bounded projection. Raw Gmail headers are never exposed
     /// through the workflow surface merely because a message was fetched.
     public let projectedHeaders: [String: String]
+
+    init(
+        id: String,
+        threadID: String,
+        sender: String,
+        recipients: String,
+        subject: String,
+        dateDescription: String,
+        body: String,
+        readerMarkdown: String? = nil,
+        htmlBody: String? = nil,
+        sanitizedHTML: String? = nil,
+        directRemoteImagesHTML: String? = nil,
+        remoteImageCount: Int = 0,
+        insecureRemoteImageCount: Int = 0,
+        embeddedImageCount: Int = 0,
+        bodyDisplayNotice: String? = nil,
+        labels: [String],
+        attachments: [GmailAttachmentSnapshot],
+        inReplyTo: String,
+        references: String,
+        projectedHeaders: [String: String]
+    ) {
+        self.id = id
+        self.threadID = threadID
+        self.sender = sender
+        self.recipients = recipients
+        self.subject = subject
+        self.dateDescription = dateDescription
+        self.body = body
+        self.readerMarkdown = readerMarkdown
+        self.htmlBody = htmlBody
+        self.sanitizedHTML = sanitizedHTML
+        self.directRemoteImagesHTML = directRemoteImagesHTML
+        self.remoteImageCount = remoteImageCount
+        self.insecureRemoteImageCount = insecureRemoteImageCount
+        self.embeddedImageCount = embeddedImageCount
+        self.bodyDisplayNotice = bodyDisplayNotice
+        self.labels = labels
+        self.attachments = attachments
+        self.inReplyTo = inReplyTo
+        self.references = references
+        self.projectedHeaders = projectedHeaders
+    }
+}
+
+struct GmailExternalBodyReference: Equatable, Hashable, Sendable {
+    let messageID: String
+    let attachmentID: String
+    let expectedSize: Int
+
+    init(messageID: String, attachmentID: String, expectedSize: Int) {
+        self.messageID = messageID
+        self.attachmentID = attachmentID
+        self.expectedSize = expectedSize
+    }
+}
+
+struct GmailInlineImageReference: Equatable, Hashable, Sendable {
+    let messageID: String
+    let attachmentID: String
+    let expectedSize: Int
+    let contentID: String
+    let mimeType: String
 }
 
 public struct GmailThreadDetailSnapshot: Equatable, Identifiable, Sendable {
@@ -608,7 +687,62 @@ public extension NativeGoogleIntegrationService {
         let id = try GmailAPIParser.validatedID(threadID)
         let url = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/threads/\(id)?format=full")!
         let data = try await authorizedData(url: url, accessToken: accessToken, service: "Gmail thread")
-        return try GmailAPIParser.thread(data: data, account: account)
+        let references = try GmailAPIParser.externalBodyReferences(data: data)
+        var externalBodyData: [GmailExternalBodyReference: Data] = [:]
+        var fetchedBytes = 0
+        for reference in references {
+            let attachmentURL = URL(
+                string: "https://gmail.googleapis.com/gmail/v1/users/me/messages/\(reference.messageID)/attachments/\(reference.attachmentID)"
+            )!
+            let response = try await authorizedData(
+                url: attachmentURL,
+                accessToken: accessToken,
+                service: "Gmail text body"
+            )
+            let decoded = try GmailAPIParser.attachment(data: response)
+            fetchedBytes += decoded.count
+            guard decoded.count <= GmailAPIParser.maximumExternalBodyPartBytes,
+                  fetchedBytes <= GmailAPIParser.maximumExternalBodyTotalBytes else {
+                throw NativeGoogleIntegrationError.invalidResponse(
+                    "Gmail text body exceeded its bounded response limit"
+                )
+            }
+            externalBodyData[reference] = decoded
+        }
+        let inlineImageReferences = try GmailAPIParser.externalInlineImageReferences(
+            data: data,
+            externalBodyData: externalBodyData
+        )
+        var externalInlineImageData: [GmailInlineImageReference: Data] = [:]
+        var fetchedInlineImageBytes = 0
+        for reference in inlineImageReferences {
+            let attachmentURL = URL(
+                string: "https://gmail.googleapis.com/gmail/v1/users/me/messages/\(reference.messageID)/attachments/\(reference.attachmentID)"
+            )!
+            do {
+                let response = try await authorizedData(
+                    url: attachmentURL,
+                    accessToken: accessToken,
+                    service: "Gmail inline image"
+                )
+                let decoded = try GmailAPIParser.attachment(data: response)
+                guard decoded.count <= GmailAPIParser.maximumInlineImagePartBytes,
+                      fetchedInlineImageBytes + decoded.count <= GmailAPIParser.maximumInlineImageTotalBytes else {
+                    continue
+                }
+                fetchedInlineImageBytes += decoded.count
+                externalInlineImageData[reference] = decoded
+            } catch {
+                // An unavailable decorative image must not make the readable message fail.
+                continue
+            }
+        }
+        return try GmailAPIParser.thread(
+            data: data,
+            account: account,
+            externalBodyData: externalBodyData,
+            externalInlineImageData: externalInlineImageData
+        )
     }
 }
 
@@ -626,6 +760,7 @@ private struct GmailWireMessage: Decodable {
     let id: String
     let threadId: String
     let labelIds: [String]?
+    let snippet: String?
     let payload: GmailWirePart?
 }
 
@@ -648,7 +783,45 @@ private struct GmailWireThread: Decodable {
     let messages: [GmailWireMessage]?
 }
 
+private struct GmailParsedBody {
+    static let empty = GmailParsedBody(
+        semanticText: "",
+        readerMarkdown: nil,
+        htmlBody: nil,
+        sanitizedHTML: nil,
+        directRemoteImagesHTML: nil,
+        remoteImageCount: 0,
+        insecureRemoteImageCount: 0,
+        embeddedImageCount: 0,
+        displayNotice: nil,
+        containsPlainRepresentation: false
+    )
+
+    let semanticText: String
+    let readerMarkdown: String?
+    let htmlBody: String?
+    let sanitizedHTML: String?
+    let directRemoteImagesHTML: String?
+    let remoteImageCount: Int
+    let insecureRemoteImageCount: Int
+    let embeddedImageCount: Int
+    let displayNotice: String?
+    let containsPlainRepresentation: Bool
+
+    var isEmpty: Bool {
+        semanticText.isEmpty && (readerMarkdown?.isEmpty ?? true) && (htmlBody?.isEmpty ?? true)
+    }
+}
+
 public enum GmailAPIParser {
+    static let maximumExternalBodyPartBytes = MailHTMLReader.maximumInputBytes
+    static let maximumExternalBodyTotalBytes = 4_000_000
+    static let maximumExternalBodyPartCount = 32
+    static let maximumInlineImagePartBytes = MailHTMLReader.maximumEmbeddedImageBytes
+    static let maximumInlineImageTotalBytes = 8_000_000
+    static let maximumInlineImagePartCount = 32
+    private static let maximumMIMEPartCount = 5_000
+
     public struct HistoryPage: Equatable, Sendable {
         public let latestHistoryID: String
         public let events: [GmailHistoryEvent]
@@ -766,10 +939,33 @@ public enum GmailAPIParser {
         return ThreadPage(ids: try (response.threads ?? []).map { try validatedID($0.id) }, nextPageToken: response.nextPageToken)
     }
 
-    public static func thread(data: Data, account: NativeGoogleAccountSnapshot) throws -> GmailThreadDetailSnapshot {
+    public static func thread(
+        data: Data,
+        account: NativeGoogleAccountSnapshot
+    ) throws -> GmailThreadDetailSnapshot {
+        try thread(
+            data: data,
+            account: account,
+            externalBodyData: [:],
+            externalInlineImageData: [:]
+        )
+    }
+
+    static func thread(
+        data: Data,
+        account: NativeGoogleAccountSnapshot,
+        externalBodyData: [GmailExternalBodyReference: Data],
+        externalInlineImageData: [GmailInlineImageReference: Data] = [:]
+    ) throws -> GmailThreadDetailSnapshot {
         do {
             let decoded = try JSONDecoder().decode(GmailWireThread.self, from: data)
-            let messages = try (decoded.messages ?? []).map { try messageSnapshot($0) }
+            let messages = try (decoded.messages ?? []).map {
+                try messageSnapshot(
+                    $0,
+                    externalBodyData: externalBodyData,
+                    externalInlineImageData: externalInlineImageData
+                )
+            }
             return GmailThreadDetailSnapshot(
                 id: try validatedID(decoded.id),
                 accountID: account.id,
@@ -780,6 +976,131 @@ public enum GmailAPIParser {
             )
         } catch let error as GmailWorkError { throw error }
         catch { throw NativeGoogleIntegrationError.invalidResponse("Gmail thread") }
+    }
+
+    static func externalBodyReferences(data: Data) throws -> [GmailExternalBodyReference] {
+        var references: [GmailExternalBodyReference] = []
+        var seen = Set<GmailExternalBodyReference>()
+        var declaredBytes = 0
+
+        for message in try boundedMIMEMessages(data: data) {
+            for part in message.parts {
+                let filename = part.filename?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let mimeType = baseMIMEType(part)
+                guard filename.isEmpty,
+                      mimeType == "text/plain" || mimeType == "text/html",
+                      part.body?.data == nil,
+                      let attachmentID = part.body?.attachmentId else { continue }
+                let expectedSize = part.body?.size ?? 0
+                guard expectedSize >= 0,
+                      expectedSize <= maximumExternalBodyPartBytes else {
+                    throw NativeGoogleIntegrationError.invalidResponse(
+                        "Gmail text body exceeded its bounded part limit"
+                    )
+                }
+                let reference = GmailExternalBodyReference(
+                    messageID: message.id,
+                    attachmentID: try validatedID(attachmentID),
+                    expectedSize: expectedSize
+                )
+                guard seen.insert(reference).inserted else { continue }
+                references.append(reference)
+                declaredBytes += expectedSize
+                guard references.count <= maximumExternalBodyPartCount,
+                      declaredBytes <= maximumExternalBodyTotalBytes else {
+                    throw NativeGoogleIntegrationError.invalidResponse(
+                        "Gmail text body exceeded its bounded thread limit"
+                    )
+                }
+            }
+        }
+        return references
+    }
+
+    static func externalInlineImageReferences(
+        data: Data,
+        externalBodyData: [GmailExternalBodyReference: Data] = [:]
+    ) throws -> [GmailInlineImageReference] {
+        var references: [GmailInlineImageReference] = []
+        var seen = Set<GmailInlineImageReference>()
+        var declaredBytes = 0
+
+        for message in try boundedMIMEMessages(data: data) {
+            let referencedIDs = message.root.map {
+                referencedContentIDs(
+                    part: $0,
+                    messageID: message.id,
+                    externalBodyData: externalBodyData
+                )
+            } ?? []
+            for part in message.parts {
+                guard let contentID = contentID(for: part),
+                      referencedIDs.contains(contentID),
+                      let mimeType = inlineImageMIMEType(for: part),
+                      part.body?.data == nil,
+                      let attachmentID = part.body?.attachmentId else { continue }
+                let expectedSize = part.body?.size ?? 0
+                guard expectedSize >= 0,
+                      expectedSize <= maximumInlineImagePartBytes,
+                      references.count < maximumInlineImagePartCount,
+                      declaredBytes + expectedSize <= maximumInlineImageTotalBytes else {
+                    continue
+                }
+                let reference = GmailInlineImageReference(
+                    messageID: message.id,
+                    attachmentID: try validatedID(attachmentID),
+                    expectedSize: expectedSize,
+                    contentID: contentID,
+                    mimeType: mimeType
+                )
+                guard seen.insert(reference).inserted else { continue }
+                references.append(reference)
+                declaredBytes += expectedSize
+            }
+        }
+        return references
+    }
+
+    private struct BoundedMIMEMessage {
+        let id: String
+        let root: GmailWirePart?
+        let parts: [GmailWirePart]
+    }
+
+    private static func boundedMIMEMessages(data: Data) throws -> [BoundedMIMEMessage] {
+        do {
+            let decoded = try JSONDecoder().decode(GmailWireThread.self, from: data)
+            var messages: [BoundedMIMEMessage] = []
+            var visitedParts = 0
+
+            for message in decoded.messages ?? [] {
+                let messageID = try validatedID(message.id)
+                var flattenedParts: [GmailWirePart] = []
+                var stack = message.payload.map { [$0] } ?? []
+                while let part = stack.popLast() {
+                    visitedParts += 1
+                    guard visitedParts <= maximumMIMEPartCount else {
+                        throw NativeGoogleIntegrationError.invalidResponse(
+                            "Gmail MIME tree exceeded its bounded part limit"
+                        )
+                    }
+                    flattenedParts.append(part)
+                    stack.append(contentsOf: part.parts ?? [])
+                }
+                messages.append(BoundedMIMEMessage(
+                    id: messageID,
+                    root: message.payload,
+                    parts: flattenedParts
+                ))
+            }
+            return messages
+        } catch let error as GmailWorkError {
+            throw error
+        } catch let error as NativeGoogleIntegrationError {
+            throw error
+        } catch {
+            throw NativeGoogleIntegrationError.invalidResponse("Gmail thread")
+        }
     }
 
     public static func threadMetadata(
@@ -817,12 +1138,56 @@ public enum GmailAPIParser {
         }
     }
 
-    public static func message(data: Data, account: NativeGoogleAccountSnapshot) throws -> GmailMessageSnapshot {
-        try parsedMessage(data: data, service: "Gmail message") { (message: GmailWireMessage) in message }
+    public static func message(
+        data: Data,
+        account: NativeGoogleAccountSnapshot
+    ) throws -> GmailMessageSnapshot {
+        try message(
+            data: data,
+            account: account,
+            externalBodyData: [:],
+            externalInlineImageData: [:]
+        )
     }
 
-    public static func draftMessage(data: Data, account: NativeGoogleAccountSnapshot) throws -> GmailMessageSnapshot {
-        try parsedMessage(data: data, service: "Gmail draft") { (draft: GmailWireDraft) in draft.message }
+    static func message(
+        data: Data,
+        account: NativeGoogleAccountSnapshot,
+        externalBodyData: [GmailExternalBodyReference: Data],
+        externalInlineImageData: [GmailInlineImageReference: Data] = [:]
+    ) throws -> GmailMessageSnapshot {
+        try parsedMessage(
+            data: data,
+            service: "Gmail message",
+            externalBodyData: externalBodyData,
+            externalInlineImageData: externalInlineImageData
+        ) { (message: GmailWireMessage) in message }
+    }
+
+    public static func draftMessage(
+        data: Data,
+        account: NativeGoogleAccountSnapshot
+    ) throws -> GmailMessageSnapshot {
+        try draftMessage(
+            data: data,
+            account: account,
+            externalBodyData: [:],
+            externalInlineImageData: [:]
+        )
+    }
+
+    static func draftMessage(
+        data: Data,
+        account: NativeGoogleAccountSnapshot,
+        externalBodyData: [GmailExternalBodyReference: Data],
+        externalInlineImageData: [GmailInlineImageReference: Data] = [:]
+    ) throws -> GmailMessageSnapshot {
+        try parsedMessage(
+            data: data,
+            service: "Gmail draft",
+            externalBodyData: externalBodyData,
+            externalInlineImageData: externalInlineImageData
+        ) { (draft: GmailWireDraft) in draft.message }
     }
 
     public static func normalizedRecipients(_ value: String) -> [String] {
@@ -839,9 +1204,15 @@ public enum GmailAPIParser {
     private static func parsedMessage<Wire: Decodable>(
         data: Data,
         service: String,
+        externalBodyData: [GmailExternalBodyReference: Data],
+        externalInlineImageData: [GmailInlineImageReference: Data],
         message: (Wire) -> GmailWireMessage
     ) throws -> GmailMessageSnapshot {
-        try messageSnapshot(message(GoogleAPIResponseParser.decode(Wire.self, from: data, service: service)))
+        try messageSnapshot(
+            message(GoogleAPIResponseParser.decode(Wire.self, from: data, service: service)),
+            externalBodyData: externalBodyData,
+            externalInlineImageData: externalInlineImageData
+        )
     }
 
     public static func labels(data: Data) throws -> [GmailLabelSnapshot] {
@@ -955,19 +1326,53 @@ public enum GmailAPIParser {
         try GoogleAPIResponseParser.decode(GmailWireOutboundReceipt.self, from: data, service: service)
     }
 
-    private static func messageSnapshot(_ message: GmailWireMessage) throws -> GmailMessageSnapshot {
+    private static func messageSnapshot(
+        _ message: GmailWireMessage,
+        externalBodyData: [GmailExternalBodyReference: Data],
+        externalInlineImageData: [GmailInlineImageReference: Data]
+    ) throws -> GmailMessageSnapshot {
         let headers = message.payload?.headers ?? []
         func header(_ name: String) -> String {
             headers.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }?.value ?? ""
         }
         var attachments: [GmailAttachmentSnapshot] = []
+        let resolvedEmbeddedImages = message.payload.map {
+            embeddedImages(
+                part: $0,
+                messageID: message.id,
+                externalInlineImageData: externalInlineImageData
+            )
+        } ?? [:]
         let body = message.payload.map {
-            bodyAndAttachments(part: $0, messageID: message.id, attachments: &attachments)
-        } ?? ""
+            bodyAndAttachments(
+                part: $0,
+                messageID: message.id,
+                attachments: &attachments,
+                externalBodyData: externalBodyData,
+                embeddedImages: resolvedEmbeddedImages
+            )
+        } ?? .empty
+        let fallbackSnippet = MailHTMLReader.boundedPlainText(message.snippet ?? "")
+        let semanticText = body.semanticText.isEmpty ? fallbackSnippet : body.semanticText
+        let displayNotice: String? = if let notice = body.displayNotice {
+            notice
+        } else if body.semanticText.isEmpty && !fallbackSnippet.isEmpty {
+            "The full message body was unavailable. Showing Gmail's text preview instead."
+        } else {
+            nil
+        }
         return GmailMessageSnapshot(
             id: try validatedID(message.id), threadID: try validatedID(message.threadId),
             sender: header("From"), recipients: header("To"), subject: header("Subject"),
-            dateDescription: header("Date"), body: body, labels: message.labelIds ?? [],
+            dateDescription: header("Date"), body: semanticText,
+            readerMarkdown: body.readerMarkdown, htmlBody: body.htmlBody,
+            sanitizedHTML: body.sanitizedHTML,
+            directRemoteImagesHTML: body.directRemoteImagesHTML,
+            remoteImageCount: body.remoteImageCount,
+            insecureRemoteImageCount: body.insecureRemoteImageCount,
+            embeddedImageCount: body.embeddedImageCount,
+            bodyDisplayNotice: displayNotice,
+            labels: message.labelIds ?? [],
             attachments: attachments, inReplyTo: header("In-Reply-To"), references: header("References"),
             projectedHeaders: Dictionary(uniqueKeysWithValues: [
                 "List-Unsubscribe", "List-Unsubscribe-Post", "Auto-Submitted", "Precedence",
@@ -981,8 +1386,10 @@ public enum GmailAPIParser {
     private static func bodyAndAttachments(
         part: GmailWirePart,
         messageID: String,
-        attachments: inout [GmailAttachmentSnapshot]
-    ) -> String {
+        attachments: inout [GmailAttachmentSnapshot],
+        externalBodyData: [GmailExternalBodyReference: Data],
+        embeddedImages: [String: MailHTMLEmbeddedImage]
+    ) -> GmailParsedBody {
         let filename = part.filename?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !filename.isEmpty, let attachmentID = part.body?.attachmentId {
             attachments.append(GmailAttachmentSnapshot(
@@ -995,22 +1402,285 @@ public enum GmailAPIParser {
         }
         let parts = part.parts ?? []
         let children = parts.map {
-            bodyAndAttachments(part: $0, messageID: messageID, attachments: &attachments)
+            bodyAndAttachments(
+                part: $0,
+                messageID: messageID,
+                attachments: &attachments,
+                externalBodyData: externalBodyData,
+                embeddedImages: embeddedImages
+            )
         }
-        if part.mimeType?.lowercased() == "multipart/alternative",
-           let plainIndex = parts.firstIndex(where: { $0.mimeType?.lowercased() == "text/plain" }),
-           !children[plainIndex].isEmpty {
-            return children[plainIndex]
+        if baseMIMEType(part) == "multipart/alternative" {
+            let plain = children.last { $0.containsPlainRepresentation && !$0.semanticText.isEmpty }
+            let html = children.last {
+                $0.sanitizedHTML?.isEmpty == false || $0.htmlBody?.isEmpty == false
+            }
+            let display = children.last { !$0.isEmpty } ?? .empty
+            let semantic = plain?.semanticText ?? html?.semanticText ?? display.semanticText
+            return GmailParsedBody(
+                semanticText: semantic,
+                readerMarkdown: html?.readerMarkdown ?? display.readerMarkdown,
+                htmlBody: html?.htmlBody,
+                sanitizedHTML: html?.sanitizedHTML,
+                directRemoteImagesHTML: html?.directRemoteImagesHTML ?? display.directRemoteImagesHTML,
+                remoteImageCount: html?.remoteImageCount ?? display.remoteImageCount,
+                insecureRemoteImageCount: html?.insecureRemoteImageCount ?? display.insecureRemoteImageCount,
+                embeddedImageCount: html?.embeddedImageCount ?? display.embeddedImageCount,
+                displayNotice: plain == nil && html?.sanitizedHTML == nil
+                    ? (html?.displayNotice ?? display.displayNotice)
+                    : nil,
+                containsPlainRepresentation: plain != nil
+            )
         }
         let nonemptyChildren = children.filter { !$0.isEmpty }
-        if !nonemptyChildren.isEmpty { return nonemptyChildren.joined(separator: "\n\n") }
-        guard filename.isEmpty, let encoded = part.body?.data,
-              let data = Data(base64URLEncoded: encoded),
-              let text = String(data: data, encoding: .utf8) else { return "" }
-        if part.mimeType?.lowercased() == "text/html" {
-            return text.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+        if !nonemptyChildren.isEmpty {
+            let semantic = MailHTMLReader.boundedPlainText(
+                nonemptyChildren.map(\.semanticText).filter { !$0.isEmpty }.joined(separator: "\n\n")
+            )
+            let reader = boundedReaderMarkdown(
+                nonemptyChildren.compactMap { child in
+                    child.readerMarkdown ?? (child.semanticText.isEmpty
+                        ? nil : MailHTMLReader.markdown(fromPlainText: child.semanticText))
+                }.joined(separator: "\n\n---\n\n")
+            )
+            let html = boundedHTML(
+                nonemptyChildren.compactMap(\.htmlBody).joined(separator: "\n<hr>\n")
+            )
+            let displayChild = nonemptyChildren.last {
+                $0.sanitizedHTML?.isEmpty == false
+            }
+            let sanitizedHTML = displayChild?.sanitizedHTML
+            return GmailParsedBody(
+                semanticText: semantic,
+                readerMarkdown: reader,
+                htmlBody: html,
+                sanitizedHTML: sanitizedHTML,
+                directRemoteImagesHTML: displayChild?.directRemoteImagesHTML,
+                remoteImageCount: displayChild?.remoteImageCount ?? 0,
+                insecureRemoteImageCount: displayChild?.insecureRemoteImageCount ?? 0,
+                embeddedImageCount: displayChild?.embeddedImageCount ?? 0,
+                displayNotice: sanitizedHTML == nil
+                    ? nonemptyChildren.compactMap(\.displayNotice).first
+                    : nil,
+                containsPlainRepresentation: nonemptyChildren.contains(where: \.containsPlainRepresentation)
+            )
         }
-        return text
+
+        guard filename.isEmpty,
+              let data = bodyData(
+                  part: part,
+                  messageID: messageID,
+                  externalBodyData: externalBodyData
+              ),
+              let text = decodedText(data, for: part) else { return .empty }
+        switch baseMIMEType(part) {
+        case "text/html":
+            guard let reader = MailHTMLReader.render(text, embeddedImages: embeddedImages) else {
+                return GmailParsedBody(
+                    semanticText: "",
+                    readerMarkdown: nil,
+                    htmlBody: boundedHTML(text),
+                    sanitizedHTML: nil,
+                    directRemoteImagesHTML: nil,
+                    remoteImageCount: 0,
+                    insecureRemoteImageCount: 0,
+                    embeddedImageCount: 0,
+                    displayNotice: "Kaname could not safely render the full HTML body. Showing Gmail's text preview instead.",
+                    containsPlainRepresentation: false
+                )
+            }
+            return GmailParsedBody(
+                semanticText: reader.plainText,
+                readerMarkdown: reader.markdown,
+                htmlBody: reader.sourceHTML,
+                sanitizedHTML: reader.sanitizedHTML,
+                directRemoteImagesHTML: reader.directRemoteImagesHTML,
+                remoteImageCount: reader.remoteImageCount,
+                insecureRemoteImageCount: reader.insecureRemoteImageCount,
+                embeddedImageCount: reader.embeddedImageCount,
+                displayNotice: reader.sanitizedHTML == nil
+                    ? "Kaname could not safely preserve this message's formatting. Showing readable text instead."
+                    : nil,
+                containsPlainRepresentation: false
+            )
+        case "text/plain", "":
+            return GmailParsedBody(
+                semanticText: MailHTMLReader.boundedPlainText(text),
+                readerMarkdown: nil,
+                htmlBody: nil,
+                sanitizedHTML: nil,
+                directRemoteImagesHTML: nil,
+                remoteImageCount: 0,
+                insecureRemoteImageCount: 0,
+                embeddedImageCount: 0,
+                displayNotice: nil,
+                containsPlainRepresentation: true
+            )
+        default:
+            return .empty
+        }
+    }
+
+    private static func bodyData(
+        part: GmailWirePart,
+        messageID: String,
+        externalBodyData: [GmailExternalBodyReference: Data]
+    ) -> Data? {
+        if let encoded = part.body?.data { return Data(base64URLEncoded: encoded) }
+        guard let attachmentID = part.body?.attachmentId else { return nil }
+        let reference = GmailExternalBodyReference(
+            messageID: messageID,
+            attachmentID: attachmentID,
+            expectedSize: part.body?.size ?? 0
+        )
+        return externalBodyData[reference]
+    }
+
+    private static func embeddedImages(
+        part: GmailWirePart,
+        messageID: String,
+        externalInlineImageData: [GmailInlineImageReference: Data]
+    ) -> [String: MailHTMLEmbeddedImage] {
+        var images: [String: MailHTMLEmbeddedImage] = [:]
+        var ambiguousContentIDs = Set<String>()
+        var stack = [part]
+        var acceptedBytes = 0
+        var visitedParts = 0
+
+        while let candidate = stack.popLast() {
+            visitedParts += 1
+            guard visitedParts <= maximumMIMEPartCount else { break }
+            stack.append(contentsOf: candidate.parts ?? [])
+
+            guard images.count < maximumInlineImagePartCount,
+                  let contentID = contentID(for: candidate),
+                  !ambiguousContentIDs.contains(contentID),
+                  let mimeType = inlineImageMIMEType(for: candidate) else { continue }
+
+            let data: Data?
+            if let encoded = candidate.body?.data,
+               encoded.utf8.count <= maximumInlineImagePartBytes * 2 {
+                data = Data(base64URLEncoded: encoded)
+            } else if let attachmentID = candidate.body?.attachmentId {
+                let reference = GmailInlineImageReference(
+                    messageID: messageID,
+                    attachmentID: attachmentID,
+                    expectedSize: candidate.body?.size ?? 0,
+                    contentID: contentID,
+                    mimeType: mimeType
+                )
+                data = externalInlineImageData[reference]
+            } else {
+                data = nil
+            }
+
+            guard let data,
+                  data.count <= maximumInlineImagePartBytes,
+                  acceptedBytes + data.count <= maximumInlineImageTotalBytes else { continue }
+            if images[contentID] != nil {
+                images.removeValue(forKey: contentID)
+                ambiguousContentIDs.insert(contentID)
+                continue
+            }
+            images[contentID] = MailHTMLEmbeddedImage(mimeType: mimeType, data: data)
+            acceptedBytes += data.count
+        }
+        return images
+    }
+
+    private static func referencedContentIDs(
+        part: GmailWirePart,
+        messageID: String,
+        externalBodyData: [GmailExternalBodyReference: Data]
+    ) -> Set<String> {
+        var identifiers = Set<String>()
+        var stack = [part]
+        var visitedParts = 0
+        while let candidate = stack.popLast() {
+            visitedParts += 1
+            guard visitedParts <= maximumMIMEPartCount else { break }
+            stack.append(contentsOf: candidate.parts ?? [])
+            guard baseMIMEType(candidate) == "text/html",
+                  let data = bodyData(
+                      part: candidate,
+                      messageID: messageID,
+                      externalBodyData: externalBodyData
+                  ),
+                  let html = decodedText(data, for: candidate) else { continue }
+            identifiers.formUnion(MailHTMLReader.referencedContentIDs(in: html))
+        }
+        return identifiers
+    }
+
+    private static func contentID(for part: GmailWirePart) -> String? {
+        let rawValue = part.headers?.first {
+            $0.name.caseInsensitiveCompare("Content-ID") == .orderedSame
+        }?.value ?? ""
+        return MailHTMLReader.normalizedContentID(rawValue)
+    }
+
+    private static func inlineImageMIMEType(for part: GmailWirePart) -> String? {
+        switch baseMIMEType(part) {
+        case "image/jpeg", "image/jpg": "image/jpeg"
+        case "image/png": "image/png"
+        case "image/gif": "image/gif"
+        case "image/webp": "image/webp"
+        default: nil
+        }
+    }
+
+    private static func decodedText(_ data: Data, for part: GmailWirePart) -> String? {
+        let declared = declaredCharset(part)
+        let declaredEncoding: String.Encoding? = switch declared {
+        case "utf-8", "utf8": .utf8
+        case "us-ascii", "ascii": .ascii
+        case "iso-8859-1", "iso8859-1", "latin1": .isoLatin1
+        case "windows-1252", "cp1252": .windowsCP1252
+        case "utf-16", "utf16": .utf16
+        case "utf-16le", "utf16le": .utf16LittleEndian
+        case "utf-16be", "utf16be": .utf16BigEndian
+        default: nil
+        }
+        if let declaredEncoding, let text = String(data: data, encoding: declaredEncoding) {
+            return text
+        }
+        return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1)
+    }
+
+    private static func declaredCharset(_ part: GmailWirePart) -> String? {
+        let contentType = part.headers?.first {
+            $0.name.caseInsensitiveCompare("Content-Type") == .orderedSame
+        }?.value ?? part.mimeType ?? ""
+        for parameter in contentType.split(separator: ";").dropFirst() {
+            let pair = parameter.split(separator: "=", maxSplits: 1).map {
+                $0.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            guard pair.count == 2, pair[0].caseInsensitiveCompare("charset") == .orderedSame else { continue }
+            return pair[1].trimmingCharacters(in: CharacterSet(charactersIn: "\"'")).lowercased()
+        }
+        return nil
+    }
+
+    private static func baseMIMEType(_ part: GmailWirePart) -> String {
+        (part.mimeType ?? part.headers?.first {
+            $0.name.caseInsensitiveCompare("Content-Type") == .orderedSame
+        }?.value ?? "")
+            .split(separator: ";", maxSplits: 1)
+            .first?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+    }
+
+    private static func boundedReaderMarkdown(_ markdown: String) -> String? {
+        guard !markdown.isEmpty else { return nil }
+        guard markdown.utf8.count > MailHTMLReader.maximumOutputBytes else { return markdown }
+        return String(decoding: markdown.utf8.prefix(MailHTMLReader.maximumOutputBytes), as: UTF8.self)
+            + "\n\nMessage text was truncated for safe display."
+    }
+
+    private static func boundedHTML(_ html: String) -> String? {
+        guard !html.isEmpty else { return nil }
+        return String(decoding: html.utf8.prefix(MailHTMLReader.maximumInputBytes), as: UTF8.self)
     }
 }
 

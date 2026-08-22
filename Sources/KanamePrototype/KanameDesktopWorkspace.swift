@@ -5417,6 +5417,7 @@ final class DesktopPersonalIntegrationViewModel: ObservableObject {
     @Published private(set) var isRequestingAppleCalendar = false
     @Published private(set) var lastProviderRefreshAt: Date?
     @Published private(set) var lastIntegrationRefreshAt: Date?
+    @Published private(set) var googleAccountLoadFailure: String?
     @Published private(set) var message: String?
 
     private let integrations = PersonalIntegrationService()
@@ -5433,9 +5434,16 @@ final class DesktopPersonalIntegrationViewModel: ObservableObject {
         providerCache = ProviderCapabilityCacheStore(directory: environment.connectivityDirectory)
         workflowMailMonitor = DesktopMailViewModel(environment: environment)
         appleAccessState = appleCalendar.accessState
+        do {
+            googleAccounts = try NativeGoogleIntegrationService.savedAccounts(
+                rootDirectory: environment.googleDirectory
+            )
+            googleAccountLoadFailure = nil
+        } catch {
+            googleAccountLoadFailure = Self.savedGoogleAccountLoadFailure(error)
+        }
         _Concurrency.Task {
             hasGoogleClientConfiguration = await googleIntegration.hasClientConfiguration
-            googleAccounts = (try? await googleIntegration.accounts()) ?? []
             if let cached = try? await providerCache.load() {
                 providerCapabilities = cached.capabilities
                 lastProviderRefreshAt = cached.checkedAt
@@ -5451,7 +5459,7 @@ final class DesktopPersonalIntegrationViewModel: ObservableObject {
         monitoringTask = _Concurrency.Task { [weak self] in
             guard let self else { return }
             hasGoogleClientConfiguration = await googleIntegration.hasClientConfiguration
-            googleAccounts = (try? await googleIntegration.accounts()) ?? []
+            await reloadSavedGoogleAccounts(announce: false)
             if let cached = try? await providerCache.load() {
                 providerCapabilities = cached.capabilities
                 lastProviderRefreshAt = cached.checkedAt
@@ -5478,6 +5486,14 @@ final class DesktopPersonalIntegrationViewModel: ObservableObject {
         }
     }
 
+    func retrySavedGoogleAccounts(model: DesktopAppModel) {
+        _Concurrency.Task {
+            await reloadSavedGoogleAccounts(announce: true)
+            guard !googleAccounts.isEmpty else { return }
+            refreshGoogle(model: model)
+        }
+    }
+
     func refreshAllStatus(model: DesktopAppModel) {
         refreshProviders()
         refreshGitHub(model: model)
@@ -5493,6 +5509,7 @@ final class DesktopPersonalIntegrationViewModel: ObservableObject {
             do {
                 let discovered = try await googleIntegration.accounts()
                 googleAccounts = discovered
+                googleAccountLoadFailure = nil
                 let gmailAccounts = discovered.map { accountRecord(for: $0, service: .gmail) }
                 let calendarAccounts = discovered.map { accountRecord(for: $0, service: .googleCalendar) }
                 model.replaceAccounts(
@@ -5537,7 +5554,8 @@ final class DesktopPersonalIntegrationViewModel: ObservableObject {
                         : "Refreshed \(discovered.count - failedAccounts.count) of \(discovered.count) Google accounts. Reconnect: \(failedAccounts.joined(separator: ", "))."
                 }
             } catch {
-                if announce { message = error.localizedDescription }
+                googleAccountLoadFailure = Self.savedGoogleAccountLoadFailure(error)
+                if announce { message = googleAccountLoadFailure }
             }
             isRefreshingGoogle = false
         }
@@ -5571,6 +5589,7 @@ final class DesktopPersonalIntegrationViewModel: ObservableObject {
             do {
                 try await googleIntegration.disconnect(accountID: id)
                 googleAccounts = try await googleIntegration.accounts()
+                googleAccountLoadFailure = nil
                 googleCalendars.removeAll { calendar in
                     !googleAccounts.contains { $0.identity == calendar.accountIdentity }
                 }
@@ -5587,6 +5606,20 @@ final class DesktopPersonalIntegrationViewModel: ObservableObject {
                 message = error.localizedDescription
             }
         }
+    }
+
+    private func reloadSavedGoogleAccounts(announce: Bool) async {
+        do {
+            googleAccounts = try await googleIntegration.accounts()
+            googleAccountLoadFailure = nil
+        } catch {
+            googleAccountLoadFailure = Self.savedGoogleAccountLoadFailure(error)
+            if announce { message = googleAccountLoadFailure }
+        }
+    }
+
+    private static func savedGoogleAccountLoadFailure(_ error: Error) -> String {
+        "Kaname could not load its saved Google account index. The saved connections were not removed. Retry loading them before reconnecting any account. (\(error.localizedDescription))"
     }
 
     func refreshInbox(model: DesktopAppModel) {
@@ -6450,12 +6483,19 @@ private struct DesktopEmailView: View {
             WorkflowConnectorBindingSheet(model: model, connector: connector)
         }
         .onAppear {
-            if allowsAutomaticInitialRead,
-               mail.threads.isEmpty,
-               !integrations.googleAccounts.isEmpty {
-                mail.search(accounts: googleAccounts, model: model)
-            }
+            searchInitiallyIfPossible()
         }
+        .onChange(of: integrations.googleAccounts) {
+            searchInitiallyIfPossible()
+        }
+    }
+
+    private func searchInitiallyIfPossible() {
+        guard allowsAutomaticInitialRead,
+              mail.threads.isEmpty,
+              !mail.isBusy,
+              !googleAccounts.isEmpty else { return }
+        mail.search(accounts: googleAccounts, model: model)
     }
 
     private var emailWorkspace: some View {
@@ -6530,7 +6570,28 @@ private struct DesktopEmailView: View {
             }
             .padding([.horizontal, .top], 16)
 
-            if mail.isBusy, mail.threads.isEmpty {
+            if let loadFailure = integrations.googleAccountLoadFailure,
+               integrations.googleAccounts.isEmpty {
+                VStack(spacing: 12) {
+                    EmptyPanel(
+                        symbol: "person.crop.circle.badge.exclamationmark",
+                        title: "Saved Gmail accounts unavailable",
+                        detail: loadFailure
+                    )
+                    Button("Retry saved accounts", systemImage: "arrow.clockwise") {
+                        integrations.retrySavedGoogleAccounts(model: model)
+                    }
+                    .disabled(integrations.isRefreshingGoogle)
+                }
+                .padding(16)
+            } else if integrations.googleAccounts.isEmpty {
+                EmptyPanel(
+                    symbol: "person.crop.circle.badge.plus",
+                    title: "No Gmail account connected",
+                    detail: "Connect Google from Settings before searching Gmail."
+                )
+                .padding(16)
+            } else if mail.isBusy, mail.threads.isEmpty {
                 ProgressView("Reading Gmail…").frame(maxHeight: .infinity)
             } else if mail.threads.isEmpty {
                 EmptyPanel(
@@ -6650,8 +6711,7 @@ private struct DesktopEmailView: View {
                             }
                             Text("To: \(message.recipients)").font(.caption).foregroundStyle(.secondary)
                             Divider()
-                            Text(message.body.isEmpty ? "No readable text body." : message.body)
-                                .textSelection(.enabled)
+                            MailReaderBody(message: message)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                             if !message.attachments.isEmpty {
                                 HStack {
@@ -7258,6 +7318,153 @@ private struct MailThreadRow: View {
     private func subject(_ message: GmailMessageSnapshot?) -> String {
         guard let subject = message?.subject, !subject.isEmpty else { return "(No subject)" }
         return subject
+    }
+}
+
+private struct MailReaderBody: View {
+    let message: GmailMessageSnapshot
+    @State private var presentation: Presentation = .formatted
+    @State private var loadsRemoteImagesDirectly = false
+
+    private enum Presentation: String, CaseIterable, Identifiable {
+        case formatted = "Formatted"
+        case plainText = "Plain text"
+
+        var id: Self { self }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let notice = message.bodyDisplayNotice, !notice.isEmpty {
+                Label(notice, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let sanitizedHTML = message.sanitizedHTML, !sanitizedHTML.isEmpty {
+                HStack(spacing: 10) {
+                    Picker("Message view", selection: $presentation) {
+                        ForEach(Presentation.allCases) { option in
+                            Text(option.rawValue).tag(option)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .controlSize(.small)
+                    .fixedSize()
+
+                    Spacer()
+
+                    Label(
+                        loadsRemoteImagesDirectly ? "Direct images" : "Safe HTML",
+                        systemImage: loadsRemoteImagesDirectly
+                            ? "exclamationmark.shield.fill"
+                            : "shield.lefthalf.filled"
+                    )
+                        .font(.caption2)
+                        .foregroundStyle(loadsRemoteImagesDirectly ? Nord.auroraYellow : .secondary)
+                        .help(loadsRemoteImagesDirectly
+                            ? directImageHelp
+                            : "Scripts, forms, remote images, and other remote content are blocked.")
+                }
+
+                remoteImageControls
+
+                switch presentation {
+                case .formatted:
+                    MailHTMLMessageView(
+                        html: loadsRemoteImagesDirectly
+                            ? (message.directRemoteImagesHTML ?? sanitizedHTML)
+                            : sanitizedHTML,
+                        loadsRemoteImagesDirectly: loadsRemoteImagesDirectly
+                    )
+                case .plainText:
+                    plainText
+                }
+            } else {
+                plainText
+            }
+        }
+        .onChange(of: message.id) { _, _ in
+            loadsRemoteImagesDirectly = false
+        }
+    }
+
+    @ViewBuilder
+    private var remoteImageControls: some View {
+        if message.embeddedImageCount > 0 {
+            Label(
+                "\(message.embeddedImageCount) embedded image\(message.embeddedImageCount == 1 ? "" : "s") loaded locally",
+                systemImage: "photo.on.rectangle.angled"
+            )
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .help("These images came from this email's validated MIME attachments. Kaname did not contact the sender to display them.")
+        }
+
+        if message.remoteImageCount > 0, message.directRemoteImagesHTML != nil {
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 12) {
+                    Toggle(directImageToggleTitle, isOn: $loadsRemoteImagesDirectly)
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+
+                    Label("Privacy relay · Coming soon", systemImage: "network")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .help("A privacy relay is planned but is not configured. Direct image loading is not private.")
+                }
+
+                Label(
+                    remoteImageStatusText,
+                    systemImage: loadsRemoteImagesDirectly ? "exclamationmark.triangle.fill" : "eye.slash"
+                )
+                .font(.caption2)
+                .foregroundStyle(loadsRemoteImagesDirectly ? Nord.auroraYellow : .secondary)
+            }
+        }
+    }
+
+    private var directImageToggleTitle: String {
+        guard message.insecureRemoteImageCount > 0 else {
+            return "Load remote images directly"
+        }
+        return message.insecureRemoteImageCount == message.remoteImageCount
+            ? "Try images over HTTPS"
+            : "Load remote images (HTTPS only)"
+    }
+
+    private var directImageHelp: String {
+        let base = "Remote images are loading directly from their senders. Scripts, forms, and other remote content remain blocked."
+        guard message.insecureRemoteImageCount > 0 else { return base }
+        return "\(base) Kaname rewrote insecure HTTP image URLs to HTTPS and never requested them over plaintext HTTP."
+    }
+
+    private var remoteImageStatusText: String {
+        let remoteCount = message.remoteImageCount
+        let insecureCount = message.insecureRemoteImageCount
+        if loadsRemoteImagesDirectly {
+            let warning = "The sender may observe this request, your network address, and when this message was opened."
+            guard insecureCount > 0 else { return warning }
+            return "\(warning) Kaname rewrote \(imageCount(insecureCount)) from HTTP to HTTPS."
+        }
+        guard insecureCount > 0 else {
+            return "\(remoteCount) remote image\(remoteCount == 1 ? " is" : "s are") blocked to prevent tracking."
+        }
+        if insecureCount == remoteCount {
+            return "\(imageCount(insecureCount)) \(insecureCount == 1 ? "uses" : "use") insecure HTTP and \(insecureCount == 1 ? "is" : "are") blocked. Loading will try HTTPS instead."
+        }
+        return "\(remoteCount) remote images are blocked to prevent tracking. Of those, \(imageCount(insecureCount)) \(insecureCount == 1 ? "uses" : "use") insecure HTTP and will be tried over HTTPS."
+    }
+
+    private func imageCount(_ count: Int) -> String {
+        "\(count) image\(count == 1 ? "" : "s")"
+    }
+
+    private var plainText: some View {
+        Text(message.body.isEmpty ? "No readable text body." : message.body)
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -10712,18 +10919,29 @@ private struct DesktopSettingsShell: View {
                 connected: !integrations.googleAccounts.isEmpty,
                 busy: integrations.isRefreshingGoogle || integrations.isConnectingGoogle
             ) {
-                Button(
-                    integrations.googleAccounts.isEmpty ? "Connect Google" : "Add account",
-                    systemImage: "person.badge.plus"
-                ) {
-                    integrations.connectGoogleAccount(model: model)
+                if integrations.googleAccountLoadFailure != nil,
+                   integrations.googleAccounts.isEmpty {
+                    Button("Retry saved accounts", systemImage: "arrow.clockwise") {
+                        integrations.retrySavedGoogleAccounts(model: model)
+                    }
+                } else {
+                    Button(
+                        integrations.googleAccounts.isEmpty ? "Connect Google" : "Add account",
+                        systemImage: "person.badge.plus"
+                    ) {
+                        integrations.connectGoogleAccount(model: model)
+                    }
+                    .disabled(!integrations.hasGoogleClientConfiguration)
                 }
-                .disabled(!integrations.hasGoogleClientConfiguration)
                 if !integrations.googleAccounts.isEmpty {
                     Button("Refresh", systemImage: "arrow.clockwise") { integrations.refreshGoogle(model: model) }
                 }
             } details: {
-                if integrations.googleAccounts.isEmpty {
+                if let loadFailure = integrations.googleAccountLoadFailure,
+                   integrations.googleAccounts.isEmpty {
+                    Text(loadFailure)
+                        .font(.caption).foregroundStyle(.secondary)
+                } else if integrations.googleAccounts.isEmpty {
                     Text(integrations.hasGoogleClientConfiguration
                         ? "Connect Google opens the system browser, asks for Gmail read/manage/compose plus Calendar list and event access, and returns directly to Kaname. Existing Google accounts must reconnect once before newer mail or approved Calendar changes can run."
                         : "Google is not registered in this build yet. Its private OAuth client registration belongs in Kaname's build configuration, not in Settings.")

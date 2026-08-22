@@ -351,9 +351,28 @@ public actor NativeGoogleIntegrationService {
     }
 
     public func accounts() throws -> [NativeGoogleAccountSnapshot] {
+        try Self.savedAccounts(rootDirectory: rootDirectory)
+    }
+
+    /// Reads the durable account index without entering the actor so first-frame UI
+    /// can distinguish saved connections from an account that has never been set up.
+    /// OAuth tokens remain in Keychain and are never read by this bootstrap path.
+    public nonisolated static func savedAccounts(
+        rootDirectory: URL
+    ) throws -> [NativeGoogleAccountSnapshot] {
+        let accountIndexURL = rootDirectory.appending(path: "accounts.json")
         guard FileManager.default.fileExists(atPath: accountIndexURL.path) else { return [] }
         let data = try Data(contentsOf: accountIndexURL)
-        return try JSONDecoder().decode(GoogleAccountIndex.self, from: data).accounts
+        guard data.count <= 1_048_576 else {
+            throw NativeGoogleIntegrationError.invalidResponse("Google account index")
+        }
+        do {
+            return try JSONDecoder().decode(GoogleAccountIndex.self, from: data).accounts
+        } catch let error as NativeGoogleIntegrationError {
+            throw error
+        } catch {
+            throw NativeGoogleIntegrationError.invalidResponse("Google account index")
+        }
     }
 
 #if os(macOS)

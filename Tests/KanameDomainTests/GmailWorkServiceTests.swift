@@ -127,7 +127,7 @@ struct GmailWorkServiceTests {
     @Test
     func multipartAlternativePrefersPlainTextWithoutDuplicatingTheMessage() throws {
         let plain = base64URL("Readable plain text")
-        let html = base64URL("<p>Readable HTML</p>")
+        let html = base64URL("<p>Readable <strong>HTML</strong></p>")
         let thread = try GmailAPIParser.thread(
             data: Data(
                 """
@@ -138,6 +138,178 @@ struct GmailWorkServiceTests {
         )
 
         #expect(thread.messages.first?.body == "Readable plain text")
+        #expect(thread.messages.first?.readerMarkdown?.contains("Readable **HTML**") == true)
+        #expect(thread.messages.first?.htmlBody?.contains("<strong>HTML</strong>") == true)
+        #expect(thread.messages.first?.sanitizedHTML?.contains("<strong>HTML</strong>") == true)
+    }
+
+    @Test
+    func htmlOnlyMessageSeparatesReaderContentFromBoundedOriginalHTML() throws {
+        let html = """
+        <html>
+          <head>
+            <style>@media screen { .button { font-family: sans-serif; color: red; } }</style>
+          </head>
+          <body>
+            <div style="display: none">Inbox preview that should stay hidden</div>
+            <h1>How did we do?</h1>
+            <p>Tell us about your transfer.</p>
+            <a href="https://example.test/feedback">Share feedback</a>
+            <img src="https://images.example.test/survey.png?recipient=unique" width="600" height="240" alt="Survey illustration">
+            <img src="http://images.example.test/app-store.png?recipient=unique" width="160" height="48" alt="Download the app">
+          </body>
+        </html>
+        """
+        let thread = try GmailAPIParser.thread(
+            data: Data(
+                """
+                {"id":"thread-1","messages":[{"id":"message-1","threadId":"thread-1","payload":{"mimeType":"text/html","filename":"","body":{"data":"\(base64URL(html))"}}}]}
+                """.utf8
+            ),
+            account: account
+        )
+        let message = try #require(thread.messages.first)
+
+        #expect(message.body.contains("How did we do?"))
+        #expect(message.body.contains("Tell us about your transfer."))
+        #expect(!message.body.contains("@media"))
+        #expect(!message.body.contains("font-family"))
+        #expect(!message.body.contains("Inbox preview"))
+        #expect(message.readerMarkdown?.contains("# How did we do?") == true)
+        #expect(message.readerMarkdown?.contains("[Share feedback](<https://example.test/feedback>)") == true)
+        #expect(message.htmlBody?.contains("@media screen") == true)
+        #expect(message.sanitizedHTML?.contains("How did we do?") == true)
+        #expect(message.sanitizedHTML?.contains("Content-Security-Policy") == true)
+        #expect(message.sanitizedHTML?.contains("@media screen") == false)
+        #expect(message.sanitizedHTML?.contains("images.example.test") == false)
+        #expect(message.sanitizedHTML?.contains("[Image: Survey illustration]") == true)
+        #expect(message.sanitizedHTML?.contains("[Image: Download the app]") == true)
+        #expect(message.directRemoteImagesHTML?.contains("https://images.example.test/survey.png?recipient=unique") == true)
+        #expect(message.directRemoteImagesHTML?.contains("https://images.example.test/app-store.png?recipient=unique") == true)
+        #expect(message.directRemoteImagesHTML?.contains("http://") == false)
+        #expect(message.remoteImageCount == 2)
+        #expect(message.insecureRemoteImageCount == 1)
+    }
+
+    @Test
+    func nestedAlternativeHonorsDeclaredLegacyCharsetForSemanticText() throws {
+        let latin1 = Data([0x43, 0x72, 0xe8, 0x6d, 0x65])
+            .base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        let html = base64URL("<h2>Crème HTML</h2>")
+        let thread = try GmailAPIParser.thread(
+            data: Data(
+                """
+                {"id":"thread-1","messages":[{"id":"message-1","threadId":"thread-1","payload":{"mimeType":"multipart/mixed","parts":[{"mimeType":"multipart/alternative","parts":[{"mimeType":"text/plain","filename":"","headers":[{"name":"Content-Type","value":"text/plain; charset=iso-8859-1"}],"body":{"data":"\(latin1)"}},{"mimeType":"text/html","filename":"","body":{"data":"\(html)"}}]},{"mimeType":"application/pdf","filename":"report.pdf","body":{"size":1200,"attachmentId":"attachment-1"}}]}}]}
+                """.utf8
+            ),
+            account: account
+        )
+        let message = try #require(thread.messages.first)
+
+        #expect(message.body == "Crème")
+        #expect(message.readerMarkdown?.contains("## Crème HTML") == true)
+        #expect(message.attachments.map(\.filename) == ["report.pdf"])
+    }
+
+    @Test
+    func externalTextBodyReferencesAreFetchedSeparatelyAndRemainBounded() throws {
+        let htmlData = Data("<p>Externally stored <strong>HTML body</strong>.</p>".utf8)
+        let wire = Data(
+            """
+            {"id":"thread-1","messages":[{"id":"message-1","threadId":"thread-1","payload":{"mimeType":"text/html","filename":"","body":{"size":\(htmlData.count),"attachmentId":"body-attachment-1"}}}]}
+            """.utf8
+        )
+        let references = try GmailAPIParser.externalBodyReferences(data: wire)
+        let reference = try #require(references.first)
+        let thread = try GmailAPIParser.thread(
+            data: wire,
+            account: account,
+            externalBodyData: [reference: htmlData]
+        )
+
+        #expect(references.count == 1)
+        #expect(reference.messageID == "message-1")
+        #expect(reference.attachmentID == "body-attachment-1")
+        #expect(thread.messages.first?.body == "Externally stored HTML body.")
+        #expect(thread.messages.first?.readerMarkdown?.contains("Externally stored **HTML body**.") == true)
+        #expect(thread.messages.first?.sanitizedHTML?.contains("<strong>HTML body</strong>") == true)
+    }
+
+    @Test
+    func inlineCIDImageBytesRenderLocallyWithoutARemoteImageVariant() throws {
+        let png = try #require(Data(base64Encoded: Self.twoByTwoPNGBase64))
+        let html = base64URL("<p>Chart follows</p><img src=\"cid:chart%40example.test\" alt=\"Account chart\">")
+        let image = base64URL(png)
+        let thread = try GmailAPIParser.thread(
+            data: Data(
+                """
+                {"id":"thread-1","messages":[{"id":"message-1","threadId":"thread-1","payload":{"mimeType":"multipart/related","parts":[{"mimeType":"text/html","filename":"","body":{"data":"\(html)"}},{"mimeType":"image/png","filename":"chart.png","headers":[{"name":"Content-ID","value":"<Chart@example.test>"},{"name":"Content-Disposition","value":"inline"}],"body":{"size":\(png.count),"data":"\(image)"}}]}}]}
+                """.utf8
+            ),
+            account: account
+        )
+        let message = try #require(thread.messages.first)
+        let sanitizedHTML = try #require(message.sanitizedHTML)
+
+        #expect(message.embeddedImageCount == 1)
+        #expect(message.remoteImageCount == 0)
+        #expect(message.insecureRemoteImageCount == 0)
+        #expect(message.directRemoteImagesHTML == nil)
+        #expect(sanitizedHTML.contains("src=\"data:image/png;base64,"))
+        #expect(!sanitizedHTML.contains("cid:"))
+        #expect(sanitizedHTML.contains("img-src data:"))
+    }
+
+    @Test
+    func externalCIDImageReferencesAreBoundedAndResolvedPerMessage() throws {
+        let png = try #require(Data(base64Encoded: Self.twoByTwoPNGBase64))
+        let html = base64URL("<p>External chart</p><img src=\"cid:chart-2\" alt=\"External chart\">")
+        let wire = Data(
+            """
+            {"id":"thread-1","messages":[{"id":"message-1","threadId":"thread-1","payload":{"mimeType":"multipart/related","parts":[{"mimeType":"text/html","filename":"","body":{"data":"\(html)"}},{"mimeType":"image/png","filename":"chart.png","headers":[{"name":"Content-ID","value":"<chart-2>"},{"name":"Content-Disposition","value":"inline"}],"body":{"size":\(png.count),"attachmentId":"inline-attachment-1"}},{"mimeType":"image/png","filename":"unused.png","headers":[{"name":"Content-ID","value":"<unused>"},{"name":"Content-Disposition","value":"inline"}],"body":{"size":\(png.count),"attachmentId":"inline-attachment-2"}}]}}]}
+            """.utf8
+        )
+        let references = try GmailAPIParser.externalInlineImageReferences(data: wire)
+        let reference = try #require(references.first)
+        let thread = try GmailAPIParser.thread(
+            data: wire,
+            account: account,
+            externalBodyData: [:],
+            externalInlineImageData: [reference: png]
+        )
+        let message = try #require(thread.messages.first)
+
+        #expect(references.count == 1)
+        #expect(reference.contentID == "chart-2")
+        #expect(reference.mimeType == "image/png")
+        #expect(reference.expectedSize == png.count)
+        #expect(message.embeddedImageCount == 1)
+        #expect(message.sanitizedHTML?.contains("src=\"data:image/png;base64,") == true)
+        #expect(message.attachments.map(\.filename) == ["chart.png", "unused.png"])
+    }
+
+    @Test
+    func htmlReaderFailureFallsBackToTheGmailMessageSnippet() throws {
+        let openingTags = String(repeating: "<div>", count: MailHTMLReader.maximumTreeDepth + 10)
+        let closingTags = String(repeating: "</div>", count: MailHTMLReader.maximumTreeDepth + 10)
+        let html = openingTags + "Full body beyond the reader depth limit" + closingTags
+        let thread = try GmailAPIParser.thread(
+            data: Data(
+                """
+                {"id":"thread-1","messages":[{"id":"message-1","threadId":"thread-1","snippet":"Gmail preview remains readable","payload":{"mimeType":"text/html","filename":"","body":{"data":"\(base64URL(html))"}}}]}
+                """.utf8
+            ),
+            account: account
+        )
+        let message = try #require(thread.messages.first)
+
+        #expect(message.body == "Gmail preview remains readable")
+        #expect(message.sanitizedHTML == nil)
+        #expect(message.htmlBody?.contains("Full body beyond the reader depth limit") == true)
+        #expect(message.bodyDisplayNotice?.contains("Gmail's text preview") == true)
     }
 
     @Test
@@ -201,11 +373,15 @@ struct GmailWorkServiceTests {
     }
 
     private func base64URL(_ value: String) -> String {
-        Data(value.utf8).base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
+        base64URL(Data(value.utf8))
     }
+
+    private func base64URL(_ value: Data) -> String {
+        value.base64URLEncodedString()
+    }
+
+    private static let twoByTwoPNGBase64 =
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAD0lEQVR4nGP4z8DAwMAAAAYIAQHLR3Z1AAAAAElFTkSuQmCC"
 }
 
 private extension Data {
