@@ -697,6 +697,11 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
                 // revision-bound migration comparisons decode additively.
                 // Existing workflows gain no authority or migration evidence.
                 break
+            case 26:
+                // Coding workflow and knowledge-lane records decode additively.
+                // Existing conversations gain no implementation, acceptance,
+                // or knowledge-write authority during migration.
+                break
             default:
                 throw DesktopModelError.unsupportedVersion
             }
@@ -2048,6 +2053,11 @@ public final class DesktopAppModel: ObservableObject {
               let message = thread.messages.first(where: { $0.id == sourceMessageID && $0.role == .user }) else {
             return nil
         }
+        if purpose == .codingPlan,
+           let state = codingWorkflow(threadID: threadID)?.state,
+           ![.discussing, .awaitingPlanApproval, .completed, .rejected, .failed].contains(state) {
+            return nil
+        }
         let run = DesktopProviderRunRecord(
             id: UUID().uuidString.lowercased(),
             threadID: threadID,
@@ -2072,9 +2082,36 @@ public final class DesktopAppModel: ObservableObject {
             snapshot.operations.providerRuns.append(run)
             guard let index = snapshot.threads.firstIndex(where: { $0.id == threadID }) else { return }
             if purpose == .codingPlan {
+                if let laneIndex = snapshot.operations.codingKnowledgeLanes.firstIndex(where: {
+                    $0.threadID == threadID
+                }) {
+                    snapshot.operations.codingKnowledgeLanes[laneIndex].consultedSources.removeAll()
+                    snapshot.operations.codingKnowledgeLanes[laneIndex].candidates.removeAll()
+                    snapshot.operations.codingKnowledgeLanes[laneIndex].disposition = .collecting
+                    snapshot.operations.codingKnowledgeLanes[laneIndex].dispositionReason = "A new coding cycle is collecting exact context and durable candidates."
+                    snapshot.operations.codingKnowledgeLanes[laneIndex].acceptedWorktreeID = nil
+                    snapshot.operations.codingKnowledgeLanes[laneIndex].proposalID = nil
+                    snapshot.operations.codingKnowledgeLanes[laneIndex].writeID = nil
+                    snapshot.operations.codingKnowledgeLanes[laneIndex].updatedAtUnixMillis = now()
+                }
                 snapshot.threads[index].plan.removeAll()
                 snapshot.threads[index].evidence.removeAll()
                 snapshot.threads[index].summary = "Creating a read-only implementation plan…"
+                Self.setCodingWorkflow(
+                    in: &snapshot,
+                    threadID: threadID,
+                    state: .planning,
+                    reason: "Read-only implementation planning is running.",
+                    timestamp: now()
+                )
+            } else if purpose == .codingImplementation {
+                Self.setCodingWorkflow(
+                    in: &snapshot,
+                    threadID: threadID,
+                    state: .preparingImplementation,
+                    reason: "The approved implementation is being prepared in an isolated worktree.",
+                    timestamp: now()
+                )
             }
             if !snapshot.operations.providerRuns.contains(where: {
                 $0.threadID == threadID && $0.id != run.id && $0.state == .running
@@ -2107,8 +2144,22 @@ public final class DesktopAppModel: ObservableObject {
                 switch selected?.purpose {
                 case .codingPlan:
                     snapshot.threads[threadIndex].summary = "Creating a read-only implementation plan…"
+                    Self.setCodingWorkflow(
+                        in: &snapshot,
+                        threadID: threadID,
+                        state: .planning,
+                        reason: "Read-only implementation planning is running.",
+                        timestamp: now()
+                    )
                 case .codingImplementation:
                     snapshot.threads[threadIndex].summary = "Implementing the approved plan in an isolated worktree…"
+                    Self.setCodingWorkflow(
+                        in: &snapshot,
+                        threadID: threadID,
+                        state: .implementing,
+                        reason: "The approved plan is being implemented in an isolated worktree.",
+                        timestamp: now()
+                    )
                 case .conversation, nil:
                     snapshot.threads[threadIndex].summary = "Kaname is responding…"
                 }
@@ -2281,9 +2332,23 @@ public final class DesktopAppModel: ObservableObject {
                 case .codingPlan:
                     attention = .needsApproval
                     threadSummary = "Plan ready for review. No implementation authority has been granted."
+                    Self.setCodingWorkflow(
+                        in: &snapshot,
+                        threadID: threadID ?? "",
+                        state: .awaitingPlanApproval,
+                        reason: "The read-only plan is ready for explicit approval.",
+                        timestamp: timestamp
+                    )
                 case .codingImplementation:
-                    attention = .running
-                    threadSummary = "Implementation finished. Kaname is collecting independent evidence."
+                    attention = .needsApproval
+                    threadSummary = "Implementation finished. Review the isolated changes before Kaname runs independent checks."
+                    Self.setCodingWorkflow(
+                        in: &snapshot,
+                        threadID: threadID ?? "",
+                        state: .awaitingReview,
+                        reason: "Implementation finished; explicit review is required before independent evidence collection.",
+                        timestamp: timestamp
+                    )
                 case .conversation:
                     attention = .needsResponse
                     threadSummary = assistant.map(Self.provisionalConversationTitle) ?? "Provider completed."
@@ -2295,6 +2360,16 @@ public final class DesktopAppModel: ObservableObject {
                 sessionState = interrupted ? .recoverable : .interrupted
                 threadSummary = interrupted ? "Provider turn interrupted. You can retry it." : error
                 attention = interrupted ? .needsResponse : .failed
+                if snapshot.operations.providerRuns[index].purpose != .conversation,
+                   let threadID = snapshot.operations.providerRuns[index].threadID {
+                    Self.setCodingWorkflow(
+                        in: &snapshot,
+                        threadID: threadID,
+                        state: .failed,
+                        reason: threadSummary,
+                        timestamp: timestamp
+                    )
+                }
             }
             snapshot.operations.providerRuns[index].completedAtUnixMillis = timestamp
             Self.reconcileProviderSession(
@@ -2328,6 +2403,15 @@ public final class DesktopAppModel: ObservableObject {
                    let threadIndex = snapshot.threads.firstIndex(where: { $0.id == threadID }) {
                     snapshot.threads[threadIndex].attention = .needsResponse
                     snapshot.threads[threadIndex].summary = "A provider turn needs recovery. No message was duplicated."
+                    if snapshot.operations.providerRuns[index].purpose != .conversation {
+                        Self.setCodingWorkflow(
+                            in: &snapshot,
+                            threadID: threadID,
+                            state: .failed,
+                            reason: "The coding provider stopped before completion; no result was accepted.",
+                            timestamp: timestamp
+                        )
+                    }
                 }
             }
         }
@@ -2412,20 +2496,39 @@ public final class DesktopAppModel: ObservableObject {
     }
 
     public func markCodingPlanUnavailable(threadID: String) {
-        mutateThread(id: threadID) { thread in
-            thread.attention = .failed
-            thread.summary = "The planning turn completed without a readable plan. No implementation authority was granted."
-            thread.updatedAtUnixMillis = now()
+        let timestamp = now()
+        mutate { snapshot in
+            guard let index = snapshot.threads.firstIndex(where: { $0.id == threadID }) else { return }
+            snapshot.threads[index].attention = .failed
+            snapshot.threads[index].summary = "The planning turn completed without a readable plan. No implementation authority was granted."
+            snapshot.threads[index].updatedAtUnixMillis = timestamp
+            Self.setCodingWorkflow(
+                in: &snapshot,
+                threadID: threadID,
+                state: .failed,
+                reason: "The planning turn completed without a readable plan.",
+                timestamp: timestamp
+            )
         }
     }
 
     public func finalizeCodingPlanForApproval(threadID: String) {
-        mutateThread(id: threadID) { thread in
-            for index in thread.plan.indices { thread.plan[index].state = .pending }
-            thread.updatedAtUnixMillis = now()
+        let timestamp = now()
+        mutate { snapshot in
+            guard let index = snapshot.threads.firstIndex(where: { $0.id == threadID }) else { return }
+            for planIndex in snapshot.threads[index].plan.indices { snapshot.threads[index].plan[planIndex].state = .pending }
+            snapshot.threads[index].updatedAtUnixMillis = timestamp
+            Self.setCodingWorkflow(
+                in: &snapshot,
+                threadID: threadID,
+                state: .awaitingPlanApproval,
+                reason: "The plan is ready for explicit approval.",
+                timestamp: timestamp
+            )
         }
     }
 
+    @discardableResult
     public func recordCodingEvidence(
         threadID: String,
         worktreeID: String,
@@ -2437,7 +2540,12 @@ public final class DesktopAppModel: ObservableObject {
         verificationOutput: String,
         artifactPaths: [String],
         digest: String
-    ) {
+    ) -> Bool {
+        guard let currentThread = thread(id: threadID), currentThread.kind == .coding,
+              codingWorkflow(threadID: threadID)?.state == .reviewingEvidence,
+              snapshot.operations.worktrees.contains(where: {
+                  $0.id == worktreeID && $0.threadID == threadID && ($0.state == .ready || $0.state == .review)
+              }) else { return false }
         let changedFilesState: DesktopEvidence.State = artifactPaths.isEmpty ? .failed : .passed
         let testState: DesktopEvidence.State = verificationExitStatus == 0 ? .passed : .failed
         let diffState: DesktopEvidence.State = diffCheckPassed ? .passed : .failed
@@ -2469,9 +2577,14 @@ public final class DesktopAppModel: ObservableObject {
             ),
         ]
         let timestamp = now()
-        mutate { snapshot in
+        var didApply = false
+        let persisted = mutate { snapshot in
             guard let threadIndex = snapshot.threads.firstIndex(where: { $0.id == threadID }),
-                  let worktreeIndex = snapshot.operations.worktrees.firstIndex(where: { $0.id == worktreeID }) else { return }
+                  snapshot.threads[threadIndex].kind == .coding,
+                  snapshot.operations.codingWorkflows.first(where: { $0.threadID == threadID })?.state == .reviewingEvidence,
+                  let worktreeIndex = snapshot.operations.worktrees.firstIndex(where: {
+                      $0.id == worktreeID && $0.threadID == threadID && ($0.state == .ready || $0.state == .review)
+                  }) else { return }
             snapshot.threads[threadIndex].evidence = items
             snapshot.threads[threadIndex].attention = .needsApproval
             snapshot.threads[threadIndex].summary = evidencePassed
@@ -2491,23 +2604,90 @@ public final class DesktopAppModel: ObservableObject {
             snapshot.operations.worktrees[worktreeIndex].diagnosticSummary = "Evidence digest \(digest)"
             snapshot.operations.worktrees[worktreeIndex].state = .review
             snapshot.operations.worktrees[worktreeIndex].updatedAtUnixMillis = timestamp
+            Self.setCodingWorkflow(
+                in: &snapshot,
+                threadID: threadID,
+                state: evidencePassed ? .awaitingAcceptance : .reviewingEvidence,
+                reason: evidencePassed
+                    ? "Independent evidence passed; accept or reject the implementation."
+                    : "Independent evidence contains a failure and requires review.",
+                timestamp: timestamp
+            )
+            didApply = true
         }
+        return didApply && persisted
     }
 
-    public func recordCodingReview(threadID: String, worktreeID: String, accepted: Bool) {
+    @discardableResult
+    public func recordCodingReview(threadID: String, worktreeID: String, accepted: Bool) -> Bool {
+        let currentWorkflowState = codingWorkflow(threadID: threadID)?.state
+        let reviewStateIsValid = accepted
+            ? currentWorkflowState == .awaitingAcceptance
+            : currentWorkflowState == .awaitingAcceptance || currentWorkflowState == .reviewingEvidence
+        guard let currentThread = thread(id: threadID), currentThread.kind == .coding,
+              reviewStateIsValid,
+              snapshot.operations.worktrees.contains(where: {
+                  $0.id == worktreeID && $0.threadID == threadID && $0.state == .review
+              }) else { return false }
+        if accepted {
+            guard !currentThread.evidence.isEmpty,
+                  currentThread.evidence.allSatisfy({ $0.state == .passed }) else { return false }
+        }
         let timestamp = now()
-        mutate { snapshot in
+        var didApply = false
+        let persisted = mutate { snapshot in
+            let persistedWorkflowState = snapshot.operations.codingWorkflows.first(where: { $0.threadID == threadID })?.state
+            let persistedReviewStateIsValid = accepted
+                ? persistedWorkflowState == .awaitingAcceptance
+                : persistedWorkflowState == .awaitingAcceptance || persistedWorkflowState == .reviewingEvidence
             guard let threadIndex = snapshot.threads.firstIndex(where: { $0.id == threadID }),
-                  let worktreeIndex = snapshot.operations.worktrees.firstIndex(where: { $0.id == worktreeID }) else { return }
+                  snapshot.threads[threadIndex].kind == .coding,
+                  persistedReviewStateIsValid,
+                  let worktreeIndex = snapshot.operations.worktrees.firstIndex(where: {
+                      $0.id == worktreeID && $0.threadID == threadID && $0.state == .review
+                  }) else { return }
+            if accepted {
+                guard !snapshot.threads[threadIndex].evidence.isEmpty,
+                      snapshot.threads[threadIndex].evidence.allSatisfy({ $0.state == .passed }) else { return }
+            }
             snapshot.operations.worktrees[worktreeIndex].state = accepted ? .accepted : .dirty
             snapshot.operations.worktrees[worktreeIndex].updatedAtUnixMillis = timestamp
-            snapshot.threads[threadIndex].attention = accepted ? .completed : .needsResponse
+            snapshot.threads[threadIndex].attention = accepted ? .needsApproval : .needsResponse
             snapshot.threads[threadIndex].summary = accepted
-                ? "Implementation accepted locally. Nothing was pushed or published."
+                ? "Implementation accepted locally. Knowledge disposition is pending; nothing was pushed or published."
                 : "Implementation rejected. The isolated changes remain available for revision."
             snapshot.threads[threadIndex].unread = false
             snapshot.threads[threadIndex].updatedAtUnixMillis = timestamp
+            Self.setCodingWorkflow(
+                in: &snapshot,
+                threadID: threadID,
+                state: accepted ? .updatingKnowledge : .rejected,
+                reason: accepted
+                    ? "Implementation accepted locally; review, reconcile, or waive the knowledge lane."
+                    : "The implementation was rejected and remains available for revision.",
+                timestamp: timestamp
+            )
+            if accepted {
+                if let laneIndex = snapshot.operations.codingKnowledgeLanes.firstIndex(where: { $0.threadID == threadID }) {
+                    snapshot.operations.codingKnowledgeLanes[laneIndex].acceptedWorktreeID = worktreeID
+                    snapshot.operations.codingKnowledgeLanes[laneIndex].disposition = .needsReview
+                    snapshot.operations.codingKnowledgeLanes[laneIndex].dispositionReason = "Implementation was accepted locally; knowledge disposition is pending review."
+                    snapshot.operations.codingKnowledgeLanes[laneIndex].updatedAtUnixMillis = timestamp
+                } else {
+                    snapshot.operations.codingKnowledgeLanes.append(.init(
+                        projectID: snapshot.threads[threadIndex].projectID,
+                        threadID: threadID,
+                        disposition: .needsReview,
+                        dispositionReason: "Implementation was accepted locally; knowledge disposition is pending review.",
+                        acceptedWorktreeID: worktreeID,
+                        createdAtUnixMillis: timestamp,
+                        updatedAtUnixMillis: timestamp
+                    ))
+                }
+            }
+            didApply = true
         }
+        return didApply && persisted
     }
 
     private func providerContextReferenceCount(for thread: DesktopThread) -> Int {
@@ -3307,6 +3487,356 @@ public final class DesktopAppModel: ObservableObject {
         return source.id
     }
 
+    public func codingKnowledgeLane(threadID: String) -> DesktopCodingKnowledgeLane? {
+        snapshot.operations.codingKnowledgeLanes.first { $0.threadID == threadID }
+    }
+
+    public func codingWorkflow(threadID: String) -> DesktopCodingWorkflowRecord? {
+        snapshot.operations.codingWorkflows.first { $0.threadID == threadID }
+    }
+
+    @discardableResult
+    public func ensureCodingWorkflow(threadID: String) -> DesktopCodingWorkflowRecord? {
+        guard let thread = thread(id: threadID), thread.kind == .coding else { return nil }
+        if let existing = codingWorkflow(threadID: threadID) { return existing }
+        let timestamp = now()
+        guard mutate({ snapshot in
+            Self.ensureCodingWorkflow(
+                in: &snapshot,
+                threadID: threadID,
+                projectID: thread.projectID,
+                timestamp: timestamp
+            )
+        }) else { return nil }
+        return codingWorkflow(threadID: threadID)
+    }
+
+    @discardableResult
+    public func updateCodingWorkflow(
+        threadID: String,
+        state: DesktopCodingWorkflowState,
+        reason: String? = nil
+    ) -> Bool {
+        guard let thread = thread(id: threadID), thread.kind == .coding,
+              let currentState = codingWorkflow(threadID: threadID)?.state,
+              Self.allowsExternalCodingTransition(from: currentState, to: state) else { return false }
+        let timestamp = now()
+        return mutate { snapshot in
+            Self.setCodingWorkflow(
+                in: &snapshot,
+                threadID: threadID,
+                projectID: thread.projectID,
+                state: state,
+                reason: reason,
+                timestamp: timestamp
+            )
+        }
+    }
+
+    @discardableResult
+    public func replaceCodingKnowledgeContext(
+        threadID: String,
+        projectID: String? = nil,
+        sources: [DesktopCodingKnowledgeConsultedSource]
+    ) -> Bool {
+        guard let thread = thread(id: threadID), thread.kind == .coding,
+              sources.count <= Self.codingKnowledgeMaximumSourceCount else { return false }
+        guard let boundedSources = Self.boundedCodingKnowledgeSources(sources) else { return false }
+        let timestamp = now()
+        return mutate { snapshot in
+            let laneIndex: Int
+            if let index = snapshot.operations.codingKnowledgeLanes.firstIndex(where: { $0.threadID == threadID }) {
+                laneIndex = index
+            } else {
+                let lane = DesktopCodingKnowledgeLane(
+                    projectID: projectID ?? thread.projectID,
+                    threadID: threadID,
+                    createdAtUnixMillis: timestamp,
+                    updatedAtUnixMillis: timestamp
+                )
+                snapshot.operations.codingKnowledgeLanes.append(lane)
+                laneIndex = snapshot.operations.codingKnowledgeLanes.count - 1
+            }
+            snapshot.operations.codingKnowledgeLanes[laneIndex].consultedSources = boundedSources
+            snapshot.operations.codingKnowledgeLanes[laneIndex].updatedAtUnixMillis = timestamp
+            if snapshot.operations.codingKnowledgeLanes[laneIndex].projectID == nil {
+                snapshot.operations.codingKnowledgeLanes[laneIndex].projectID = projectID ?? thread.projectID
+            }
+            Self.ensureCodingWorkflow(
+                in: &snapshot,
+                threadID: threadID,
+                projectID: projectID ?? thread.projectID,
+                timestamp: timestamp
+            )
+        }
+    }
+
+    @discardableResult
+    public func addCodingKnowledgeCandidate(
+        threadID: String,
+        category: DesktopCodingKnowledgeCandidateCategory,
+        title: String,
+        detail: String,
+        evidenceDigest: String? = nil
+    ) -> String? {
+        guard let thread = thread(id: threadID), thread.kind == .coding else { return nil }
+        let cleanTitle = Self.normalized(title)
+        let cleanDetail = Self.normalized(detail)
+        let cleanEvidence = evidenceDigest.map(Self.normalized)
+        guard !cleanTitle.isEmpty, cleanTitle.utf8.count <= Self.codingKnowledgeMaximumTitleBytes,
+              !cleanDetail.isEmpty, cleanDetail.utf8.count <= Self.codingKnowledgeMaximumDetailBytes,
+              cleanEvidence?.utf8.count ?? 0 <= Self.codingKnowledgeMaximumDigestBytes else { return nil }
+        let timestamp = now()
+        let candidate = DesktopCodingKnowledgeCandidate(
+            category: category,
+            title: cleanTitle,
+            detail: cleanDetail,
+            evidenceDigest: cleanEvidence
+        )
+        var result: String?
+        let persisted = mutate { snapshot in
+            let laneIndex: Int
+            if let index = snapshot.operations.codingKnowledgeLanes.firstIndex(where: { $0.threadID == threadID }) {
+                laneIndex = index
+            } else {
+                snapshot.operations.codingKnowledgeLanes.append(.init(
+                    projectID: thread.projectID,
+                    threadID: threadID,
+                    createdAtUnixMillis: timestamp,
+                    updatedAtUnixMillis: timestamp
+                ))
+                laneIndex = snapshot.operations.codingKnowledgeLanes.count - 1
+            }
+            let duplicate = snapshot.operations.codingKnowledgeLanes[laneIndex].candidates.contains {
+                $0.category == category && $0.title == cleanTitle && $0.detail == cleanDetail
+                    && $0.evidenceDigest == cleanEvidence
+            }
+            guard !duplicate,
+                  snapshot.operations.codingKnowledgeLanes[laneIndex].candidates.count < Self.codingKnowledgeMaximumCandidateCount else { return }
+            snapshot.operations.codingKnowledgeLanes[laneIndex].candidates.append(candidate)
+            snapshot.operations.codingKnowledgeLanes[laneIndex].updatedAtUnixMillis = timestamp
+            Self.ensureCodingWorkflow(
+                in: &snapshot,
+                threadID: threadID,
+                projectID: thread.projectID,
+                timestamp: timestamp
+            )
+            result = candidate.id
+        }
+        return persisted ? result : nil
+    }
+
+    @discardableResult
+    public func markCodingKnowledgeNeedsReview(threadID: String, reason: String) -> Bool {
+        updateCodingKnowledgeDisposition(threadID: threadID, disposition: .needsReview, reason: reason)
+    }
+
+    @discardableResult
+    public func linkCodingKnowledge(
+        threadID: String,
+        proposalID: String? = nil,
+        writeID: String? = nil
+    ) -> Bool {
+        let cleanProposal = proposalID.map(Self.normalized)
+        let cleanWrite = writeID.map(Self.normalized)
+        guard cleanProposal?.isEmpty != true, cleanProposal?.utf8.count ?? 0 <= 256,
+              cleanWrite?.isEmpty != true, cleanWrite?.utf8.count ?? 0 <= 256,
+              thread(id: threadID)?.kind == .coding,
+              codingWorkflow(threadID: threadID)?.state == .updatingKnowledge,
+              Self.hasAcceptedCodingWorktree(in: snapshot, threadID: threadID),
+              codingKnowledgeLane(threadID: threadID) != nil,
+              cleanProposal != nil || cleanWrite != nil else { return false }
+        let timestamp = now()
+        var didApply = false
+        let persisted = mutate { snapshot in
+            guard let laneIndex = snapshot.operations.codingKnowledgeLanes.firstIndex(where: { $0.threadID == threadID }),
+                  snapshot.threads.first(where: { $0.id == threadID })?.kind == .coding,
+                  snapshot.operations.codingWorkflows.first(where: { $0.threadID == threadID })?.state == .updatingKnowledge,
+                  Self.hasAcceptedCodingWorktree(in: snapshot, threadID: threadID) else { return }
+            snapshot.operations.codingKnowledgeLanes[laneIndex].proposalID = cleanProposal ?? snapshot.operations.codingKnowledgeLanes[laneIndex].proposalID
+            snapshot.operations.codingKnowledgeLanes[laneIndex].writeID = cleanWrite ?? snapshot.operations.codingKnowledgeLanes[laneIndex].writeID
+            snapshot.operations.codingKnowledgeLanes[laneIndex].disposition = .proposed
+            snapshot.operations.codingKnowledgeLanes[laneIndex].dispositionReason = "Knowledge update proposal is linked and awaiting review."
+            snapshot.operations.codingKnowledgeLanes[laneIndex].updatedAtUnixMillis = timestamp
+            Self.setCodingWorkflow(
+                in: &snapshot,
+                threadID: threadID,
+                state: .updatingKnowledge,
+                reason: "Knowledge update proposal is linked and awaiting review.",
+                timestamp: timestamp
+            )
+            didApply = true
+        }
+        return didApply && persisted
+    }
+
+    @discardableResult
+    public func waiveCodingKnowledge(threadID: String, reason: String) -> Bool {
+        guard let cleanReason = validatedCodingKnowledgeReason(threadID: threadID, reason: reason) else {
+            return false
+        }
+        let timestamp = now()
+        var didApply = false
+        let persisted = mutate { snapshot in
+            guard let laneIndex = Self.codingKnowledgeLaneIndexForMutation(
+                in: snapshot,
+                threadID: threadID
+            ) else { return }
+            Self.setCodingKnowledgeLaneDisposition(
+                in: &snapshot,
+                laneIndex: laneIndex,
+                disposition: .waived,
+                reason: cleanReason,
+                timestamp: timestamp
+            )
+            if let proposalID = snapshot.operations.codingKnowledgeLanes[laneIndex].proposalID,
+               let proposalIndex = snapshot.operations.knowledgeProposals.firstIndex(where: { $0.id == proposalID }),
+               snapshot.operations.knowledgeProposals[proposalIndex].state != .reconciled {
+                snapshot.operations.knowledgeProposals[proposalIndex].state = .cancelled
+            }
+            if let writeID = snapshot.operations.codingKnowledgeLanes[laneIndex].writeID,
+               let writeIndex = snapshot.operations.knowledgeWrites.firstIndex(where: { $0.id == writeID }),
+               snapshot.operations.knowledgeWrites[writeIndex].state != .reconciled {
+                snapshot.operations.knowledgeWrites[writeIndex].state = .cancelled
+                if let approvalID = snapshot.operations.knowledgeWrites[writeIndex].approvalID,
+                   let approvalIndex = snapshot.operations.approvals.firstIndex(where: {
+                       $0.id == approvalID && $0.state == .awaitingApproval
+                   }) {
+                    snapshot.operations.approvals[approvalIndex].state = .cancelled
+                }
+            }
+            Self.setCodingWorkflow(
+                in: &snapshot,
+                threadID: threadID,
+                state: .completed,
+                reason: "Knowledge update waived: \(cleanReason)",
+                timestamp: timestamp
+            )
+            if let threadIndex = snapshot.threads.firstIndex(where: { $0.id == threadID }) {
+                snapshot.threads[threadIndex].attention = .completed
+                snapshot.threads[threadIndex].summary = "Implementation accepted locally. Knowledge update waived: \(cleanReason)"
+                snapshot.threads[threadIndex].unread = false
+                snapshot.threads[threadIndex].updatedAtUnixMillis = timestamp
+            }
+            snapshot.operations.audit.append(DesktopAuditRecord(
+                id: UUID().uuidString.lowercased(),
+                domain: "knowledge",
+                action: "coding knowledge waived",
+                target: threadID,
+                state: .completed,
+                detail: cleanReason,
+                recordedAtUnixMillis: timestamp
+            ))
+            didApply = true
+        }
+        return didApply && persisted
+    }
+
+    @discardableResult
+    public func beginCodingKnowledgeRevision(threadID: String) -> Bool {
+        guard thread(id: threadID)?.kind == .coding,
+              codingWorkflow(threadID: threadID)?.state == .updatingKnowledge,
+              Self.hasAcceptedCodingWorktree(in: snapshot, threadID: threadID),
+              let lane = codingKnowledgeLane(threadID: threadID),
+              let writeID = lane.writeID,
+              let write = snapshot.operations.knowledgeWrites.first(where: { $0.id == writeID }) else { return false }
+        let approvalState = write.approvalID.flatMap { approvalID in
+            snapshot.operations.approvals.first(where: { $0.id == approvalID })?.state
+        }
+        guard lane.disposition == .conflict || write.state == .failed
+                || approvalState == .rejected || approvalState == .cancelled else { return false }
+        let timestamp = now()
+        var didApply = false
+        let persisted = mutate { snapshot in
+            guard let laneIndex = snapshot.operations.codingKnowledgeLanes.firstIndex(where: { $0.threadID == threadID }),
+                  snapshot.operations.codingKnowledgeLanes[laneIndex].writeID == writeID,
+                  snapshot.operations.codingWorkflows.first(where: { $0.threadID == threadID })?.state == .updatingKnowledge,
+                  Self.hasAcceptedCodingWorktree(in: snapshot, threadID: threadID) else { return }
+            snapshot.operations.codingKnowledgeLanes[laneIndex].proposalID = nil
+            snapshot.operations.codingKnowledgeLanes[laneIndex].writeID = nil
+            snapshot.operations.codingKnowledgeLanes[laneIndex].disposition = .needsReview
+            snapshot.operations.codingKnowledgeLanes[laneIndex].dispositionReason = "The previous proposal was rejected or conflicted; inspect the current note and prepare a revised diff."
+            snapshot.operations.codingKnowledgeLanes[laneIndex].updatedAtUnixMillis = timestamp
+            Self.setCodingWorkflow(
+                in: &snapshot,
+                threadID: threadID,
+                state: .updatingKnowledge,
+                reason: "A revised knowledge proposal is required from the current note revision.",
+                timestamp: timestamp
+            )
+            didApply = true
+        }
+        return didApply && persisted
+    }
+
+    @discardableResult
+    private func updateCodingKnowledgeDisposition(
+        threadID: String,
+        disposition: DesktopCodingKnowledgeDisposition,
+        reason: String
+    ) -> Bool {
+        guard let cleanReason = validatedCodingKnowledgeReason(threadID: threadID, reason: reason) else {
+            return false
+        }
+        let timestamp = now()
+        var didApply = false
+        let persisted = mutate { snapshot in
+            guard let laneIndex = Self.codingKnowledgeLaneIndexForMutation(
+                in: snapshot,
+                threadID: threadID
+            ) else { return }
+            Self.setCodingKnowledgeLaneDisposition(
+                in: &snapshot,
+                laneIndex: laneIndex,
+                disposition: disposition,
+                reason: cleanReason,
+                timestamp: timestamp
+            )
+            Self.setCodingWorkflow(
+                in: &snapshot,
+                threadID: threadID,
+                state: .updatingKnowledge,
+                reason: cleanReason,
+                timestamp: timestamp
+            )
+            didApply = true
+        }
+        return didApply && persisted
+    }
+
+    private func validatedCodingKnowledgeReason(threadID: String, reason: String) -> String? {
+        let cleanReason = Self.normalized(reason)
+        guard thread(id: threadID)?.kind == .coding,
+              codingWorkflow(threadID: threadID)?.state == .updatingKnowledge,
+              Self.hasAcceptedCodingWorktree(in: snapshot, threadID: threadID),
+              codingKnowledgeLane(threadID: threadID) != nil,
+              !cleanReason.isEmpty,
+              cleanReason.utf8.count <= Self.codingKnowledgeMaximumReasonBytes else { return nil }
+        return cleanReason
+    }
+
+    private static func codingKnowledgeLaneIndexForMutation(
+        in snapshot: DesktopAppSnapshot,
+        threadID: String
+    ) -> Int? {
+        guard snapshot.threads.first(where: { $0.id == threadID })?.kind == .coding,
+              snapshot.operations.codingWorkflows.first(where: { $0.threadID == threadID })?.state == .updatingKnowledge,
+              hasAcceptedCodingWorktree(in: snapshot, threadID: threadID) else { return nil }
+        return snapshot.operations.codingKnowledgeLanes.firstIndex { $0.threadID == threadID }
+    }
+
+    private static func setCodingKnowledgeLaneDisposition(
+        in snapshot: inout DesktopAppSnapshot,
+        laneIndex: Int,
+        disposition: DesktopCodingKnowledgeDisposition,
+        reason: String,
+        timestamp: Int64
+    ) {
+        snapshot.operations.codingKnowledgeLanes[laneIndex].disposition = disposition
+        snapshot.operations.codingKnowledgeLanes[laneIndex].dispositionReason = reason
+        snapshot.operations.codingKnowledgeLanes[laneIndex].updatedAtUnixMillis = timestamp
+    }
+
     @discardableResult
     public func createKnowledgeProposal(
         sourceID: String?,
@@ -3316,22 +3846,29 @@ public final class DesktopAppModel: ObservableObject {
         proposedContent: String,
         baseRevision: String
     ) -> String? {
-        guard !Self.normalized(title).isEmpty,
-              !Self.normalized(target).isEmpty,
-              !Self.normalized(proposedContent).isEmpty else { return nil }
+        let cleanTitle = Self.normalized(title)
+        let cleanTarget = Self.normalized(target)
+        let cleanSummary = Self.normalized(summary)
+        let cleanBaseRevision = Self.normalized(baseRevision)
+        let targetComponents = cleanTarget.split(separator: "/", omittingEmptySubsequences: false)
+        guard !cleanTitle.isEmpty, cleanTitle.utf8.count <= 240,
+              !cleanTarget.isEmpty, cleanTarget.utf8.count <= 2_048, !cleanTarget.hasPrefix("/"),
+              !targetComponents.contains("."), !targetComponents.contains(".."), !targetComponents.contains(""),
+              cleanSummary.utf8.count <= 16_384,
+              !Self.normalized(proposedContent).isEmpty, proposedContent.utf8.count <= 2_097_152,
+              !cleanBaseRevision.isEmpty, cleanBaseRevision.utf8.count <= 256 else { return nil }
         let proposal = DesktopKnowledgeProposal(
             id: UUID().uuidString.lowercased(),
             knowledgeSourceID: sourceID,
-            title: Self.normalized(title),
-            target: Self.normalized(target),
-            summary: Self.normalized(summary),
+            title: cleanTitle,
+            target: cleanTarget,
+            summary: cleanSummary,
             proposedContent: proposedContent,
-            baseRevision: Self.normalized(baseRevision),
+            baseRevision: cleanBaseRevision,
             state: .proposed,
             createdAtUnixMillis: now()
         )
-        mutate { $0.operations.knowledgeProposals.append(proposal) }
-        return proposal.id
+        return mutate({ $0.operations.knowledgeProposals.append(proposal) }) ? proposal.id : nil
     }
 
     @discardableResult
@@ -3404,14 +3941,28 @@ public final class DesktopAppModel: ObservableObject {
         proposedDigest: String,
         diffSummary: String,
         unifiedDiff: String
-    ) -> String {
+    ) -> String? {
+        let cleanTargetPath = Self.normalized(targetPath)
+        let cleanBaseDigest = Self.normalized(baseDigest)
+        let cleanProposedDigest = Self.normalized(proposedDigest)
+        guard let proposal = snapshot.operations.knowledgeProposals.first(where: {
+            $0.id == proposalID && $0.state == .proposed
+        }),
+              proposal.target == cleanTargetPath,
+              proposal.baseRevision == cleanBaseDigest,
+              Self.stableLocalDigest(proposal.proposedContent) == cleanProposedDigest,
+              !cleanTargetPath.isEmpty,
+              !cleanBaseDigest.isEmpty,
+              !cleanProposedDigest.isEmpty,
+              diffSummary.utf8.count <= 16_384,
+              unifiedDiff.utf8.count <= 524_288 else { return nil }
         let record = DesktopKnowledgeWriteRecord(
             id: UUID().uuidString.lowercased(),
             proposalID: proposalID,
             approvalID: nil,
-            targetPath: targetPath,
-            baseDigest: baseDigest,
-            proposedDigest: proposedDigest,
+            targetPath: cleanTargetPath,
+            baseDigest: cleanBaseDigest,
+            proposedDigest: cleanProposedDigest,
             diffSummary: diffSummary,
             unifiedDiff: unifiedDiff,
             state: .proposed,
@@ -3419,19 +3970,82 @@ public final class DesktopAppModel: ObservableObject {
             createdAtUnixMillis: now(),
             reconciledAtUnixMillis: nil
         )
-        mutate { $0.operations.knowledgeWrites.append(record) }
-        return record.id
+        let timestamp = now()
+        let persisted = mutate { snapshot in
+            snapshot.operations.knowledgeWrites.append(record)
+            for laneIndex in snapshot.operations.codingKnowledgeLanes.indices
+            where snapshot.operations.codingKnowledgeLanes[laneIndex].proposalID == proposalID
+                && Self.hasAcceptedCodingWorktree(
+                    in: snapshot,
+                    threadID: snapshot.operations.codingKnowledgeLanes[laneIndex].threadID
+                ) {
+                let threadID = snapshot.operations.codingKnowledgeLanes[laneIndex].threadID
+                snapshot.operations.codingKnowledgeLanes[laneIndex].writeID = record.id
+                snapshot.operations.codingKnowledgeLanes[laneIndex].disposition = .proposed
+                snapshot.operations.codingKnowledgeLanes[laneIndex].dispositionReason = "Knowledge write proposal is ready for review."
+                snapshot.operations.codingKnowledgeLanes[laneIndex].updatedAtUnixMillis = timestamp
+                Self.setCodingWorkflow(
+                    in: &snapshot,
+                    threadID: threadID,
+                    state: .updatingKnowledge,
+                    reason: "Knowledge write proposal is ready for review.",
+                    timestamp: timestamp
+                )
+            }
+        }
+        return persisted ? record.id : nil
     }
 
-    public func attachKnowledgeApproval(writeID: String, approvalID: String) {
-        mutate { snapshot in
-            guard let index = snapshot.operations.knowledgeWrites.firstIndex(where: { $0.id == writeID }) else { return }
+    @discardableResult
+    public func attachKnowledgeApproval(writeID: String, approvalID: String) -> Bool {
+        guard let write = snapshot.operations.knowledgeWrites.first(where: { $0.id == writeID }),
+              let approval = snapshot.operations.approvals.first(where: {
+                  $0.id == approvalID && $0.state == .awaitingApproval
+              }),
+              approval.exactTarget == Self.knowledgeApprovalTarget(
+                  path: write.targetPath,
+                  baseDigest: write.baseDigest
+              ) else { return false }
+        if let lane = snapshot.operations.codingKnowledgeLanes.first(where: {
+            $0.writeID == writeID || $0.proposalID == write.proposalID
+        }), approval.threadID != lane.threadID { return false }
+        var didApply = false
+        let persisted = mutate { snapshot in
+            guard let index = snapshot.operations.knowledgeWrites.firstIndex(where: { $0.id == writeID }),
+                  let approval = snapshot.operations.approvals.first(where: {
+                      $0.id == approvalID && $0.state == .awaitingApproval
+                  }),
+                  approval.exactTarget == Self.knowledgeApprovalTarget(
+                      path: snapshot.operations.knowledgeWrites[index].targetPath,
+                      baseDigest: snapshot.operations.knowledgeWrites[index].baseDigest
+                  ) else { return }
             snapshot.operations.knowledgeWrites[index].approvalID = approvalID
             snapshot.operations.knowledgeWrites[index].state = .awaitingApproval
-            if let proposalIndex = snapshot.operations.knowledgeProposals.firstIndex(where: {
-                $0.id == snapshot.operations.knowledgeWrites[index].proposalID
-            }) { snapshot.operations.knowledgeProposals[proposalIndex].state = .awaitingApproval }
+            let proposalID = snapshot.operations.knowledgeWrites[index].proposalID
+            if let proposalIndex = snapshot.operations.knowledgeProposals.firstIndex(where: { $0.id == proposalID }) {
+                snapshot.operations.knowledgeProposals[proposalIndex].state = .awaitingApproval
+            }
+            let timestamp = now()
+            for laneIndex in snapshot.operations.codingKnowledgeLanes.indices
+            where snapshot.operations.codingKnowledgeLanes[laneIndex].writeID == writeID
+                || snapshot.operations.codingKnowledgeLanes[laneIndex].proposalID == proposalID {
+                let threadID = snapshot.operations.codingKnowledgeLanes[laneIndex].threadID
+                guard Self.hasAcceptedCodingWorktree(in: snapshot, threadID: threadID),
+                      snapshot.operations.codingWorkflows.first(where: { $0.threadID == threadID })?.state == .updatingKnowledge else { continue }
+                snapshot.operations.codingKnowledgeLanes[laneIndex].disposition = .awaitingApproval
+                snapshot.operations.codingKnowledgeLanes[laneIndex].dispositionReason = "Knowledge update is awaiting exact approval."
+                snapshot.operations.codingKnowledgeLanes[laneIndex].updatedAtUnixMillis = timestamp
+                Self.setCodingWorkflow(
+                    in: &snapshot,
+                    threadID: threadID,
+                    state: .updatingKnowledge,
+                    reason: "Knowledge update is awaiting exact approval.",
+                    timestamp: timestamp
+                )
+            }
+            didApply = true
         }
+        return didApply && persisted
     }
 
     public func reconcileKnowledgeWrite(
@@ -3443,22 +4057,79 @@ public final class DesktopAppModel: ObservableObject {
         let timestamp = now()
         mutate { snapshot in
             guard let index = snapshot.operations.knowledgeWrites.firstIndex(where: { $0.id == id }) else { return }
-            snapshot.operations.knowledgeWrites[index].state = state
+            let digestMatchesProposal = currentDigest != nil
+                && currentDigest == snapshot.operations.knowledgeWrites[index].proposedDigest
+            let effectiveState: DesktopActionState = state == .reconciled && !digestMatchesProposal ? .failed : state
+            let effectiveDetail = state == .reconciled && !digestMatchesProposal
+                ? "Reconciliation digest did not match the proposed content. \(detail)"
+                : detail
+            snapshot.operations.knowledgeWrites[index].state = effectiveState
             snapshot.operations.knowledgeWrites[index].currentDigest = currentDigest
             snapshot.operations.knowledgeWrites[index].reconciledAtUnixMillis = timestamp
             if let proposalIndex = snapshot.operations.knowledgeProposals.firstIndex(where: {
                 $0.id == snapshot.operations.knowledgeWrites[index].proposalID
-            }) { snapshot.operations.knowledgeProposals[proposalIndex].state = state }
+            }) { snapshot.operations.knowledgeProposals[proposalIndex].state = effectiveState }
             if let documentIndex = snapshot.operations.knowledgeDocuments.firstIndex(where: {
                 $0.path == snapshot.operations.knowledgeWrites[index].targetPath
-            }) { snapshot.operations.knowledgeDocuments[documentIndex].conflictDigest = state == .failed ? currentDigest : nil }
+            }) { snapshot.operations.knowledgeDocuments[documentIndex].conflictDigest = effectiveState == .failed ? currentDigest : nil }
+            let writeID = snapshot.operations.knowledgeWrites[index].id
+            let proposalID = snapshot.operations.knowledgeWrites[index].proposalID
+            let linkedLaneIndexes = snapshot.operations.codingKnowledgeLanes.indices.filter {
+                snapshot.operations.codingKnowledgeLanes[$0].writeID == writeID
+                    || snapshot.operations.codingKnowledgeLanes[$0].proposalID == proposalID
+            }
+            for laneIndex in linkedLaneIndexes {
+                let threadID = snapshot.operations.codingKnowledgeLanes[laneIndex].threadID
+                guard Self.hasAcceptedCodingWorktree(in: snapshot, threadID: threadID),
+                      snapshot.operations.codingWorkflows.first(where: { $0.threadID == threadID })?.state == .updatingKnowledge else { continue }
+                if effectiveState == .reconciled {
+                    snapshot.operations.codingKnowledgeLanes[laneIndex].disposition = .reconciled
+                    snapshot.operations.codingKnowledgeLanes[laneIndex].dispositionReason = KanameTextBounds.utf8Prefix(
+                        Self.normalized(effectiveDetail),
+                        maximumBytes: Self.codingKnowledgeMaximumReasonBytes
+                    )
+                    Self.setCodingWorkflow(
+                        in: &snapshot,
+                        threadID: threadID,
+                        state: .completed,
+                        reason: "Knowledge update reconciled successfully.",
+                        timestamp: timestamp
+                    )
+                    if let threadIndex = snapshot.threads.firstIndex(where: { $0.id == threadID }) {
+                        snapshot.threads[threadIndex].attention = .completed
+                        snapshot.threads[threadIndex].summary = "Implementation accepted locally. Knowledge update reconciled; nothing was pushed or published."
+                        snapshot.threads[threadIndex].unread = false
+                        snapshot.threads[threadIndex].updatedAtUnixMillis = timestamp
+                    }
+                } else if effectiveState == .failed {
+                    snapshot.operations.codingKnowledgeLanes[laneIndex].disposition = .conflict
+                    snapshot.operations.codingKnowledgeLanes[laneIndex].dispositionReason = KanameTextBounds.utf8Prefix(
+                        Self.normalized(effectiveDetail),
+                        maximumBytes: Self.codingKnowledgeMaximumReasonBytes
+                    )
+                    Self.setCodingWorkflow(
+                        in: &snapshot,
+                        threadID: threadID,
+                        state: .updatingKnowledge,
+                        reason: "Knowledge update conflicted and requires review.",
+                        timestamp: timestamp
+                    )
+                    if let threadIndex = snapshot.threads.firstIndex(where: { $0.id == threadID }) {
+                        snapshot.threads[threadIndex].attention = .needsApproval
+                        snapshot.threads[threadIndex].summary = "Knowledge update conflicted; review the external note and decide whether to retry or waive it."
+                        snapshot.threads[threadIndex].unread = true
+                        snapshot.threads[threadIndex].updatedAtUnixMillis = timestamp
+                    }
+                }
+                snapshot.operations.codingKnowledgeLanes[laneIndex].updatedAtUnixMillis = timestamp
+            }
             snapshot.operations.audit.append(DesktopAuditRecord(
                 id: UUID().uuidString.lowercased(),
                 domain: "knowledge",
                 action: "write reconciliation",
                 target: snapshot.operations.knowledgeWrites[index].targetPath,
-                state: state,
-                detail: detail,
+                state: effectiveState,
+                detail: effectiveDetail,
                 recordedAtUnixMillis: timestamp
             ))
         }
@@ -3528,6 +4199,12 @@ public final class DesktopAppModel: ObservableObject {
                   snapshot.operations.approvals[index].state == .awaitingApproval else { return }
             if snapshot.operations.approvals[index].expiresAtUnixMillis.map({ $0 < timestamp }) ?? false {
                 snapshot.operations.approvals[index].state = .cancelled
+                Self.applyKnowledgeApprovalDecision(
+                    in: &snapshot,
+                    approvalID: id,
+                    state: .cancelled,
+                    timestamp: timestamp
+                )
                 snapshot.operations.audit.append(DesktopAuditRecord(
                     id: UUID().uuidString.lowercased(),
                     domain: "approval",
@@ -3541,6 +4218,12 @@ public final class DesktopAppModel: ObservableObject {
             }
             let state: DesktopActionState = approved ? .approved : .rejected
             snapshot.operations.approvals[index].state = state
+            Self.applyKnowledgeApprovalDecision(
+                in: &snapshot,
+                approvalID: id,
+                state: state,
+                timestamp: timestamp
+            )
             snapshot.operations.audit.append(
                 DesktopAuditRecord(
                     id: UUID().uuidString.lowercased(),
@@ -4489,6 +5172,148 @@ public final class DesktopAppModel: ObservableObject {
         default:
             ([], ["This provider is not supported by the installed Kaname build"])
         }
+    }
+
+    private static let codingKnowledgeMaximumSourceCount = 64
+    private static let codingKnowledgeMaximumCandidateCount = 64
+    private static let codingKnowledgeMaximumSourceIDBytes = 256
+    private static let codingKnowledgeMaximumTitleBytes = 240
+    private static let codingKnowledgeMaximumPathBytes = 2_048
+    private static let codingKnowledgeMaximumDigestBytes = 256
+    private static let codingKnowledgeMaximumProvenanceBytes = 1_024
+    private static let codingKnowledgeMaximumExcerptBytes = 8_192
+    private static let codingKnowledgeMaximumSummaryBytes = 2_048
+    private static let codingKnowledgeMaximumDetailBytes = 8_192
+    private static let codingKnowledgeMaximumReasonBytes = 2_048
+
+    private static func ensureCodingWorkflow(
+        in snapshot: inout DesktopAppSnapshot,
+        threadID: String,
+        projectID: String?,
+        timestamp: Int64
+    ) {
+        guard let thread = snapshot.threads.first(where: { $0.id == threadID }), thread.kind == .coding,
+              !snapshot.operations.codingWorkflows.contains(where: { $0.threadID == threadID }) else { return }
+        snapshot.operations.codingWorkflows.append(DesktopCodingWorkflowRecord(
+            projectID: projectID ?? thread.projectID,
+            threadID: threadID,
+            createdAtUnixMillis: timestamp,
+            updatedAtUnixMillis: timestamp
+        ))
+    }
+
+    private static func hasAcceptedCodingWorktree(
+        in snapshot: DesktopAppSnapshot,
+        threadID: String
+    ) -> Bool {
+        guard let acceptedWorktreeID = snapshot.operations.codingKnowledgeLanes.first(where: {
+            $0.threadID == threadID
+        })?.acceptedWorktreeID else { return false }
+        return snapshot.operations.worktrees.contains {
+            $0.id == acceptedWorktreeID && $0.threadID == threadID && $0.state == .accepted
+        }
+    }
+
+    private static func knowledgeApprovalTarget(path: String, baseDigest: String) -> String {
+        "obsidian:\(path)#sha256=\(baseDigest)"
+    }
+
+    private static func applyKnowledgeApprovalDecision(
+        in snapshot: inout DesktopAppSnapshot,
+        approvalID: String,
+        state: DesktopActionState,
+        timestamp: Int64
+    ) {
+        let writeIndexes = snapshot.operations.knowledgeWrites.indices.filter {
+            snapshot.operations.knowledgeWrites[$0].approvalID == approvalID
+        }
+        for writeIndex in writeIndexes {
+            let writeID = snapshot.operations.knowledgeWrites[writeIndex].id
+            let proposalID = snapshot.operations.knowledgeWrites[writeIndex].proposalID
+            snapshot.operations.knowledgeWrites[writeIndex].state = state
+            if let proposalIndex = snapshot.operations.knowledgeProposals.firstIndex(where: { $0.id == proposalID }) {
+                snapshot.operations.knowledgeProposals[proposalIndex].state = state
+            }
+            for laneIndex in snapshot.operations.codingKnowledgeLanes.indices
+            where snapshot.operations.codingKnowledgeLanes[laneIndex].writeID == writeID
+                || snapshot.operations.codingKnowledgeLanes[laneIndex].proposalID == proposalID {
+                let threadID = snapshot.operations.codingKnowledgeLanes[laneIndex].threadID
+                guard hasAcceptedCodingWorktree(in: snapshot, threadID: threadID),
+                      snapshot.operations.codingWorkflows.first(where: { $0.threadID == threadID })?.state == .updatingKnowledge else { continue }
+                if state == .approved {
+                    snapshot.operations.codingKnowledgeLanes[laneIndex].disposition = .proposed
+                    snapshot.operations.codingKnowledgeLanes[laneIndex].dispositionReason = "The exact knowledge write is approved but has not been applied or reconciled."
+                } else if state == .rejected || state == .cancelled {
+                    snapshot.operations.codingKnowledgeLanes[laneIndex].disposition = .needsReview
+                    snapshot.operations.codingKnowledgeLanes[laneIndex].dispositionReason = state == .rejected
+                        ? "The exact knowledge write was rejected; revise it or record a reasoned waiver."
+                        : "The exact knowledge-write approval expired; request a revised proposal or record a reasoned waiver."
+                }
+                snapshot.operations.codingKnowledgeLanes[laneIndex].updatedAtUnixMillis = timestamp
+            }
+        }
+    }
+
+    private static func allowsExternalCodingTransition(
+        from current: DesktopCodingWorkflowState,
+        to next: DesktopCodingWorkflowState
+    ) -> Bool {
+        if current == next { return true }
+        if next == .failed && current != .completed { return true }
+        return switch (current, next) {
+        case (.awaitingPlanApproval, .preparingImplementation),
+             (.awaitingReview, .reviewingEvidence),
+             (.reviewingEvidence, .awaitingReview),
+             (.awaitingAcceptance, .reviewingEvidence):
+            true
+        default:
+            false
+        }
+    }
+
+    private static func setCodingWorkflow(
+        in snapshot: inout DesktopAppSnapshot,
+        threadID: String,
+        projectID: String? = nil,
+        state: DesktopCodingWorkflowState,
+        reason: String? = nil,
+        timestamp: Int64
+    ) {
+        guard let thread = snapshot.threads.first(where: { $0.id == threadID }), thread.kind == .coding else { return }
+        ensureCodingWorkflow(in: &snapshot, threadID: threadID, projectID: projectID ?? thread.projectID, timestamp: timestamp)
+        guard let index = snapshot.operations.codingWorkflows.firstIndex(where: { $0.threadID == threadID }) else { return }
+        snapshot.operations.codingWorkflows[index].state = state
+        if let reason {
+            let cleanReason = normalized(reason)
+            snapshot.operations.codingWorkflows[index].reason = cleanReason.isEmpty
+                ? nil
+                : KanameTextBounds.utf8Prefix(cleanReason, maximumBytes: codingKnowledgeMaximumReasonBytes)
+        } else {
+            snapshot.operations.codingWorkflows[index].reason = nil
+        }
+        snapshot.operations.codingWorkflows[index].updatedAtUnixMillis = timestamp
+    }
+
+    private static func boundedCodingKnowledgeSources(
+        _ sources: [DesktopCodingKnowledgeConsultedSource]
+    ) -> [DesktopCodingKnowledgeConsultedSource]? {
+        var seen = Set<String>()
+        var bounded: [DesktopCodingKnowledgeConsultedSource] = []
+        bounded.reserveCapacity(sources.count)
+        for source in sources {
+            guard !normalized(source.sourceID).isEmpty, source.sourceID.utf8.count <= codingKnowledgeMaximumSourceIDBytes,
+                  !normalized(source.title).isEmpty, source.title.utf8.count <= codingKnowledgeMaximumTitleBytes,
+                  !normalized(source.path).isEmpty, source.path.utf8.count <= codingKnowledgeMaximumPathBytes,
+                  !normalized(source.digest).isEmpty, source.digest.utf8.count <= codingKnowledgeMaximumDigestBytes,
+                  !normalized(source.provenance).isEmpty, source.provenance.utf8.count <= codingKnowledgeMaximumProvenanceBytes,
+                  source.excerpt.utf8.count <= codingKnowledgeMaximumExcerptBytes,
+                  source.summary.utf8.count <= codingKnowledgeMaximumSummaryBytes else { return nil }
+            let key = "\(source.sourceID)|\(source.path)|\(source.digest)"
+            guard seen.insert(key).inserted else { continue }
+            bounded.append(source)
+            if bounded.count == codingKnowledgeMaximumSourceCount { break }
+        }
+        return bounded
     }
 
     private static func normalized(_ value: String) -> String {

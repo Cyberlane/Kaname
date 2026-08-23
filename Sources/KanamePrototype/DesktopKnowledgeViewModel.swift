@@ -8,14 +8,68 @@ final class DesktopKnowledgeViewModel: ObservableObject {
     @Published private(set) var searchResults: [ObsidianSearchResult] = []
     @Published private(set) var diff: ObsidianNoteDiff?
     @Published private(set) var activeWriteID: String?
+    @Published private(set) var codingThreadID: String?
     @Published private(set) var isBusy = false
     @Published private(set) var message: String?
     @Published var draft = ""
+
+    func prepareCodingDraft(
+        model: DesktopAppModel,
+        threadID: String,
+        path: String,
+        scopePath: String,
+        candidates: [DesktopCodingKnowledgeCandidate]
+    ) {
+        guard !isBusy else { return }
+        guard let cleanPath = writableNotePath(model: model, path: path, scopePath: scopePath) else {
+            message = "Choose an exact Markdown note inside a writable vault scope."
+            return
+        }
+        guard model.codingKnowledgeLane(threadID: threadID) != nil else {
+            message = "This coding thread has no durable knowledge lane yet."
+            return
+        }
+        codingThreadID = threadID
+        isBusy = true
+        Task {
+            defer { isBusy = false }
+            do {
+                let snapshot = try await service(model: model).inspect(path: cleanPath)
+                document = snapshot
+                draft = Self.seededDraft(content: snapshot.content, candidates: candidates)
+                diff = nil
+                activeWriteID = nil
+                model.recordKnowledgeDocument(Self.documentRecord(snapshot, existing: model.snapshot.operations.knowledgeDocuments.first {
+                    $0.path == snapshot.path
+                }))
+                message = "Loaded " + snapshot.path + ". Review the seeded draft before requesting exact write approval."
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+    }
 
     func seedDefaultScope(model: DesktopAppModel) {
         guard model.snapshot.operations.vaultScopes.isEmpty,
               let source = model.snapshot.domains.knowledgeSources.first(where: { $0.kind == .obsidian }) else { return }
         _ = model.addVaultScope(path: source.scope, sourceID: source.id, canWrite: false)
+    }
+
+    func resumeCodingProposal(model: DesktopAppModel, threadID: String) {
+        codingThreadID = threadID
+        document = nil
+        activeWriteID = nil
+        draft = ""
+        diff = nil
+        message = nil
+        guard let lane = model.codingKnowledgeLane(threadID: threadID),
+              let writeID = lane.writeID,
+              let write = model.snapshot.operations.knowledgeWrites.first(where: { $0.id == writeID }),
+              let proposal = model.snapshot.operations.knowledgeProposals.first(where: { $0.id == write.proposalID }) else { return }
+        activeWriteID = write.id
+        draft = proposal.proposedContent
+        diff = nil
+        message = "Resumed the persisted knowledge proposal. Review the exact diff and approval state."
     }
 
     func inspect(model: DesktopAppModel, path: String) {
@@ -56,7 +110,7 @@ final class DesktopKnowledgeViewModel: ObservableObject {
         }
     }
 
-    func reviewDraft(model: DesktopAppModel) {
+    func reviewDraft(model: DesktopAppModel, codingThreadID: String? = nil) {
         guard let document else {
             message = "Open a note before reviewing changes."
             return
@@ -88,14 +142,28 @@ final class DesktopKnowledgeViewModel: ObservableObject {
                     message = "The proposed edit could not be recorded."
                     return
                 }
-                let writeID = model.recordKnowledgeWrite(
+                let linkedCodingThreadID = codingThreadID ?? self.codingThreadID
+                if let linkedCodingThreadID,
+                   !model.linkCodingKnowledge(threadID: linkedCodingThreadID, proposalID: proposalID) {
+                    message = "The coding workflow changed before the proposal could be linked. Nothing was approved or written."
+                    return
+                }
+                guard let writeID = model.recordKnowledgeWrite(
                     proposalID: proposalID,
                     targetPath: proposed.targetPath,
                     baseDigest: proposed.baseDigest,
                     proposedDigest: proposed.proposedDigest,
                     diffSummary: proposed.summary,
                     unifiedDiff: proposed.unifiedDiff
-                )
+                ) else {
+                    message = "Kaname could not persist a digest-bound write proposal. Nothing was approved or written."
+                    return
+                }
+                if let linkedCodingThreadID,
+                   model.codingKnowledgeLane(threadID: linkedCodingThreadID)?.writeID != writeID {
+                    message = "Kaname could not durably bind the proposed write to this coding thread. Nothing was approved or written."
+                    return
+                }
                 diff = proposed
                 activeWriteID = writeID
                 message = "Review the exact diff, then request write approval."
@@ -111,7 +179,7 @@ final class DesktopKnowledgeViewModel: ObservableObject {
               write.approvalID == nil else { return }
         let exactTarget = Self.approvalTarget(path: write.targetPath, baseDigest: write.baseDigest)
         guard let approvalID = model.createApproval(
-            threadID: nil,
+            threadID: codingThreadID,
             title: "Write Obsidian note",
             exactTarget: exactTarget,
             consequence: "Replace \(write.targetPath) only if revision \(write.baseDigest.prefix(12)) is still current.",
@@ -119,7 +187,10 @@ final class DesktopKnowledgeViewModel: ObservableObject {
             reversible: true,
             expiresAtUnixMillis: nil
         ) else { return }
-        model.attachKnowledgeApproval(writeID: writeID, approvalID: approvalID)
+        guard model.attachKnowledgeApproval(writeID: writeID, approvalID: approvalID) else {
+            message = "Kaname could not bind the approval to this exact note revision. Nothing was written."
+            return
+        }
         message = "The exact note write is ready for approval in Inbox."
     }
 
@@ -190,6 +261,35 @@ final class DesktopKnowledgeViewModel: ObservableObject {
 
     private func scope(model: DesktopAppModel, path: String) -> DesktopVaultScopeRecord? {
         model.snapshot.operations.vaultScopes.first { path == $0.path || path.hasPrefix($0.path + "/") }
+    }
+
+    private func writableNotePath(model: DesktopAppModel, path: String, scopePath: String) -> String? {
+        let clean = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        let components = clean.split(separator: "/", omittingEmptySubsequences: false)
+        guard !clean.isEmpty,
+              clean.utf8.count <= 2_048,
+              !clean.hasPrefix("/"),
+              URL(fileURLWithPath: clean).pathExtension.lowercased() == "md",
+              !components.contains("."),
+              !components.contains(".."),
+              !components.contains("") else { return nil }
+        guard model.snapshot.operations.vaultScopes.contains(where: {
+            $0.canWrite && $0.path == scopePath && (clean == $0.path || clean.hasPrefix($0.path + "/"))
+        }) else { return nil }
+        return clean
+    }
+
+    private static func seededDraft(
+        content: String,
+        candidates: [DesktopCodingKnowledgeCandidate]
+    ) -> String {
+        guard !candidates.isEmpty else { return content }
+        let additions = candidates.enumerated().map { index, candidate in
+            let evidence = candidate.evidenceDigest.map { "\nEvidence digest: \($0)" } ?? ""
+            return String(index + 1) + ". **" + candidate.title + "** (" + candidate.category.rawValue + ")\n" + candidate.detail + evidence
+        }.joined(separator: "\n\n")
+        let separator = content.hasSuffix("\n") ? "\n" : "\n\n"
+        return content + separator + "## Proposed coding knowledge\n\n" + additions + "\n"
     }
 
     private static func documentRecord(

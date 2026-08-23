@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 @testable import KanameDesktop
 @testable import KanameDomain
@@ -368,11 +369,12 @@ struct DesktopAppModelTests {
         #expect(model.thread(id: threadID)?.summary == "Implementing the approved plan in an isolated worktree…")
         clock += 1
         model.completeProviderRun(id: runID)
-        #expect(model.thread(id: threadID)?.attention == .running)
+        #expect(model.thread(id: threadID)?.attention == .needsApproval)
 
         clock += 1
+        #expect(model.updateCodingWorkflow(threadID: threadID, state: .reviewingEvidence))
         let verificationOutput = String(repeating: "build output\n", count: 3_000) + "FINAL RESULT: passed"
-        model.recordCodingEvidence(
+        #expect(model.recordCodingEvidence(
             threadID: threadID,
             worktreeID: worktreeID,
             revision: "base:diff",
@@ -383,7 +385,7 @@ struct DesktopAppModelTests {
             verificationOutput: verificationOutput,
             artifactPaths: ["Sources/Flow.swift"],
             digest: String(repeating: "a", count: 64)
-        )
+        ))
         #expect(model.thread(id: threadID)?.attention == .needsApproval)
         #expect(model.thread(id: threadID)?.evidence.allSatisfy { $0.state == .passed } == true)
         #expect(model.thread(id: threadID)?.plan.allSatisfy { $0.state == .complete } == true)
@@ -395,7 +397,7 @@ struct DesktopAppModelTests {
         clock += 1
         model.recordCodingReview(threadID: threadID, worktreeID: worktreeID, accepted: true)
         let restored = DesktopAppModel(store: store, now: { 2_000 })
-        #expect(restored.thread(id: threadID)?.attention == .completed)
+        #expect(restored.thread(id: threadID)?.attention == .needsApproval)
         #expect(restored.snapshot.operations.worktrees.first(where: { $0.id == worktreeID })?.state == .accepted)
     }
 
@@ -1024,14 +1026,24 @@ struct DesktopAppModelTests {
             proposedContent: "# Overview\nUpdated",
             baseRevision: document.digest
         ))
-        let writeID = model.recordKnowledgeWrite(
+        let writeID = try #require(model.recordKnowledgeWrite(
             proposalID: proposalID,
             targetPath: document.path,
             baseDigest: document.digest,
-            proposedDigest: String(repeating: "b", count: 64),
+            proposedDigest: knowledgeDigest("# Overview\nUpdated"),
             diffSummary: "0 removed · 1 added line",
             unifiedDiff: "+Updated"
-        )
+        ))
+        let mismatchedApprovalID = try #require(model.createApproval(
+            threadID: nil,
+            title: "Write wrong Obsidian revision",
+            exactTarget: "obsidian:\(document.path)#sha256=wrong",
+            consequence: "This target must not bind.",
+            dataLeavingDevice: "Nothing",
+            reversible: true,
+            expiresAtUnixMillis: nil
+        ))
+        #expect(model.attachKnowledgeApproval(writeID: writeID, approvalID: mismatchedApprovalID) == false)
         let approvalID = try #require(model.createApproval(
             threadID: nil,
             title: "Write Obsidian note",
@@ -1041,12 +1053,12 @@ struct DesktopAppModelTests {
             reversible: true,
             expiresAtUnixMillis: nil
         ))
-        model.attachKnowledgeApproval(writeID: writeID, approvalID: approvalID)
+        #expect(model.attachKnowledgeApproval(writeID: writeID, approvalID: approvalID))
         model.resolveApproval(id: approvalID, approved: true)
         model.reconcileKnowledgeWrite(
             id: writeID,
             state: .reconciled,
-            currentDigest: String(repeating: "b", count: 64),
+            currentDigest: knowledgeDigest("# Overview\nUpdated"),
             detail: "Re-read matched."
         )
 
@@ -1261,6 +1273,462 @@ struct DesktopAppModelTests {
         let persisted = try #require(store.primary)
         #expect(try JSONDecoder().decode(DesktopAppSnapshot.self, from: persisted) == previous)
     }
+}
+
+// Durable coding workflow gates are intentionally exercised through the model
+// surface so snapshot restoration is part of the contract under test.
+extension DesktopAppModelTests {
+    @Test
+    func codingImplementationCompletionEntersAwaitingReview() throws {
+        let model = DesktopAppModel(store: MemoryDesktopStateStore(), now: { 20_000 })
+        let (threadID, _) = try prepareCodingReview(model)
+
+        #expect(model.codingWorkflow(threadID: threadID)?.state == .awaitingReview)
+        #expect(model.thread(id: threadID)?.attention == .needsApproval)
+    }
+
+    @Test
+    func orphanedCodingPlanFailsClosedAndCanRetryTheSameSavedMessage() throws {
+        let model = DesktopAppModel(store: MemoryDesktopStateStore(), now: { 20_250 })
+        let projectID = try #require(model.snapshot.projects.first?.id)
+        let threadID = model.createConversation(kind: .coding, projectID: projectID)
+        let messageID = try #require(model.appendUserMessage(threadID: threadID, body: "Plan this safely."))
+        let runID = try #require(model.enqueueProviderRun(
+            threadID: threadID,
+            sourceMessageID: messageID,
+            purpose: .codingPlan,
+            runtimeModeOverride: .approvalRequired,
+            networkAccessOverride: false
+        ))
+        #expect(model.beginProviderRun(id: runID) != nil)
+
+        model.recoverOrphanedProviderRuns()
+        #expect(model.providerRun(id: runID)?.state == .interrupted)
+        #expect(model.codingWorkflow(threadID: threadID)?.state == .failed)
+        let retryID = try #require(model.retryProviderRun(id: runID))
+        #expect(model.providerRun(id: retryID)?.sourceMessageID == messageID)
+        #expect(model.codingWorkflow(threadID: threadID)?.state == .planning)
+        #expect(model.thread(id: threadID)?.messages.filter { $0.role == .user }.count == 1)
+    }
+
+    @Test
+    func schema26SnapshotDecodesEmptyCodingWorkflowCollections() throws {
+        let store = MemoryDesktopStateStore()
+        let encoder = JSONEncoder()
+        let starter = DesktopAppSnapshot.starter(now: 20_500)
+        var object = try #require(JSONSerialization.jsonObject(with: encoder.encode(starter)) as? [String: Any])
+        object["version"] = 26
+        var operations = try #require(object["operations"] as? [String: Any])
+        operations.removeValue(forKey: "codingKnowledgeLanes")
+        operations.removeValue(forKey: "codingWorkflows")
+        object["operations"] = operations
+        store.data = try JSONSerialization.data(withJSONObject: object)
+
+        let restored = DesktopAppModel(store: store, now: { 20_501 })
+        #expect(restored.snapshot.version == DesktopAppSnapshot.currentVersion)
+        #expect(restored.snapshot.operations.codingKnowledgeLanes.isEmpty)
+        #expect(restored.snapshot.operations.codingWorkflows.isEmpty)
+    }
+
+    @Test
+    func codingAcceptanceRequiresExactThreadWorktreePassingEvidenceAndAwaitingAcceptance() throws {
+        let model = DesktopAppModel(store: MemoryDesktopStateStore(), now: { 21_000 })
+        let (threadID, worktreeID) = try prepareCodingReview(model)
+        let projectID = try #require(model.thread(id: threadID)?.projectID)
+        let otherThreadID = model.createConversation(kind: .coding, projectID: projectID)
+        let otherWorktreeID = try #require(model.proposeWorktree(
+            projectID: projectID,
+            threadID: otherThreadID,
+            rootWorkspacePath: "/tmp/kaname-root",
+            worktreePath: "/tmp/kaname-other-worktree",
+            branch: "kaname/other",
+            baseRevision: "base"
+        ))
+        model.updateWorktree(
+            id: otherWorktreeID,
+            headRevision: "other:diff",
+            changedFileCount: 1,
+            diffSummary: "Other thread change",
+            state: .review
+        )
+        recordPassingCodingEvidence(model, threadID: threadID, worktreeID: worktreeID)
+        #expect(model.codingWorkflow(threadID: threadID)?.state == .awaitingAcceptance)
+
+        #expect(model.recordCodingReview(threadID: threadID, worktreeID: otherWorktreeID, accepted: true) == false)
+        #expect(model.recordCodingReview(threadID: threadID, worktreeID: worktreeID, accepted: true) == true)
+        #expect(model.codingWorkflow(threadID: threadID)?.state == .updatingKnowledge)
+
+        // A later direct acceptance is not valid merely because the worktree and
+        // evidence still look acceptable; the durable state gate is exact too.
+        let secondModel = DesktopAppModel(store: MemoryDesktopStateStore(), now: { 22_000 })
+        let (secondThreadID, secondWorktreeID) = try prepareCodingReview(secondModel)
+        recordPassingCodingEvidence(secondModel, threadID: secondThreadID, worktreeID: secondWorktreeID)
+        #expect(secondModel.updateCodingWorkflow(threadID: secondThreadID, state: .reviewingEvidence))
+        #expect(secondModel.recordCodingReview(threadID: secondThreadID, worktreeID: secondWorktreeID, accepted: true) == false)
+        #expect(secondModel.codingWorkflow(threadID: secondThreadID)?.state == .reviewingEvidence)
+    }
+
+    @Test
+    func acceptedCodingReviewLeavesKnowledgeLaneAndThreadNeedsApproval() throws {
+        let model = DesktopAppModel(store: MemoryDesktopStateStore(), now: { 23_000 })
+        let (threadID, worktreeID) = try prepareCodingReview(model)
+        recordPassingCodingEvidence(model, threadID: threadID, worktreeID: worktreeID)
+
+        #expect(model.recordCodingReview(threadID: threadID, worktreeID: worktreeID, accepted: true))
+        #expect(model.codingWorkflow(threadID: threadID)?.state == .updatingKnowledge)
+        #expect(model.codingKnowledgeLane(threadID: threadID)?.disposition == .needsReview)
+        #expect(model.codingKnowledgeLane(threadID: threadID)?.acceptedWorktreeID == worktreeID)
+        #expect(model.thread(id: threadID)?.attention == .needsApproval)
+    }
+
+    @Test
+    func knowledgeProposalAndWaiverAreBlockedBeforeAcceptanceAndNonEmptyWaiverCompletesAfterward() throws {
+        let model = DesktopAppModel(store: MemoryDesktopStateStore(), now: { 24_000 })
+        let (threadID, worktreeID) = try prepareCodingReview(model)
+        let source = DesktopCodingKnowledgeConsultedSource(
+            sourceID: "source",
+            title: "Context",
+            path: "Projects/Coding ADE/Overview.md",
+            digest: String(repeating: "a", count: 64),
+            provenance: "Obsidian CLI",
+            excerpt: "Reference only"
+        )
+        #expect(model.replaceCodingKnowledgeContext(threadID: threadID, sources: [source]))
+        #expect(model.linkCodingKnowledge(threadID: threadID, proposalID: "proposal-before-acceptance") == false)
+        #expect(model.waiveCodingKnowledge(threadID: threadID, reason: "Not yet accepted") == false)
+        #expect(model.codingWorkflow(threadID: threadID)?.state == .awaitingReview)
+
+        recordPassingCodingEvidence(model, threadID: threadID, worktreeID: worktreeID)
+        #expect(model.recordCodingReview(threadID: threadID, worktreeID: worktreeID, accepted: true))
+        #expect(model.waiveCodingKnowledge(threadID: threadID, reason: "   ") == false)
+        #expect(model.waiveCodingKnowledge(threadID: threadID, reason: "No durable knowledge change is required."))
+        #expect(model.codingWorkflow(threadID: threadID)?.state == .completed)
+        #expect(model.codingKnowledgeLane(threadID: threadID)?.disposition == .waived)
+        #expect(model.thread(id: threadID)?.attention == .completed)
+    }
+
+    @Test
+    func linkedKnowledgeProposalAndWriteSurviveSnapshotRestore() throws {
+        let store = MemoryDesktopStateStore()
+        let model = DesktopAppModel(store: store, now: { 25_000 })
+        let (threadID, worktreeID) = try prepareCodingReview(model)
+        recordPassingCodingEvidence(model, threadID: threadID, worktreeID: worktreeID)
+        #expect(model.recordCodingReview(threadID: threadID, worktreeID: worktreeID, accepted: true))
+        let proposalID = try #require(model.createKnowledgeProposal(
+            sourceID: "knowledge-coding-ade",
+            title: "Update decision note",
+            target: "Projects/Coding ADE/Decisions.md",
+            summary: "Record the accepted implementation decision.",
+            proposedContent: "# Decision\nUse the gated workflow.",
+            baseRevision: String(repeating: "b", count: 64)
+        ))
+        #expect(model.linkCodingKnowledge(threadID: threadID, proposalID: proposalID))
+        let writeID = try #require(model.recordKnowledgeWrite(
+            proposalID: proposalID,
+            targetPath: "Projects/Coding ADE/Decisions.md",
+            baseDigest: String(repeating: "b", count: 64),
+            proposedDigest: knowledgeDigest("# Decision\nUse the gated workflow."),
+            diffSummary: "1 added line",
+            unifiedDiff: "+Use the gated workflow."
+        ))
+
+        let restored = DesktopAppModel(store: store, now: { 26_000 })
+        #expect(restored.codingKnowledgeLane(threadID: threadID)?.proposalID == proposalID)
+        #expect(restored.codingKnowledgeLane(threadID: threadID)?.writeID == writeID)
+        #expect(restored.snapshot.operations.knowledgeProposals.first { $0.id == proposalID }?.state == .proposed)
+        #expect(restored.snapshot.operations.knowledgeWrites.first { $0.id == writeID }?.proposalID == proposalID)
+        #expect(restored.codingWorkflow(threadID: threadID)?.state == .updatingKnowledge)
+    }
+
+    @Test
+    func failedKnowledgeReconciliationRemainsUpdatingKnowledgeConflictUntilReconciled() throws {
+        let model = DesktopAppModel(store: MemoryDesktopStateStore(), now: { 27_000 })
+        let (threadID, worktreeID) = try prepareCodingReview(model)
+        recordPassingCodingEvidence(model, threadID: threadID, worktreeID: worktreeID)
+        #expect(model.recordCodingReview(threadID: threadID, worktreeID: worktreeID, accepted: true))
+        let proposalID = try #require(model.createKnowledgeProposal(
+            sourceID: "knowledge-coding-ade",
+            title: "Reconcile decision",
+            target: "Projects/Coding ADE/Decisions.md",
+            summary: "Reconcile an external edit.",
+            proposedContent: "Updated decision",
+            baseRevision: "base"
+        ))
+        #expect(model.linkCodingKnowledge(threadID: threadID, proposalID: proposalID))
+        let writeID = try #require(model.recordKnowledgeWrite(
+            proposalID: proposalID,
+            targetPath: "Projects/Coding ADE/Decisions.md",
+            baseDigest: "base",
+            proposedDigest: knowledgeDigest("Updated decision"),
+            diffSummary: "1 changed line",
+            unifiedDiff: "-old\n+next"
+        ))
+
+        model.reconcileKnowledgeWrite(
+            id: writeID,
+            state: .reconciled,
+            currentDigest: "external",
+            detail: "A caller attempted to reconcile the wrong digest."
+        )
+        #expect(model.codingWorkflow(threadID: threadID)?.state == .updatingKnowledge)
+        #expect(model.codingKnowledgeLane(threadID: threadID)?.disposition == .conflict)
+        #expect(model.snapshot.operations.knowledgeWrites.first { $0.id == writeID }?.state == .failed)
+        #expect(model.thread(id: threadID)?.attention == .needsApproval)
+
+        model.reconcileKnowledgeWrite(
+            id: writeID,
+            state: .reconciled,
+            currentDigest: knowledgeDigest("Updated decision"),
+            detail: "The exact inspected revision was written."
+        )
+        #expect(model.codingWorkflow(threadID: threadID)?.state == .completed)
+        #expect(model.codingKnowledgeLane(threadID: threadID)?.disposition == .reconciled)
+        #expect(model.snapshot.operations.knowledgeWrites.first { $0.id == writeID }?.state == .reconciled)
+        #expect(model.thread(id: threadID)?.attention == .completed)
+    }
+
+    @Test
+    func conflictedKnowledgeProposalCanBeDetachedForRevisionWithoutCompletingWorkflow() throws {
+        let model = DesktopAppModel(store: MemoryDesktopStateStore(), now: { 27_500 })
+        let (threadID, worktreeID) = try prepareCodingReview(model)
+        recordPassingCodingEvidence(model, threadID: threadID, worktreeID: worktreeID)
+        #expect(model.recordCodingReview(threadID: threadID, worktreeID: worktreeID, accepted: true))
+        let proposalID = try #require(model.createKnowledgeProposal(
+            sourceID: "knowledge-coding-ade",
+            title: "Revise decision",
+            target: "Projects/Coding ADE/Decisions.md",
+            summary: "Prepare a revision.",
+            proposedContent: "Revised decision",
+            baseRevision: "base"
+        ))
+        #expect(model.linkCodingKnowledge(threadID: threadID, proposalID: proposalID))
+        let writeID = try #require(model.recordKnowledgeWrite(
+            proposalID: proposalID,
+            targetPath: "Projects/Coding ADE/Decisions.md",
+            baseDigest: "base",
+            proposedDigest: knowledgeDigest("Revised decision"),
+            diffSummary: "1 changed line",
+            unifiedDiff: "-old\n+next"
+        ))
+        model.reconcileKnowledgeWrite(
+            id: writeID,
+            state: .failed,
+            currentDigest: "external",
+            detail: "The note changed after inspection."
+        )
+
+        #expect(model.beginCodingKnowledgeRevision(threadID: threadID))
+        #expect(model.codingKnowledgeLane(threadID: threadID)?.proposalID == nil)
+        #expect(model.codingKnowledgeLane(threadID: threadID)?.writeID == nil)
+        #expect(model.codingKnowledgeLane(threadID: threadID)?.disposition == .needsReview)
+        #expect(model.codingWorkflow(threadID: threadID)?.state == .updatingKnowledge)
+        #expect(model.thread(id: threadID)?.attention == .needsApproval)
+    }
+
+    @Test
+    func codingKnowledgeApprovalIsThreadBoundAndRejectionRequiresRevisionOrWaiver() throws {
+        let model = DesktopAppModel(store: MemoryDesktopStateStore(), now: { 27_750 })
+        let (threadID, worktreeID) = try prepareCodingReview(model)
+        recordPassingCodingEvidence(model, threadID: threadID, worktreeID: worktreeID)
+        #expect(model.recordCodingReview(threadID: threadID, worktreeID: worktreeID, accepted: true))
+        let content = "Rejected proposal"
+        let proposalID = try #require(model.createKnowledgeProposal(
+            sourceID: "knowledge-coding-ade",
+            title: "Thread-bound decision",
+            target: "Projects/Coding ADE/Decisions.md",
+            summary: "Review an exact thread-bound proposal.",
+            proposedContent: content,
+            baseRevision: "base"
+        ))
+        #expect(model.linkCodingKnowledge(threadID: threadID, proposalID: proposalID))
+        let writeID = try #require(model.recordKnowledgeWrite(
+            proposalID: proposalID,
+            targetPath: "Projects/Coding ADE/Decisions.md",
+            baseDigest: "base",
+            proposedDigest: knowledgeDigest(content),
+            diffSummary: "1 changed line",
+            unifiedDiff: "+Rejected proposal"
+        ))
+        let exactTarget = "obsidian:Projects/Coding ADE/Decisions.md#sha256=base"
+        let unboundApprovalID = try #require(model.createApproval(
+            threadID: nil,
+            title: "Unbound write",
+            exactTarget: exactTarget,
+            consequence: "Must not bind to the coding lane.",
+            dataLeavingDevice: "Nothing",
+            reversible: true,
+            expiresAtUnixMillis: nil
+        ))
+        #expect(model.attachKnowledgeApproval(writeID: writeID, approvalID: unboundApprovalID) == false)
+        let approvalID = try #require(model.createApproval(
+            threadID: threadID,
+            title: "Thread-bound write",
+            exactTarget: exactTarget,
+            consequence: "Write only this coding thread's exact proposal.",
+            dataLeavingDevice: "Nothing",
+            reversible: true,
+            expiresAtUnixMillis: nil
+        ))
+        #expect(model.attachKnowledgeApproval(writeID: writeID, approvalID: approvalID))
+        #expect(model.codingKnowledgeLane(threadID: threadID)?.disposition == .awaitingApproval)
+
+        model.resolveApproval(id: approvalID, approved: false)
+        #expect(model.snapshot.operations.knowledgeWrites.first { $0.id == writeID }?.state == .rejected)
+        #expect(model.codingKnowledgeLane(threadID: threadID)?.disposition == .needsReview)
+        #expect(model.beginCodingKnowledgeRevision(threadID: threadID))
+        #expect(model.codingWorkflow(threadID: threadID)?.state == .updatingKnowledge)
+    }
+
+    @Test
+    func newCodingCycleResetsOnlyTheActiveKnowledgeLaneAfterReasonedWaiver() throws {
+        let model = DesktopAppModel(store: MemoryDesktopStateStore(), now: { 27_900 })
+        let (threadID, worktreeID) = try prepareCodingReview(model)
+        recordPassingCodingEvidence(model, threadID: threadID, worktreeID: worktreeID)
+        #expect(model.recordCodingReview(threadID: threadID, worktreeID: worktreeID, accepted: true))
+        #expect(model.addCodingKnowledgeCandidate(
+            threadID: threadID,
+            category: .decision,
+            title: "Previous cycle",
+            detail: "This candidate belongs only to the completed cycle."
+        ) != nil)
+        let content = "Unneeded durable edit"
+        let proposalID = try #require(model.createKnowledgeProposal(
+            sourceID: "knowledge-coding-ade",
+            title: "Previous proposal",
+            target: "Projects/Coding ADE/Decisions.md",
+            summary: "A proposal that will be waived.",
+            proposedContent: content,
+            baseRevision: "base"
+        ))
+        #expect(model.linkCodingKnowledge(threadID: threadID, proposalID: proposalID))
+        let writeID = try #require(model.recordKnowledgeWrite(
+            proposalID: proposalID,
+            targetPath: "Projects/Coding ADE/Decisions.md",
+            baseDigest: "base",
+            proposedDigest: knowledgeDigest(content),
+            diffSummary: "1 changed line",
+            unifiedDiff: "+Unneeded durable edit"
+        ))
+        #expect(model.waiveCodingKnowledge(
+            threadID: threadID,
+            reason: "The accepted result does not change durable project truth."
+        ))
+        #expect(model.snapshot.operations.knowledgeWrites.first { $0.id == writeID }?.state == .cancelled)
+
+        let nextMessageID = try #require(model.appendUserMessage(
+            threadID: threadID,
+            body: "Start the next implementation cycle."
+        ))
+        #expect(model.enqueueProviderRun(
+            threadID: threadID,
+            sourceMessageID: nextMessageID,
+            purpose: .codingPlan,
+            runtimeModeOverride: .approvalRequired,
+            networkAccessOverride: false
+        ) != nil)
+        let lane = try #require(model.codingKnowledgeLane(threadID: threadID))
+        #expect(lane.consultedSources.isEmpty)
+        #expect(lane.candidates.isEmpty)
+        #expect(lane.disposition == .collecting)
+        #expect(lane.acceptedWorktreeID == nil)
+        #expect(lane.proposalID == nil)
+        #expect(lane.writeID == nil)
+        #expect(model.codingWorkflow(threadID: threadID)?.state == .planning)
+        #expect(model.snapshot.operations.knowledgeWrites.contains { $0.id == writeID })
+    }
+
+    @Test
+    func codingKnowledgeContextDeduplicatesAndRejectsOversizedSources() throws {
+        let model = DesktopAppModel(store: MemoryDesktopStateStore(), now: { 28_000 })
+        let projectID = try #require(model.snapshot.projects.first?.id)
+        let threadID = model.createConversation(kind: .coding, projectID: projectID)
+        let source = DesktopCodingKnowledgeConsultedSource(
+            sourceID: "obsidian",
+            title: "Overview",
+            path: "Projects/Coding ADE/Overview.md",
+            digest: String(repeating: "d", count: 64),
+            provenance: "Obsidian CLI · local vault",
+            excerpt: "bounded"
+        )
+        let second = DesktopCodingKnowledgeConsultedSource(
+            sourceID: "repository",
+            title: "AGENTS",
+            path: "AGENTS.md",
+            digest: String(repeating: "e", count: 64),
+            provenance: "Repository checkout",
+            excerpt: "policy reference"
+        )
+        #expect(model.replaceCodingKnowledgeContext(threadID: threadID, sources: [source, source, second]))
+        #expect(model.codingKnowledgeLane(threadID: threadID)?.consultedSources.map(\.path) == [source.path, second.path])
+
+        let oversized = DesktopCodingKnowledgeConsultedSource(
+            sourceID: "oversized",
+            title: "Too large",
+            path: "large.md",
+            digest: "digest",
+            provenance: "fixture",
+            excerpt: String(repeating: "x", count: 8_193)
+        )
+        #expect(model.replaceCodingKnowledgeContext(threadID: threadID, sources: [oversized]) == false)
+        #expect(model.codingKnowledgeLane(threadID: threadID)?.consultedSources.map(\.path) == [source.path, second.path])
+
+        let tooMany = (0..<65).map { index in
+            DesktopCodingKnowledgeConsultedSource(
+                sourceID: "source-\(index)",
+                title: "Source \(index)",
+                path: "source-\(index).md",
+                digest: "digest-\(index)",
+                provenance: "fixture"
+            )
+        }
+        #expect(model.replaceCodingKnowledgeContext(threadID: threadID, sources: tooMany) == false)
+    }
+
+    private func prepareCodingReview(_ model: DesktopAppModel) throws -> (threadID: String, worktreeID: String) {
+        let projectID = try #require(model.snapshot.projects.first?.id)
+        let threadID = model.createConversation(kind: .coding, projectID: projectID)
+        let messageID = try #require(model.appendUserMessage(threadID: threadID, body: "Implement the approved change."))
+        let worktreeID = try #require(model.proposeWorktree(
+            projectID: projectID,
+            threadID: threadID,
+            rootWorkspacePath: "/tmp/kaname-root",
+            worktreePath: "/tmp/kaname-worktree-\(threadID)",
+            branch: "kaname/test",
+            baseRevision: "base"
+        ))
+        model.updateWorktree(id: worktreeID, headRevision: "base", changedFileCount: 0, diffSummary: "Ready", state: .ready)
+        let runID = try #require(model.enqueueProviderRun(
+            threadID: threadID,
+            sourceMessageID: messageID,
+            workspacePathOverride: "/tmp/kaname-worktree-\(threadID)",
+            purpose: .codingImplementation,
+            runtimeModeOverride: .autoAcceptEdits,
+            networkAccessOverride: false
+        ))
+        #expect(model.beginProviderRun(id: runID) != nil)
+        model.completeProviderRun(id: runID)
+        return (threadID, worktreeID)
+    }
+
+    private func recordPassingCodingEvidence(_ model: DesktopAppModel, threadID: String, worktreeID: String) {
+        #expect(model.updateCodingWorkflow(threadID: threadID, state: .reviewingEvidence))
+        #expect(model.recordCodingEvidence(
+            threadID: threadID,
+            worktreeID: worktreeID,
+            revision: "base:diff",
+            diffStat: "1 file changed",
+            diffCheckPassed: true,
+            verificationCommand: "swift test --filter DesktopAppModelTests",
+            verificationExitStatus: 0,
+            verificationOutput: "PASS",
+            artifactPaths: ["Sources/Flow.swift"],
+            digest: String(repeating: "a", count: 64)
+        ))
+    }
+}
+
+private func knowledgeDigest(_ value: String) -> String {
+    SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
 }
 
 private final class MemoryDesktopStateStore: DesktopStateStoring {

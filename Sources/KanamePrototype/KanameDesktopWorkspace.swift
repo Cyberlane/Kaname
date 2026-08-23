@@ -2541,16 +2541,18 @@ private struct DesktopThreadConversation: View {
 
     private enum Panel: String, CaseIterable, Identifiable {
         case conversation
-        case changes
         case plan
+        case changes
         case evidence
+        case knowledge
         var id: String { rawValue }
         var label: String {
             switch self {
             case .conversation: "Chat"
-            case .changes: "Diff"
             case .plan: "Plan"
-            case .evidence: "Checks"
+            case .changes: "Changes"
+            case .evidence: "Evidence"
+            case .knowledge: "Knowledge"
             }
         }
     }
@@ -2570,6 +2572,12 @@ private struct DesktopThreadConversation: View {
                 ThreadPlanView(items: thread.plan)
             case .evidence:
                 ThreadEvidenceView(items: thread.evidence)
+            case .knowledge:
+                DesktopCodingKnowledgeLaneView(
+                    model: model,
+                    thread: thread
+                )
+                .id(thread.id)
             }
         }
         .sheet(isPresented: $showsRename, onDismiss: restoreSheetFocus) {
@@ -2605,6 +2613,9 @@ private struct DesktopThreadConversation: View {
         }
         .onAppear {
             applyComposerFocusRequest()
+            if thread.kind == .coding, runtime.codingStage(threadID: thread.id) == .knowledgeReview {
+                panel = .knowledge
+            }
 #if os(macOS)
             installImagePasteMonitor()
 #endif
@@ -2616,6 +2627,7 @@ private struct DesktopThreadConversation: View {
         }
         .onChange(of: composerFocusRequest) { _ in applyComposerFocusRequest() }
         .onChange(of: thread.id) { _ in
+            if thread.kind != .coding { panel = .conversation }
             narrativeRowLimit = DesktopConversationNarrativePresentation.defaultMaximumRows
             conversationSearch = ""
             selectedRunID = nil
@@ -2630,6 +2642,11 @@ private struct DesktopThreadConversation: View {
         }
         .onChange(of: thread.evidence.count) { count in
             if count > 0 { panel = .evidence }
+        }
+        .onChange(of: runtime.codingStage(threadID: thread.id)) { stage in
+            if thread.kind == .coding, stage == .knowledgeReview {
+                panel = .knowledge
+            }
         }
     }
 
@@ -2663,7 +2680,7 @@ private struct DesktopThreadConversation: View {
             }
             if thread.kind == .coding { codingWorkflowBanner }
             Picker("Thread panel", selection: $panel) {
-                ForEach(Panel.allCases) { item in
+                ForEach(availablePanels) { item in
                     Text(item.label).tag(item)
                 }
             }
@@ -2683,12 +2700,17 @@ private struct DesktopThreadConversation: View {
                 panel = .plan
                 runtime.approvePlanAndImplement(threadID: thread.id)
             },
+            beginReview: {
+                panel = .changes
+                runtime.beginImplementationReview(threadID: thread.id)
+            },
             recheckEvidence: {
                 panel = .evidence
                 runtime.recheckImplementation(threadID: thread.id)
             },
             accept: { runtime.reviewImplementation(threadID: thread.id, accepted: true) },
-            reject: { runtime.reviewImplementation(threadID: thread.id, accepted: false) }
+            reject: { runtime.reviewImplementation(threadID: thread.id, accepted: false) },
+            reviewKnowledge: { panel = .knowledge }
         )
     }
 
@@ -3034,9 +3056,13 @@ private struct DesktopThreadConversation: View {
 
     private var canSendMessage: Bool {
         guard thread.kind == .coding else { return true }
-        return ![.planning, .preparing, .implementing, .evidenceReview].contains(
+        return ![.planning, .preparing, .implementing, .implementationReview, .evidenceReview, .knowledgeReview].contains(
             runtime.codingStage(threadID: thread.id)
         )
+    }
+
+    private var availablePanels: [Panel] {
+        thread.kind == .coding ? Array(Panel.allCases) : Panel.allCases.filter { $0 != .knowledge }
     }
 
     private var hasSendableContent: Bool {
@@ -3358,9 +3384,11 @@ private struct DesktopCodingWorkflowBanner: View {
     let evidencePassed: Bool
     let error: String?
     let approvePlan: () -> Void
+    let beginReview: () -> Void
     let recheckEvidence: () -> Void
     let accept: () -> Void
     let reject: () -> Void
+    let reviewKnowledge: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
@@ -3407,7 +3435,7 @@ private struct DesktopCodingWorkflowBanner: View {
         }
     }
 
-    private static let workflowPath = "Discuss → Plan → Approve → Implement → Review evidence → Accept → Update knowledge"
+    private static let workflowPath = "Discuss → Plan → Approve → Implement → Review changes → Review evidence (Accept) → Update knowledge"
 
     private var progressLabel: String {
         switch stage {
@@ -3415,9 +3443,11 @@ private struct DesktopCodingWorkflowBanner: View {
         case .planning: "Stage 2 of 7 · Plan"
         case .planReview: "Stage 3 of 7 · Approve"
         case .preparing, .implementing: "Stage 4 of 7 · Implement"
-        case .evidenceReview: "Stage 5 of 7 · Review evidence"
-        case .rejected: "Stage 6 of 7 · Rejected"
-        case .accepted: "Stage 7 of 7 · Knowledge update proposed"
+        case .implementationReview: "Stage 5 of 7 · Review changes"
+        case .evidenceReview: "Stage 6 of 7 · Review evidence"
+        case .knowledgeReview: "Stage 7 of 7 · Knowledge update"
+        case .completed: "Complete · Knowledge reconciled or waived"
+        case .rejected: "Stopped · Rejected"
         case .failed: "Stopped safely · no accepted result"
         }
     }
@@ -3431,6 +3461,9 @@ private struct DesktopCodingWorkflowBanner: View {
                 .help(provider.caseInsensitiveCompare("Codex") == .orderedSame
                     ? "Create an isolated worktree and authorize one network-denied implementation turn"
                     : "Choose Codex to use Kaname's signed isolated implementation flow")
+        case .implementationReview:
+            Button("Review changes & run checks", systemImage: "checkmark.shield", action: beginReview)
+                .buttonStyle(.borderedProminent)
         case .evidenceReview:
             Button("Re-run checks", systemImage: "arrow.clockwise", action: recheckEvidence).buttonStyle(.bordered)
             Button("Reject", role: .destructive, action: reject).buttonStyle(.bordered)
@@ -3438,7 +3471,10 @@ private struct DesktopCodingWorkflowBanner: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(!evidencePassed)
                 .help(evidencePassed ? "Record local acceptance" : "All independent evidence must pass before acceptance")
-        default:
+        case .knowledgeReview:
+            Button("Review knowledge", systemImage: "books.vertical", action: reviewKnowledge)
+                .buttonStyle(.borderedProminent)
+        case .completed, .discuss, .planning, .preparing, .implementing, .rejected, .failed:
             EmptyView()
         }
     }
@@ -3450,8 +3486,10 @@ private struct DesktopCodingWorkflowBanner: View {
         case .planReview: "Plan needs your approval"
         case .preparing: "Preparing the next guarded stage"
         case .implementing: "Implementing in an isolated worktree"
+        case .implementationReview: "Review changes before checks"
         case .evidenceReview: "Evidence needs your review"
-        case .accepted: "Accepted locally"
+        case .knowledgeReview: "Accepted · knowledge update pending"
+        case .completed: "Completed"
         case .rejected: "Rejected; isolated changes retained"
         case .failed: "Stopped safely"
         }
@@ -3464,8 +3502,10 @@ private struct DesktopCodingWorkflowBanner: View {
         case .planReview: "Review or revise the plan. Implementation cannot start until you press the approval button."
         case .preparing: "Kaname is creating or checking the isolated worktree and signed evidence boundary."
         case .implementing: "One approved, network-denied turn may write only inside the linked worktree."
+        case .implementationReview: "Review the isolated changes and run independent checks before evidence acceptance."
         case .evidenceReview: "Provider completion is not acceptance. Inspect the diff and verification evidence, then accept or reject."
-        case .accepted: "The reviewed result is accepted. Nothing was committed, pushed, published, or merged."
+        case .knowledgeReview: "The code is accepted locally. Review the proposed knowledge edit or provide a reason for no durable update."
+        case .completed: "The knowledge update was reconciled or explicitly waived. Nothing was pushed, published, or merged."
         case .rejected: "The changes remain isolated and recoverable. Send revision guidance to request a fresh plan."
         case .failed: "No result was accepted. Inspect the error, then send a revised request or retry the planning turn."
         }
@@ -3473,20 +3513,21 @@ private struct DesktopCodingWorkflowBanner: View {
 
     private var symbol: String {
         switch stage {
-        case .accepted: "checkmark.seal.fill"
         case .failed, .rejected: "exclamationmark.shield.fill"
         case .planning, .preparing, .implementing: "hourglass"
-        case .planReview, .evidenceReview: "person.crop.circle.badge.questionmark"
+        case .planReview, .implementationReview, .evidenceReview, .knowledgeReview: "person.crop.circle.badge.questionmark"
+        case .completed: "checkmark.seal.fill"
         case .discuss: "text.bubble"
         }
     }
 
     private var tint: Color {
         switch stage {
-        case .accepted: Nord.auroraGreen
         case .failed, .rejected: Nord.auroraRed
         case .planReview, .evidenceReview: Nord.auroraYellow
+        case .implementationReview, .knowledgeReview: Nord.auroraYellow
         case .planning, .preparing, .implementing: Nord.frost1
+        case .completed: Nord.auroraGreen
         case .discuss: Nord.frost0
         }
     }
@@ -5838,6 +5879,338 @@ final class DesktopPersonalIntegrationViewModel: ObservableObject {
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
         return "\(prefix)-\(encoded)"
+    }
+}
+
+private struct DesktopCodingKnowledgeLaneView: View {
+    @ObservedObject var model: DesktopAppModel
+    let thread: DesktopThread
+    @StateObject private var knowledge = DesktopKnowledgeViewModel()
+    @State private var targetScopeID: String?
+    @State private var targetPath = ""
+    @State private var waiverReason = ""
+
+    private var lane: DesktopCodingKnowledgeLane? {
+        model.codingKnowledgeLane(threadID: thread.id)
+    }
+
+    private var writableScopes: [DesktopVaultScopeRecord] {
+        model.snapshot.operations.vaultScopes.filter { $0.canWrite }
+    }
+
+    private var selectedScope: DesktopVaultScopeRecord? {
+        writableScopes.first { $0.id == targetScopeID }
+    }
+
+    private var activeWrite: DesktopKnowledgeWriteRecord? {
+        (knowledge.activeWriteID ?? lane?.writeID).flatMap { id in
+            model.snapshot.operations.knowledgeWrites.first { $0.id == id }
+        }
+    }
+
+    private var knowledgeReadyForDisposition: Bool {
+        guard lane?.disposition != .reconciled, lane?.disposition != .waived else { return false }
+        let workflowReady = model.codingWorkflow(threadID: thread.id)?.state == .updatingKnowledge
+        let acceptedWorktree = lane?.acceptedWorktreeID.flatMap { acceptedWorktreeID in
+            model.snapshot.operations.worktrees.first {
+                $0.id == acceptedWorktreeID && $0.threadID == thread.id
+            }
+        }?.state == .accepted
+        return workflowReady && acceptedWorktree
+    }
+
+    private var activeProposal: DesktopKnowledgeProposal? {
+        activeWrite.flatMap { write in
+            model.snapshot.operations.knowledgeProposals.first { $0.id == write.proposalID }
+        }
+    }
+
+    private var activeApproval: DesktopApprovalRecord? {
+        activeWrite?.approvalID.flatMap { id in
+            model.snapshot.operations.approvals.first { $0.id == id }
+        }
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                if knowledge.isBusy {
+                    ProgressView("Working with local knowledge…")
+                }
+                if let message = knowledge.message, !message.isEmpty {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if let lane {
+                    knowledgeCollectionSection(
+                        title: "Consulted",
+                        emptyMessage: "No consulted sources were recorded.",
+                        items: lane.consultedSources,
+                        accessibilityLabel: "Consulted coding knowledge sources"
+                    ) { source in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(source.title).font(.subheadline.weight(.semibold))
+                            Text(source.path).font(.caption).textSelection(.enabled)
+                            Text("Digest " + source.digest + " · " + source.provenance)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
+                    }
+                    knowledgeCollectionSection(
+                        title: "Candidates",
+                        emptyMessage: "No candidates were recorded. An empty list does not waive the durable update.",
+                        items: lane.candidates,
+                        accessibilityLabel: "Coding knowledge candidates"
+                    ) { candidate in
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(alignment: .firstTextBaseline) {
+                                Text(candidate.title).font(.subheadline.weight(.semibold))
+                                Spacer()
+                                Text(candidate.category.label)
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(Nord.frost1)
+                            }
+                            Text(candidate.detail).font(.caption).foregroundStyle(.secondary)
+                            if let digest = candidate.evidenceDigest {
+                                Text("Evidence digest: " + digest)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                    }
+                    proposalSection(lane)
+                    statusSection(lane)
+                } else {
+                    EmptyPanel(
+                        symbol: "books.vertical",
+                        title: "Knowledge lane unavailable",
+                        detail: "This coding result has no durable knowledge lane to review."
+                    )
+                }
+            }
+            .padding(22)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .background(Nord.polarNight0)
+        .onAppear {
+            if targetScopeID == nil { targetScopeID = writableScopes.first?.id }
+            knowledge.resumeCodingProposal(model: model, threadID: thread.id)
+        }
+        .onChange(of: thread.id) { _ in
+            targetScopeID = writableScopes.first?.id
+            targetPath = ""
+            waiverReason = ""
+        }
+    }
+
+    private func knowledgeCollectionSection<Item: Identifiable, Row: View>(
+        title: String,
+        emptyMessage: String,
+        items: [Item],
+        accessibilityLabel: String,
+        @ViewBuilder row: @escaping (Item) -> Row
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title).font(.headline)
+            if items.isEmpty {
+                Text(emptyMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(items) { item in
+                    row(item)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10)
+                    .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 10))
+                }
+            }
+        }
+        .panelStyle()
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(accessibilityLabel)
+    }
+
+    private func proposalSection(_ lane: DesktopCodingKnowledgeLane) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Proposed edit").font(.headline)
+            if let activeWrite {
+                LabeledContent("Target", value: activeWrite.targetPath)
+                LabeledContent("Proposal", value: activeWrite.proposalID)
+                LabeledContent("Write", value: activeWrite.id)
+                LabeledContent("State", value: activeWrite.state.label)
+                LabeledContent("Base digest", value: activeWrite.baseDigest)
+                LabeledContent("Proposed digest", value: activeWrite.proposedDigest)
+                if let activeProposal {
+                    Text(activeProposal.summary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if let diff = knowledge.diff {
+                    ScrollView(.horizontal) {
+                        Text(diff.unifiedDiff)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                    }
+                    .frame(maxHeight: 220)
+                } else if !activeWrite.unifiedDiff.isEmpty {
+                    ScrollView(.horizontal) {
+                        Text(activeWrite.unifiedDiff)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                    }
+                    .frame(maxHeight: 220)
+                }
+                HStack {
+                    if activeApproval == nil, knowledgeReadyForDisposition {
+                        Button("Request write approval", systemImage: "checkmark.shield") {
+                            knowledge.requestApproval(model: model)
+                        }
+                        .buttonStyle(.borderedProminent)
+                    } else if activeApproval?.state == .approved, knowledgeReadyForDisposition {
+                        Button("Apply approved edit", systemImage: "square.and.arrow.down") {
+                            knowledge.applyApprovedDraft(model: model)
+                        }
+                        .buttonStyle(.borderedProminent)
+                    } else if activeApproval != nil {
+                        Label("Write approval: " + (activeApproval?.state.label ?? "Unknown"), systemImage: "tray.full")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    if activeWrite.state == .failed || lane.disposition == .conflict
+                        || activeApproval?.state == .rejected || activeApproval?.state == .cancelled {
+                        Button("Revise from current note", systemImage: "arrow.triangle.2.circlepath") {
+                            let previousPath = activeWrite.targetPath
+                            guard model.beginCodingKnowledgeRevision(threadID: thread.id) else { return }
+                            targetPath = previousPath
+                            targetScopeID = writableScopes.first(where: {
+                                previousPath == $0.path || previousPath.hasPrefix($0.path + "/")
+                            })?.id
+                            knowledge.resumeCodingProposal(model: model, threadID: thread.id)
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
+            } else if let document = knowledge.document {
+                Text("Exact note: " + document.path)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                Text("Current digest: " + document.digest)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                TextEditor(text: $knowledge.draft)
+                    .font(.system(.body, design: .monospaced))
+                    .scrollContentBackground(.hidden)
+                    .padding(10)
+                    .frame(minHeight: 230, maxHeight: 360)
+                    .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 10))
+                    .accessibilityLabel("Editable proposed knowledge note")
+                    .disabled(!knowledgeReadyForDisposition)
+                HStack {
+                    Button("Review exact diff", systemImage: "doc.text.magnifyingglass") {
+                        knowledge.reviewDraft(model: model, codingThreadID: thread.id)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!knowledgeReadyForDisposition || knowledge.isBusy)
+                    Button("Reset draft", systemImage: "arrow.uturn.backward") { knowledge.resetDraft() }
+                    Spacer()
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    if !knowledgeReadyForDisposition {
+                        Text("The accepted implementation must enter the knowledge review lane before a durable note proposal can be created.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Picker("Writable scope", selection: $targetScopeID) {
+                        Text("Choose a writable scope").tag(String?.none)
+                        ForEach(writableScopes) { scope in
+                            Text(scope.path).tag(Optional(scope.id))
+                        }
+                    }
+                    .labelsHidden()
+                    if writableScopes.isEmpty {
+                        Text("Add a writable Obsidian scope in Knowledge before proposing an edit.")
+                            .font(.caption)
+                            .foregroundStyle(Nord.auroraYellow)
+                    }
+                    TextField("Vault-relative Markdown note path", text: $targetPath)
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityLabel("Vault-relative target note path")
+                    Text("The exact note must already exist inside the selected writable scope. No write occurs during inspection.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("Inspect & seed editable draft", systemImage: "doc.text.magnifyingglass") {
+                        knowledge.prepareCodingDraft(
+                            model: model,
+                            threadID: thread.id,
+                            path: targetPath,
+                            scopePath: selectedScope?.path ?? "",
+                            candidates: lane.candidates
+                        )
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!knowledgeReadyForDisposition || knowledge.isBusy || selectedScope == nil || targetPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+        .panelStyle()
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Proposed coding knowledge edit")
+    }
+
+    private func statusSection(_ lane: DesktopCodingKnowledgeLane) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Conflicts/status").font(.headline)
+            LabeledContent("Disposition", value: lane.disposition.label)
+            if let acceptedWorktreeID = lane.acceptedWorktreeID {
+                LabeledContent("Accepted worktree", value: acceptedWorktreeID)
+            }
+            if let reason = lane.dispositionReason, !reason.isEmpty {
+                Text(reason).font(.caption).foregroundStyle(.secondary)
+            }
+            if let activeWrite, let currentDigest = activeWrite.currentDigest {
+                LabeledContent("Current digest", value: currentDigest)
+            }
+            if let document = model.snapshot.operations.knowledgeDocuments.first(where: {
+                $0.path == activeWrite?.targetPath
+            }) {
+                LabeledContent("Persisted digest", value: document.digest)
+                if let conflictDigest = document.conflictDigest {
+                    LabeledContent("Conflict digest", value: conflictDigest)
+                }
+            }
+            if lane.disposition == .reconciled || lane.disposition == .waived {
+                Label(
+                    lane.disposition == .reconciled ? "Durable update reconciled" : "No durable update recorded with an explicit reason",
+                    systemImage: "checkmark.seal"
+                )
+                .foregroundStyle(Nord.auroraGreen)
+            } else {
+                Divider()
+                Text("No durable update").font(.subheadline.weight(.semibold))
+                TextField("Reason required", text: $waiverReason, axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("Reason for no durable knowledge update")
+                Button("Record no durable update", systemImage: "arrow.uturn.left") {
+                    let reason = waiverReason.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !reason.isEmpty else { return }
+                    if model.waiveCodingKnowledge(threadID: thread.id, reason: reason) {
+                        waiverReason = ""
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(!knowledgeReadyForDisposition || waiverReason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .help("This records an explicit reason and completes the knowledge lane without writing a note")
+            }
+        }
+        .panelStyle()
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Coding knowledge conflicts and status")
     }
 }
 

@@ -29,6 +29,177 @@ public enum DesktopActionState: String, Codable, CaseIterable, Equatable, Sendab
     }
 }
 
+public enum DesktopCodingKnowledgeDisposition: String, Codable, CaseIterable, Equatable, Sendable {
+    case collecting
+    case needsReview
+    case proposed
+    case awaitingApproval
+    case reconciled
+    case waived
+    case conflict
+
+    public var label: String {
+        switch self {
+        case .collecting: "Collecting"
+        case .needsReview: "Needs review"
+        case .proposed: "Proposed"
+        case .awaitingApproval: "Awaiting approval"
+        case .reconciled: "Reconciled"
+        case .waived: "Waived"
+        case .conflict: "Conflict"
+        }
+    }
+}
+
+public enum DesktopCodingKnowledgeCandidateCategory: String, Codable, CaseIterable, Equatable, Sendable {
+    case decision
+    case implementation
+    case openQuestion
+    case research
+
+    public var label: String {
+        switch self {
+        case .decision: "Decision"
+        case .implementation: "Implementation"
+        case .openQuestion: "Open question"
+        case .research: "Research"
+        }
+    }
+}
+
+public struct DesktopCodingKnowledgeConsultedSource: Codable, Equatable, Identifiable, Sendable {
+    public var id: String { "\(sourceID):\(path):\(digest)" }
+    public let sourceID: String
+    public let title: String
+    public let path: String
+    public let digest: String
+    public let provenance: String
+    public let excerpt: String
+    public let summary: String
+
+    public init(
+        sourceID: String,
+        title: String,
+        path: String,
+        digest: String,
+        provenance: String,
+        excerpt: String = "",
+        summary: String = ""
+    ) {
+        self.sourceID = sourceID
+        self.title = title
+        self.path = path
+        self.digest = digest
+        self.provenance = provenance
+        self.excerpt = excerpt
+        self.summary = summary
+    }
+}
+
+public struct DesktopCodingKnowledgeCandidate: Codable, Equatable, Identifiable, Sendable {
+    public let id: String
+    public let category: DesktopCodingKnowledgeCandidateCategory
+    public let title: String
+    public let detail: String
+    public let evidenceDigest: String?
+
+    public init(
+        id: String = UUID().uuidString.lowercased(),
+        category: DesktopCodingKnowledgeCandidateCategory,
+        title: String,
+        detail: String,
+        evidenceDigest: String? = nil
+    ) {
+        self.id = id
+        self.category = category
+        self.title = title
+        self.detail = detail
+        self.evidenceDigest = evidenceDigest
+    }
+}
+
+public struct DesktopCodingKnowledgeLane: Codable, Equatable, Identifiable, Sendable {
+    public var id: String { threadID }
+    public var projectID: String?
+    public let threadID: String
+    public var consultedSources: [DesktopCodingKnowledgeConsultedSource]
+    public var candidates: [DesktopCodingKnowledgeCandidate]
+    public var disposition: DesktopCodingKnowledgeDisposition
+    public var dispositionReason: String?
+    public var acceptedWorktreeID: String?
+    public var proposalID: String?
+    public var writeID: String?
+    public let createdAtUnixMillis: Int64
+    public var updatedAtUnixMillis: Int64
+
+    public init(
+        projectID: String?,
+        threadID: String,
+        consultedSources: [DesktopCodingKnowledgeConsultedSource] = [],
+        candidates: [DesktopCodingKnowledgeCandidate] = [],
+        disposition: DesktopCodingKnowledgeDisposition = .collecting,
+        dispositionReason: String? = nil,
+        acceptedWorktreeID: String? = nil,
+        proposalID: String? = nil,
+        writeID: String? = nil,
+        createdAtUnixMillis: Int64,
+        updatedAtUnixMillis: Int64
+    ) {
+        self.projectID = projectID
+        self.threadID = threadID
+        self.consultedSources = consultedSources
+        self.candidates = candidates
+        self.disposition = disposition
+        self.dispositionReason = dispositionReason
+        self.acceptedWorktreeID = acceptedWorktreeID
+        self.proposalID = proposalID
+        self.writeID = writeID
+        self.createdAtUnixMillis = createdAtUnixMillis
+        self.updatedAtUnixMillis = updatedAtUnixMillis
+    }
+}
+
+public enum DesktopCodingWorkflowState: String, Codable, CaseIterable, Equatable, Sendable {
+    case discussing
+    case planning
+    case awaitingPlanApproval
+    case preparingImplementation
+    case implementing
+    case awaitingReview
+    case reviewingEvidence
+    case awaitingAcceptance
+    case updatingKnowledge
+    case completed
+    case rejected
+    case failed
+}
+
+public struct DesktopCodingWorkflowRecord: Codable, Equatable, Identifiable, Sendable {
+    public var id: String { threadID }
+    public let projectID: String?
+    public let threadID: String
+    public var state: DesktopCodingWorkflowState
+    public var reason: String?
+    public let createdAtUnixMillis: Int64
+    public var updatedAtUnixMillis: Int64
+
+    public init(
+        projectID: String?,
+        threadID: String,
+        state: DesktopCodingWorkflowState = .discussing,
+        reason: String? = nil,
+        createdAtUnixMillis: Int64,
+        updatedAtUnixMillis: Int64
+    ) {
+        self.projectID = projectID
+        self.threadID = threadID
+        self.state = state
+        self.reason = reason
+        self.createdAtUnixMillis = createdAtUnixMillis
+        self.updatedAtUnixMillis = updatedAtUnixMillis
+    }
+}
+
 public enum DesktopProviderEventKind: String, Codable, Equatable, Sendable {
     case status
     case assistantText
@@ -512,6 +683,8 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
     public var vaultScopes: [DesktopVaultScopeRecord]
     public var knowledgeDocuments: [DesktopKnowledgeDocumentRecord]
     public var knowledgeWrites: [DesktopKnowledgeWriteRecord]
+    public var codingKnowledgeLanes: [DesktopCodingKnowledgeLane]
+    public var codingWorkflows: [DesktopCodingWorkflowRecord]
     public var capabilityUpdates: [DesktopCapabilityUpdateRecord]
     public var mailActions: [DesktopMailActionRecord]
     public var mailStandingRules: [DesktopMailStandingRule]
@@ -545,7 +718,9 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         mailStandingRules: [],
         mailAttention: [],
         workflows: .empty,
-        audit: []
+        audit: [],
+        codingKnowledgeLanes: [],
+        codingWorkflows: []
     )
 
     private enum CodingKeys: String, CodingKey {
@@ -569,6 +744,8 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         case vaultScopes
         case knowledgeDocuments
         case knowledgeWrites
+        case codingKnowledgeLanes
+        case codingWorkflows
         case capabilityUpdates
         case mailActions
         case mailStandingRules
@@ -603,7 +780,9 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         mailStandingRules: [DesktopMailStandingRule] = [],
         mailAttention: [DesktopMailAttentionRecord] = [],
         workflows: DesktopWorkflowPlatformState = .empty,
-        audit: [DesktopAuditRecord]
+        audit: [DesktopAuditRecord],
+        codingKnowledgeLanes: [DesktopCodingKnowledgeLane] = [],
+        codingWorkflows: [DesktopCodingWorkflowRecord] = []
     ) {
         (self.researchSources, self.knowledgeProposals, self.artifacts) = (researchSources, knowledgeProposals, artifacts)
         (self.approvals, self.gitStackLayers, self.providerRuns) = (approvals, gitStackLayers, providerRuns)
@@ -616,6 +795,7 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         (self.knowledgeDocuments, self.knowledgeWrites, self.capabilityUpdates) = (
             knowledgeDocuments, knowledgeWrites, capabilityUpdates
         )
+        (self.codingKnowledgeLanes, self.codingWorkflows) = (codingKnowledgeLanes, codingWorkflows)
         (self.mailActions, self.mailStandingRules, self.mailAttention) = (mailActions, mailStandingRules, mailAttention)
         (self.workflows, self.audit) = (workflows, audit)
     }
@@ -645,6 +825,8 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         vaultScopes = try container.decodeIfPresent([DesktopVaultScopeRecord].self, forKey: .vaultScopes) ?? []
         knowledgeDocuments = try container.decodeIfPresent([DesktopKnowledgeDocumentRecord].self, forKey: .knowledgeDocuments) ?? []
         knowledgeWrites = try container.decodeIfPresent([DesktopKnowledgeWriteRecord].self, forKey: .knowledgeWrites) ?? []
+        codingKnowledgeLanes = try container.decodeIfPresent([DesktopCodingKnowledgeLane].self, forKey: .codingKnowledgeLanes) ?? []
+        codingWorkflows = try container.decodeIfPresent([DesktopCodingWorkflowRecord].self, forKey: .codingWorkflows) ?? []
         capabilityUpdates = try container.decodeIfPresent([DesktopCapabilityUpdateRecord].self, forKey: .capabilityUpdates) ?? []
         mailActions = try container.decodeIfPresent([DesktopMailActionRecord].self, forKey: .mailActions) ?? []
         mailStandingRules = try container.decodeIfPresent([DesktopMailStandingRule].self, forKey: .mailStandingRules) ?? []

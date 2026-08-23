@@ -12,8 +12,10 @@ enum DesktopCodingWorkflowStage: Equatable {
     case planReview
     case preparing
     case implementing
+    case implementationReview
     case evidenceReview
-    case accepted
+    case knowledgeReview
+    case completed
     case rejected
     case failed
 }
@@ -44,6 +46,7 @@ final class DesktopConversationRuntime: ObservableObject {
     private var nativeTurnByRunID: [String: String]
     private var pollCandidateThreadIDs: Set<String>
     private var runningRunIDByThread: [String: String]
+    private var codingContextPreparationRunIDs: Set<String> = []
     private var didReconcilePersistedTitles = false
     private lazy var gitControl = DesktopGitControlService(managedRoot: environment.worktreeDirectory)
 
@@ -118,7 +121,8 @@ final class DesktopConversationRuntime: ObservableObject {
             return nil
         }
         if thread.kind == .coding,
-           [.planning, .preparing, .implementing, .evidenceReview].contains(codingStage(threadID: threadID)) {
+           [.planning, .preparing, .implementing, .implementationReview, .evidenceReview, .knowledgeReview]
+            .contains(codingStage(threadID: threadID)) {
             codingWorkflowErrors[threadID] = "Finish the current Coding stage before starting another plan."
             return nil
         }
@@ -195,6 +199,21 @@ final class DesktopConversationRuntime: ObservableObject {
     }
 
     func codingStage(threadID: String) -> DesktopCodingWorkflowStage {
+        if let workflow = model.codingWorkflow(threadID: threadID) {
+            switch workflow.state {
+            case .discussing: return .discuss
+            case .planning: return .planning
+            case .awaitingPlanApproval: return .planReview
+            case .preparingImplementation: return .preparing
+            case .implementing: return .implementing
+            case .awaitingReview: return .implementationReview
+            case .reviewingEvidence, .awaitingAcceptance: return .evidenceReview
+            case .updatingKnowledge: return .knowledgeReview
+            case .completed: return .completed
+            case .rejected: return .rejected
+            case .failed: return .failed
+            }
+        }
         let runs = model.providerRuns(threadID: threadID)
         let worktree = latestCodingWorktree(threadID: threadID)
         if codingWorkflowBusyThreadIDs.contains(threadID) { return .preparing }
@@ -208,15 +227,16 @@ final class DesktopConversationRuntime: ObservableObject {
             }
             if latest.purpose == .codingImplementation && latest.state == .completed {
                 switch worktree?.state {
-                case .accepted: return .accepted
+                case .accepted: return .completed
                 case .review: return .evidenceReview
                 case .dirty: return .rejected
                 case .failed: return .failed
+                case .ready: return .implementationReview
                 default: return .preparing
                 }
             }
         }
-        if worktree?.state == .accepted { return .accepted }
+        if worktree?.state == .accepted { return .completed }
         if worktree?.state == .review { return .evidenceReview }
         if worktree?.state == .dirty { return .rejected }
         if worktree?.state == .failed { return .failed }
@@ -245,6 +265,11 @@ final class DesktopConversationRuntime: ObservableObject {
         }
         codingWorkflowBusyThreadIDs.insert(threadID)
         codingWorkflowErrors.removeValue(forKey: threadID)
+        _ = model.updateCodingWorkflow(
+            threadID: threadID,
+            state: .preparingImplementation,
+            reason: "Creating the approved isolated implementation boundary."
+        )
         _Concurrency.Task { [weak self] in
             guard let self else { return }
             defer { codingWorkflowBusyThreadIDs.remove(threadID) }
@@ -270,6 +295,16 @@ final class DesktopConversationRuntime: ObservableObject {
                     throw CodingWorkspaceInspectorError.unavailable("Kaname could not persist the exact implementation approval.")
                 }
                 model.resolveApproval(id: approvalID, approved: true)
+                guard model.addCodingKnowledgeCandidate(
+                    threadID: threadID,
+                    category: .decision,
+                    title: "Approved implementation plan",
+                    detail: KanameTextBounds.utf8Prefix(planText, maximumBytes: 8 * 1_024)
+                ) != nil else {
+                    throw CodingWorkspaceInspectorError.unavailable(
+                        "Kaname could not persist the approved plan in the durable knowledge lane."
+                    )
+                }
                 guard let worktreeID = model.proposeWorktree(
                     projectID: projectID,
                     threadID: threadID,
@@ -329,6 +364,11 @@ final class DesktopConversationRuntime: ObservableObject {
                 submit(runID: runID, authorization: authorization)
             } catch {
                 codingWorkflowErrors[threadID] = error.localizedDescription
+                _ = model.updateCodingWorkflow(
+                    threadID: threadID,
+                    state: .failed,
+                    reason: error.localizedDescription
+                )
                 model.setAttention(threadID: threadID, attention: .failed)
             }
         }
@@ -336,6 +376,30 @@ final class DesktopConversationRuntime: ObservableObject {
 
     func recheckImplementation(threadID: String) {
         refreshImplementationEvidence(threadID: threadID, accepted: nil)
+    }
+
+    func beginImplementationReview(threadID: String) {
+        guard !codingWorkflowBusyThreadIDs.contains(threadID),
+              model.codingWorkflow(threadID: threadID)?.state == .awaitingReview,
+              let completedRun = model.providerRuns(threadID: threadID).last(where: {
+                  $0.purpose == .codingImplementation && $0.state == .completed
+              }),
+              let path = completedRun.workspacePathOverride,
+              let worktree = latestCodingWorktree(threadID: threadID),
+              worktree.state == .ready,
+              URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+                == URL(fileURLWithPath: worktree.worktreePath, isDirectory: true).standardizedFileURL else { return }
+        codingWorkflowErrors.removeValue(forKey: threadID)
+        guard model.updateCodingWorkflow(
+            threadID: threadID,
+            state: .reviewingEvidence,
+            reason: "The user started independent diff and verification review."
+        ) else { return }
+        collectCodingEvidence(
+            threadID: threadID,
+            worktreeID: worktree.id,
+            workspace: URL(fileURLWithPath: path, isDirectory: true)
+        )
     }
 
     func reviewImplementation(threadID: String, accepted: Bool) {
@@ -351,6 +415,13 @@ final class DesktopConversationRuntime: ObservableObject {
               let runner = LocalCoreRunner.bundled() else { return }
         codingWorkflowBusyThreadIDs.insert(threadID)
         codingWorkflowErrors.removeValue(forKey: threadID)
+        guard model.updateCodingWorkflow(
+            threadID: threadID,
+            state: .reviewingEvidence,
+            reason: accepted == nil
+                ? "Independent evidence is being refreshed."
+                : "The accepted or rejected review decision is being bound to fresh evidence."
+        ) else { return }
         _Concurrency.Task { [weak self] in
             guard let self else { return }
             defer { codingWorkflowBusyThreadIDs.remove(threadID) }
@@ -362,7 +433,11 @@ final class DesktopConversationRuntime: ObservableObject {
                     throw CodingWorkspaceInspectorError.unavailable("Acceptance is disabled because the latest independent evidence does not pass.")
                 }
                 guard let accepted else {
-                    persistCodingEvidence(evidence, threadID: threadID, worktreeID: worktree.id)
+                    guard persistCodingEvidence(evidence, threadID: threadID, worktreeID: worktree.id) else {
+                        throw CodingWorkspaceInspectorError.unavailable(
+                            "Kaname could not persist the exact evidence receipt."
+                        )
+                    }
                     return
                 }
                 _ = try await Phase2ControlPlane.recordReview(
@@ -374,15 +449,31 @@ final class DesktopConversationRuntime: ObservableObject {
                     accepted: accepted,
                     knowledgeUpdateProposal: "Record the reviewed plan, isolated diff, verification result, evidence digest, acceptance decision, and remaining boundaries for \(thread.title)."
                 )
-                persistCodingEvidence(evidence, threadID: threadID, worktreeID: worktree.id)
-                model.recordCodingReview(threadID: threadID, worktreeID: worktree.id, accepted: accepted)
+                guard persistCodingEvidence(evidence, threadID: threadID, worktreeID: worktree.id) else {
+                    throw CodingWorkspaceInspectorError.unavailable(
+                        "Kaname could not persist the fresh evidence receipt."
+                    )
+                }
+                guard model.recordCodingReview(
+                    threadID: threadID,
+                    worktreeID: worktree.id,
+                    accepted: accepted
+                ) else {
+                    throw CodingWorkspaceInspectorError.unavailable(
+                        "Kaname could not persist the exact review decision; the implementation remains unaccepted."
+                    )
+                }
             } catch {
                 codingWorkflowErrors[threadID] = error.localizedDescription
             }
         }
     }
 
-    private func submit(runID: String, authorization: CodexWorkspaceAuthorization? = nil) {
+    private func submit(
+        runID: String,
+        authorization: CodexWorkspaceAuthorization? = nil,
+        codingContextSources: [CodingContextSource]? = nil
+    ) {
         guard let run = model.providerRun(id: runID),
               let threadID = run.threadID,
               let sourceMessageID = run.sourceMessageID,
@@ -405,6 +496,10 @@ final class DesktopConversationRuntime: ObservableObject {
                 interrupted: false,
                 error: "Choose a valid project workspace before starting a provider. The message remains saved locally."
             )
+            return
+        }
+        if run.purpose == .codingPlan, codingContextSources == nil {
+            prepareCodingPlanContext(run: run, thread: thread, workspace: workspace, authorization: authorization)
             return
         }
         guard let machService = Bundle.main.object(forInfoDictionaryKey: "KanameLocalCoreMachService") as? String,
@@ -431,7 +526,8 @@ final class DesktopConversationRuntime: ObservableObject {
                 includeProjectContext: run.usesProjectContext ?? true,
                 runtimeMode: run.runtimeMode,
                 networkAccess: run.networkAccess,
-                purpose: run.purpose
+                purpose: run.purpose,
+                codingContextSources: codingContextSources ?? []
             ),
             attachments: message.attachments,
             workspacePath: workspace.path,
@@ -453,6 +549,68 @@ final class DesktopConversationRuntime: ObservableObject {
             setThreadActive(threadID, active: true)
         } catch {
             model.stopProviderRun(id: run.id, interrupted: false, error: error.localizedDescription)
+        }
+    }
+
+    private func prepareCodingPlanContext(
+        run: DesktopProviderRunRecord,
+        thread: DesktopThread,
+        workspace: URL,
+        authorization: CodexWorkspaceAuthorization?
+    ) {
+        guard codingContextPreparationRunIDs.insert(run.id).inserted else { return }
+        let project = (run.usesProjectContext ?? true) ? model.project(id: thread.projectID) : nil
+        let selectedSourceIDs = Set(project?.context.knowledgeSourceIDs ?? [])
+        let selectedObsidianPaths = model.snapshot.domains.knowledgeSources.compactMap { source in
+            selectedSourceIDs.contains(source.id) && source.kind == .obsidian ? source.scope : nil
+        }
+        _Concurrency.Task { [weak self] in
+            guard let self else { return }
+            defer { codingContextPreparationRunIDs.remove(run.id) }
+            do {
+                let snapshot = try await CodingWorkspaceInspector.inspect(
+                    workspaceURL: workspace,
+                    obsidianNotePaths: selectedObsidianPaths
+                )
+                guard !snapshot.obsidianNoteSelectionWasTruncated,
+                      snapshot.missingObsidianNotePaths.isEmpty else {
+                    let unavailable = snapshot.missingObsidianNotePaths.joined(separator: ", ")
+                    throw CodingWorkspaceInspectorError.unavailable(
+                        snapshot.obsidianNoteSelectionWasTruncated
+                            ? "The selected Obsidian context exceeds the bounded planning limit. Narrow the project knowledge selection."
+                            : "Kaname could not load selected Obsidian context: \(unavailable). No planning turn was sent."
+                    )
+                }
+                let selectedContextSources = snapshot.contextSources.filter {
+                    (run.usesProjectContext ?? true) || $0.kind == .repositoryInstructions
+                }
+                let records = selectedContextSources.map { source in
+                    DesktopCodingKnowledgeConsultedSource(
+                        sourceID: knowledgeSourceID(for: source, project: project),
+                        title: source.title,
+                        path: source.path,
+                        digest: source.sha256,
+                        provenance: knowledgeProvenance(for: source),
+                        excerpt: KanameTextBounds.utf8Prefix(source.excerpt, maximumBytes: 8 * 1_024),
+                        summary: source.excerpt.utf8.count > 8 * 1_024
+                            ? "Bounded preview retained; the digest binds the full excerpt loaded into read-only planning."
+                            : "Loaded into the read-only planning context."
+                    )
+                }
+                guard model.replaceCodingKnowledgeContext(
+                    threadID: thread.id,
+                    projectID: thread.projectID,
+                    sources: records
+                ) else {
+                    throw CodingWorkspaceInspectorError.unavailable(
+                        "Kaname could not persist the exact planning-context receipt. No planning turn was sent."
+                    )
+                }
+                submit(runID: run.id, authorization: authorization, codingContextSources: selectedContextSources)
+            } catch {
+                codingWorkflowErrors[thread.id] = error.localizedDescription
+                model.stopProviderRun(id: run.id, interrupted: false, error: error.localizedDescription)
+            }
         }
     }
 
@@ -673,15 +831,6 @@ final class DesktopConversationRuntime: ObservableObject {
             runningRunIDByThread.removeValue(forKey: serviceEvent.threadID)
             guard registerServiceEvidence(threadID: serviceEvent.threadID, runID: serviceEvent.runID) else { return false }
             scheduleTitleIfNeeded(threadID: serviceEvent.threadID)
-            if completedRun?.purpose == .codingImplementation,
-               let path = completedRun?.workspacePathOverride,
-               let worktree = latestCodingWorktree(threadID: serviceEvent.threadID) {
-                collectCodingEvidence(
-                    threadID: serviceEvent.threadID,
-                    worktreeID: worktree.id,
-                    workspace: URL(fileURLWithPath: path, isDirectory: true)
-                )
-            }
         case .runInterrupted:
             if model.providerRun(id: serviceEvent.runID)?.state != .interrupted {
                 model.stopProviderRun(id: serviceEvent.runID, interrupted: true, error: event.text ?? "The provider turn was interrupted.")
@@ -900,7 +1049,8 @@ final class DesktopConversationRuntime: ObservableObject {
         includeProjectContext: Bool,
         runtimeMode: ConversationRuntimeMode,
         networkAccess: Bool,
-        purpose: DesktopProviderRunPurpose
+        purpose: DesktopProviderRunPurpose,
+        codingContextSources: [CodingContextSource]
     ) -> String {
         let boundary = authorityBoundary(
             provider: thread.provider,
@@ -908,7 +1058,12 @@ final class DesktopConversationRuntime: ObservableObject {
             networkAccess: networkAccess
         )
         if purpose == .codingPlan {
-            return codingPlanPrompt(thread: thread, userMessage: userMessage, includeProjectContext: includeProjectContext)
+            return codingPlanPrompt(
+                thread: thread,
+                userMessage: userMessage,
+                includeProjectContext: includeProjectContext,
+                contextSources: codingContextSources
+            )
         }
         if purpose == .codingImplementation {
             return implementationPrompt(thread: thread, userMessage: userMessage)
@@ -945,12 +1100,19 @@ final class DesktopConversationRuntime: ObservableObject {
     private func codingPlanPrompt(
         thread: DesktopThread,
         userMessage: String,
-        includeProjectContext: Bool
+        includeProjectContext: Bool,
+        contextSources: [CodingContextSource]
     ) -> String {
         let project = includeProjectContext ? model.project(id: thread.projectID) : nil
         let instructions = project?.context.instructionReferences.joined(separator: ", ") ?? "None selected"
         let knowledge = project?.context.knowledgeSourceIDs.joined(separator: ", ") ?? "None selected"
         let skills = project?.context.skillIDs.joined(separator: ", ") ?? "None selected"
+        let frozenContext = CodingWorkspaceInspector.providerPrompt(
+            task: userMessage,
+            selectedSources: contextSources,
+            selectedMatches: [],
+            mode: "DISCUSS AND PLAN ONLY"
+        )
         return """
         Kaname Coding stage: DISCUSS AND PLAN ONLY.
 
@@ -962,8 +1124,8 @@ final class DesktopConversationRuntime: ObservableObject {
         Selected skills and tools: \(skills)
         Authority boundary: read-only workspace, network disabled, no implementation authority.
 
-        User request:
-        \(userMessage)
+        Exact digest-bound context snapshot and user request:
+        \(frozenContext)
         """
     }
 
@@ -975,7 +1137,7 @@ final class DesktopConversationRuntime: ObservableObject {
         return """
         Kaname Coding stage: APPROVED ISOLATED IMPLEMENTATION.
 
-        Implement only the approved plan below inside the selected linked Git worktree. Do not access the network or write outside the worktree. Run the relevant local verification, report changed files and not-run boundaries, and do not commit, push, publish, merge, or update external knowledge. Kaname will independently collect evidence and require a separate accept or reject decision after this turn.
+        Implement only the approved plan below inside the selected linked Git worktree. Do not access the network or write outside the worktree. Run the relevant local verification, report changed files and not-run boundaries, and do not commit, push, publish, merge, or update external knowledge. After this turn Kaname must wait for the user to begin independent review; provider completion is never evidence review, acceptance, or knowledge-update authority.
 
         Project: \(project?.name ?? "Standalone")
         Original request:
@@ -992,6 +1154,30 @@ final class DesktopConversationRuntime: ObservableObject {
             .max { $0.updatedAtUnixMillis < $1.updatedAtUnixMillis }
     }
 
+    private func knowledgeSourceID(
+        for source: CodingContextSource,
+        project: DesktopProject?
+    ) -> String {
+        if source.kind == .obsidian,
+           let sourceID = project?.context.knowledgeSourceIDs.compactMap({ selectedID in
+               model.snapshot.domains.knowledgeSources.first(where: {
+                   $0.id == selectedID && $0.kind == .obsidian && $0.scope == source.path
+               })?.id
+           }).first {
+            return sourceID
+        }
+        return "\(source.kind.rawValue):\(source.path)"
+    }
+
+    private func knowledgeProvenance(for source: CodingContextSource) -> String {
+        switch source.kind {
+        case .obsidian: "Obsidian CLI · selected vault note · bounded SHA-256 excerpt"
+        case .repositoryInstructions: "Selected worktree · repository instructions"
+        case .repositoryKnowledge: "Selected worktree · repository knowledge"
+        case .searchResult: "Selected worktree · bounded local search"
+        }
+    }
+
     private func collectCodingEvidence(threadID: String, worktreeID: String, workspace: URL) {
         codingWorkflowBusyThreadIDs.insert(threadID)
         _Concurrency.Task { [weak self] in
@@ -999,20 +1185,30 @@ final class DesktopConversationRuntime: ObservableObject {
             defer { codingWorkflowBusyThreadIDs.remove(threadID) }
             do {
                 let evidence = try await CodingWorkspaceInspector.collectEvidence(workspaceURL: workspace)
-                persistCodingEvidence(evidence, threadID: threadID, worktreeID: worktreeID)
+                guard persistCodingEvidence(evidence, threadID: threadID, worktreeID: worktreeID) else {
+                    throw CodingWorkspaceInspectorError.unavailable(
+                        "Kaname could not persist the exact evidence receipt."
+                    )
+                }
             } catch {
                 codingWorkflowErrors[threadID] = "Evidence collection failed: \(error.localizedDescription)"
-                model.setAttention(threadID: threadID, attention: .failed)
+                _ = model.updateCodingWorkflow(
+                    threadID: threadID,
+                    state: .awaitingReview,
+                    reason: "Independent evidence collection failed and can be retried."
+                )
+                model.setAttention(threadID: threadID, attention: .needsApproval)
             }
         }
     }
 
+    @discardableResult
     private func persistCodingEvidence(
         _ evidence: CodingEvidenceSnapshot,
         threadID: String,
         worktreeID: String
-    ) {
-        model.recordCodingEvidence(
+    ) -> Bool {
+        guard model.recordCodingEvidence(
             threadID: threadID,
             worktreeID: worktreeID,
             revision: evidence.revision,
@@ -1023,7 +1219,19 @@ final class DesktopConversationRuntime: ObservableObject {
             verificationOutput: evidence.verificationOutput,
             artifactPaths: evidence.artifactPaths,
             digest: evidence.digest
+        ) else { return false }
+        _ = model.addCodingKnowledgeCandidate(
+            threadID: threadID,
+            category: .implementation,
+            title: "Implementation evidence",
+            detail: KanameTextBounds.utf8Prefix([
+                evidence.diffStat.isEmpty ? "No diff summary was reported." : evidence.diffStat,
+                "Changed paths: \(evidence.artifactPaths.joined(separator: ", "))",
+                "Verification: \(evidence.verificationCommand) exited \(evidence.verificationExitStatus)",
+            ].joined(separator: "\n"), maximumBytes: 8 * 1_024),
+            evidenceDigest: evidence.digest
         )
+        return true
     }
 
     private func resolvedModel(provider: String, value: String) -> String {
