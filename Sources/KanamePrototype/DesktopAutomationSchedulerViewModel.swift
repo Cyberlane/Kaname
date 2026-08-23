@@ -13,6 +13,7 @@ final class DesktopAutomationSchedulerViewModel: ObservableObject {
     private let runtime: DesktopConversationRuntime
     private let ownerID = UUID().uuidString.lowercased()
     private let leaseStore: DesktopSchedulerLeaseStore
+    private let allowsAutomaticExecution: Bool
     private var loop: Task<Void, Never>?
 
     init(
@@ -22,7 +23,12 @@ final class DesktopAutomationSchedulerViewModel: ObservableObject {
     ) {
         self.model = model
         self.runtime = runtime
+        allowsAutomaticExecution = environment.allowsAutomaticExecution
         leaseStore = DesktopSchedulerLeaseStore(directory: environment.desktopDirectory.appending(path: "Scheduler", directoryHint: .isDirectory))
+        guard allowsAutomaticExecution else {
+            ownerState = "Disabled in Development — copied automations are paused"
+            return
+        }
         guard !CommandLine.arguments.contains("--snapshot") else {
             ownerState = "Disabled during snapshot qualification"
             return
@@ -36,6 +42,10 @@ final class DesktopAutomationSchedulerViewModel: ObservableObject {
     }
 
     func evaluateNow() {
+        guard allowsAutomaticExecution else {
+            message = "Automatic execution is disabled in the Development build."
+            return
+        }
         Task { await evaluate() }
     }
 
@@ -49,6 +59,10 @@ final class DesktopAutomationSchedulerViewModel: ObservableObject {
     }
 
     func executeApproved(runID: String) {
+        guard allowsAutomaticExecution else {
+            message = "The Development build did not dispatch this automation."
+            return
+        }
         let timestamp = Int64(Date().timeIntervalSince1970 * 1_000)
         do {
             _ = try leaseStore.acquire(ownerID: ownerID, nowUnixMillis: timestamp)

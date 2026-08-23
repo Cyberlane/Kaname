@@ -9,6 +9,8 @@ public enum DesktopRecoveryArtifactKind: String, Codable, CaseIterable, Hashable
     case conversationServiceState
     case workflowInstallationState
     case workflowCapabilityPackage
+    case workflowLibraryState
+    case workflowObjectState
 }
 
 public enum DesktopRecoveryExcludedScope: String, Codable, CaseIterable, Sendable {
@@ -493,7 +495,7 @@ public struct DesktopRecoveryService: Sendable {
                 throw DesktopRecoveryError.unsafeManifestPath
             }
             if let restoreRelativePath = artifact.restoreRelativePath {
-                guard isSafeRestoreRelativePath(restoreRelativePath), restorePaths.insert(restoreRelativePath).inserted else {
+                guard Self.isSafeRestoreRelativePath(restoreRelativePath), restorePaths.insert(restoreRelativePath).inserted else {
                     throw DesktopRecoveryError.unsafeManifestPath
                 }
             }
@@ -614,7 +616,7 @@ public struct DesktopRecoveryService: Sendable {
             }
     }
 
-    static func sha256(_ data: Data) -> String {
+    public static func sha256(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
@@ -623,7 +625,7 @@ public struct DesktopRecoveryService: Sendable {
         for source in sources {
             guard isSafeArchiveName(source.archiveName) else { throw DesktopRecoveryError.unsafeSource }
             if let restoreRelativePath = source.restoreRelativePath {
-                guard isSafeRestoreRelativePath(restoreRelativePath) else { throw DesktopRecoveryError.unsafeSource }
+                guard Self.isSafeRestoreRelativePath(restoreRelativePath) else { throw DesktopRecoveryError.unsafeSource }
             }
             guard archiveNames.insert(source.archiveName).inserted else { throw DesktopRecoveryError.duplicateArchiveName }
             guard FileManager.default.fileExists(atPath: source.fileURL.path) else { throw DesktopRecoveryError.missingSource }
@@ -641,13 +643,13 @@ public struct DesktopRecoveryService: Sendable {
         return components.count == 2 && components.allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." }
     }
 
-    private func isSafeRestoreRelativePath(_ path: String) -> Bool {
+    public static func isSafeRestoreRelativePath(_ path: String) -> Bool {
         guard !path.isEmpty, !path.hasPrefix("/"), !path.contains("\\") else { return false }
         let components = path.split(separator: "/", omittingEmptySubsequences: false)
         return components.allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." }
     }
 
-    static func isRegularNonSymlink(_ url: URL) throws -> Bool {
+    public static func isRegularNonSymlink(_ url: URL) throws -> Bool {
         guard FileManager.default.fileExists(atPath: url.path) else { return false }
         do {
             let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])

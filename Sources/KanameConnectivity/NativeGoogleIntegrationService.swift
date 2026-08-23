@@ -78,6 +78,11 @@ public struct GoogleOAuthClientConfiguration: Equatable, Sendable {
     }
 }
 
+public enum GoogleIntegrationAccessMode: String, Codable, Equatable, Sendable {
+    case readWrite
+    case readOnly
+}
+
 public enum NativeGoogleIntegrationError: Error, Equatable, LocalizedError, Sendable {
     case clientConfigurationMissing
     case invalidClientConfiguration
@@ -89,6 +94,7 @@ public enum NativeGoogleIntegrationError: Error, Equatable, LocalizedError, Send
     case invalidResponse(String)
     case requestFailed(String)
     case httpStatus(String, Int)
+    case mutationDeniedByAccessPolicy
 
     public var errorDescription: String? {
         switch self {
@@ -112,6 +118,8 @@ public enum NativeGoogleIntegrationError: Error, Equatable, LocalizedError, Send
             "\(service) could not complete the request."
         case let .httpStatus(service, status):
             "\(service) returned HTTP \(status)."
+        case .mutationDeniedByAccessPolicy:
+            "This Kaname build has read-only Google access. The requested remote change was not sent."
         }
     }
 }
@@ -135,15 +143,28 @@ public struct GoogleAuthorizationScopeDiff: Equatable, Sendable {
 }
 
 public enum GoogleOAuthRequestBuilder {
-    public static let scopes = [
+    public static let identityScopes = [
         "openid",
         "email",
         "profile",
+    ]
+
+    public static let readOnlyScopes = identityScopes + [
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+        "https://www.googleapis.com/auth/calendar.readonly",
+    ]
+
+    public static let readWriteScopes = identityScopes + [
         "https://www.googleapis.com/auth/gmail.modify",
         "https://www.googleapis.com/auth/gmail.compose",
         "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
         "https://www.googleapis.com/auth/calendar.events",
     ]
+
+    /// Kept as the full-access compatibility surface for callers that do not
+    /// select a build-specific policy.
+    public static let scopes = readWriteScopes
 
     public static func make(
         configuration: GoogleOAuthClientConfiguration,
@@ -330,18 +351,25 @@ public actor NativeGoogleIntegrationService {
     private let session: URLSession
     private let tokenStore: GoogleTokenKeychainStore
     private let clientConfigurationOverride: GoogleOAuthClientConfiguration?
+    public let accessMode: GoogleIntegrationAccessMode
 
     public init(
         rootDirectory: URL? = nil,
         session: URLSession = .shared,
         keychainService: String = "com.cyberlane.kaname.desktop.google-oauth",
-        clientConfiguration: GoogleOAuthClientConfiguration? = nil
+        clientConfiguration: GoogleOAuthClientConfiguration? = nil,
+        accessMode: GoogleIntegrationAccessMode = .readWrite
     ) {
         let applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         self.rootDirectory = rootDirectory ?? applicationSupport.appending(path: "Kaname/Google", directoryHint: .isDirectory)
         self.session = session
         self.tokenStore = GoogleTokenKeychainStore(service: keychainService)
         self.clientConfigurationOverride = clientConfiguration
+        self.accessMode = accessMode
+    }
+
+    public var authorizationScopes: [String] {
+        accessMode == .readOnly ? GoogleOAuthRequestBuilder.readOnlyScopes : GoogleOAuthRequestBuilder.readWriteScopes
     }
 
     public var hasClientConfiguration: Bool {
@@ -381,7 +409,8 @@ public actor NativeGoogleIntegrationService {
         let receiver = try await GoogleLoopbackReceiver.start()
         let request = try GoogleOAuthRequestBuilder.make(
             configuration: configuration,
-            redirectURI: receiver.redirectURI
+            redirectURI: receiver.redirectURI,
+            scopes: authorizationScopes
         )
         guard NSWorkspace.shared.open(request.url) else {
             receiver.cancel()
@@ -405,14 +434,18 @@ public actor NativeGoogleIntegrationService {
                 id: user.subject,
                 identity: user.email,
                 displayName: user.name ?? user.email,
-                capabilities: ["Gmail manage and compose", "Google Calendar events"],
-                authorizationVersion: NativeGoogleAccountSnapshot.currentAuthorizationVersion
+                capabilities: accessMode == .readOnly
+                    ? ["Gmail read-only", "Google Calendar read-only"]
+                    : ["Gmail manage and compose", "Google Calendar events"],
+                authorizationVersion: accessMode == .readWrite
+                    ? NativeGoogleAccountSnapshot.currentAuthorizationVersion
+                    : nil
             )
             let tokenRecord = GoogleTokenRecord(
                 accessToken: token.accessToken,
                 refreshToken: refreshToken,
                 expiresAt: Date().addingTimeInterval(token.expiresIn),
-                grantedScopes: GoogleOAuthRequestBuilder.scopes
+                grantedScopes: authorizationScopes
             )
             try tokenStore.store(try JSONEncoder().encode(tokenRecord), accountID: account.id)
             try upsertAccount(account)
@@ -440,7 +473,7 @@ public actor NativeGoogleIntegrationService {
         let token = try JSONDecoder().decode(GoogleTokenRecord.self, from: stored)
         let granted = Set(token.grantedScopes ?? [])
         let requested = Set(requestedScopes)
-        guard requested.isSubset(of: Set(GoogleOAuthRequestBuilder.scopes)),
+        guard requested.isSubset(of: Set(authorizationScopes)),
               !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw NativeGoogleIntegrationError.authorizationUnavailable
         }
@@ -469,10 +502,12 @@ public actor NativeGoogleIntegrationService {
         let oldToken = try JSONDecoder().decode(GoogleTokenRecord.self, from: oldData)
         let configuration = try loadClientConfiguration()
         let receiver = try await GoogleLoopbackReceiver.start()
-        let completeScope = Set(diff.grantedScopes).union(diff.requestedScopes).sorted()
+        let completeScope = accessMode == .readOnly
+            ? Set(diff.requestedScopes).intersection(authorizationScopes).sorted()
+            : Set(diff.grantedScopes).union(diff.requestedScopes).sorted()
         let request = try GoogleOAuthRequestBuilder.make(
             configuration: configuration, redirectURI: receiver.redirectURI,
-            scopes: completeScope, includeGrantedScopes: true
+            scopes: completeScope, includeGrantedScopes: accessMode == .readWrite
         )
         guard NSWorkspace.shared.open(request.url) else {
             receiver.cancel()
@@ -561,6 +596,12 @@ public actor NativeGoogleIntegrationService {
         var current = try accounts()
         current.removeAll { $0.id == accountID }
         try writeAccountIndex(current)
+    }
+
+    func requireExternalMutationAccess() throws {
+        guard accessMode == .readWrite else {
+            throw NativeGoogleIntegrationError.mutationDeniedByAccessPolicy
+        }
     }
 
     func selectedAccounts(_ accountIDs: [String]?) throws -> [NativeGoogleAccountSnapshot] {

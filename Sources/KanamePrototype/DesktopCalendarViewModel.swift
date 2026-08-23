@@ -12,11 +12,14 @@ final class DesktopCalendarViewModel: ObservableObject {
 
     private let google: NativeGoogleIntegrationService
     private let apple = AppleCalendarIntegrationService()
+    private let environment: KanameDesktopEnvironment
 
     init(environment: KanameDesktopEnvironment = .current) {
+        self.environment = environment
         google = NativeGoogleIntegrationService(
             rootDirectory: environment.googleDirectory,
-            keychainService: environment.googleKeychainService
+            keychainService: environment.googleKeychainService,
+            accessMode: environment.googleIntegrationAccessMode
         )
     }
 
@@ -184,6 +187,10 @@ final class DesktopCalendarViewModel: ObservableObject {
         sources: [DesktopCalendarSourceRecord],
         googleAccounts: [NativeGoogleAccountSnapshot]
     ) {
+        guard environment.allowsExternalMutations else {
+            message = "The Development build is read-only for external calendars. This proposal remains local."
+            return
+        }
         guard !isBusy,
               let proposal = activeProposal(model: model),
               let approvalID = proposal.approvalID,

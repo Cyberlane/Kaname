@@ -46,7 +46,8 @@ public final class DesktopMailViewModel: ObservableObject {
         let service = NativeGoogleIntegrationService(
             rootDirectory: environment.googleDirectory,
             keychainService: environment.googleKeychainService,
-            clientConfiguration: googleClientConfiguration
+            clientConfiguration: googleClientConfiguration,
+            accessMode: environment.googleIntegrationAccessMode
         )
         self.service = service
         mailAdapter = GmailMailProviderAdapter(service: service)
@@ -54,6 +55,7 @@ public final class DesktopMailViewModel: ObservableObject {
 
     public func startWorkflowMonitoring(model: DesktopAppModel) {
         guard workflowMonitoringTask == nil,
+              environment.allowsAutomaticExecution,
               !CommandLine.arguments.contains("--snapshot") else { return }
         workflowMonitoringTask = _Concurrency.Task { [weak self] in
             guard let self else { return }
@@ -67,6 +69,10 @@ public final class DesktopMailViewModel: ObservableObject {
     }
 
     public func runWorkflowMaintenanceCycle(model: DesktopAppModel) async {
+        guard environment.allowsAutomaticExecution else {
+            message = "Automatic workflow execution is disabled in the Development build."
+            return
+        }
         _ = model.expireWorkflowAuthorityGrants()
         _ = model.recoverExpiredWorkflowClaims()
         _ = model.expireWorkflowWaits()
@@ -843,6 +849,7 @@ public final class DesktopMailViewModel: ObservableObject {
     }
 
     private func executeQueuedWorkflowRuns(model: DesktopAppModel) async {
+        guard environment.allowsAutomaticExecution else { return }
         if workflowRuntime == nil { workflowRuntime = await makeWorkflowRuntime(model: model) }
         guard let workflowRuntime else { return }
         let queued = model.snapshot.operations.workflows.runs.filter { $0.state == .queued }
@@ -1288,6 +1295,10 @@ public final class DesktopMailViewModel: ObservableObject {
     }
 
     public func executeWorkflowEffect(model: DesktopAppModel, effect: DesktopWorkflowEffectRecord) {
+        guard environment.allowsExternalMutations else {
+            message = "The Development build kept this workflow effect local and did not send it."
+            return
+        }
         if model.snapshot.operations.workflows.effectPreviews.contains(where: {
             $0.effectID == effect.id && $0.connectorID == "kaname.mail"
         }) {

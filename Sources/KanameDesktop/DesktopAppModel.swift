@@ -950,6 +950,14 @@ public final class FileDesktopStateStore: DesktopRecoveryStateStoring {
         applicationSupportRootURL.appendingPathComponent("WorkflowCapabilities", isDirectory: true)
     }
 
+    public var workflowLibraryDirectoryURL: URL {
+        applicationSupportRootURL.appendingPathComponent("Workflows", isDirectory: true)
+    }
+
+    public var workflowObjectsDirectoryURL: URL {
+        applicationSupportRootURL.appendingPathComponent("Objects", isDirectory: true)
+    }
+
     public var resetArchiveDirectoryURL: URL {
         managedRecoveryDirectoryURL.appendingPathComponent("ResetArchives", isDirectory: true)
     }
@@ -1138,6 +1146,8 @@ public final class FileDesktopStateStore: DesktopRecoveryStateStoring {
                 conversationServiceDirectoryURL,
                 workflowInstallationsDirectoryURL,
                 workflowCapabilitiesDirectoryURL,
+                workflowLibraryDirectoryURL,
+                workflowObjectsDirectoryURL,
             ]
             where FileManager.default.fileExists(atPath: source.path) {
                 let values = try source.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
@@ -1189,6 +1199,8 @@ public final class FileDesktopStateStore: DesktopRecoveryStateStoring {
             || !regularFiles(below: conversationServiceDirectoryURL).isEmpty
             || !regularFiles(below: workflowInstallationsDirectoryURL).isEmpty
             || !regularFiles(below: workflowCapabilitiesDirectoryURL).isEmpty
+            || !regularFiles(below: workflowLibraryDirectoryURL).isEmpty
+            || !regularFiles(below: workflowObjectsDirectoryURL).isEmpty
     }
 
     public func activateVerifiedRuntimeRestore(
@@ -1203,6 +1215,8 @@ public final class FileDesktopStateStore: DesktopRecoveryStateStoring {
             .conversationServiceState,
             .workflowInstallationState,
             .workflowCapabilityPackage,
+            .workflowLibraryState,
+            .workflowObjectState,
         ]
         let runtimeArtifacts = try service.verifiedArtifacts(kinds: runtimeKinds, from: bundleURL)
         guard manifest.runtimeStateIncluded == true else {
@@ -1237,7 +1251,10 @@ public final class FileDesktopStateStore: DesktopRecoveryStateStoring {
                 .appendingPathComponent("FailedRuntimeRestores", isDirectory: true)
                 .appendingPathComponent(restoreID.uuidString.lowercased(), isDirectory: true)
             do {
-                for name in ["LocalCore", "ConversationService", "WorkflowInstallations", "WorkflowCapabilities"] {
+                for name in [
+                    "LocalCore", "ConversationService", "WorkflowInstallations",
+                    "WorkflowCapabilities", "Workflows", "Objects",
+                ] {
                     let staged = stagingRoot.appendingPathComponent(name, isDirectory: true)
                     guard FileManager.default.fileExists(atPath: staged.path) else { continue }
                     let active = applicationSupportRootURL.appendingPathComponent(name, isDirectory: true)
@@ -1310,6 +1327,10 @@ public final class FileDesktopStateStore: DesktopRecoveryStateStoring {
             path.hasPrefix("WorkflowInstallations/")
         case .workflowCapabilityPackage:
             path.hasPrefix("WorkflowCapabilities/")
+        case .workflowLibraryState:
+            path.hasPrefix("Workflows/")
+        case .workflowObjectState:
+            path.hasPrefix("Objects/")
         case .workspaceState, .previousWorkspaceState:
             false
         }
@@ -1349,6 +1370,18 @@ public final class FileDesktopStateStore: DesktopRecoveryStateStoring {
             kind: .workflowCapabilityPackage,
             restorePrefix: "WorkflowCapabilities",
             archivePrefix: "workflow-capability"
+        )
+        sources += try runtimeRecoverySources(
+            below: workflowLibraryDirectoryURL,
+            kind: .workflowLibraryState,
+            restorePrefix: "Workflows",
+            archivePrefix: "workflow-library"
+        )
+        sources += try runtimeRecoverySources(
+            below: workflowObjectsDirectoryURL,
+            kind: .workflowObjectState,
+            restorePrefix: "Objects",
+            archivePrefix: "workflow-object"
         )
         guard sources.count <= 4_098 else { throw DesktopRecoveryError.unsafeSource }
         return sources
@@ -4518,7 +4551,7 @@ public final class DesktopAppModel: ObservableObject {
         return (try decoded.migratedToCurrent(now: now), true)
     }
 
-    private static func declaredSchemaVersion(from data: Data) -> Int? {
+    public static func declaredSchemaVersion(from data: Data) -> Int? {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         return object["version"] as? Int
     }

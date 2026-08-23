@@ -511,6 +511,7 @@ public extension NativeGoogleIntegrationService {
         mutation: GmailThreadMutation,
         grant: GmailMutationGrant
     ) async throws -> GmailMutationReceipt {
+        try requireExternalMutationAccess()
         let account = try gmailAccount(id: accountID)
         let thread = try GmailAPIParser.validatedID(threadID)
         let target = Self.gmailMutationTarget(accountID: account.id, threadID: thread, mutation: mutation)
@@ -566,6 +567,7 @@ public extension NativeGoogleIntegrationService {
         grant: GmailMutationGrant,
         operation: OutboundOperation
     ) async throws -> OutboundResult {
+        try requireExternalMutationAccess()
         let account = try gmailAccount(id: accountID)
         let raw = try GmailAPIParser.rawMessage(message)
         let target = try operation == .draft

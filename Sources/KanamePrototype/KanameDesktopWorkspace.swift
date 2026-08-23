@@ -187,6 +187,13 @@ private struct DesktopUIRestoreStore {
     }
 }
 
+private final class VolatileDesktopStateStore: DesktopStateStoring {
+    private var data: Data?
+
+    func load() throws -> Data? { data }
+    func save(_ data: Data) throws { self.data = data }
+}
+
 private struct NewConversationRequest: Identifiable {
     let id = UUID()
     let projectID: String?
@@ -228,6 +235,7 @@ struct KanameDesktopWorkspace: View {
     @State private var showsSettings = false
     @State private var showsGlobalSearch = false
     @State private var showsDiagnostics = false
+    @State private var developmentForkFailure: String?
     @State private var navigationHistory: [DesktopNavigationLocation] = []
     @State private var pendingCreatedThreadID: String?
     @State private var composerFocusRequest: DesktopComposerFocusRequest?
@@ -248,11 +256,22 @@ struct KanameDesktopWorkspace: View {
 
     init() {
         let environment = KanameDesktopEnvironment.current
+        let desktopStore: any DesktopStateStoring
+        let forkFailure: String?
+        do {
+            _ = try DesktopDevelopmentDataFork.prepareIfNeeded(environment: environment)
+            desktopStore = FileDesktopStateStore(fileURL: environment.workspaceFileURL)
+            forkFailure = nil
+        } catch {
+            desktopStore = VolatileDesktopStateStore()
+            forkFailure = error.localizedDescription
+        }
         let restoreStore = DesktopUIRestoreStore(fileURL: environment.desktopDirectory.appending(path: "ui-restore.json"))
-        let restoredUI = restoreStore.load()
+        let restoredUI = forkFailure == nil ? restoreStore.load() : nil
         uiRestoreStore = restoreStore
-        let desktopModel = DesktopAppModel(store: FileDesktopStateStore(fileURL: environment.workspaceFileURL))
+        let desktopModel = DesktopAppModel(store: desktopStore)
         let runtime = DesktopConversationRuntime(model: desktopModel, environment: environment)
+        _developmentForkFailure = State(initialValue: forkFailure)
         _model = StateObject(wrappedValue: desktopModel)
         _conversationRuntime = StateObject(wrappedValue: runtime)
         _automationScheduler = StateObject(wrappedValue: DesktopAutomationSchedulerViewModel(model: desktopModel, runtime: runtime, environment: environment))
@@ -377,6 +396,22 @@ struct KanameDesktopWorkspace: View {
                 )
                 .zIndex(10)
             }
+
+            if let developmentForkFailure {
+                ZStack {
+                    Nord.polarNight0.ignoresSafeArea()
+                    ContentUnavailableView {
+                        Label("Development data fork stopped safely", systemImage: "lock.shield.fill")
+                            .foregroundStyle(Nord.auroraYellow)
+                    } description: {
+                        Text(developmentForkFailure)
+                        Text("The Stable workspace was not modified. Quit Development, resolve the reported condition, then relaunch it through the Dev launcher.")
+                            .foregroundStyle(Nord.frost1)
+                    }
+                    .frame(maxWidth: 620)
+                }
+                .zIndex(20)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -438,7 +473,7 @@ struct KanameDesktopWorkspace: View {
     private var lifecycleWorkspace: some View {
         presentedWorkspace
         .task {
-            guard !model.isRecoveryReadOnly else { return }
+            guard developmentForkFailure == nil, !model.isRecoveryReadOnly else { return }
             personalIntegrations.startMonitoring(model: model)
             automaticBackup.start(model: model)
             await _Concurrency.Task<Never, Never>.yield()
@@ -450,6 +485,7 @@ struct KanameDesktopWorkspace: View {
                 dismissNonRecoveryPresentations()
                 return
             }
+            guard developmentForkFailure == nil else { return }
             personalIntegrations.startMonitoring(model: model)
             automaticBackup.start(model: model)
             NotificationCenter.default.post(name: .kanameDesktopReady, object: nil)
@@ -5429,7 +5465,8 @@ final class DesktopPersonalIntegrationViewModel: ObservableObject {
     init(environment: KanameDesktopEnvironment = .current) {
         googleIntegration = NativeGoogleIntegrationService(
             rootDirectory: environment.googleDirectory,
-            keychainService: environment.googleKeychainService
+            keychainService: environment.googleKeychainService,
+            accessMode: environment.googleIntegrationAccessMode
         )
         providerCache = ProviderCapabilityCacheStore(directory: environment.connectivityDirectory)
         workflowMailMonitor = DesktopMailViewModel(environment: environment)

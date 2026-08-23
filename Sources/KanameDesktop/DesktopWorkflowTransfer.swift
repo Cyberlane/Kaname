@@ -210,7 +210,7 @@ public extension DesktopAppModel {
 
         var imported = payload.state
         let timestamp = now()
-        removeImportedAuthority(from: &imported, timestamp: timestamp)
+        Self.removeImportedAuthority(from: &imported, timestamp: timestamp)
 
         let restoredArtifacts = try restoreInstallationArtifacts(
             payload.artifacts, workflowID: workflowID, artifactRoles: imported.artifactRoles
@@ -317,7 +317,105 @@ public extension DesktopAppModel {
         throw DesktopWorkflowTransferError.invalidArchive
     }
 
-    private func removeImportedAuthority(from state: inout DesktopWorkflowPlatformState, timestamp: Int64) {
+    /// Converts a copied workspace into inert development data. Historical
+    /// content remains visible, but no approval, schedule, provider run, or
+    /// workflow grant crosses the Stable-to-Dev boundary.
+    @discardableResult
+    func prepareDevelopmentDataFork() -> Bool {
+        let timestamp = now()
+        let activeActions: [DesktopActionState] = [.proposed, .awaitingApproval, .approved, .running]
+        return mutate { state in
+            state.preferences.safeMode = true
+            for index in state.threads.indices {
+                state.threads[index].runtimeMode = .approvalRequired
+                state.threads[index].networkAccess = false
+            }
+            for index in state.domains.automations.indices {
+                state.domains.automations[index].status = .paused
+                state.domains.automations[index].nextRunAtUnixMillis = nil
+                state.domains.automations[index].authority = .askEveryRun
+                state.domains.automations[index].standingAuthorityApprovedAtUnixMillis = nil
+                state.domains.automations[index].standingAuthorityApprovalID = nil
+            }
+            for index in state.domains.calendarProposals.indices
+            where state.domains.calendarProposals[index].approvalID != nil
+                || state.domains.calendarProposals[index].exactTarget != nil
+                || [.ready, .proposed, .waiting, .running].contains(state.domains.calendarProposals[index].status) {
+                state.domains.calendarProposals[index].status = .needsReview
+                state.domains.calendarProposals[index].approvalID = nil
+                state.domains.calendarProposals[index].exactTarget = nil
+                state.domains.calendarProposals[index].mutationPhase = nil
+            }
+            for index in state.operations.approvals.indices
+            where activeActions.contains(state.operations.approvals[index].state) {
+                state.operations.approvals[index].state = .cancelled
+            }
+            for index in state.operations.providerRuns.indices {
+                state.operations.providerRuns[index].runtimeMode = .approvalRequired
+                state.operations.providerRuns[index].networkAccess = false
+                if activeActions.contains(state.operations.providerRuns[index].state) {
+                    state.operations.providerRuns[index].state = .cancelled
+                    state.operations.providerRuns[index].errorSummary = "Cancelled while creating an isolated development data fork."
+                    state.operations.providerRuns[index].completedAtUnixMillis = timestamp
+                }
+            }
+            for index in state.operations.automationRuns.indices
+            where activeActions.contains(state.operations.automationRuns[index].state) {
+                state.operations.automationRuns[index].state = .cancelled
+                state.operations.automationRuns[index].detail = "Cancelled while creating an isolated development data fork."
+                state.operations.automationRuns[index].completedAtUnixMillis = timestamp
+                state.operations.automationRuns[index].ownerID = nil
+                state.operations.automationRuns[index].approvalID = nil
+                state.operations.automationRuns[index].contractTarget = nil
+                state.operations.automationRuns[index].exactTarget = nil
+            }
+            for index in state.operations.knowledgeWrites.indices
+            where activeActions.contains(state.operations.knowledgeWrites[index].state) {
+                state.operations.knowledgeWrites[index].state = .cancelled
+                state.operations.knowledgeWrites[index].approvalID = nil
+                state.operations.knowledgeWrites[index].reconciledAtUnixMillis = timestamp
+            }
+            for index in state.operations.capabilityUpdates.indices
+            where activeActions.contains(state.operations.capabilityUpdates[index].state) {
+                state.operations.capabilityUpdates[index].state = .cancelled
+            }
+            for index in state.operations.mailActions.indices
+            where activeActions.contains(state.operations.mailActions[index].state) {
+                state.operations.mailActions[index].state = .cancelled
+                state.operations.mailActions[index].approvalID = nil
+                state.operations.mailActions[index].standingRuleID = nil
+                state.operations.mailActions[index].reconciledAtUnixMillis = timestamp
+            }
+            for index in state.operations.mailStandingRules.indices {
+                state.operations.mailStandingRules[index].enabled = false
+            }
+            for index in state.operations.vaultScopes.indices {
+                state.operations.vaultScopes[index].canWrite = false
+            }
+            for index in state.operations.providerSessions.indices
+            where state.operations.providerSessions[index].state == .running {
+                state.operations.providerSessions[index].state = .interrupted
+                state.operations.providerSessions[index].lastReconciledAtUnixMillis = timestamp
+            }
+            for index in state.operations.subagents.indices
+            where [.queued, .running, .waiting].contains(state.operations.subagents[index].state) {
+                state.operations.subagents[index].state = .interrupted
+                state.operations.subagents[index].completedAtUnixMillis = timestamp
+            }
+            Self.removeImportedAuthority(from: &state.operations.workflows, timestamp: timestamp)
+            state.operations.audit.append(.init(
+                id: UUID().uuidString.lowercased(),
+                domain: "development-fork",
+                action: "authority-removed",
+                target: "stable-snapshot",
+                state: .completed,
+                detail: "Stable content was copied into isolated Dev storage with external and automatic authority removed.",
+                recordedAtUnixMillis: timestamp
+            ))
+        }
+    }
+
+    private static func removeImportedAuthority(from state: inout DesktopWorkflowPlatformState, timestamp: Int64) {
         for index in state.definitions.indices {
             state.definitions[index].enabled = false
             state.definitions[index].updatedAtUnixMillis = timestamp
@@ -377,6 +475,20 @@ public extension DesktopAppModel {
                 kind: .revoked, detail: "Revoked during private installation transfer.",
                 recordedAtUnixMillis: timestamp
             ))
+        }
+        for index in state.runtimeClaims.indices where state.runtimeClaims[index].state == .active {
+            state.runtimeClaims[index].state = .expired
+            state.runtimeClaims[index].releasedAtUnixMillis = timestamp
+        }
+        for index in state.capabilityInstallations.indices {
+            state.capabilityInstallations[index].enabled = false
+        }
+        for index in state.connectorInstallations.indices {
+            state.connectorInstallations[index].enabled = false
+        }
+        for index in state.connectorBindings.indices {
+            state.connectorBindings[index].enabled = false
+            state.connectorBindings[index].updatedAtUnixMillis = timestamp
         }
         for index in state.operationalStatuses.indices {
             state.operationalStatuses[index].active = false

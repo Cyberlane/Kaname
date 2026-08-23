@@ -349,6 +349,7 @@ public extension NativeGoogleIntegrationService {
         grant: CalendarMutationGrant,
         progress: @Sendable (CalendarMutationPhase) async -> Void = { _ in }
     ) async throws -> CalendarMutationReceipt {
+        try requireExternalMutationAccess()
         let account = try googleCalendarAccount(id: accountID)
         guard account.supportsCalendarEventWrites else { throw CalendarWorkError.authorizationUpgradeRequired }
         let expectedTarget = try Self.googleCalendarTarget(

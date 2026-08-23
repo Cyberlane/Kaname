@@ -13,12 +13,14 @@ final class DesktopAutomaticBackupViewModel: ObservableObject {
 
     private let configurationStore: FileDesktopAutomaticBackupConfigurationStore
     private let secretStore: any DesktopAutomaticBackupSecretStoring
+    private let environment: KanameDesktopEnvironment
     private let service = DesktopAutomaticBackupService()
     private var schedulerTask: Task<Void, Never>?
     private var secretStatusTask: Task<Void, Never>?
     private var secretStatusRevision = 0
 
     init(environment: KanameDesktopEnvironment = .current) {
+        self.environment = environment
         configurationStore = FileDesktopAutomaticBackupConfigurationStore(
             fileURL: environment.desktopDirectory.appendingPathComponent("automatic-backup.json")
         )
@@ -36,6 +38,10 @@ final class DesktopAutomaticBackupViewModel: ObservableObject {
 
     func start(model: DesktopAppModel) {
         loadSecretStatusIfNeeded()
+        guard environment.allowsAutomaticExecution else {
+            message = "Automatic backups are disabled in the Development build."
+            return
+        }
         guard schedulerTask == nil else { return }
         schedulerTask = Task { [weak self, weak model] in
             while !Task.isCancelled {
@@ -132,6 +138,10 @@ final class DesktopAutomaticBackupViewModel: ObservableObject {
     }
 
     func testConnection() {
+        guard environment.allowsExternalMutations else {
+            message = "The Development build does not write to backup destinations."
+            return
+        }
         guard !isBusy else { return }
         isBusy = true
         message = "Testing the private destination…"
@@ -158,6 +168,10 @@ final class DesktopAutomaticBackupViewModel: ObservableObject {
     }
 
     func setEnabled(_ enabled: Bool) {
+        guard environment.allowsAutomaticExecution || !enabled else {
+            message = "Automatic backups cannot be enabled in the Development build."
+            return
+        }
         if enabled {
             guard configuration.verifiedDestinationDigest == configuration.destinationDigest,
                   secretsConfigured,
@@ -175,6 +189,10 @@ final class DesktopAutomaticBackupViewModel: ObservableObject {
     }
 
     func backupNow(model: DesktopAppModel, automatic: Bool = false) {
+        guard environment.allowsExternalMutations else {
+            message = "The Development build did not write to the configured backup destination."
+            return
+        }
         guard !isBusy else { return }
         isBusy = true
         var attempted = configuration

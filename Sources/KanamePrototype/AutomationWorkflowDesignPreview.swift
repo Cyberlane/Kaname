@@ -330,7 +330,7 @@ struct AutomationWorkflowProductView: View {
                     )
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .background(Nord.polarNight0)
         .onAppear {
@@ -985,11 +985,24 @@ private struct AutomationReadinessView: View {
     }
 
     var body: some View {
-        HSplitView {
-            workflowList.frame(minWidth: 250, idealWidth: 300, maxWidth: 360)
-            readinessDetail.frame(minWidth: 650, maxWidth: .infinity)
+        if model.workflowDefinitions.isEmpty {
+            EmptyPanel(
+                symbol: "checkmark.seal",
+                title: "No workflows installed",
+                detail: "Install or create a workflow to inspect its readiness."
+            )
+            .padding(24)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        } else {
+            HSplitView {
+                workflowList
+                    .frame(minWidth: 250, idealWidth: 300, maxWidth: 360, maxHeight: .infinity, alignment: .topLeading)
+                readinessDetail
+                    .frame(minWidth: 650, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+            .padding(20)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .padding(20)
     }
 
     private var workflowList: some View {

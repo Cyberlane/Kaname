@@ -1,5 +1,10 @@
 import Foundation
 
+public enum KanameExternalMutationPolicy: String, Codable, Equatable, Sendable {
+    case allowed
+    case denied
+}
+
 public struct KanameDesktopEnvironment: Equatable, Sendable {
     public enum Channel: String, Codable, Sendable {
         case stable
@@ -54,6 +59,14 @@ public struct KanameDesktopEnvironment: Equatable, Sendable {
         case .candidate: "Kaname Candidate"
         case .development: "Kaname - Dev"
         }
+    }
+    public var externalMutationPolicy: KanameExternalMutationPolicy {
+        channel == .development ? .denied : .allowed
+    }
+    public var allowsExternalMutations: Bool { externalMutationPolicy == .allowed }
+    public var allowsAutomaticExecution: Bool { channel != .development }
+    public var googleIntegrationAccessMode: GoogleIntegrationAccessMode {
+        channel == .development ? .readOnly : .readWrite
     }
     public var localCoreMachService: String { "\(bundleIdentifier).localcore.service" }
     public var googleKeychainService: String { "\(bundleIdentifier).google-oauth" }

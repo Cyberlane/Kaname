@@ -3,8 +3,8 @@ import Foundation
 import Darwin
 #endif
 
-enum DesktopWorkflowFilesystem {
-    static func preparePrivateDirectory(_ url: URL, failure: @autoclosure () -> any Error) throws {
+public enum DesktopWorkflowFilesystem {
+    public static func preparePrivateDirectory(_ url: URL, failure: @autoclosure () -> any Error) throws {
         try createPrivateItem(at: url, isDirectory: true, mode: 0o700, failure: failure()) {
             try FileManager.default.createDirectory(
                 at: url,
@@ -14,7 +14,7 @@ enum DesktopWorkflowFilesystem {
         }
     }
 
-    static func writePrivate(_ data: Data, to url: URL, failure: @autoclosure () -> any Error) throws {
+    public static func writePrivate(_ data: Data, to url: URL, failure: @autoclosure () -> any Error) throws {
         try createPrivateItem(at: url, isDirectory: false, mode: 0o600, failure: failure()) {
             try data.write(to: url, options: [.atomic])
         }
