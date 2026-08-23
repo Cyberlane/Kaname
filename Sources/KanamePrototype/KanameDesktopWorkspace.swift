@@ -2534,7 +2534,7 @@ private struct DesktopThreadConversation: View {
     @State private var attachmentError: String?
     @State private var isImportingAttachments = false
     @State private var questionAnswer = ""
-    @State private var panel: Panel = .conversation
+    @State private var panel: DesktopThreadPanel = .conversation
     @State private var showsRename = false
     @State private var renamedTitle = ""
     @State private var showsRuntimeSettings = false
@@ -2575,7 +2575,7 @@ private struct DesktopThreadConversation: View {
         let requestedPanel = CommandLine.arguments.firstIndex(of: "--desktop-thread-panel")
             .flatMap { index in
                 CommandLine.arguments.indices.contains(index + 1)
-                    ? Panel(rawValue: CommandLine.arguments[index + 1])
+                    ? DesktopThreadPanel(rawValue: CommandLine.arguments[index + 1])
                     : nil
             }
             ?? .conversation
@@ -2584,25 +2584,8 @@ private struct DesktopThreadConversation: View {
             : .conversation)
     }
 
-    private enum Panel: String, CaseIterable, Identifiable {
-        case conversation
-        case plan
-        case changes
-        case evidence
-        case knowledge
-        var id: String { rawValue }
-        var label: String {
-            switch self {
-            case .conversation: "Chat"
-            case .plan: "Plan"
-            case .changes: "Changes"
-            case .evidence: "Evidence"
-            case .knowledge: "Knowledge"
-            }
-        }
-    }
-
     var body: some View {
+        let codingStage = runtime.codingStage(threadID: thread.id)
         VStack(spacing: 0) {
             threadHeader
 
@@ -2612,17 +2595,28 @@ private struct DesktopThreadConversation: View {
             case .conversation:
                 conversation
             case .changes:
-                DesktopThreadChangesView(model: model, thread: thread)
+                DesktopThreadChangesView(
+                    model: model,
+                    thread: thread,
+                    isAwaitingReview: thread.kind == .coding && codingStage == .implementationReview,
+                    beginReview: { runtime.beginImplementationReview(threadID: thread.id) }
+                )
             case .plan:
                 ThreadPlanView(
                     items: thread.plan,
-                    phase: runtime.codingStage(threadID: thread.id).planPhase(hasSavedPlan: !thread.plan.isEmpty),
+                    phase: codingStage.planPhase(hasSavedPlan: !thread.plan.isEmpty),
                     provider: thread.provider,
                     requestChanges: requestPlanChanges,
                     approvePlan: approvePlanAndImplement
                 )
             case .evidence:
-                ThreadEvidenceView(items: thread.evidence)
+                ThreadEvidenceView(
+                    items: thread.evidence,
+                    isAwaitingReview: thread.kind == .coding && codingStage == .evidenceReview,
+                    recheckEvidence: { runtime.recheckImplementation(threadID: thread.id) },
+                    accept: { runtime.reviewImplementation(threadID: thread.id, accepted: true) },
+                    reject: { runtime.reviewImplementation(threadID: thread.id, accepted: false) }
+                )
             case .knowledge:
                 DesktopCodingKnowledgeLaneView(
                     model: model,
@@ -2665,9 +2659,6 @@ private struct DesktopThreadConversation: View {
         }
         .onAppear {
             applyComposerFocusRequest()
-            if thread.kind == .coding, runtime.codingStage(threadID: thread.id) == .knowledgeReview {
-                panel = .knowledge
-            }
 #if os(macOS)
             installImagePasteMonitor()
 #endif
@@ -2684,8 +2675,8 @@ private struct DesktopThreadConversation: View {
                 reconcileComposerCommandSelection()
             }
         }
-        .onChange(of: thread.id) { _ in
-            if thread.kind != .coding { panel = .conversation }
+        .onChange(of: thread.id) { _, _ in
+            panel = .conversation
             narrativeRowLimit = DesktopConversationNarrativePresentation.defaultMaximumRows
             conversationSearch = ""
             selectedRunID = nil
@@ -2701,80 +2692,89 @@ private struct DesktopThreadConversation: View {
             attachments = model.composerAttachments(threadID: thread.id)
             attachmentError = nil
         }
-        .onChange(of: thread.plan.count) { count in
-            if count > 0 { panel = .plan }
-        }
-        .onChange(of: thread.evidence.count) { count in
-            if count > 0 { panel = .evidence }
-        }
-        .onChange(of: runtime.codingStage(threadID: thread.id)) { stage in
-            if thread.kind == .coding, stage == .knowledgeReview {
-                panel = .knowledge
-            }
+        .onChange(of: runtime.codingStage(threadID: thread.id)) { _, stage in
+            announceWorkflowAttentionIfNeeded(stage)
         }
     }
 
     private var threadHeader: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(thread.title).font(.title2.weight(.bold))
-                    Text(thread.summary)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
+        let stage = runtime.codingStage(threadID: thread.id)
+        let workflow = DesktopCodingWorkflowPresentation(stage: stage)
+        return VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Text(thread.title)
+                    .font(.headline)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .help("\(thread.title)\n\(thread.summary)")
+                    .accessibilityLabel("\(thread.title). \(thread.summary)")
+                    .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                    .layoutPriority(1)
+
+                if thread.kind == .coding {
+                    DesktopCodingWorkflowStatusControl(
+                        stage: stage,
+                        error: runtime.codingWorkflowErrors[thread.id],
+                        openPanel: openPanel,
+                        interrupt: runtime.isRunning(threadID: thread.id)
+                            ? { runtime.interrupt(threadID: thread.id) }
+                            : nil
+                    )
+                } else {
+                    AttentionPill(attention: thread.attention)
                 }
-                Spacer()
-                if runtime.isRunning(threadID: thread.id) {
-                    Button("Interrupt", systemImage: "stop.circle") {
-                        runtime.interrupt(threadID: thread.id)
-                    }
-                    .buttonStyle(.bordered)
-                }
-                Button {
-                    captureSheetFocus()
-                    renamedTitle = thread.title
-                    showsRename = true
-                } label: {
-                    Image(systemName: "pencil")
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Rename conversation")
-                AttentionPill(attention: thread.attention)
+
+                conversationActionsMenu
             }
-            if thread.kind == .coding { codingWorkflowBanner }
-            Picker("Thread panel", selection: $panel) {
-                ForEach(availablePanels) { item in
-                    Text(item.label).tag(item)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
+            .padding(.horizontal, 18)
+            .frame(height: 60)
+
+            Divider()
+
+            DesktopThreadTabBar(
+                selection: $panel,
+                panels: availablePanels,
+                attentionPanel: thread.kind == .coding ? workflow.attentionPanel : nil
+            )
+            .frame(height: 42)
         }
-        .padding(22)
+        .background(Nord.polarNight1)
     }
 
-    private var codingWorkflowBanner: some View {
-        let stage = runtime.codingStage(threadID: thread.id)
-        return DesktopCodingWorkflowBanner(
-            stage: stage,
-            provider: thread.provider,
-            evidencePassed: !thread.evidence.isEmpty && thread.evidence.allSatisfy { $0.state == .passed },
-            error: runtime.codingWorkflowErrors[thread.id],
-            isCondensed: panel == .plan && stage == .planReview,
-            showsPlanReviewAction: panel != .plan,
-            approvePlan: approvePlanAndImplement,
-            beginReview: {
-                panel = .changes
-                runtime.beginImplementationReview(threadID: thread.id)
-            },
-            recheckEvidence: {
-                panel = .evidence
-                runtime.recheckImplementation(threadID: thread.id)
-            },
-            accept: { runtime.reviewImplementation(threadID: thread.id, accepted: true) },
-            reject: { runtime.reviewImplementation(threadID: thread.id, accepted: false) },
-            reviewKnowledge: { panel = .knowledge }
+    private var conversationActionsMenu: some View {
+        Menu {
+            Button("Rename conversation", systemImage: "pencil") {
+                captureSheetFocus()
+                renamedTitle = thread.title
+                showsRename = true
+            }
+            Button("Runtime settings", systemImage: "slider.horizontal.3") {
+                openRuntimeSettings()
+            }
+            .disabled(runtimeSettingsLocked)
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .font(.body)
+                .frame(width: 28, height: 28)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Conversation actions")
+        .accessibilityLabel("Conversation actions")
+    }
+
+    private func openPanel(_ destination: DesktopThreadPanel) {
+        guard availablePanels.contains(destination) else { return }
+        panel = destination
+        postDesktopAccessibilityAnnouncement("\(destination.label) opened")
+    }
+
+    private func announceWorkflowAttentionIfNeeded(_ stage: DesktopCodingWorkflowStage) {
+        guard thread.kind == .coding else { return }
+        let presentation = DesktopCodingWorkflowPresentation(stage: stage)
+        guard presentation.requiresAttention, let ownerPanel = presentation.ownerPanel else { return }
+        postDesktopAccessibilityAnnouncement(
+            "\(presentation.title). Open \(ownerPanel.label) when you are ready."
         )
     }
 
@@ -3350,8 +3350,8 @@ private struct DesktopThreadConversation: View {
         )
     }
 
-    private var availablePanels: [Panel] {
-        thread.kind == .coding ? Array(Panel.allCases) : Panel.allCases.filter { $0 != .knowledge }
+    private var availablePanels: [DesktopThreadPanel] {
+        DesktopThreadPanel.available(forCodingThread: thread.kind == .coding)
     }
 
     private var hasSendableContent: Bool {
@@ -3635,6 +3635,8 @@ private struct DesktopComposerCommandDrawer: View {
 private struct DesktopThreadChangesView: View {
     @ObservedObject var model: DesktopAppModel
     let thread: DesktopThread
+    let isAwaitingReview: Bool
+    let beginReview: () -> Void
     @StateObject private var changes = DesktopThreadChangesViewModel()
 
     private var worktree: DesktopWorktreeRecord? {
@@ -3644,20 +3646,34 @@ private struct DesktopThreadChangesView: View {
     }
 
     var body: some View {
-        Group {
-            if let worktree {
-                changesWorkspace(worktree)
-                    .onAppear { changes.load(worktree: worktree) }
-                    .onChange(of: worktree.updatedAtUnixMillis) { _ in
-                        changes.load(worktree: worktree, force: true)
-                    }
-            } else {
-                EmptyPanel(
-                    symbol: "doc.text.magnifyingglass",
-                    title: "No code changes for this thread",
-                    detail: "When an approved coding run creates an isolated worktree, its files and per-file patches appear here instead of filling the conversation."
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        VStack(spacing: 0) {
+            Group {
+                if let worktree {
+                    changesWorkspace(worktree)
+                        .onAppear { changes.load(worktree: worktree) }
+                        .onChange(of: worktree.updatedAtUnixMillis) { _ in
+                            changes.load(worktree: worktree, force: true)
+                        }
+                } else {
+                    EmptyPanel(
+                        symbol: "doc.text.magnifyingglass",
+                        title: "No code changes for this thread",
+                        detail: "When an approved coding run creates an isolated worktree, its files and per-file patches appear here instead of filling the conversation."
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+
+            if isAwaitingReview {
+                Divider()
+                DesktopDecisionFooter(
+                    title: "Ready for independent checks",
+                    detail: "Review the isolated diff first. Starting checks does not accept, merge, push, or publish these changes."
+                ) {
+                    Button("Review changes & run checks", systemImage: "checkmark.shield", action: beginReview)
+                        .buttonStyle(.borderedProminent)
+                        .accessibilityHint("Starts independent checks for the isolated changes")
+                }
             }
         }
         .background(Nord.polarNight0)
@@ -3795,168 +3811,198 @@ private struct DesktopUnifiedDiffLine: View {
     }
 }
 
-private struct DesktopCodingWorkflowBanner: View {
-    let stage: DesktopCodingWorkflowStage
-    let provider: String
-    let evidencePassed: Bool
-    let error: String?
-    let isCondensed: Bool
-    let showsPlanReviewAction: Bool
-    let approvePlan: () -> Void
-    let beginReview: () -> Void
-    let recheckEvidence: () -> Void
-    let accept: () -> Void
-    let reject: () -> Void
-    let reviewKnowledge: () -> Void
+private struct DesktopThreadTabBar: View {
+    @Binding var selection: DesktopThreadPanel
+    let panels: [DesktopThreadPanel]
+    let attentionPanel: DesktopThreadPanel?
+    @FocusState private var focusedPanel: DesktopThreadPanel?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            if isCondensed {
-                Label("\(progressLabel) · \(title)", systemImage: symbol)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(tint)
-                    .help(Self.workflowPath)
-            } else {
+        HStack(spacing: 0) {
+            ForEach(panels) { panel in
+                tabButton(panel)
+            }
+        }
+        .onMoveCommand(perform: moveSelection)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Thread sections")
+    }
+
+    @ViewBuilder private func tabButton(_ panel: DesktopThreadPanel) -> some View {
+        let isSelected = selection == panel
+        let needsAttention = attentionPanel == panel
+        Button {
+            selection = panel
+            focusedPanel = panel
+        } label: {
+            ZStack(alignment: .bottom) {
                 ViewThatFits(in: .horizontal) {
-                    Text(Self.workflowPath).lineLimit(1)
-                    Text(progressLabel).lineLimit(1)
+                    Text(panel.label)
+                        .font(.subheadline.weight(isSelected ? .semibold : .regular))
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                    Image(systemName: panel.symbol)
+                        .font(.subheadline.weight(isSelected ? .semibold : .regular))
+                        .accessibilityHidden(true)
                 }
-                .font(.caption2.weight(.medium))
-                .foregroundStyle(.secondary)
-                .help(Self.workflowPath)
-                ViewThatFits(in: .horizontal) {
-                    HStack(alignment: .center, spacing: 10) {
-                        statusContent
-                        actions
-                    }
-                    VStack(alignment: .leading, spacing: 9) {
-                        statusContent
-                        HStack(spacing: 7) { actions }
-                    }
+                .foregroundStyle(isSelected ? Color.primary : Color.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                if isSelected {
+                    Rectangle()
+                        .fill(Nord.frost1)
+                        .frame(height: 2)
+                        .accessibilityHidden(true)
                 }
             }
+            .contentShape(Rectangle())
+            .overlay(alignment: .topTrailing) {
+                if needsAttention {
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(Nord.auroraYellow)
+                        .padding(.top, 7)
+                        .padding(.trailing, 7)
+                        .accessibilityHidden(true)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .focused($focusedPanel, equals: panel)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(isSelected ? Nord.frost1.opacity(0.07) : Color.clear)
+        .accessibilityLabel(needsAttention ? "\(panel.label), requires attention" : panel.label)
+        .accessibilityHint("Shows the \(panel.label) section")
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
+    private func moveSelection(_ direction: MoveCommandDirection) {
+        let movement: DesktopCyclicSelectionDirection
+        switch direction {
+        case .left: movement = .previous
+        case .right: movement = .next
+        default:
+            return
+        }
+        guard let destination = DesktopCyclicSelection.moving(
+            focusedPanel ?? selection,
+            movement,
+            in: panels
+        ) else { return }
+        focusedPanel = destination
+        selection = destination
+    }
+}
+
+private struct DesktopCodingWorkflowStatusControl: View {
+    let stage: DesktopCodingWorkflowStage
+    let error: String?
+    let openPanel: (DesktopThreadPanel) -> Void
+    let interrupt: (() -> Void)?
+    @State private var showsDetails = false
+
+    private var presentation: DesktopCodingWorkflowPresentation {
+        DesktopCodingWorkflowPresentation(stage: stage)
+    }
+
+    private var statusTint: Color {
+        error == nil ? stage.tint : Nord.auroraRed
+    }
+
+    var body: some View {
+        Button {
+            showsDetails.toggle()
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: error == nil ? presentation.symbol : "exclamationmark.triangle.fill")
+                    .accessibilityHidden(true)
+                Text(presentation.compactLabel)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+                    .accessibilityHidden(true)
+            }
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(statusTint)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 6)
+            .frame(minWidth: 44, maxWidth: 190)
+            .background(statusTint.opacity(0.14), in: Capsule())
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $showsDetails) {
+            statusDetails
+        }
+        .help("Show workflow status")
+        .accessibilityLabel(
+            "Workflow status: \(presentation.title). \(presentation.progressLabel)"
+                + (error == nil ? "" : ". Error details available")
+        )
+        .accessibilityHint("Shows workflow details and navigation")
+    }
+
+    private var statusDetails: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(presentation.title, systemImage: presentation.symbol)
+                .font(.headline)
+                .foregroundStyle(stage.tint)
+            Text(presentation.progressLabel)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(presentation.detail)
+                .font(.subheadline)
+                .fixedSize(horizontal: false, vertical: true)
+
             if let error {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(Nord.auroraRed)
                     .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider()
+
+            GroupBox {
+                Text(DesktopCodingWorkflowPresentation.workflowPath)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } label: {
+                Label("Guarded workflow", systemImage: "shield.lefthalf.filled")
+                    .font(.caption.weight(.semibold))
+            }
+
+            if presentation.ownerPanel != nil || interrupt != nil {
+                Divider()
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) { statusActions }
+                    VStack(alignment: .leading, spacing: 8) { statusActions }
+                }
             }
         }
-        .padding(12)
-        .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
-        .overlay {
-            RoundedRectangle(cornerRadius: 12).strokeBorder(tint.opacity(0.25), lineWidth: 1)
-        }
+        .padding(16)
+        .frame(width: 360, alignment: .leading)
         .accessibilityElement(children: .contain)
     }
 
-    private var statusContent: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: symbol).foregroundStyle(tint)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.subheadline.weight(.semibold))
-                Text(detail).font(.caption).foregroundStyle(.secondary)
+    @ViewBuilder private var statusActions: some View {
+        if let ownerPanel = presentation.ownerPanel {
+            Button("Open \(ownerPanel.label)", systemImage: ownerPanel.symbol) {
+                showsDetails = false
+                openPanel(ownerPanel)
             }
-            Spacer(minLength: 0)
+            .buttonStyle(.borderedProminent)
         }
-    }
-
-    private static let workflowPath = "Discuss → Plan → Approve → Implement → Review changes → Review evidence (Accept) → Update knowledge"
-
-    private var progressLabel: String {
-        switch stage {
-        case .discuss: "Stage 1 of 7 · Discuss"
-        case .planning: "Stage 2 of 7 · Plan"
-        case .planReview: "Stage 3 of 7 · Approve"
-        case .preparing, .implementing: "Stage 4 of 7 · Implement"
-        case .implementationReview: "Stage 5 of 7 · Review changes"
-        case .evidenceReview: "Stage 6 of 7 · Review evidence"
-        case .knowledgeReview: "Stage 7 of 7 · Knowledge update"
-        case .completed: "Complete · Knowledge reconciled or waived"
-        case .rejected: "Stopped · Rejected"
-        case .failed: "Stopped safely · no accepted result"
-        }
-    }
-
-    @ViewBuilder private var actions: some View {
-        switch stage {
-        case .planReview:
-            if showsPlanReviewAction {
-                Button("Approve plan & implement", action: approvePlan)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(provider.caseInsensitiveCompare("Codex") != .orderedSame)
-                    .help(provider.caseInsensitiveCompare("Codex") == .orderedSame
-                        ? "Create an isolated worktree and authorize one network-denied implementation turn"
-                        : "Choose Codex to use Kaname's signed isolated implementation flow")
+        if let interrupt {
+            Button("Interrupt", systemImage: "stop.circle", role: .destructive) {
+                showsDetails = false
+                interrupt()
             }
-        case .implementationReview:
-            Button("Review changes & run checks", systemImage: "checkmark.shield", action: beginReview)
-                .buttonStyle(.borderedProminent)
-        case .evidenceReview:
-            Button("Re-run checks", systemImage: "arrow.clockwise", action: recheckEvidence).buttonStyle(.bordered)
-            Button("Reject", role: .destructive, action: reject).buttonStyle(.bordered)
-            Button("Accept", action: accept)
-                .buttonStyle(.borderedProminent)
-                .disabled(!evidencePassed)
-                .help(evidencePassed ? "Record local acceptance" : "All independent evidence must pass before acceptance")
-        case .knowledgeReview:
-            Button("Review knowledge", systemImage: "books.vertical", action: reviewKnowledge)
-                .buttonStyle(.borderedProminent)
-        case .completed, .discuss, .planning, .preparing, .implementing, .rejected, .failed:
-            EmptyView()
-        }
-    }
-
-    private var title: String {
-        switch stage {
-        case .discuss: "Discuss the task"
-        case .planning: "Planning read-only"
-        case .planReview: "Plan needs your approval"
-        case .preparing: "Preparing the next guarded stage"
-        case .implementing: "Implementing in an isolated worktree"
-        case .implementationReview: "Review changes before checks"
-        case .evidenceReview: "Evidence needs your review"
-        case .knowledgeReview: "Accepted · knowledge update pending"
-        case .completed: "Completed"
-        case .rejected: "Rejected; isolated changes retained"
-        case .failed: "Stopped safely"
-        }
-    }
-
-    private var detail: String {
-        switch stage {
-        case .discuss: "Your next message starts a read-only planning turn. It cannot write code."
-        case .planning: "No write authority or network access is available. The structured plan will appear in the Plan tab."
-        case .planReview: "Review or revise the plan. Implementation cannot start until you press the approval button."
-        case .preparing: "Kaname is creating or checking the isolated worktree and signed evidence boundary."
-        case .implementing: "One approved, network-denied turn may write only inside the linked worktree."
-        case .implementationReview: "Review the isolated changes and run independent checks before evidence acceptance."
-        case .evidenceReview: "Provider completion is not acceptance. Inspect the diff and verification evidence, then accept or reject."
-        case .knowledgeReview: "The code is accepted locally. Review the proposed knowledge edit or provide a reason for no durable update."
-        case .completed: "The knowledge update was reconciled or explicitly waived. Nothing was pushed, published, or merged."
-        case .rejected: "The changes remain isolated and recoverable. Send revision guidance to request a fresh plan."
-        case .failed: "No result was accepted. Inspect the error, then send a revised request or retry the planning turn."
-        }
-    }
-
-    private var symbol: String {
-        switch stage {
-        case .failed, .rejected: "exclamationmark.shield.fill"
-        case .planning, .preparing, .implementing: "hourglass"
-        case .planReview, .implementationReview, .evidenceReview, .knowledgeReview: "person.crop.circle.badge.questionmark"
-        case .completed: "checkmark.seal.fill"
-        case .discuss: "text.bubble"
-        }
-    }
-
-    private var tint: Color {
-        switch stage {
-        case .failed, .rejected: Nord.auroraRed
-        case .planReview, .evidenceReview: Nord.auroraYellow
-        case .implementationReview, .knowledgeReview: Nord.auroraYellow
-        case .planning, .preparing, .implementing: Nord.frost1
-        case .completed: Nord.auroraGreen
-        case .discuss: Nord.frost0
+            .buttonStyle(.bordered)
+            .accessibilityHint("Stops the active provider turn")
         }
     }
 }
@@ -14560,6 +14606,44 @@ struct BoundaryCallout: View {
     }
 }
 
+private struct DesktopDecisionFooter<Actions: View>: View {
+    let title: String
+    let detail: String
+    @ViewBuilder let actions: Actions
+
+    init(title: String, detail: String, @ViewBuilder actions: () -> Actions) {
+        self.title = title
+        self.detail = detail
+        self.actions = actions()
+    }
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .center, spacing: 18) {
+                decisionText
+                Spacer(minLength: 12)
+                actions
+            }
+            VStack(alignment: .leading, spacing: 12) {
+                decisionText
+                actions
+            }
+        }
+        .padding(.horizontal, 22)
+        .padding(.vertical, 16)
+        .background(Nord.polarNight1)
+    }
+
+    private var decisionText: some View {
+        (
+            Text(title).font(.subheadline.weight(.semibold))
+                + Text("\n")
+                + Text(detail).font(.caption).foregroundColor(Nord.snowStorm0.opacity(0.72))
+        )
+        .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
 private struct ThreadPlanView: View {
     let items: [DesktopPlanItem]
     let phase: DesktopPlanPhase
@@ -14677,6 +14761,7 @@ private struct ThreadPlanView: View {
             .font(.title3)
             .foregroundStyle(phase.tint)
             .frame(width: 24)
+            .accessibilityHidden(true)
     }
 
     private var phaseTitle: some View {
@@ -14692,39 +14777,12 @@ private struct ThreadPlanView: View {
     }
 
     private var planReviewFooter: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(alignment: .center, spacing: 18) {
-                reviewBoundaryText
-                Spacer(minLength: 12)
-                reviewActions
-            }
-            VStack(alignment: .leading, spacing: 12) {
-                reviewBoundaryText
-                reviewActions
-            }
+        DesktopDecisionFooter(
+            title: "Ready for your decision",
+            detail: "Changes start another read-only plan. Approval authorizes one network-denied implementation turn in an isolated worktree."
+        ) {
+            reviewActions
         }
-        .padding(.horizontal, 22)
-        .padding(.vertical, 16)
-        .background(Nord.polarNight1)
-    }
-
-    private var reviewBoundaryText: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            reviewDecisionTitle
-            reviewDecisionDetail
-        }
-    }
-
-    private var reviewDecisionTitle: some View {
-        Text("Ready for your decision")
-            .font(.subheadline.weight(.semibold))
-    }
-
-    private var reviewDecisionDetail: some View {
-        Text("Changes start another read-only plan. Approval authorizes one network-denied implementation turn in an isolated worktree.")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
     }
 
     private var reviewActions: some View {
@@ -14744,6 +14802,7 @@ private struct ThreadPlanView: View {
         Button("Request changes", systemImage: "text.bubble", action: requestChanges)
             .buttonStyle(.bordered)
             .tint(Nord.frost1)
+            .accessibilityHint("Opens Chat and focuses the composer for revision guidance")
     }
 
     private var approvePlanButton: some View {
@@ -14755,6 +14814,7 @@ private struct ThreadPlanView: View {
         .tint(Nord.auroraGreen)
         .disabled(items.isEmpty || !providerSupportsImplementation)
         .help(approvalHelp)
+        .accessibilityHint(approvalHelp)
     }
 
     private var providerSupportsImplementation: Bool {
@@ -14814,35 +14874,79 @@ private struct ThreadPlanRow: View {
 
 private struct ThreadEvidenceView: View {
     let items: [DesktopEvidence]
+    let isAwaitingReview: Bool
+    let recheckEvidence: () -> Void
+    let accept: () -> Void
+    let reject: () -> Void
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                if items.isEmpty {
-                    EmptyPanel(symbol: "checkmark.seal", title: "No evidence yet", detail: "Provider completion does not count as accepted work.")
-                } else {
-                    ForEach(items) { item in
-                        HStack(alignment: .top, spacing: 12) {
-                            Image(systemName: item.state.symbol)
-                                .foregroundStyle(item.state.tint)
-                                .font(.title3)
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(item.label).font(.headline)
-                                Text(item.detail).font(.subheadline).foregroundStyle(.secondary)
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    if items.isEmpty {
+                        EmptyPanel(symbol: "checkmark.seal", title: "No evidence yet", detail: "Provider completion does not count as accepted work.")
+                    } else {
+                        ForEach(items) { item in
+                            HStack(alignment: .top, spacing: 12) {
+                                Image(systemName: item.state.symbol)
+                                    .foregroundStyle(item.state.tint)
+                                    .font(.title3)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(item.label).font(.headline)
+                                    Text(item.detail).font(.subheadline).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Text(item.state.label)
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(item.state.tint)
                             }
-                            Spacer()
-                            Text(item.state.label)
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(item.state.tint)
+                            .padding(15)
+                            .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
                         }
-                        .padding(15)
-                        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
                     }
                 }
+                .padding(22)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(22)
-            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if isAwaitingReview {
+                Divider()
+                DesktopDecisionFooter(
+                    title: "Decide from independent evidence",
+                    detail: "Acceptance records a local decision only. It does not merge, push, publish, or update durable knowledge."
+                ) {
+                    evidenceReviewActions
+                }
+            }
         }
+    }
+
+    private var evidenceReviewActions: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) { evidenceReviewButtons }
+            VStack(alignment: .leading, spacing: 8) { evidenceReviewButtons }
+        }
+    }
+
+    @ViewBuilder private var evidenceReviewButtons: some View {
+        Button("Re-run checks", systemImage: "arrow.clockwise", action: recheckEvidence)
+            .buttonStyle(.bordered)
+        Button("Reject", role: .destructive, action: reject)
+            .buttonStyle(.bordered)
+            .accessibilityHint("Rejects this result while retaining isolated changes")
+        Button("Accept", action: accept)
+            .buttonStyle(.borderedProminent)
+            .disabled(!evidencePassed)
+            .help(evidencePassed ? "Record local acceptance" : "All independent evidence must pass before acceptance")
+            .accessibilityHint(
+                evidencePassed
+                    ? "Records local acceptance without merging, pushing, or publishing"
+                    : "All independent evidence must pass before acceptance"
+            )
+    }
+
+    private var evidencePassed: Bool {
+        !items.isEmpty && items.allSatisfy { $0.state == .passed }
     }
 }
 
@@ -15406,6 +15510,16 @@ private extension DesktopCodingWorkflowStage {
         case .implementationReview, .evidenceReview, .knowledgeReview: .reviewingResult
         case .completed: .completed
         case .rejected, .failed: .stopped
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .failed, .rejected: Nord.auroraRed
+        case .planReview, .implementationReview, .evidenceReview, .knowledgeReview: Nord.auroraYellow
+        case .planning, .preparing, .implementing: Nord.frost1
+        case .completed: Nord.auroraGreen
+        case .discuss: Nord.frost0
         }
     }
 }

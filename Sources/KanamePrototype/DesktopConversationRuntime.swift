@@ -6,20 +6,6 @@ import KanameDesktop
 import KanameDomain
 import KanameLocalCore
 
-enum DesktopCodingWorkflowStage: Equatable {
-    case discuss
-    case planning
-    case planReview
-    case preparing
-    case implementing
-    case implementationReview
-    case evidenceReview
-    case knowledgeReview
-    case completed
-    case rejected
-    case failed
-}
-
 @MainActor
 final class DesktopConversationRuntime: ObservableObject {
     private struct PreparedServiceEvent {
