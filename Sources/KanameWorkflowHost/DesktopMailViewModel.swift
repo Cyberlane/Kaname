@@ -17,12 +17,25 @@ private func withWorkflowAgentTimeout<Value: Sendable>(
     }
 }
 
+public struct DesktopMailLabelSelection: Equatable, Sendable {
+    public let accountID: String
+    public let label: GmailLabelSnapshot
+
+    public init(accountID: String, label: GmailLabelSnapshot) {
+        self.accountID = accountID
+        self.label = label
+    }
+}
+
 @MainActor
 public final class DesktopMailViewModel: ObservableObject {
     @Published public private(set) var threads: [GmailThreadDetailSnapshot] = []
     @Published public private(set) var selectedThread: GmailThreadDetailSnapshot?
     @Published public private(set) var labels: [String: [GmailLabelSnapshot]] = [:]
-    @Published public private(set) var nextPageTokens: [String: String] = [:]
+    @Published public private(set) var selectedLabel: DesktopMailLabelSelection?
+    @Published public private(set) var labelLoadingAccountIDs: Set<String> = []
+    @Published public private(set) var labelErrors: [String: String] = [:]
+    @Published public private(set) var hasNextPage = false
     @Published public private(set) var failedAccounts: [String] = []
     @Published public private(set) var isBusy = false
     @Published public private(set) var message: String?
@@ -37,6 +50,10 @@ public final class DesktopMailViewModel: ObservableObject {
     private var workflowMonitoringTask: _Concurrency.Task<Void, Never>?
     private var workflowRuntime: DesktopWorkflowRuntime?
     private var workflowEffectCoordinator: DesktopWorkflowEffectCoordinator?
+    private var pagination = GmailSearchPaginationState()
+    private var searchGeneration = UUID()
+    private var searchTask: _Concurrency.Task<Void, Never>?
+    private var currentAccountScopeID: String?
 
     public init(
         environment: KanameDesktopEnvironment = .current,
@@ -1397,41 +1414,80 @@ public final class DesktopMailViewModel: ObservableObject {
 
     public func search(accounts: [NativeGoogleAccountSnapshot], model: DesktopAppModel, loadMore: Bool = false) {
         guard !isBusy, !accounts.isEmpty else { return }
+        let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let scopedAccounts = selectedLabel.map { selection in
+            accounts.filter { $0.id == selection.accountID }
+        } ?? accounts
+        guard !scopedAccounts.isEmpty else { return }
+        let scope = GmailSearchScope(
+            accountIDs: scopedAccounts.map(\.id),
+            query: normalizedQuery,
+            labelAccountID: selectedLabel?.accountID,
+            labelID: selectedLabel?.label.id
+        )
+        let continuesActiveSearch = pagination.prepare(scope: scope, loadMore: loadMore)
         isBusy = true
-        if !loadMore {
+        if !continuesActiveSearch {
             threads = []
-            nextPageTokens = [:]
+            selectedThread = nil
+            activeActionID = nil
+            localSummary = nil
         }
         failedAccounts = []
-        Task {
+        let generation = UUID()
+        searchGeneration = generation
+        searchTask = _Concurrency.Task {
             var discovered: [GmailThreadDetailSnapshot] = []
-            var tokens = nextPageTokens
+            var pagination = self.pagination
             var failures: [String] = []
             var failedThreads = 0
-            for account in accounts {
+            for account in scopedAccounts {
+                let key = scope.pageKey(accountID: account.id)
+                if continuesActiveSearch, pagination.token(for: key) == nil { continue }
                 do {
                     let page = try await service.searchMail(
                         accountID: account.id,
-                        query: query,
-                        pageToken: loadMore ? tokens[account.id] : nil
+                        query: normalizedQuery,
+                        labelID: key.labelID,
+                        pageToken: continuesActiveSearch ? pagination.token(for: key) : nil
                     )
                     discovered.append(contentsOf: page.threads)
                     failedThreads += page.failedThreadCount
-                    tokens[account.id] = page.nextPageToken
-                    if page.nextPageToken == nil { tokens.removeValue(forKey: account.id) }
+                    pagination.setToken(page.nextPageToken, for: key)
                 } catch {
                     failures.append(account.identity)
                 }
             }
-            threads = Self.deduplicated(loadMore ? threads + discovered : discovered)
-            nextPageTokens = tokens
+            guard !_Concurrency.Task.isCancelled, searchGeneration == generation else { return }
+            threads = Self.deduplicated(continuesActiveSearch ? threads + discovered : discovered)
+            self.pagination = pagination
+            hasNextPage = pagination.hasNextPage
             failedAccounts = failures
             reconcileAttention(model: model)
             message = failures.isEmpty && failedThreads == 0
-                ? "Loaded \(discovered.count) thread(s) across \(accounts.count) account(s)."
+                ? "Loaded \(discovered.count) thread(s) across \(scopedAccounts.count) account(s)."
                 : "Loaded \(discovered.count) thread(s); \(failedThreads) thread detail(s) and \(failures.count) account(s) could not reconcile."
             isBusy = false
+            searchTask = nil
         }
+    }
+
+    public func selectLabel(accountID: String, label: GmailLabelSnapshot) {
+        if query == "in:inbox" { query = "" }
+        selectedLabel = DesktopMailLabelSelection(accountID: accountID, label: label)
+        resetSearchState()
+    }
+
+    public func clearLabelSelection() {
+        selectedLabel = nil
+        resetSearchState()
+    }
+
+    public func setAccountScope(_ accountID: String?) {
+        guard currentAccountScopeID != accountID else { return }
+        currentAccountScopeID = accountID
+        if selectedLabel?.accountID != accountID { selectedLabel = nil }
+        resetSearchState()
     }
 
     @discardableResult
@@ -1467,10 +1523,22 @@ public final class DesktopMailViewModel: ObservableObject {
         }
     }
 
-    public func loadLabels(accountID: String) {
-        Task {
-            do { labels[accountID] = try await service.listGmailLabels(accountID: accountID) }
-            catch { message = error.localizedDescription }
+    public func loadLabels(accounts: [NativeGoogleAccountSnapshot], force: Bool = false) {
+        let pending = accounts.filter {
+            (force || labels[$0.id] == nil) && !labelLoadingAccountIDs.contains($0.id)
+        }
+        guard !pending.isEmpty else { return }
+        labelLoadingAccountIDs.formUnion(pending.map(\.id))
+        _Concurrency.Task {
+            for account in pending {
+                do {
+                    labels[account.id] = try await service.listGmailLabels(accountID: account.id)
+                    labelErrors.removeValue(forKey: account.id)
+                } catch {
+                    labelErrors[account.id] = error.localizedDescription
+                }
+                labelLoadingAccountIDs.remove(account.id)
+            }
         }
     }
 
@@ -1783,6 +1851,20 @@ public final class DesktopMailViewModel: ObservableObject {
               approval.state == .approved,
               approval.exactTarget == action.exactTarget else { return nil }
         return action
+    }
+
+    private func resetSearchState() {
+        searchTask?.cancel()
+        searchTask = nil
+        searchGeneration = UUID()
+        pagination.reset()
+        hasNextPage = false
+        threads = []
+        selectedThread = nil
+        activeActionID = nil
+        localSummary = nil
+        failedAccounts = []
+        isBusy = false
     }
 
     private func replaceThread(_ thread: GmailThreadDetailSnapshot) {

@@ -136,6 +136,7 @@ public struct GmailThreadPage: Equatable, Sendable {
     public let accountID: String
     public let accountIdentity: String
     public let query: String
+    public let labelID: String?
     public let threads: [GmailThreadDetailSnapshot]
     public let nextPageToken: String?
     public let failedThreadCount: Int
@@ -181,6 +182,73 @@ public struct GmailLabelSnapshot: Equatable, Identifiable, Sendable {
     public let id: String
     public let name: String
     public let type: String
+}
+
+public struct GmailSearchPageKey: Equatable, Hashable, Sendable {
+    public let accountID: String
+    public let query: String
+    public let labelID: String?
+
+    public init(accountID: String, query: String, labelID: String?) {
+        self.accountID = accountID
+        self.query = query
+        self.labelID = labelID
+    }
+}
+
+public struct GmailSearchScope: Equatable, Hashable, Sendable {
+    public let accountIDs: [String]
+    public let query: String
+    public let labelAccountID: String?
+    public let labelID: String?
+
+    public init(accountIDs: [String], query: String, labelAccountID: String?, labelID: String?) {
+        self.accountIDs = accountIDs.sorted()
+        self.query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.labelAccountID = labelAccountID
+        self.labelID = labelID
+    }
+
+    public func pageKey(accountID: String) -> GmailSearchPageKey {
+        GmailSearchPageKey(
+            accountID: accountID,
+            query: query,
+            labelID: labelAccountID == accountID ? labelID : nil
+        )
+    }
+}
+
+public struct GmailSearchPaginationState: Equatable, Sendable {
+    public private(set) var activeScope: GmailSearchScope?
+    public private(set) var nextPageTokens: [GmailSearchPageKey: String] = [:]
+
+    public init() {}
+
+    public var hasNextPage: Bool { !nextPageTokens.isEmpty }
+
+    @discardableResult
+    public mutating func prepare(scope: GmailSearchScope, loadMore: Bool) -> Bool {
+        let continuesActiveSearch = loadMore && activeScope == scope
+        if !continuesActiveSearch {
+            activeScope = scope
+            nextPageTokens = [:]
+        }
+        return continuesActiveSearch
+    }
+
+    public func token(for key: GmailSearchPageKey) -> String? {
+        nextPageTokens[key]
+    }
+
+    public mutating func setToken(_ token: String?, for key: GmailSearchPageKey) {
+        nextPageTokens[key] = token
+        if token == nil { nextPageTokens.removeValue(forKey: key) }
+    }
+
+    public mutating func reset() {
+        activeScope = nil
+        nextPageTokens = [:]
+    }
 }
 
 public enum GmailThreadMutation: Equatable, Sendable {
@@ -319,16 +387,31 @@ public extension NativeGoogleIntegrationService {
         pageToken: String? = nil,
         limit: Int = 40
     ) async throws -> GmailThreadPage {
+        try await searchMail(
+            accountID: accountID,
+            query: query,
+            labelID: nil,
+            pageToken: pageToken,
+            limit: limit
+        )
+    }
+
+    func searchMail(
+        accountID: String,
+        query: String,
+        labelID: String?,
+        pageToken: String? = nil,
+        limit: Int = 40
+    ) async throws -> GmailThreadPage {
         let account = try gmailAccount(id: accountID)
         let token = try await validAccessToken(for: account)
-        var components = URLComponents(string: "https://gmail.googleapis.com/gmail/v1/users/me/threads")!
-        var items = [
-            URLQueryItem(name: "maxResults", value: "\(min(max(limit, 1), 100))"),
-            URLQueryItem(name: "q", value: query),
-        ]
-        if let pageToken { items.append(URLQueryItem(name: "pageToken", value: pageToken)) }
-        components.queryItems = items
-        let listData = try await authorizedData(url: components.url!, accessToken: token, service: "Gmail search")
+        let listURL = try GmailAPIParser.threadListURL(
+            query: query,
+            labelID: labelID,
+            pageToken: pageToken,
+            limit: limit
+        )
+        let listData = try await authorizedData(url: listURL, accessToken: token, service: "Gmail search")
         let page = try GmailAPIParser.threadPage(data: listData)
         var threads: [GmailThreadDetailSnapshot] = []
         var failures = 0
@@ -341,6 +424,7 @@ public extension NativeGoogleIntegrationService {
             accountID: account.id,
             accountIdentity: account.identity,
             query: query,
+            labelID: labelID,
             threads: threads,
             nextPageToken: page.nextPageToken,
             failedThreadCount: failures
@@ -939,6 +1023,23 @@ public enum GmailAPIParser {
         }
         let response = try GoogleAPIResponseParser.decode(Response.self, from: data, service: "Gmail search")
         return ThreadPage(ids: try (response.threads ?? []).map { try validatedID($0.id) }, nextPageToken: response.nextPageToken)
+    }
+
+    public static func threadListURL(
+        query: String,
+        labelID: String? = nil,
+        pageToken: String? = nil,
+        limit: Int = 40
+    ) throws -> URL {
+        var components = URLComponents(string: "https://gmail.googleapis.com/gmail/v1/users/me/threads")!
+        var items = [URLQueryItem(name: "maxResults", value: "\(min(max(limit, 1), 100))")]
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedQuery.isEmpty { items.append(URLQueryItem(name: "q", value: trimmedQuery)) }
+        if let labelID { items.append(URLQueryItem(name: "labelIds", value: try validatedID(labelID))) }
+        if let pageToken { items.append(URLQueryItem(name: "pageToken", value: pageToken)) }
+        components.queryItems = items
+        guard let url = components.url else { throw GmailWorkError.invalidIdentifier }
+        return url
     }
 
     public static func thread(

@@ -40,6 +40,52 @@ struct GmailWorkServiceTests {
     }
 
     @Test
+    func labelScopedThreadURLAndPaginationNeverReuseAnotherScopeCursor() throws {
+        let url = try GmailAPIParser.threadListURL(
+            query: "  is:unread  ",
+            labelID: "Label_42",
+            pageToken: "next/account-one",
+            limit: 500
+        )
+        let items = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems)
+        let values = Dictionary(uniqueKeysWithValues: items.compactMap { item in
+            item.value.map { (item.name, $0) }
+        })
+        #expect(values["q"] == "is:unread")
+        #expect(values["labelIds"] == "Label_42")
+        #expect(values["pageToken"] == "next/account-one")
+        #expect(values["maxResults"] == "100")
+
+        let firstScope = GmailSearchScope(
+            accountIDs: ["account-1"],
+            query: "is:unread",
+            labelAccountID: "account-1",
+            labelID: "Label_42"
+        )
+        var pagination = GmailSearchPaginationState()
+        let startedNewSearch = pagination.prepare(scope: firstScope, loadMore: false)
+        #expect(!startedNewSearch)
+        let firstKey = firstScope.pageKey(accountID: "account-1")
+        pagination.setToken("page-2", for: firstKey)
+        let continuedSearch = pagination.prepare(scope: firstScope, loadMore: true)
+        #expect(continuedSearch)
+        #expect(pagination.token(for: firstKey) == "page-2")
+
+        let otherAccount = GmailSearchScope(
+            accountIDs: ["account-2"],
+            query: "is:unread",
+            labelAccountID: "account-2",
+            labelID: "Label_42"
+        )
+        let reusedAcrossAccounts = pagination.prepare(scope: otherAccount, loadMore: true)
+        #expect(!reusedAcrossAccounts)
+        #expect(!pagination.hasNextPage)
+        #expect(throws: GmailWorkError.invalidIdentifier) {
+            _ = try GmailAPIParser.threadListURL(query: "", labelID: "../other-account")
+        }
+    }
+
+    @Test
     func metadataParserProjectsOnlySelectedHeadersLabelsAndCursor() throws {
         let metadata = try GmailAPIParser.threadMetadata(
             data: Data(

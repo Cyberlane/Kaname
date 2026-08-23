@@ -128,7 +128,7 @@ private actor GmailConformanceFixtureService: GmailMailServing {
     ) async throws -> GmailThreadPage {
         GmailThreadPage(
             accountID: accountID, accountIdentity: "person@example.test", query: query,
-            threads: [thread()], nextPageToken: nil, failedThreadCount: 0
+            labelID: nil, threads: [thread()], nextPageToken: nil, failedThreadCount: 0
         )
     }
 

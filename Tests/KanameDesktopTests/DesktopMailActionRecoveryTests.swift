@@ -7,6 +7,25 @@ import Testing
 @MainActor
 struct DesktopMailActionRecoveryTests {
     @Test
+    func selectingMailLabelScopesSearchAndChangingAccountClearsIt() throws {
+        let root = try TestTemporaryDirectory.make(prefix: "kaname-mail-label-selection")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let viewModel = DesktopMailViewModel(environment: KanameDesktopEnvironment(
+            channel: .development,
+            applicationSupportDirectory: root
+        ))
+        let label = GmailLabelSnapshot(id: "Label_42", name: "Kaname", type: "user")
+
+        viewModel.selectLabel(accountID: "account-1", label: label)
+        #expect(viewModel.query.isEmpty)
+        #expect(viewModel.selectedLabel == DesktopMailLabelSelection(accountID: "account-1", label: label))
+
+        viewModel.setAccountScope("account-2")
+        #expect(viewModel.selectedLabel == nil)
+        #expect(!viewModel.hasNextPage)
+    }
+
+    @Test
     func selectingThreadAfterApprovalRestoresExactTrashActionWithoutCreatingAnotherProposal() throws {
         let root = try TestTemporaryDirectory.make(prefix: "kaname-mail-action-recovery")
         defer { try? FileManager.default.removeItem(at: root) }

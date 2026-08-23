@@ -7280,19 +7280,21 @@ private struct DesktopEmailView: View {
             WorkflowConnectorBindingSheet(model: model, connector: connector)
         }
         .onAppear {
-            searchInitiallyIfPossible()
+            loadInitialMailDataIfNeeded()
         }
         .onChange(of: integrations.googleAccounts) {
-            searchInitiallyIfPossible()
+            loadInitialMailDataIfNeeded()
         }
     }
 
-    private func searchInitiallyIfPossible() {
+    private func loadInitialMailDataIfNeeded() {
+        let accounts = googleAccounts
+        mail.loadLabels(accounts: accounts)
         guard allowsAutomaticInitialRead,
               mail.threads.isEmpty,
               !mail.isBusy,
-              !googleAccounts.isEmpty else { return }
-        mail.search(accounts: googleAccounts, model: model)
+              !accounts.isEmpty else { return }
+        mail.search(accounts: accounts, model: model)
     }
 
     private var emailWorkspace: some View {
@@ -7345,6 +7347,9 @@ private struct DesktopEmailView: View {
             case .drafts: draftsWorkspace
             }
         }
+        .onChange(of: selectedAccountID) { _, accountID in
+            accountScopeChanged(to: accountID)
+        }
     }
 
     private var inboxWorkspace: some View {
@@ -7366,6 +7371,10 @@ private struct DesktopEmailView: View {
                     .labelStyle(.iconOnly)
             }
             .padding([.horizontal, .top], 16)
+
+            if !googleAccounts.isEmpty {
+                mailLabelBrowser
+            }
 
             if let loadFailure = integrations.googleAccountLoadFailure,
                integrations.googleAccounts.isEmpty {
@@ -7404,15 +7413,160 @@ private struct DesktopEmailView: View {
                             .tag(thread.stableID)
                             .onTapGesture {
                                 pendingMutation = mail.select(thread, model: model)
-                                mail.loadLabels(accountID: thread.accountID)
                             }
                     }
                 }
-                if !mail.nextPageTokens.isEmpty {
+                if mail.hasNextPage {
                     Button("Load next page") { mail.search(accounts: googleAccounts, model: model, loadMore: true) }
                         .padding(.bottom, 12)
                 }
             }
+        }
+    }
+
+    private var mailLabelBrowser: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label("Folders & labels", systemImage: "tray.2")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                if let selection = mail.selectedLabel {
+                    Text(selection.label.name)
+                        .font(.caption)
+                        .foregroundStyle(Nord.frost1)
+                        .lineLimit(1)
+                    Button {
+                        mail.clearLabelSelection()
+                        mail.search(accounts: googleAccounts, model: model)
+                    } label: {
+                        Label("Clear \(selection.label.name)", systemImage: "xmark.circle.fill")
+                            .labelStyle(.iconOnly)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Clear folder or label filter")
+                }
+            }
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 10) {
+                    ForEach(googleAccounts) { account in
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(account.identity)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(Nord.frost1)
+                                .lineLimit(1)
+                            if mail.labelLoadingAccountIDs.contains(account.id), mail.labels[account.id] == nil {
+                                ProgressView("Loading folders…").controlSize(.small)
+                            } else if let error = mail.labelErrors[account.id] {
+                                LabeledContent {
+                                    Button("Retry") { mail.loadLabels(accounts: [account], force: true) }
+                                        .controlSize(.small)
+                                } label: {
+                                    Text(error)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                }
+                            } else {
+                                mailLabelGroup(
+                                    title: "Folders",
+                                    labels: labels(for: account, type: "system"),
+                                    account: account
+                                )
+                                mailLabelGroup(
+                                    title: "Labels",
+                                    labels: labels(for: account, type: "user"),
+                                    account: account
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            .frame(maxHeight: 180)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .padding(.horizontal, 16)
+    }
+
+    @ViewBuilder
+    private func mailLabelGroup(
+        title: String,
+        labels: [GmailLabelSnapshot],
+        account: NativeGoogleAccountSnapshot
+    ) -> some View {
+        if !labels.isEmpty {
+            Text(title.uppercased())
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 5)], alignment: .leading, spacing: 5) {
+                ForEach(labels) { label in
+                    let isSelected = mail.selectedLabel?.accountID == account.id
+                        && mail.selectedLabel?.label.id == label.id
+                    Button {
+                        selectedAccountID = account.id
+                        mail.setAccountScope(account.id)
+                        mail.selectLabel(accountID: account.id, label: label)
+                        mail.search(accounts: [account], model: model)
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: labelSymbol(label.id))
+                            Text(label.name).lineLimit(1)
+                            Spacer(minLength: 0)
+                        }
+                        .font(.caption)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 5)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            isSelected ? Nord.frost1.opacity(0.28) : Nord.polarNight2,
+                            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(isSelected ? .isSelected : [])
+                }
+            }
+        }
+    }
+
+    private func labels(for account: NativeGoogleAccountSnapshot, type: String) -> [GmailLabelSnapshot] {
+        (mail.labels[account.id] ?? [])
+            .filter { $0.type.caseInsensitiveCompare(type) == .orderedSame }
+            .sorted { left, right in
+                if type == "system" {
+                    let order = ["INBOX", "STARRED", "IMPORTANT", "SENT", "DRAFT", "ALL_MAIL", "SPAM", "TRASH"]
+                    let leftIndex = order.firstIndex(of: left.id) ?? order.count
+                    let rightIndex = order.firstIndex(of: right.id) ?? order.count
+                    if leftIndex != rightIndex { return leftIndex < rightIndex }
+                }
+                return left.name.localizedCaseInsensitiveCompare(right.name) == .orderedAscending
+            }
+    }
+
+    private func labelSymbol(_ id: String) -> String {
+        let systemLabelSymbols = [
+            "INBOX": "tray",
+            "STARRED": "star",
+            "IMPORTANT": "exclamationmark.circle",
+            "SENT": "paperplane",
+            "DRAFT": "doc",
+            "SPAM": "exclamationmark.shield",
+            "TRASH": "trash",
+        ]
+        return systemLabelSymbols[id] ?? "tag"
+    }
+
+    private func accountScopeChanged(to accountID: String?) {
+        mail.setAccountScope(accountID)
+        let scopedAccounts = accountID.map { id in
+            integrations.googleAccounts.filter { $0.id == id }
+        } ?? integrations.googleAccounts
+        mail.loadLabels(accounts: scopedAccounts)
+        if allowsAutomaticInitialRead, !scopedAccounts.isEmpty {
+            mail.search(accounts: scopedAccounts, model: model)
         }
     }
 
