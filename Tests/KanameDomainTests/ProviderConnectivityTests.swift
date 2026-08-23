@@ -515,9 +515,10 @@ struct ProviderConnectivityTests {
             localCoreRequirement: "requirement",
             createdAtUnixMillis: 1_000
         )
-        try store.enqueue(request)
+        let queuedURL = try store.enqueue(request)
         let queued = try store.pendingRequests(threadID: "thread-1")
         #expect(queued.map(\.1) == [request])
+        #expect(queued.map { $0.0.lastPathComponent } == [queuedURL.lastPathComponent])
         #expect(queued.first?.1.runtimeMode == .auto)
         #expect(queued.first?.1.networkAccess == true)
         #expect(queued.first?.1.attachments == [attachment])
@@ -568,6 +569,19 @@ struct ProviderConnectivityTests {
         #expect(store.isWorkerAlive(threadID: "thread-1") == false)
         try store.finishRequest(at: queued[0].0, threadID: "thread-1")
         #expect(try store.pendingRequests(threadID: "thread-1").isEmpty)
+
+        let requeuedURL = try store.enqueue(request)
+        let quarantinedURL = try store.quarantinePendingRequest(at: requeuedURL, threadID: "thread-1")
+        #expect(quarantinedURL.deletingLastPathComponent().lastPathComponent == "Quarantined")
+        #expect(try store.pendingRequests(threadID: "thread-1").isEmpty)
+        #expect(try store.quarantinedRequests(threadID: "thread-1").map(\.1) == [request])
+        #expect((try FileManager.default.attributesOfItem(atPath: quarantinedURL.path)[.posixPermissions] as? NSNumber)?.intValue == 0o600)
+
+        let duplicateURL = try store.enqueue(request)
+        let duplicateQuarantineURL = try store.quarantinePendingRequest(at: duplicateURL, threadID: "thread-1")
+        #expect(duplicateQuarantineURL != quarantinedURL)
+        #expect(try store.pendingRequests(threadID: "thread-1").isEmpty)
+        #expect(try store.quarantinedRequests(threadID: "thread-1").map(\.1) == [request, request])
     }
 
     @Test

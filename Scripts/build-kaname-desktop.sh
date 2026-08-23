@@ -2,25 +2,40 @@
 
 set -euo pipefail
 
-script_dir="$(cd "$(dirname "$0")" && pwd)"
-project_dir="$(cd "$script_dir/.." && pwd)"
+script_dir="$(cd "$(dirname "$0")" && pwd -P)"
+project_dir="$(cd "$script_dir/.." && pwd -P)"
 configuration="${KANAME_BUILD_CONFIGURATION:-release}"
 channel="${KANAME_DESKTOP_CHANNEL:-stable}"
 case "$channel" in
     stable)
         app_name="Kaname"
+        display_name="Kaname"
         identifier="com.cyberlane.kaname.desktop"
         service_identifier="com.cyberlane.kaname.desktop.localcore.service"
         core_identifier="com.cyberlane.kaname.desktop.localcore"
+        default_app_version="0.23.0"
+        default_app_build="43"
         ;;
     candidate)
         app_name="Kaname Candidate"
+        display_name="Kaname Candidate"
         identifier="com.cyberlane.kaname.desktop.candidate"
         service_identifier="com.cyberlane.kaname.desktop.candidate.localcore.service"
         core_identifier="com.cyberlane.kaname.desktop.candidate.localcore"
+        default_app_version="0.23.0"
+        default_app_build="43"
+        ;;
+    development)
+        app_name="Kaname Prototype"
+        display_name="Kaname - Dev"
+        identifier="com.cyberlane.kaname.desktop.dev"
+        service_identifier="com.cyberlane.kaname.desktop.dev.localcore.service"
+        core_identifier="com.cyberlane.kaname.desktop.dev.localcore"
+        default_app_version="0.0.0"
+        default_app_build="1"
         ;;
     *)
-        echo "KANAME_DESKTOP_CHANNEL must be stable or candidate." >&2
+        echo "KANAME_DESKTOP_CHANNEL must be stable, candidate, or development." >&2
         exit 1
         ;;
 esac
@@ -43,8 +58,8 @@ info_plist="$contents_path/Info.plist"
 icon_source="$project_dir/.build/KanameIcon-1024.png"
 iconset_path="$project_dir/.build/Kaname.iconset"
 service_requirement="identifier \"$service_identifier\""
-app_version="${KANAME_APP_VERSION:-0.23.0}"
-app_build="${KANAME_APP_BUILD:-43}"
+app_version="${KANAME_APP_VERSION:-$default_app_version}"
+app_build="${KANAME_APP_BUILD:-$default_app_build}"
 workspace_schema_version=27
 release_notarization="${KANAME_RELEASE_NOTARIZATION:-NO}"
 release_notes_path="${KANAME_RELEASE_NOTES_FILE:-$project_dir/Docs/KanameReleaseNotes.md}"
@@ -132,8 +147,8 @@ plutil -replace CFBundleExecutable -string KanamePrototype "$info_plist"
 plutil -replace CFBundleIconFile -string Kaname "$info_plist"
 plutil -replace CFBundleIdentifier -string "$identifier" "$info_plist"
 plutil -replace CFBundleInfoDictionaryVersion -string 6.0 "$info_plist"
-plutil -replace CFBundleName -string "$app_name" "$info_plist"
-plutil -replace CFBundleDisplayName -string "$app_name" "$info_plist"
+plutil -replace CFBundleName -string "$display_name" "$info_plist"
+plutil -replace CFBundleDisplayName -string "$display_name" "$info_plist"
 plutil -replace CFBundlePackageType -string APPL "$info_plist"
 plutil -replace CFBundleShortVersionString -string "$app_version" "$info_plist"
 plutil -replace CFBundleVersion -string "$app_build" "$info_plist"

@@ -225,7 +225,8 @@ public struct KanameConversationServiceStore: Sendable {
         self.rootDirectory = rootDirectory.standardizedFileURL
     }
 
-    public func enqueue(_ request: KanameConversationServiceRequest) throws {
+    @discardableResult
+    public func enqueue(_ request: KanameConversationServiceRequest) throws -> URL {
         try validate(request.threadID)
         try validate(request.runID)
         guard request.attachments.count <= ConversationImageAttachment.maximumCountPerMessage else {
@@ -239,19 +240,74 @@ public struct KanameConversationServiceStore: Sendable {
         guard data.count <= 128 * 1024 else { throw KanameConversationServiceError.requestTooLarge }
         let inbox = try privateDirectory(threadDirectory(request.threadID).appending(path: "Inbox", directoryHint: .isDirectory))
         let name = String(format: "%020lld-%@.json", request.createdAtUnixMillis, request.runID)
-        try writePrivate(data, to: inbox.appending(path: name))
+        let requestURL = inbox.appending(path: name)
+        try writePrivate(data, to: requestURL)
+        return requestURL
     }
 
     public func pendingRequests(threadID: String) throws -> [(URL, KanameConversationServiceRequest)] {
-        try validate(threadID)
-        let inbox = try privateDirectory(threadDirectory(threadID).appending(path: "Inbox", directoryHint: .isDirectory))
-        return try decodedJSONFiles(in: inbox, as: KanameConversationServiceRequest.self)
+        try conversationRequests(threadID: threadID, directoryName: "Inbox")
     }
 
     public func finishRequest(at url: URL, threadID: String) throws {
-        let inbox = threadDirectory(threadID).appending(path: "Inbox", directoryHint: .isDirectory).standardizedFileURL
-        guard url.standardizedFileURL.deletingLastPathComponent() == inbox else { throw KanameConversationServiceError.invalidIdentifier }
-        try FileManager.default.removeItem(at: url)
+        let inbox = threadDirectory(threadID)
+            .appending(path: "Inbox", directoryHint: .isDirectory)
+            .standardizedFileURL
+        let source = url.standardizedFileURL
+        guard canonicalExistingPath(source.deletingLastPathComponent()) == canonicalExistingPath(inbox) else {
+            throw KanameConversationServiceError.invalidIdentifier
+        }
+        try FileManager.default.removeItem(at: source)
+    }
+
+    /// Preserves a request that must never execute while removing it from the
+    /// worker-visible Inbox. This is used for terminal runs and launch rollback.
+    @discardableResult
+    public func quarantinePendingRequest(at url: URL, threadID: String) throws -> URL {
+        try validate(threadID)
+        let inbox = threadDirectory(threadID)
+            .appending(path: "Inbox", directoryHint: .isDirectory)
+            .standardizedFileURL
+        let source = url.standardizedFileURL
+        guard canonicalExistingPath(source.deletingLastPathComponent()) == canonicalExistingPath(inbox),
+              source.pathExtension == "json" else {
+            throw KanameConversationServiceError.invalidIdentifier
+        }
+        let values = try source.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+        guard values.isRegularFile == true, values.isSymbolicLink != true else {
+            throw KanameConversationServiceError.invalidIdentifier
+        }
+        let quarantine = try privateDirectory(
+            threadDirectory(threadID).appending(path: "Quarantined", directoryHint: .isDirectory)
+        )
+        var destination = quarantine.appending(path: source.lastPathComponent).standardizedFileURL
+        if FileManager.default.fileExists(atPath: destination.path) {
+            let stem = source.deletingPathExtension().lastPathComponent
+            destination = quarantine
+                .appending(path: "\(stem)-duplicate-\(UUID().uuidString).json")
+                .standardizedFileURL
+            guard !FileManager.default.fileExists(atPath: destination.path) else {
+                throw KanameConversationServiceError.invalidIdentifier
+            }
+        }
+        try FileManager.default.moveItem(at: source, to: destination)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
+        return destination
+    }
+
+    public func quarantinedRequests(threadID: String) throws -> [(URL, KanameConversationServiceRequest)] {
+        try conversationRequests(threadID: threadID, directoryName: "Quarantined")
+    }
+
+    private func conversationRequests(
+        threadID: String,
+        directoryName: String
+    ) throws -> [(URL, KanameConversationServiceRequest)] {
+        try validate(threadID)
+        let directory = try privateDirectory(
+            threadDirectory(threadID).appending(path: directoryName, directoryHint: .isDirectory)
+        )
+        return try decodedJSONFiles(in: directory, as: KanameConversationServiceRequest.self)
     }
 
     public func append(_ event: KanameConversationServiceEvent) throws {
@@ -424,6 +480,18 @@ public struct KanameConversationServiceStore: Sendable {
         _ = try privateDirectory(url.deletingLastPathComponent())
         try data.write(to: url, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
+    private func canonicalExistingPath(_ url: URL) -> String {
+#if os(macOS)
+        return url.path.withCString { path in
+            guard let resolved = Darwin.realpath(path, nil) else { return url.standardizedFileURL.path }
+            defer { free(resolved) }
+            return String(cString: resolved)
+        }
+#else
+        return url.resolvingSymlinksInPath().path
+#endif
     }
 
     private func validate(_ identifier: String) throws {

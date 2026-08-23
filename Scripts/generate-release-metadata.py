@@ -78,7 +78,15 @@ def load_cargo_metadata() -> dict[str, Any]:
 
 
 def load_cargo_lock() -> dict[str, Any]:
-    import tomllib
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        try:
+            import tomli as tomllib
+        except ModuleNotFoundError as error:
+            raise ReleaseMetadataError(
+                "release metadata generation requires Python 3.11 or the tomli compatibility package"
+            ) from error
 
     return tomllib.loads(CARGO_LOCK.read_text(encoding="utf-8"))
 

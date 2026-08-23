@@ -254,6 +254,31 @@ struct DesktopAppModelTests {
     }
 
     @Test
+    func starterDogfoodConversationUsesProviderDefaultModel() throws {
+        let thread = try #require(
+            DesktopAppSnapshot.starter(now: 1_000).threads.first(where: { $0.id == "thread-desktop-dogfood" })
+        )
+
+        #expect(thread.provider == "Codex")
+        #expect(thread.model == "Use provider default")
+    }
+
+    @Test
+    func legacyDogfoodDisplayModelDecodesAsProviderDefault() throws {
+        var snapshot = DesktopAppSnapshot.starter(now: 1_000)
+        let index = try #require(snapshot.threads.firstIndex(where: { $0.id == "thread-desktop-dogfood" }))
+        snapshot.threads[index].model = "Local development session"
+
+        let decoded = try JSONDecoder().decode(
+            DesktopAppSnapshot.self,
+            from: JSONEncoder().encode(snapshot)
+        )
+
+        #expect(decoded.threads[index].provider == "Codex")
+        #expect(decoded.threads[index].model == "Use provider default")
+    }
+
+    @Test
     func conversationRuntimeChoicesPersistAndFlowIntoTheQueuedRun() throws {
         let store = MemoryDesktopStateStore()
         let model = DesktopAppModel(store: store, now: { 1_000 })

@@ -75,6 +75,7 @@ final class DesktopConversationRuntime: ObservableObject {
         serviceStore = KanameConversationServiceStore(
             rootDirectory: environment.applicationSupportRoot.appending(path: "ConversationService", directoryHint: .isDirectory)
         )
+        quarantineTerminalPendingRequests()
         performanceStore.record(DesktopConversationPerformanceSample(
             metric: .historyIndex,
             durationNanoseconds: indexEnded >= indexStarted ? indexEnded - indexStarted : 0,
@@ -116,6 +117,10 @@ final class DesktopConversationRuntime: ObservableObject {
         workspacePathOverride: String? = nil
     ) -> String? {
         guard let thread = model.thread(id: threadID) else { return nil }
+        if let preflightError = conversationRuntimePreflightError() {
+            codingWorkflowErrors[threadID] = preflightError
+            return nil
+        }
         guard attachments.isEmpty || Self.supportsImageAttachments(provider: thread.provider) else {
             codingWorkflowErrors[threadID] = "\(thread.provider) does not have a Kaname image adapter. Remove the images or choose Codex, Claude, or OpenCode."
             return nil
@@ -144,6 +149,7 @@ final class DesktopConversationRuntime: ObservableObject {
 
     func resumePrepared(runID: String) {
         guard let run = model.providerRun(id: runID), let threadID = run.threadID else { return }
+        quarantineTerminalPendingRequests(threadID: threadID)
         let events = (try? serviceStore.events(threadID: threadID).filter { $0.runID == runID }) ?? []
         if !events.isEmpty { return }
         let pending = (try? serviceStore.pendingRequests(threadID: threadID).contains { $0.1.runID == runID }) ?? false
@@ -481,6 +487,16 @@ final class DesktopConversationRuntime: ObservableObject {
               let thread = model.thread(id: threadID) else {
             return
         }
+        let workerURL: URL
+        do {
+            workerURL = try workerExecutableURL()
+        } catch {
+            let message = conversationRuntimePreflightError() ?? error.localizedDescription
+            codingWorkflowErrors[threadID] = message
+            model.stopProviderRun(id: run.id, interrupted: false, error: message)
+            return
+        }
+        quarantineTerminalPendingRequests(threadID: threadID)
         providerByRunID[run.id] = run.provider
         pollCandidateThreadIDs.insert(threadID)
         let workspace: URL
@@ -539,16 +555,26 @@ final class DesktopConversationRuntime: ObservableObject {
             isCodingPlan: run.purpose == .codingPlan,
             createdAtUnixMillis: run.startedAtUnixMillis
         )
+        var queuedRequestURL: URL?
         do {
-            try serviceStore.enqueue(request)
+            queuedRequestURL = try serviceStore.enqueue(request)
             _ = try KanameConversationWorkerLauncher.launch(
-                executableURL: workerExecutableURL(),
+                executableURL: workerURL,
                 storeRoot: serviceStore.rootDirectory,
                 threadID: threadID
             )
             setThreadActive(threadID, active: true)
         } catch {
-            model.stopProviderRun(id: run.id, interrupted: false, error: error.localizedDescription)
+            var failure = error.localizedDescription
+            if let queuedRequestURL {
+                do {
+                    try serviceStore.quarantinePendingRequest(at: queuedRequestURL, threadID: threadID)
+                } catch {
+                    failure += " Kaname could not quarantine the queued request; do not retry this thread until its local queue is inspected."
+                }
+            }
+            codingWorkflowErrors[threadID] = failure
+            model.stopProviderRun(id: run.id, interrupted: false, error: failure)
         }
     }
 
@@ -671,6 +697,7 @@ final class DesktopConversationRuntime: ObservableObject {
                         remainingEventCapacity -= 1
                     }
                 }
+                quarantineTerminalPendingRequests(threadID: threadID)
                 let alive = serviceStore.isWorkerAlive(threadID: threadID)
                 let hasPending = (try? serviceStore.pendingRequests(threadID: threadID).isEmpty == false) ?? false
                 if alive || hasPending {
@@ -944,6 +971,9 @@ final class DesktopConversationRuntime: ObservableObject {
     }
 
     private func launchWorkerIfAvailable(threadID: String) {
+        quarantineTerminalPendingRequests(threadID: threadID)
+        let hasPending = (try? serviceStore.pendingRequests(threadID: threadID).isEmpty == false) ?? false
+        guard hasPending else { return }
         _ = try? KanameConversationWorkerLauncher.launch(
             executableURL: workerExecutableURL(),
             storeRoot: serviceStore.rootDirectory,
@@ -960,6 +990,41 @@ final class DesktopConversationRuntime: ObservableObject {
             if FileManager.default.isExecutableFile(atPath: sibling.path) { return sibling }
         }
         throw KanameConversationServiceError.workerUnavailable
+    }
+
+    private func conversationRuntimePreflightError() -> String? {
+        do {
+            _ = try workerExecutableURL()
+        } catch {
+            if environment.channel == .development {
+                return "Kaname's development coding runtime is incomplete. Rebuild and relaunch it with Scripts/run-phase0-prototype.sh."
+            }
+            return error.localizedDescription
+        }
+        guard LocalCoreRunner.bundled() != nil else {
+            return "The signed local journal service is unavailable, so Kaname did not save or send the message."
+        }
+        return nil
+    }
+
+    private func quarantineTerminalPendingRequests() {
+        let threadIDs = Set(model.snapshot.operations.providerRuns.compactMap(\.threadID))
+        for threadID in threadIDs {
+            quarantineTerminalPendingRequests(threadID: threadID)
+        }
+    }
+
+    private func quarantineTerminalPendingRequests(threadID: String) {
+        guard let pending = try? serviceStore.pendingRequests(threadID: threadID) else { return }
+        for (url, request) in pending {
+            let state = model.providerRun(id: request.runID)?.state
+            guard state != .proposed, state != .running else { continue }
+            do {
+                try serviceStore.quarantinePendingRequest(at: url, threadID: threadID)
+            } catch {
+                codingWorkflowErrors[threadID] = "Kaname could not quarantine a terminal provider request. Do not retry this thread until its local queue is inspected."
+            }
+        }
     }
 
     private func scheduleTitleIfNeeded(threadID: String) {

@@ -221,6 +221,13 @@ public struct DesktopThread: Codable, Equatable, Identifiable, Sendable {
 
     public init(from decoder: any Decoder) throws {
         let payload = try DesktopThreadPayload(from: decoder)
+        let persistedModel: String
+        if payload.provider.caseInsensitiveCompare("Codex") == .orderedSame,
+           payload.model == "Local development session" {
+            persistedModel = "Use provider default"
+        } else {
+            persistedModel = payload.model
+        }
         self.init(
             id: payload.id,
             projectID: payload.projectID,
@@ -229,7 +236,7 @@ public struct DesktopThread: Codable, Equatable, Identifiable, Sendable {
             kind: payload.kind,
             attention: payload.attention,
             provider: payload.provider,
-            model: payload.model,
+            model: persistedModel,
             reasoningEffort: payload.reasoningEffort ?? "xhigh",
             runtimeMode: payload.runtimeMode ?? .approvalRequired,
             networkAccess: payload.networkAccess ?? false,
@@ -507,7 +514,7 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
                     kind: .coding,
                     attention: .needsResponse,
                     provider: "Codex",
-                    model: "Local development session",
+                    model: "Use provider default",
                     updatedAtUnixMillis: now,
                     unread: true,
                     messages: [
