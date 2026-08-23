@@ -57,6 +57,20 @@ struct CodexLiveSessionTests {
     }
 
     @Test
+    func structuredPlanUpdateWithEmptyPlanIsIgnored() throws {
+        let event = try notification(
+            method: "turn/plan/updated",
+            parameters: [
+                "turnId": "turn-empty-plan",
+                "plan": [],
+            ]
+        )
+
+        #expect(event.kind == .planUpdated)
+        #expect(event.planUpdate == nil)
+    }
+
+    @Test
     func initializeHandshakeIsOneImmediateOrderedJSONLSequence() throws {
         let data = try CodexAppServerConnection.encodedRequestSequence(
             method: "initialize",
