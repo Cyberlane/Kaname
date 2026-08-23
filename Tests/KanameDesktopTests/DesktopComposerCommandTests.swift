@@ -148,6 +148,27 @@ struct DesktopComposerCommandTests {
         #expect(DesktopComposerPresentation.toolbarPointSize >= 13)
         #expect(DesktopComposerPresentation.contextPointSize >= 12.5)
         #expect(DesktopComposerPresentation.maximumWidth == 760)
+        #expect(DesktopComposerPresentation.inputHorizontalPadding == 16)
+        #expect(DesktopComposerPresentation.inputTopPadding == 14)
+        #expect(DesktopComposerPresentation.inputBottomPadding == 12)
+    }
+
+    @Test
+    func returnPolicySubmitsOnlyPlainReturnOutsideIMEComposition() {
+        #expect(DesktopComposerReturnPolicy.disposition() == .submit)
+        #expect(DesktopComposerReturnPolicy.disposition(shift: true) == .insertNewline)
+        #expect(DesktopComposerReturnPolicy.disposition(command: true) == .nativeEditing)
+        #expect(DesktopComposerReturnPolicy.disposition(option: true) == .nativeEditing)
+        #expect(DesktopComposerReturnPolicy.disposition(control: true) == .nativeEditing)
+        #expect(DesktopComposerReturnPolicy.disposition(hasMarkedText: true) == .nativeEditing)
+        #expect(DesktopComposerReturnPolicy.disposition(
+            shift: true,
+            hasMarkedText: true
+        ) == .nativeEditing)
+        #expect(DesktopComposerReturnPolicy.disposition(
+            shift: true,
+            command: true
+        ) == .nativeEditing)
     }
 
     private func resolvedQueryAndEdit(

@@ -9,6 +9,11 @@ import SwiftUI
 #if os(macOS)
 import AppKit
 import UniformTypeIdentifiers
+private let kanameDesktopDidResignActiveNotification = NSApplication.didResignActiveNotification
+private let kanameDesktopWillTerminateNotification = NSApplication.willTerminateNotification
+#else
+private let kanameDesktopDidResignActiveNotification = Notification.Name("com.cyberlane.kaname.desktop.lifecycle.did-resign-active")
+private let kanameDesktopWillTerminateNotification = Notification.Name("com.cyberlane.kaname.desktop.lifecycle.will-terminate")
 #endif
 
 extension Notification.Name {
@@ -495,6 +500,12 @@ struct KanameDesktopWorkspace: View {
         .onChange(of: selectedThreadID) { _ in persistUIRestoreState() }
         .onChange(of: selectedProjectID) { _ in persistUIRestoreState() }
         .onChange(of: showsInspector) { _ in persistUIRestoreState() }
+        .onReceive(NotificationCenter.default.publisher(for: kanameDesktopDidResignActiveNotification)) { _ in
+            _ = model.flushComposerDrafts()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: kanameDesktopWillTerminateNotification)) { _ in
+            _ = model.flushComposerDrafts()
+        }
     }
 
     private var primaryCommandWorkspace: some View {
@@ -2631,6 +2642,7 @@ private struct DesktopThreadConversation: View {
 #endif
         }
         .onDisappear {
+            _ = model.flushComposerDrafts()
 #if os(macOS)
             removeImagePasteMonitor()
 #endif
@@ -3101,12 +3113,12 @@ private struct DesktopThreadConversation: View {
                     .textFieldStyle(.plain)
                     .font(.system(size: DesktopComposerPresentation.inputPointSize))
                     .lineLimit(DesktopComposerPresentation.minimumLines...DesktopComposerPresentation.maximumLines)
-                    .padding(.horizontal, 12)
-                    .padding(.top, 12)
-                    .padding(.bottom, 9)
+                    .padding(.horizontal, DesktopComposerPresentation.inputHorizontalPadding)
+                    .padding(.top, DesktopComposerPresentation.inputTopPadding)
+                    .padding(.bottom, DesktopComposerPresentation.inputBottomPadding)
                     .focused($composerFocused)
                     .disabled(!canSendMessage)
-                    .onSubmit(submitComposer)
+                    .onKeyPress(.return, phases: .down, action: handleComposerReturn)
                     .onChange(of: draft) { body in
                         composerCommandMenuDismissed = false
                         composerCursorOffset = min(composerCursorOffset ?? body.count, body.count)
@@ -3118,6 +3130,7 @@ private struct DesktopThreadConversation: View {
                         reconcileComposerCommandSelection()
                     }
                     .accessibilityLabel("Message composer for \(thread.title)")
+                    .accessibilityHint("Return sends. Shift-Return inserts a new line.")
                     .accessibilityIdentifier("thread-composer")
 
                 GeometryReader { geometry in
@@ -3273,6 +3286,40 @@ private struct DesktopThreadConversation: View {
 
     private func selectComposerCommand(_ commandID: DesktopComposerCommandID) {
         composerCommandSelection = DesktopComposerCommandSelectionState(selectedCommandID: commandID)
+    }
+
+    private func handleComposerReturn(_ press: KeyPress) -> KeyPress.Result {
+        let modifiers = press.modifiers
+#if os(macOS)
+        let responder = currentDesktopResponder()
+        let hasMarkedText = (responder as? NSTextInputClient)?.hasMarkedText() == true
+#else
+        let hasMarkedText = false
+#endif
+        let disposition = DesktopComposerReturnPolicy.disposition(
+            shift: modifiers.contains(.shift),
+            command: modifiers.contains(.command),
+            option: modifiers.contains(.option),
+            control: modifiers.contains(.control),
+            hasMarkedText: hasMarkedText
+        )
+        switch disposition {
+        case .submit:
+            submitComposer()
+            return .handled
+        case .insertNewline:
+#if os(macOS)
+            guard let editor = responder as? NSTextView else {
+                return .handled
+            }
+            editor.insertNewlineIgnoringFieldEditor(nil)
+            return .handled
+#else
+            return .ignored
+#endif
+        case .nativeEditing:
+            return .ignored
+        }
     }
 
 #if os(macOS)
@@ -6134,50 +6181,65 @@ private final class DesktopUpdateViewModel: ObservableObject {
 
     func switchAndRelaunch(model: DesktopAppModel) {
 #if os(macOS)
-        let hasActiveApproval = model.snapshot.operations.approvals.contains { $0.state == .awaitingApproval }
-        isBusy = true
-        _Concurrency.Task {
-            do {
-                let request = try await coordinator.switchRequest(
-                    installedBundleURL: Bundle.main.bundleURL,
-                    processIdentifier: ProcessInfo.processInfo.processIdentifier,
-                    composerCheckpointed: model.persistenceError == nil,
-                    hasActiveApproval: hasActiveApproval
-                )
-                try launchHelper(request)
-                message = "Switching after the current UI closes…"
-                NSApplication.shared.terminate(nil)
-            } catch {
-                message = error.localizedDescription
-                isBusy = false
-            }
-        }
+        beginRelaunch(model: model, operation: .installUpdate)
 #endif
     }
 
     func rollback(model: DesktopAppModel) {
 #if os(macOS)
         guard !isBusy else { return }
+        beginRelaunch(model: model, operation: .rollback)
+#endif
+    }
+
+#if os(macOS)
+    private enum RelaunchOperation {
+        case installUpdate
+        case rollback
+
+        var completionMessage: String {
+            switch self {
+            case .installUpdate:
+                "Switching after the current UI closes…"
+            case .rollback:
+                "Restoring the previous Kaname UI…"
+            }
+        }
+    }
+
+    private func beginRelaunch(model: DesktopAppModel, operation: RelaunchOperation) {
         let hasActiveApproval = model.snapshot.operations.approvals.contains { $0.state == .awaitingApproval }
+        let composerCheckpointed = model.flushComposerDrafts() && model.persistenceError == nil
         isBusy = true
         _Concurrency.Task {
             do {
-                let request = try await coordinator.rollbackRequest(
-                    installedBundleURL: Bundle.main.bundleURL,
-                    processIdentifier: ProcessInfo.processInfo.processIdentifier,
-                    composerCheckpointed: model.persistenceError == nil,
-                    hasActiveApproval: hasActiveApproval
-                )
+                let request: KanameUpdateLaunchRequest
+                switch operation {
+                case .installUpdate:
+                    request = try await coordinator.switchRequest(
+                        installedBundleURL: Bundle.main.bundleURL,
+                        processIdentifier: ProcessInfo.processInfo.processIdentifier,
+                        composerCheckpointed: composerCheckpointed,
+                        hasActiveApproval: hasActiveApproval
+                    )
+                case .rollback:
+                    request = try await coordinator.rollbackRequest(
+                        installedBundleURL: Bundle.main.bundleURL,
+                        processIdentifier: ProcessInfo.processInfo.processIdentifier,
+                        composerCheckpointed: composerCheckpointed,
+                        hasActiveApproval: hasActiveApproval
+                    )
+                }
                 try launchHelper(request)
-                message = "Restoring the previous Kaname UI…"
+                message = operation.completionMessage
                 NSApplication.shared.terminate(nil)
             } catch {
                 message = error.localizedDescription
                 isBusy = false
             }
         }
-#endif
     }
+#endif
 
     private func launchHelper(_ request: KanameUpdateLaunchRequest) throws {
         let process = Process()

@@ -472,15 +472,20 @@ struct DesktopAppModelTests {
 
     @Test
     @MainActor
-    func composerDraftSurvivesRestartAndClearsOnlyAfterSendCheckpoint() throws {
+    func composerDraftSurvivesRestartAndClearsOnlyAfterSendCheckpoint() async throws {
         let store = MemoryDesktopStateStore()
         let model = DesktopAppModel(store: store, now: { 1_000 })
         let threadID = model.createConversation(kind: .coding, projectID: nil)
         #expect(model.updateComposerDraft(threadID: threadID, body: "Unsent work in progress"))
+        #expect(model.flushComposerDrafts())
 
-        let restored = DesktopAppModel(store: store, now: { 2_000 })
+        let restored = DesktopAppModel(store: store, now: { 2_000 }, composerDraftSaveDelay: .zero)
         #expect(restored.composerDraft(threadID: threadID) == "Unsent work in progress")
-        #expect(restored.updateComposerDraft(threadID: threadID, body: ""))
+        #expect(restored.updateComposerDraft(threadID: threadID, body: "Edited before send"))
+        restored.clearComposerDraft(threadID: threadID)
+        for _ in 0..<10 {
+            await _Concurrency.Task<Never, Never>.yield()
+        }
         #expect(DesktopAppModel(store: store, now: { 3_000 }).composerDraft(threadID: threadID).isEmpty)
     }
 

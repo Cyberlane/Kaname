@@ -171,6 +171,27 @@ public struct DesktopComposerCommandSelectionState: Equatable, Sendable {
     }
 }
 
+public enum DesktopComposerReturnDisposition: Equatable, Sendable {
+    case submit
+    case insertNewline
+    case nativeEditing
+}
+
+public enum DesktopComposerReturnPolicy {
+    public static func disposition(
+        shift: Bool = false,
+        command: Bool = false,
+        option: Bool = false,
+        control: Bool = false,
+        hasMarkedText: Bool = false
+    ) -> DesktopComposerReturnDisposition {
+        guard !hasMarkedText, !command, !option, !control else {
+            return .nativeEditing
+        }
+        return shift ? .insertNewline : .submit
+    }
+}
+
 public enum DesktopComposerPresentation {
     public static let minimumLines = 1
     public static let maximumLines = 8
@@ -179,6 +200,9 @@ public enum DesktopComposerPresentation {
     public static let contextPointSize: CGFloat = 12.5
     public static let maximumWidth: CGFloat = 760
     public static let cornerRadius: CGFloat = 20
+    public static let inputHorizontalPadding: CGFloat = 16
+    public static let inputTopPadding: CGFloat = 14
+    public static let inputBottomPadding: CGFloat = 12
 
     public static func primaryAction(
         isRunning: Bool,
