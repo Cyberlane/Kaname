@@ -270,6 +270,20 @@ struct KanameDesktopWorkspace: View {
         let restoredUI = forkFailure == nil ? restoreStore.load() : nil
         uiRestoreStore = restoreStore
         let desktopModel = DesktopAppModel(store: desktopStore)
+        let arguments = CommandLine.arguments
+        if arguments.contains("--desktop-plan-review-fixture") {
+            desktopModel.replaceProviderPlan(
+                threadID: "thread-desktop-dogfood",
+                steps: [
+                    ("Audit the current Plan surface, workflow boundary, and related status patterns.", "pending"),
+                    ("Replace the repeated cards with one bounded, readable implementation outline.", "pending"),
+                    ("Add clear request-changes and approval actions without granting implicit write authority.", "pending"),
+                    ("Verify long-step wrapping, compact layout, accessibility semantics, and existing workflow behavior.", "pending"),
+                ],
+                explanation: "A focused Plan review fixture with explicit authority and responsive actions."
+            )
+            desktopModel.finalizeCodingPlanForApproval(threadID: "thread-desktop-dogfood")
+        }
         let runtime = DesktopConversationRuntime(model: desktopModel, environment: environment)
         _developmentForkFailure = State(initialValue: forkFailure)
         _model = StateObject(wrappedValue: desktopModel)
@@ -278,7 +292,6 @@ struct KanameDesktopWorkspace: View {
         _personalIntegrations = StateObject(wrappedValue: DesktopPersonalIntegrationViewModel(environment: environment))
         _updates = StateObject(wrappedValue: DesktopUpdateViewModel(environment: environment))
         _automaticBackup = StateObject(wrappedValue: DesktopAutomaticBackupViewModel(environment: environment))
-        let arguments = CommandLine.arguments
         if let fixtureIndex = arguments.firstIndex(of: "--desktop-workflow-fixture"),
            arguments.indices.contains(fixtureIndex + 1) {
             seedSyntheticWorkflowFixture(model: desktopModel, manifestPath: arguments[fixtureIndex + 1])
@@ -2559,6 +2572,16 @@ private struct DesktopThreadConversation: View {
         self.composerFocusRequest = composerFocusRequest
         _draft = State(initialValue: model.composerDraft(threadID: thread.id))
         _attachments = State(initialValue: model.composerAttachments(threadID: thread.id))
+        let requestedPanel = CommandLine.arguments.firstIndex(of: "--desktop-thread-panel")
+            .flatMap { index in
+                CommandLine.arguments.indices.contains(index + 1)
+                    ? Panel(rawValue: CommandLine.arguments[index + 1])
+                    : nil
+            }
+            ?? .conversation
+        _panel = State(initialValue: thread.kind == .coding || requestedPanel != .knowledge
+            ? requestedPanel
+            : .conversation)
     }
 
     private enum Panel: String, CaseIterable, Identifiable {
@@ -2591,7 +2614,13 @@ private struct DesktopThreadConversation: View {
             case .changes:
                 DesktopThreadChangesView(model: model, thread: thread)
             case .plan:
-                ThreadPlanView(items: thread.plan)
+                ThreadPlanView(
+                    items: thread.plan,
+                    phase: runtime.codingStage(threadID: thread.id).planPhase(hasSavedPlan: !thread.plan.isEmpty),
+                    provider: thread.provider,
+                    requestChanges: requestPlanChanges,
+                    approvePlan: approvePlanAndImplement
+                )
             case .evidence:
                 ThreadEvidenceView(items: thread.evidence)
             case .knowledge:
@@ -2726,15 +2755,15 @@ private struct DesktopThreadConversation: View {
     }
 
     private var codingWorkflowBanner: some View {
-        DesktopCodingWorkflowBanner(
-            stage: runtime.codingStage(threadID: thread.id),
+        let stage = runtime.codingStage(threadID: thread.id)
+        return DesktopCodingWorkflowBanner(
+            stage: stage,
             provider: thread.provider,
             evidencePassed: !thread.evidence.isEmpty && thread.evidence.allSatisfy { $0.state == .passed },
             error: runtime.codingWorkflowErrors[thread.id],
-            approvePlan: {
-                panel = .plan
-                runtime.approvePlanAndImplement(threadID: thread.id)
-            },
+            isCondensed: panel == .plan && stage == .planReview,
+            showsPlanReviewAction: panel != .plan,
+            approvePlan: approvePlanAndImplement,
             beginReview: {
                 panel = .changes
                 runtime.beginImplementationReview(threadID: thread.id)
@@ -2747,6 +2776,17 @@ private struct DesktopThreadConversation: View {
             reject: { runtime.reviewImplementation(threadID: thread.id, accepted: false) },
             reviewKnowledge: { panel = .knowledge }
         )
+    }
+
+    private func requestPlanChanges() {
+        panel = .conversation
+        DispatchQueue.main.async { composerFocused = true }
+        postDesktopAccessibilityAnnouncement("Chat opened. Describe the changes you want in the plan.")
+    }
+
+    private func approvePlanAndImplement() {
+        panel = .plan
+        runtime.approvePlanAndImplement(threadID: thread.id)
     }
 
     private var narrativePage: DesktopConversationNarrativePage {
@@ -3760,6 +3800,8 @@ private struct DesktopCodingWorkflowBanner: View {
     let provider: String
     let evidencePassed: Bool
     let error: String?
+    let isCondensed: Bool
+    let showsPlanReviewAction: Bool
     let approvePlan: () -> Void
     let beginReview: () -> Void
     let recheckEvidence: () -> Void
@@ -3769,21 +3811,28 @@ private struct DesktopCodingWorkflowBanner: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
-            ViewThatFits(in: .horizontal) {
-                Text(Self.workflowPath).lineLimit(1)
-                Text(progressLabel).lineLimit(1)
-            }
-            .font(.caption2.weight(.medium))
-            .foregroundStyle(.secondary)
-            .help(Self.workflowPath)
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .center, spacing: 10) {
-                    statusContent
-                    actions
+            if isCondensed {
+                Label("\(progressLabel) · \(title)", systemImage: symbol)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(tint)
+                    .help(Self.workflowPath)
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    Text(Self.workflowPath).lineLimit(1)
+                    Text(progressLabel).lineLimit(1)
                 }
-                VStack(alignment: .leading, spacing: 9) {
-                    statusContent
-                    HStack(spacing: 7) { actions }
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(.secondary)
+                .help(Self.workflowPath)
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .center, spacing: 10) {
+                        statusContent
+                        actions
+                    }
+                    VStack(alignment: .leading, spacing: 9) {
+                        statusContent
+                        HStack(spacing: 7) { actions }
+                    }
                 }
             }
             if let error {
@@ -3832,12 +3881,14 @@ private struct DesktopCodingWorkflowBanner: View {
     @ViewBuilder private var actions: some View {
         switch stage {
         case .planReview:
-            Button("Approve plan & implement", action: approvePlan)
-                .buttonStyle(.borderedProminent)
-                .disabled(provider.caseInsensitiveCompare("Codex") != .orderedSame)
-                .help(provider.caseInsensitiveCompare("Codex") == .orderedSame
-                    ? "Create an isolated worktree and authorize one network-denied implementation turn"
-                    : "Choose Codex to use Kaname's signed isolated implementation flow")
+            if showsPlanReviewAction {
+                Button("Approve plan & implement", action: approvePlan)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(provider.caseInsensitiveCompare("Codex") != .orderedSame)
+                    .help(provider.caseInsensitiveCompare("Codex") == .orderedSame
+                        ? "Create an isolated worktree and authorize one network-denied implementation turn"
+                        : "Choose Codex to use Kaname's signed isolated implementation flow")
+            }
         case .implementationReview:
             Button("Review changes & run checks", systemImage: "checkmark.shield", action: beginReview)
                 .buttonStyle(.borderedProminent)
@@ -14511,29 +14562,253 @@ struct BoundaryCallout: View {
 
 private struct ThreadPlanView: View {
     let items: [DesktopPlanItem]
+    let phase: DesktopPlanPhase
+    let provider: String
+    let requestChanges: () -> Void
+    let approvePlan: () -> Void
+
+    private var presentation: DesktopPlanPresentation {
+        DesktopPlanPresentation(items: items, phase: phase)
+    }
 
     var body: some View {
+        VStack(spacing: 0) {
+            planScrollSurface
+
+            if phase == .awaitingApproval {
+                Divider()
+                planReviewFooter
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(presentation.accessibilityLabel)
+    }
+
+    private var planScrollSurface: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                if items.isEmpty {
-                    EmptyPanel(symbol: "list.bullet.clipboard", title: "No plan yet", detail: "A provider plan remains separate from write approval.")
-                } else {
-                    ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                        VStack(alignment: .leading, spacing: 5) {
-                            (Text("\(index + 1). ").foregroundColor(item.state.tint) + Text(item.title))
-                                .font(.subheadline.weight(.medium))
-                            Text(item.state.label)
-                                .font(.caption.weight(.medium))
-                                .foregroundStyle(item.state.tint)
-                        }
-                        .padding(15)
-                        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
-                    }
+            planScrollContent
+        }
+    }
+
+    private var planScrollContent: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            if presentation.rows.isEmpty {
+                emptyPlan
+            } else {
+                planHeader
+                planOutline
+            }
+        }
+        .padding(.horizontal, 22)
+        .padding(.vertical, 26)
+        .frame(maxWidth: 780, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .center)
+    }
+
+    private var emptyPlan: some View {
+        EmptyPanel(
+            symbol: "list.bullet.clipboard",
+            title: "No plan yet",
+            detail: "A provider plan remains separate from write approval. Request or revise it in Chat."
+        )
+    }
+
+    private var planOutline: some View {
+        LazyVStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(presentation.rows.enumerated()), id: \.element.id) { index, row in
+                ThreadPlanRow(row: row)
+                if index < presentation.rows.count - 1 {
+                    Divider().padding(.leading, 66)
                 }
             }
-            .padding(22)
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+        }
+    }
+
+    private var planHeader: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            planHeading
+            phaseCallout
+        }
+    }
+
+    private var planHeading: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            planTitle
+            planProgress
+        }
+    }
+
+    private var planTitle: some View {
+        Text("Implementation plan")
+            .font(.title2.weight(.bold))
+    }
+
+    private var planProgress: some View {
+        Label(presentation.progressLabel, systemImage: "list.number")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+    }
+
+    private var phaseCallout: some View {
+        HStack(alignment: .top, spacing: 11) {
+            phaseIcon
+            VStack(alignment: .leading, spacing: 3) {
+                phaseTitle
+                phaseDetail
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(phase.tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(phase.tint.opacity(0.24), lineWidth: 1)
+        }
+    }
+
+    private var phaseIcon: some View {
+        Image(systemName: phase.symbol)
+            .font(.title3)
+            .foregroundStyle(phase.tint)
+            .frame(width: 24)
+    }
+
+    private var phaseTitle: some View {
+        Text(phase.label)
+            .font(.subheadline.weight(.semibold))
+    }
+
+    private var phaseDetail: some View {
+        Text(phase.detail)
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var planReviewFooter: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .center, spacing: 18) {
+                reviewBoundaryText
+                Spacer(minLength: 12)
+                reviewActions
+            }
+            VStack(alignment: .leading, spacing: 12) {
+                reviewBoundaryText
+                reviewActions
+            }
+        }
+        .padding(.horizontal, 22)
+        .padding(.vertical, 16)
+        .background(Nord.polarNight1)
+    }
+
+    private var reviewBoundaryText: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            reviewDecisionTitle
+            reviewDecisionDetail
+        }
+    }
+
+    private var reviewDecisionTitle: some View {
+        Text("Ready for your decision")
+            .font(.subheadline.weight(.semibold))
+    }
+
+    private var reviewDecisionDetail: some View {
+        Text("Changes start another read-only plan. Approval authorizes one network-denied implementation turn in an isolated worktree.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var reviewActions: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 9) {
+                requestChangesButton
+                approvePlanButton
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                requestChangesButton
+                approvePlanButton
+            }
+        }
+    }
+
+    private var requestChangesButton: some View {
+        Button("Request changes", systemImage: "text.bubble", action: requestChanges)
+            .buttonStyle(.bordered)
+            .tint(Nord.frost1)
+    }
+
+    private var approvePlanButton: some View {
+        Button(action: approvePlan) {
+            Label("Approve plan & implement", systemImage: "checkmark.shield.fill")
+                .foregroundStyle(Nord.polarNight0)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(Nord.auroraGreen)
+        .disabled(items.isEmpty || !providerSupportsImplementation)
+        .help(approvalHelp)
+    }
+
+    private var providerSupportsImplementation: Bool {
+        provider.caseInsensitiveCompare("Codex") == .orderedSame
+    }
+
+    private var approvalHelp: String {
+        if items.isEmpty { return "Wait for a readable plan before approving implementation" }
+        return providerSupportsImplementation
+            ? "Create an isolated worktree and authorize one network-denied implementation turn"
+            : "Choose Codex to use Kaname's signed isolated implementation flow"
+    }
+}
+
+private struct ThreadPlanRow: View {
+    let row: DesktopPlanPresentation.Row
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            ordinalBadge
+            VStack(alignment: .leading, spacing: 8) {
+                planStepTitle
+                statusLabel
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(row.isCurrent ? row.tint.opacity(0.08) : Color.clear)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(row.accessibilityLabel)
+    }
+
+    private var ordinalBadge: some View {
+        Text("\(row.ordinal)")
+            .font(.caption.monospacedDigit().weight(.bold))
+            .foregroundStyle(row.tint)
+            .frame(width: 28, height: 28)
+            .background(row.tint.opacity(0.13), in: Circle())
+    }
+
+    private var planStepTitle: some View {
+        Text(row.title)
+            .font(.body.weight(.medium))
+            .foregroundStyle(.primary)
+            .fixedSize(horizontal: false, vertical: true)
+            .textSelection(.enabled)
+    }
+
+    private var statusLabel: some View {
+        Label(row.statusLabel, systemImage: row.statusSymbol)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(row.tint)
+            .fixedSize()
     }
 }
 
@@ -15105,27 +15380,52 @@ private extension DesktopMessageRole {
 
 private extension DesktopPlanItem.State {
     var label: String {
-        switch self {
-        case .pending: "Pending"
-        case .inProgress: "In progress"
-        case .complete: "Complete"
-        }
+        planStatusLabel
     }
 
     var symbol: String {
-        switch self {
-        case .pending: "circle"
-        case .inProgress: "circle.dotted"
-        case .complete: "checkmark.circle.fill"
-        }
+        planStatusSymbol
     }
 
     var tint: Color {
         switch self {
-        case .pending: Nord.polarNight3
+        case .pending: Nord.snowStorm0.opacity(0.78)
         case .inProgress: Nord.frost1
         case .complete: Nord.auroraGreen
         }
+    }
+}
+
+private extension DesktopCodingWorkflowStage {
+    func planPhase(hasSavedPlan: Bool) -> DesktopPlanPhase {
+        switch self {
+        case .discuss: hasSavedPlan ? .saved : .notStarted
+        case .planning: .drafting
+        case .planReview: .awaitingApproval
+        case .preparing, .implementing: .implementing
+        case .implementationReview, .evidenceReview, .knowledgeReview: .reviewingResult
+        case .completed: .completed
+        case .rejected, .failed: .stopped
+        }
+    }
+}
+
+private extension DesktopPlanPhase {
+    var tint: Color {
+        switch self {
+        case .notStarted: Color.secondary
+        case .saved: Nord.frost0
+        case .drafting, .implementing: Nord.frost1
+        case .awaitingApproval, .reviewingResult: Nord.auroraYellow
+        case .completed: Nord.auroraGreen
+        case .stopped: Nord.auroraRed
+        }
+    }
+}
+
+private extension DesktopPlanPresentation.Row {
+    var tint: Color {
+        state.tint
     }
 }
 
