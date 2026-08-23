@@ -31,8 +31,8 @@ fi
 jq -e '
     .schemaVersion == 1
     and .resizable == true
-    and (.checks | length == 21)
+    and (.checks | length == 23)
     and ([.checks[]] | all)
 ' "$receipt" >/dev/null
 
-echo "Resize cursor qualification passed: 21/21 checks"
+echo "Resize cursor qualification passed: 23/23 checks"

@@ -386,7 +386,7 @@ private final class KanameDesktopSingleInstanceCoordinator: @unchecked Sendable 
     private init() throws {
         let environment = KanameDesktopEnvironment.current
         activationNotification = Notification.Name(environment.activationNotificationName)
-        instanceLock = try KanameDesktopInstanceLock(lockFileURL: environment.instanceLockURL)
+        instanceLock = try KanameDesktopInstanceLock(lockFileURL: environment.desktopUIInstanceLockURL)
         distributedObserver = DistributedNotificationCenter.default().addObserver(
             forName: activationNotification,
             object: nil,
@@ -463,11 +463,12 @@ final class KanameWindowResizeCursorOverlay: NSView {
     private static let identifier = NSUserInterfaceItemIdentifier("KanameWindowResizeCursorOverlay")
     private static let edgeThickness: CGFloat = 8
     private static let cornerLength: CGFloat = 18
-    private var cursorTrackingArea: NSTrackingArea?
+    private var resizeTrackingAreas: [NSTrackingArea] = []
 
     static func install(in window: NSWindow) {
         guard window.styleMask.contains(.resizable),
               let frameView = window.contentView?.superview else { return }
+        window.acceptsMouseMovedEvents = true
         if let existing = frameView.subviews.first(where: { $0.identifier == identifier }) {
             existing.frame = frameView.bounds
             window.invalidateCursorRects(for: existing)
@@ -514,48 +515,31 @@ final class KanameWindowResizeCursorOverlay: NSView {
     }
 
     override func updateTrackingAreas() {
-        if let cursorTrackingArea {
-            removeTrackingArea(cursorTrackingArea)
-        }
-        let trackingArea = NSTrackingArea(
-            rect: bounds,
-            options: [.activeInKeyWindow, .cursorUpdate, .mouseMoved, .inVisibleRect],
-            owner: self,
-            userInfo: nil
-        )
-        addTrackingArea(trackingArea)
-        cursorTrackingArea = trackingArea
         super.updateTrackingAreas()
+        for trackingArea in resizeTrackingAreas {
+            removeTrackingArea(trackingArea)
+        }
+        resizeTrackingAreas = resizeRegions().map { region in
+            let trackingArea = NSTrackingArea(
+                rect: region.rect,
+                options: [.activeInKeyWindow, .cursorUpdate],
+                owner: self,
+                userInfo: nil
+            )
+            addTrackingArea(trackingArea)
+            return trackingArea
+        }
     }
 
     override func cursorUpdate(with event: NSEvent) {
         updateCursor(for: event)
     }
 
-    override func mouseMoved(with event: NSEvent) {
-        updateCursor(for: event)
-    }
-
     override func resetCursorRects() {
         super.resetCursorRects()
-        guard window?.styleMask.contains(.resizable) == true,
-              bounds.width > Self.cornerLength * 2,
-              bounds.height > Self.cornerLength * 2 else { return }
-
-        let edge = Self.edgeThickness
-        let corner = Self.cornerLength
-        let middleWidth = bounds.width - corner * 2
-        let middleHeight = bounds.height - corner * 2
-
-        addCursorRect(NSRect(x: corner, y: bounds.maxY - edge, width: middleWidth, height: edge), cursor: resizeCursor(at: .top))
-        addCursorRect(NSRect(x: corner, y: bounds.minY, width: middleWidth, height: edge), cursor: resizeCursor(at: .bottom))
-        addCursorRect(NSRect(x: bounds.minX, y: corner, width: edge, height: middleHeight), cursor: resizeCursor(at: .left))
-        addCursorRect(NSRect(x: bounds.maxX - edge, y: corner, width: edge, height: middleHeight), cursor: resizeCursor(at: .right))
-
-        addCursorRect(NSRect(x: bounds.minX, y: bounds.maxY - corner, width: corner, height: corner), cursor: resizeCursor(at: .topLeft))
-        addCursorRect(NSRect(x: bounds.maxX - corner, y: bounds.maxY - corner, width: corner, height: corner), cursor: resizeCursor(at: .topRight))
-        addCursorRect(NSRect(x: bounds.minX, y: bounds.minY, width: corner, height: corner), cursor: resizeCursor(at: .bottomLeft))
-        addCursorRect(NSRect(x: bounds.maxX - corner, y: bounds.minY, width: corner, height: corner), cursor: resizeCursor(at: .bottomRight))
+        for region in resizeRegions() {
+            addCursorRect(region.rect, cursor: resizeCursor(at: region.position))
+        }
     }
 
     private func resizeCursor(at position: ResizePosition) -> NSCursor {
@@ -584,6 +568,8 @@ final class KanameWindowResizeCursorOverlay: NSView {
         let point = convert(event.locationInWindow, from: nil)
         if let position = resizePosition(at: point) {
             resizeCursor(at: position).set()
+        } else {
+            NSCursor.arrow.set()
         }
     }
 
@@ -604,7 +590,11 @@ final class KanameWindowResizeCursorOverlay: NSView {
         var checks: [String: Bool] = [
             "overlayCoversFrame": frame == superview?.bounds,
             "centerPassesThrough": hitTest(NSPoint(x: bounds.midX, y: bounds.midY)) == nil,
-            "trackingAreaInstalled": cursorTrackingArea != nil,
+            "resizeTrackingAreasInstalled": resizeTrackingAreas.count == samples.count,
+            "trackingAreasUseExplicitEdgeRects": resizeTrackingAreas.allSatisfy {
+                !$0.options.contains(.inVisibleRect) && !$0.rect.contains(NSPoint(x: bounds.midX, y: bounds.midY))
+            },
+            "windowAcceptsMouseMovedEvents": window?.acceptsMouseMovedEvents == true,
         ]
         for (name, point, expectedPosition) in samples {
             checks["\(name)HitTarget"] = hitTest(point) === self
@@ -618,6 +608,27 @@ final class KanameWindowResizeCursorOverlay: NSView {
         checks["horizontalResizeGeometry"] = left.origin.x == 140 && left.width == 1_160
         checks["verticalResizeGeometry"] = top.origin.y == 100 && top.height == 840
         return checks
+    }
+
+    private func resizeRegions() -> [(position: ResizePosition, rect: NSRect)] {
+        guard window?.styleMask.contains(.resizable) == true,
+              bounds.width > Self.cornerLength * 2,
+              bounds.height > Self.cornerLength * 2 else { return [] }
+
+        let edge = Self.edgeThickness
+        let corner = Self.cornerLength
+        let middleWidth = bounds.width - corner * 2
+        let middleHeight = bounds.height - corner * 2
+        return [
+            (.top, NSRect(x: corner, y: bounds.maxY - edge, width: middleWidth, height: edge)),
+            (.bottom, NSRect(x: corner, y: bounds.minY, width: middleWidth, height: edge)),
+            (.left, NSRect(x: bounds.minX, y: corner, width: edge, height: middleHeight)),
+            (.right, NSRect(x: bounds.maxX - edge, y: corner, width: edge, height: middleHeight)),
+            (.topLeft, NSRect(x: bounds.minX, y: bounds.maxY - corner, width: corner, height: corner)),
+            (.topRight, NSRect(x: bounds.maxX - corner, y: bounds.maxY - corner, width: corner, height: corner)),
+            (.bottomLeft, NSRect(x: bounds.minX, y: bounds.minY, width: corner, height: corner)),
+            (.bottomRight, NSRect(x: bounds.maxX - corner, y: bounds.minY, width: corner, height: corner)),
+        ]
     }
 
     private func resizePosition(at point: NSPoint) -> ResizePosition? {

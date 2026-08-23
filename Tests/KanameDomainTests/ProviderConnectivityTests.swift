@@ -435,8 +435,9 @@ struct ProviderConnectivityTests {
             #expect(throws: KanameDesktopInstanceLockError.alreadyRunning) {
                 try KanameDesktopInstanceLock(lockFileURL: lockFile)
             }
-            withExtendedLifetime(primary) {}
-        }
+        withExtendedLifetime(primary) {}
+    }
+
         let directoryMode = try FileManager.default.attributesOfItem(atPath: directory.path)[.posixPermissions] as? Int
         let lockFileMode = try FileManager.default.attributesOfItem(atPath: lockFile.path)[.posixPermissions] as? Int
         #expect(directoryMode == 0o700)
@@ -444,6 +445,41 @@ struct ProviderConnectivityTests {
 
         let replacement = try KanameDesktopInstanceLock(lockFileURL: lockFile)
         _ = replacement
+    }
+
+    @Test
+    func desktopUIInstanceLockIsGlobalAcrossChannelsAndQAStateRoots() throws {
+        let lockBase = FileManager.default.temporaryDirectory
+            .appending(path: "kaname-ui-lock-test-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let sharedLockFile = KanameDesktopEnvironment.desktopUIInstanceLockURL(
+            applicationSupportDirectory: lockBase
+        )
+        defer { try? FileManager.default.removeItem(at: lockBase) }
+
+        let stable = KanameDesktopEnvironment(
+            channel: .stable,
+            applicationSupportDirectory: lockBase.appending(path: "stable", directoryHint: .isDirectory)
+        )
+        let candidate = KanameDesktopEnvironment(
+            channel: .candidate,
+            applicationSupportDirectory: lockBase.appending(path: "candidate", directoryHint: .isDirectory)
+        )
+        let development = KanameDesktopEnvironment(
+            channel: .development,
+            applicationSupportDirectory: lockBase.appending(path: "qa", directoryHint: .isDirectory)
+        )
+
+        #expect(stable.desktopUIInstanceLockURL == candidate.desktopUIInstanceLockURL)
+        #expect(stable.desktopUIInstanceLockURL == development.desktopUIInstanceLockURL)
+        #expect(stable.desktopUIInstanceLockURL != stable.instanceLockURL)
+        #expect(candidate.desktopUIInstanceLockURL != candidate.instanceLockURL)
+        #expect(development.desktopUIInstanceLockURL != development.instanceLockURL)
+
+        let primary = try KanameDesktopInstanceLock(lockFileURL: sharedLockFile)
+        #expect(throws: KanameDesktopInstanceLockError.alreadyRunning) {
+            try KanameDesktopInstanceLock(lockFileURL: sharedLockFile)
+        }
+        withExtendedLifetime(primary) {}
     }
 
     @Test
@@ -462,6 +498,8 @@ struct ProviderConnectivityTests {
         #expect(stable.instanceLockURL != candidate.instanceLockURL)
         #expect(stable.instanceLockURL != development.instanceLockURL)
         #expect(candidate.instanceLockURL != development.instanceLockURL)
+        #expect(stable.desktopUIInstanceLockURL == candidate.desktopUIInstanceLockURL)
+        #expect(stable.desktopUIInstanceLockURL == development.desktopUIInstanceLockURL)
         #expect(stable.workspaceFileURL != candidate.workspaceFileURL)
         #expect(stable.workspaceFileURL != development.workspaceFileURL)
         #expect(candidate.workspaceFileURL != development.workspaceFileURL)

@@ -9,7 +9,7 @@ public enum KanameDesktopInstanceLockError: Error, Equatable, Sendable {
     case lockUnavailable(Int32)
 }
 
-/// A user-scoped process lock shared by installed and development builds.
+/// An advisory process lock whose sharing boundary is defined by its URL.
 ///
 /// The close-on-exec flag is essential because Kaname launches provider child
 /// processes; those children must never keep the desktop-app lock alive.

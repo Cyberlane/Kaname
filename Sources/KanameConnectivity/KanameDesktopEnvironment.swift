@@ -53,6 +53,17 @@ public struct KanameDesktopEnvironment: Equatable, Sendable {
         }
     }
 
+    public static func desktopUIInstanceLockURL(
+        applicationSupportDirectory: URL = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        )[0]
+    ) -> URL {
+        applicationSupportDirectory
+            .appending(path: "Kaname Runtime", directoryHint: .isDirectory)
+            .appending(path: "desktop-ui-instance.lock", directoryHint: .notDirectory)
+    }
+
     public var displayName: String {
         switch channel {
         case .stable: "Kaname"
@@ -78,6 +89,7 @@ public struct KanameDesktopEnvironment: Equatable, Sendable {
     public var connectivityDirectory: URL { applicationSupportRoot.appending(path: "Connectivity", directoryHint: .isDirectory) }
     public var googleDirectory: URL { applicationSupportRoot.appending(path: "Google", directoryHint: .isDirectory) }
     public var runtimeDirectory: URL { applicationSupportRoot.appending(path: "Runtime", directoryHint: .isDirectory) }
+    public var desktopUIInstanceLockURL: URL { Self.desktopUIInstanceLockURL() }
     public var instanceLockURL: URL { runtimeDirectory.appending(path: "desktop-instance.lock") }
     public var updateDirectory: URL { applicationSupportRoot.appending(path: "Updates", directoryHint: .isDirectory) }
     public var dogfoodUpdateDirectory: URL { updateDirectory.appending(path: "Dogfood", directoryHint: .isDirectory) }
