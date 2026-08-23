@@ -2521,7 +2521,7 @@ private struct DesktopThreadConversation: View {
     @State private var attachmentError: String?
     @State private var isImportingAttachments = false
     @State private var questionAnswer = ""
-    @State private var panel: Panel = .conversation
+    @State private var panel: DesktopThreadPanel = .conversation
     @State private var showsRename = false
     @State private var renamedTitle = ""
     @State private var showsRuntimeSettings = false
@@ -2533,9 +2533,11 @@ private struct DesktopThreadConversation: View {
     @State private var runtimeNetworkAccess = false
     @State private var narrativeRowLimit = DesktopConversationNarrativePresentation.defaultMaximumRows
     @State private var conversationSearch = ""
+    @State private var showsConversationSearch = false
     @State private var followsLatest = true
     @State private var hasNewNarrativeContent = false
     @FocusState private var composerFocused: Bool
+    @FocusState private var conversationSearchFocused: Bool
 #if os(macOS)
     @State private var sheetPreviousResponder: NSResponder?
     @State private var pasteMonitor: Any?
@@ -2561,24 +2563,6 @@ private struct DesktopThreadConversation: View {
         _attachments = State(initialValue: model.composerAttachments(threadID: thread.id))
     }
 
-    private enum Panel: String, CaseIterable, Identifiable {
-        case conversation
-        case plan
-        case changes
-        case evidence
-        case knowledge
-        var id: String { rawValue }
-        var label: String {
-            switch self {
-            case .conversation: "Chat"
-            case .plan: "Plan"
-            case .changes: "Changes"
-            case .evidence: "Evidence"
-            case .knowledge: "Knowledge"
-            }
-        }
-    }
-
     var body: some View {
         VStack(spacing: 0) {
             threadHeader
@@ -2591,7 +2575,13 @@ private struct DesktopThreadConversation: View {
             case .changes:
                 DesktopThreadChangesView(model: model, thread: thread)
             case .plan:
-                ThreadPlanView(items: thread.plan)
+                ThreadPlanView(
+                    items: thread.plan,
+                    phase: runtime.codingStage(threadID: thread.id).planPhase(hasSavedPlan: !thread.plan.isEmpty),
+                    provider: thread.provider,
+                    requestChanges: requestPlanChanges,
+                    approvePlan: approvePlanAndImplement
+                )
             case .evidence:
                 ThreadEvidenceView(items: thread.evidence)
             case .knowledge:
@@ -2636,9 +2626,6 @@ private struct DesktopThreadConversation: View {
         }
         .onAppear {
             applyComposerFocusRequest()
-            if thread.kind == .coding, runtime.codingStage(threadID: thread.id) == .knowledgeReview {
-                panel = .knowledge
-            }
 #if os(macOS)
             installImagePasteMonitor()
 #endif
@@ -2656,9 +2643,10 @@ private struct DesktopThreadConversation: View {
             }
         }
         .onChange(of: thread.id) { _ in
-            if thread.kind != .coding { panel = .conversation }
+            panel = .conversation
             narrativeRowLimit = DesktopConversationNarrativePresentation.defaultMaximumRows
             conversationSearch = ""
+            showsConversationSearch = false
             selectedRunID = nil
             conversationAnchorID = nil
             followsLatest = true
@@ -2672,69 +2660,198 @@ private struct DesktopThreadConversation: View {
             attachments = model.composerAttachments(threadID: thread.id)
             attachmentError = nil
         }
-        .onChange(of: thread.plan.count) { count in
-            if count > 0 { panel = .plan }
-        }
-        .onChange(of: thread.evidence.count) { count in
-            if count > 0 { panel = .evidence }
-        }
-        .onChange(of: runtime.codingStage(threadID: thread.id)) { stage in
-            if thread.kind == .coding, stage == .knowledgeReview {
-                panel = .knowledge
-            }
-        }
     }
 
     private var threadHeader: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(thread.title).font(.title2.weight(.bold))
-                    Text(thread.summary)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                }
-                Spacer()
-                if runtime.isRunning(threadID: thread.id) {
-                    Button("Interrupt", systemImage: "stop.circle") {
-                        runtime.interrupt(threadID: thread.id)
-                    }
-                    .buttonStyle(.bordered)
-                }
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 10) {
+                threadBreadcrumb
+                Spacer(minLength: 10)
+                threadAttentionLabel
                 Button {
-                    captureSheetFocus()
-                    renamedTitle = thread.title
-                    showsRename = true
+                    if panel == .conversation {
+                        showsConversationSearch.toggle()
+                    } else {
+                        panel = .conversation
+                        showsConversationSearch = true
+                    }
+                    if showsConversationSearch {
+                        DispatchQueue.main.async { conversationSearchFocused = true }
+                    } else {
+                        conversationSearch = ""
+                    }
                 } label: {
-                    Image(systemName: "pencil")
+                    Image(systemName: showsConversationSearch ? "xmark" : "magnifyingglass")
+                        .frame(width: 26, height: 26)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Rename conversation")
-                AttentionPill(attention: thread.attention)
-            }
-            if thread.kind == .coding { codingWorkflowBanner }
-            Picker("Thread panel", selection: $panel) {
-                ForEach(availablePanels) { item in
-                    Text(item.label).tag(item)
+                .accessibilityLabel(showsConversationSearch ? "Close conversation search" : "Search conversation")
+
+                Menu {
+                    Button("Rename conversation", systemImage: "pencil") { beginRenamingThread() }
+                    if runtimeSettingsLocked {
+                        Label("Runtime locked while work is active", systemImage: "lock.fill")
+                    } else {
+                        Button("Runtime details", systemImage: "slider.horizontal.3") { openRuntimeSettings() }
+                    }
+                    if runtime.isRunning(threadID: thread.id) {
+                        Divider()
+                        Button("Stop current turn", systemImage: "stop.fill", role: .destructive) {
+                            runtime.interrupt(threadID: thread.id)
+                        }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .frame(width: 26, height: 26)
                 }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .accessibilityLabel("Conversation actions")
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
+
+            threadTabDock
+            if thread.kind == .coding { codingWorkflowBanner }
         }
-        .padding(22)
+        .padding(.horizontal, 16)
+        .padding(.top, 11)
+        .padding(.bottom, 10)
+        .background(Nord.polarNight0)
+    }
+
+    private var threadBreadcrumb: some View {
+        HStack(spacing: 7) {
+            threadProjectBreadcrumb
+            threadTitleButton
+        }
+        .font(.system(size: 15, weight: .semibold))
+        .layoutPriority(1)
+    }
+
+    @ViewBuilder
+    private var threadProjectBreadcrumb: some View {
+        if let project = model.project(id: thread.projectID) {
+            Text(project.name)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Image(systemName: "chevron.right")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    private var threadTitleButton: some View {
+        Button(thread.title, action: beginRenamingThread)
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .padding(.trailing, 13)
+            .overlay(alignment: .trailing) {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(.tertiary)
+            }
+            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            .help(thread.summary)
+            .accessibilityLabel("Conversation, \(thread.title). Rename conversation")
+            .accessibilityHint(thread.summary)
+    }
+
+    private var threadAttentionLabel: some View {
+        ViewThatFits(in: .horizontal) {
+            Label(thread.attention.label, systemImage: thread.attention.accessibilitySymbol)
+            Image(systemName: thread.attention.accessibilitySymbol)
+        }
+        .font(.system(size: 13, weight: .semibold))
+        .foregroundStyle(thread.attention.tint)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Attention: \(thread.attention.label)")
+    }
+
+    private var threadTabDock: some View {
+        HStack(spacing: 3) {
+            ForEach(availablePanels) { item in
+                Button {
+                    panel = item
+                    if item != .conversation {
+                        showsConversationSearch = false
+                        conversationSearch = ""
+                    }
+                } label: {
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 5) {
+                            tabTitle(item)
+                            tabBadge(item)
+                        }
+                        tabTitle(item)
+                    }
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(panel == item ? Color.primary : Color.secondary)
+                    .padding(.horizontal, 6)
+                    .frame(maxWidth: .infinity, minHeight: 32)
+                    .contentShape(Rectangle())
+                    .background(
+                        panel == item ? Nord.polarNight2.opacity(0.9) : Color.clear,
+                        in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier(item.accessibilityIdentifier)
+                .accessibilityLabel(item.label)
+                .accessibilityValue(panelAccessibilityValue(for: item))
+                .accessibilityAddTraits(panel == item ? .isSelected : [])
+            }
+        }
+        .padding(4)
+        .background(Nord.polarNight1.opacity(0.78), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .strokeBorder(Nord.polarNight3.opacity(0.5), lineWidth: 1)
+        }
+        .shadow(color: Color.black.opacity(0.13), radius: 4, y: 2)
+        .accessibilityElement(children: .contain)
+    }
+
+    private func tabTitle(_ item: DesktopThreadPanel) -> some View {
+        Text(item.label)
+            .lineLimit(1)
+            .minimumScaleFactor(0.88)
+    }
+
+    @ViewBuilder private func tabBadge(_ item: DesktopThreadPanel) -> some View {
+        if let count = panelBadges.count(for: item) {
+            Text(count > 99 ? "99+" : "\(count)")
+                .font(.system(size: 11, weight: .bold))
+                .monospacedDigit()
+                .padding(.horizontal, 5)
+                .frame(minHeight: 18)
+                .background(
+                    panel == item ? conversationAccent.opacity(0.22) : Nord.polarNight3.opacity(0.55),
+                    in: Capsule()
+                )
+        } else if item == .conversation, runtime.isRunning(threadID: thread.id) {
+            Circle()
+                .fill(conversationAccent)
+                .frame(width: 7, height: 7)
+                .accessibilityHidden(true)
+        }
+    }
+
+    private func beginRenamingThread() {
+        captureSheetFocus()
+        renamedTitle = thread.title
+        showsRename = true
     }
 
     private var codingWorkflowBanner: some View {
-        DesktopCodingWorkflowBanner(
-            stage: runtime.codingStage(threadID: thread.id),
+        let stage = runtime.codingStage(threadID: thread.id)
+        return DesktopCodingWorkflowBanner(
+            stage: stage,
             provider: thread.provider,
             evidencePassed: !thread.evidence.isEmpty && thread.evidence.allSatisfy { $0.state == .passed },
             error: runtime.codingWorkflowErrors[thread.id],
-            approvePlan: {
-                panel = .plan
-                runtime.approvePlanAndImplement(threadID: thread.id)
-            },
+            showsPlanReviewActions: panel != .plan,
+            reviewPlan: { panel = .plan },
+            approvePlan: approvePlanAndImplement,
             beginReview: {
                 panel = .changes
                 runtime.beginImplementationReview(threadID: thread.id)
@@ -2747,6 +2864,17 @@ private struct DesktopThreadConversation: View {
             reject: { runtime.reviewImplementation(threadID: thread.id, accepted: false) },
             reviewKnowledge: { panel = .knowledge }
         )
+    }
+
+    private func requestPlanChanges() {
+        panel = .conversation
+        DispatchQueue.main.async { composerFocused = true }
+        postDesktopAccessibilityAnnouncement("Chat opened. Describe the changes you want in the plan.")
+    }
+
+    private func approvePlanAndImplement() {
+        panel = .plan
+        runtime.approvePlanAndImplement(threadID: thread.id)
     }
 
     private var narrativePage: DesktopConversationNarrativePage {
@@ -2777,29 +2905,33 @@ private struct DesktopThreadConversation: View {
 
     private var conversation: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
-                TextField("Find conversation or activity", text: $conversationSearch)
-                    .textFieldStyle(.plain)
-                if !conversationSearch.isEmpty {
-                    Text("\(narrative.count) result\(narrative.count == 1 ? "" : "s")")
-                        .font(.caption)
+            if showsConversationSearch {
+                HStack(spacing: 10) {
+                    Image(systemName: "magnifyingglass")
                         .foregroundStyle(.secondary)
-                    Button {
-                        conversationSearch = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
+                    TextField("Find conversation or activity", text: $conversationSearch)
+                        .font(.system(size: 14))
+                        .textFieldStyle(.plain)
+                        .focused($conversationSearchFocused)
+                    if !conversationSearch.isEmpty {
+                        Text("\(narrative.count) result\(narrative.count == 1 ? "" : "s")")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                        Button {
+                            conversationSearch = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Clear conversation search")
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Clear conversation search")
                 }
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .background(Nord.polarNight1)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 9)
+                .background(Nord.polarNight1)
 
-            Divider()
+                Divider()
+            }
 
             ScrollViewReader { proxy in
                 ZStack(alignment: .bottomTrailing) {
@@ -2896,7 +3028,6 @@ private struct DesktopThreadConversation: View {
                 }
             }
 
-            Divider()
             if let run = latestRecoverableRun,
                model.nextQueuedProviderRun(threadID: thread.id) == nil,
                !runtime.isRunning(threadID: thread.id) {
@@ -2913,7 +3044,14 @@ private struct DesktopThreadConversation: View {
                 }
                 .padding(.horizontal, 14)
                 .padding(.top, 10)
+                .frame(maxWidth: DesktopComposerPresentation.maximumWidth)
             }
+            composerDock
+        }
+    }
+
+    private var composerDock: some View {
+        VStack(alignment: .leading, spacing: 6) {
             VStack(alignment: .leading, spacing: 0) {
                 if !attachments.isEmpty {
                     ScrollView(.horizontal, showsIndicators: false) {
@@ -2961,10 +3099,11 @@ private struct DesktopThreadConversation: View {
                     axis: .vertical
                 )
                     .textFieldStyle(.plain)
+                    .font(.system(size: DesktopComposerPresentation.inputPointSize))
                     .lineLimit(DesktopComposerPresentation.minimumLines...DesktopComposerPresentation.maximumLines)
                     .padding(.horizontal, 12)
-                    .padding(.top, 11)
-                    .padding(.bottom, 8)
+                    .padding(.top, 12)
+                    .padding(.bottom, 9)
                     .focused($composerFocused)
                     .disabled(!canSendMessage)
                     .onSubmit(submitComposer)
@@ -2979,20 +3118,25 @@ private struct DesktopThreadConversation: View {
                         reconcileComposerCommandSelection()
                     }
                     .accessibilityLabel("Message composer for \(thread.title)")
+                    .accessibilityIdentifier("thread-composer")
 
                 GeometryReader { geometry in
-                    composerAccessoryRow(compact: geometry.size.width < 360)
+                    composerAccessoryRow(compact: geometry.size.width < 520)
                 }
-                .frame(height: 25)
-                .padding(.leading, 7)
-                .padding(.trailing, 8)
-                .padding(.bottom, 8)
+                .frame(height: 32)
+                .padding(.leading, 9)
+                .padding(.trailing, 9)
+                .padding(.bottom, 9)
             }
-            .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .background(
+                Nord.polarNight1,
+                in: RoundedRectangle(cornerRadius: DesktopComposerPresentation.cornerRadius, style: .continuous)
+            )
             .overlay {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .strokeBorder(Nord.polarNight3.opacity(0.55), lineWidth: 1)
+                RoundedRectangle(cornerRadius: DesktopComposerPresentation.cornerRadius, style: .continuous)
+                    .strokeBorder(conversationAccent.opacity(thread.kind == .coding ? 0.58 : 0.32), lineWidth: 1)
             }
+            .shadow(color: Color.black.opacity(0.2), radius: 10, y: 4)
 #if os(macOS)
             .dropDestination(for: URL.self) { urls, _ in
                 importImageURLs(urls)
@@ -3002,14 +3146,42 @@ private struct DesktopThreadConversation: View {
                     .frame(width: 0, height: 0)
             }
 #endif
-            .padding(14)
-            .background(Nord.polarNight0)
-            .onChange(of: runtime.isRunning(threadID: thread.id)) { isRunning in
-                postDesktopAccessibilityAnnouncement(
-                    isRunning ? "\(thread.provider) is responding" : "\(thread.provider) finished responding"
-                )
-            }
+
+            composerContextShelf
         }
+        .frame(maxWidth: DesktopComposerPresentation.maximumWidth)
+        .padding(.horizontal, 14)
+        .padding(.top, 10)
+        .padding(.bottom, 11)
+        .frame(maxWidth: .infinity)
+        .background(Nord.polarNight0)
+        .onChange(of: runtime.isRunning(threadID: thread.id)) { isRunning in
+            postDesktopAccessibilityAnnouncement(
+                isRunning ? "\(thread.provider) is responding" : "\(thread.provider) finished responding"
+            )
+        }
+    }
+
+    private var composerContextShelf: some View {
+        HStack(spacing: 6) {
+            ForEach(Array(composerContextLabels.enumerated()), id: \.offset) { index, label in
+                if index > 0 {
+                    Circle()
+                        .fill(Color.secondary.opacity(0.65))
+                        .frame(width: 3, height: 3)
+                        .accessibilityHidden(true)
+                }
+                Text(label)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer(minLength: 0)
+        }
+        .font(.system(size: DesktopComposerPresentation.contextPointSize, weight: .medium))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 8)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Context: \(composerContextLabels.joined(separator: ", "))")
     }
 
     private func applyComposerFocusRequest() {
@@ -3070,8 +3242,22 @@ private struct DesktopThreadConversation: View {
         }
         switch composerSelection.indices {
         case let .selection(range):
-            composerCursorOffset = draft.distance(from: draft.startIndex, to: range.lowerBound)
-            composerHasSelection = !range.isEmpty
+            let projection = DesktopComposerSelectionProjection.project(
+                range,
+                in: draft,
+                fallbackCursorOffset: composerCursorOffset
+            )
+            composerCursorOffset = projection.cursorOffset
+            composerHasSelection = projection.hasSelection
+            if projection.recoveredStaleSelection {
+                KanameDevelopmentRuntimeLogger.shared.record(
+                    .composerSelectionRecovered,
+                    measurements: [
+                        .draftCharacterCount: draft.count,
+                        .fallbackCursorOffset: projection.cursorOffset,
+                    ]
+                )
+            }
         case .multiSelection:
             composerCursorOffset = nil
             composerHasSelection = true
@@ -3183,7 +3369,7 @@ private struct DesktopThreadConversation: View {
 
     private func applyComposerCommandEdit(_ edit: DesktopComposerCommandEdit) {
         draft = edit.text
-        let insertionOffset = min(edit.insertionOffset, draft.count)
+        let insertionOffset = min(max(edit.insertionOffset, 0), draft.count)
         let insertionPoint = draft.index(draft.startIndex, offsetBy: insertionOffset)
         composerSelection = TextSelection(insertionPoint: insertionPoint)
         composerCursorOffset = insertionOffset
@@ -3244,23 +3430,24 @@ private struct DesktopThreadConversation: View {
     }
 
     private func composerAccessoryRow(compact: Bool) -> some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 5) {
 #if os(macOS)
-            Button(action: chooseImages) {
-                Image(systemName: "paperclip")
-            }
-            .buttonStyle(.plain)
-            .disabled(
-                !imageAttachmentsSupported
-                    || isImportingAttachments
-                    || attachments.count >= ConversationImageAttachment.maximumCountPerMessage
-            )
-            .help(
-                imageAttachmentsSupported
-                    ? "Attach images, or paste with Command-V"
-                    : "Choose Codex, Claude, or OpenCode to attach images"
-            )
-            .accessibilityLabel("Attach images")
+            Button("Attach images", systemImage: "plus", action: chooseImages)
+                .labelStyle(.iconOnly)
+                .font(.system(size: DesktopComposerPresentation.toolbarPointSize, weight: .semibold))
+                .frame(width: 26, height: 26)
+                .buttonStyle(.plain)
+                .disabled(
+                    !imageAttachmentsSupported
+                        || isImportingAttachments
+                        || attachments.count >= ConversationImageAttachment.maximumCountPerMessage
+                )
+                .help(
+                    imageAttachmentsSupported
+                        ? "Attach images, or paste with Command-V"
+                        : "Choose Codex, Claude, or OpenCode to attach images"
+                )
+                .accessibilityLabel("Attach images")
 #endif
 
             DesktopComposerRuntimeControls(
@@ -3281,25 +3468,66 @@ private struct DesktopThreadConversation: View {
                     .accessibilityLabel("Preparing image attachments")
             }
 
-            if runtime.isRunning(threadID: thread.id) {
+            if runtime.isRunning(threadID: thread.id), composerPrimaryAction.kind != .stop {
                 ProgressView()
                     .controlSize(.small)
                     .help("\(thread.provider) is responding. New messages queue in order.")
                     .accessibilityLabel("\(thread.provider) is responding; new messages queue in order")
             }
 
-            Button(action: submitComposer) {
-                Image(systemName: "arrow.up.circle.fill")
-                    .font(.title2)
-                    .foregroundStyle(
-                        !hasSendableContent
-                            ? Color.secondary
-                            : Nord.frost1
-                    )
+            if composerPrimaryAction.kind == .queue {
+                Button {
+                    runtime.interrupt(threadID: thread.id)
+                } label: {
+                    Image(systemName: "stop.fill")
+                        .font(.system(size: 11, weight: .bold))
+                        .frame(width: 27, height: 27)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Nord.auroraRed)
+                .help("Stop the current turn")
+                .accessibilityLabel("Stop current turn")
+            }
+
+            Button(action: performComposerPrimaryAction) {
+                ViewThatFits(in: .horizontal) {
+                    Label(composerPrimaryAction.title, systemImage: composerPrimaryAction.systemImage)
+                    Image(systemName: composerPrimaryAction.systemImage)
+                }
+                .font(.system(size: DesktopComposerPresentation.toolbarPointSize, weight: .semibold))
+                .padding(.horizontal, compact ? 8 : 10)
+                .frame(minWidth: 30, minHeight: 29)
+                .foregroundStyle(composerPrimaryAction.isEnabled ? Nord.polarNight0 : Color.secondary)
+                .background(
+                    composerPrimaryAction.isEnabled
+                        ? (composerPrimaryAction.kind == .stop ? Nord.auroraRed : conversationAccent)
+                        : Nord.polarNight2,
+                    in: Capsule()
+                )
             }
             .buttonStyle(.plain)
-            .disabled(!canSendMessage || !hasSendableContent || isImportingAttachments)
+            .disabled(!composerPrimaryAction.isEnabled)
+            .help(composerSubmissionAccessibilityLabel)
             .accessibilityLabel(composerSubmissionAccessibilityLabel)
+            .accessibilityIdentifier("thread-composer-primary-action")
+        }
+    }
+
+    private var composerPrimaryAction: DesktopComposerPrimaryAction {
+        DesktopComposerPresentation.primaryAction(
+            isRunning: runtime.isRunning(threadID: thread.id),
+            hasSendableContent: hasSendableContent,
+            canSend: canSendMessage,
+            isImportingAttachments: isImportingAttachments,
+            selectedCommandIsEnabled: selectedComposerCommand.map { $0.disabledReason == nil }
+        )
+    }
+
+    private func performComposerPrimaryAction() {
+        if composerPrimaryAction.kind == .stop {
+            runtime.interrupt(threadID: thread.id)
+        } else {
+            submitComposer()
         }
     }
 
@@ -3310,8 +3538,58 @@ private struct DesktopThreadConversation: View {
         )
     }
 
-    private var availablePanels: [Panel] {
-        thread.kind == .coding ? Array(Panel.allCases) : Panel.allCases.filter { $0 != .knowledge }
+    private var availablePanels: [DesktopThreadPanel] {
+        DesktopThreadPanel.available(isCoding: thread.kind == .coding)
+    }
+
+    private var latestCodingWorktree: DesktopWorktreeRecord? {
+        model.snapshot.operations.worktrees
+            .filter { $0.threadID == thread.id && $0.state != .removed }
+            .max { $0.updatedAtUnixMillis < $1.updatedAtUnixMillis }
+    }
+
+    private var panelBadges: DesktopThreadPanelBadges {
+        DesktopThreadPanelBadges(
+            plan: thread.plan.count,
+            changes: latestCodingWorktree?.changedFileCount ?? 0,
+            evidence: thread.evidence.count,
+            knowledge: model.codingKnowledgeLane(threadID: thread.id)?.candidates.count ?? 0
+        )
+    }
+
+    private func panelBadgeAccessibilityValue(for panel: DesktopThreadPanel) -> String {
+        guard let count = panelBadges.count(for: panel) else { return "" }
+        return "\(count) item\(count == 1 ? "" : "s")"
+    }
+
+    private func panelAccessibilityValue(for item: DesktopThreadPanel) -> String {
+        [panel == item ? "Selected" : nil, panelBadgeAccessibilityValue(for: item)]
+            .compactMap { $0 }
+            .filter { !$0.isEmpty }
+            .joined(separator: ", ")
+    }
+
+    private var codingStage: DesktopCodingWorkflowStage? {
+        thread.kind == .coding ? runtime.codingStage(threadID: thread.id) : nil
+    }
+
+    private var conversationAccent: Color {
+        codingStage?.accent.color ?? Nord.frost2
+    }
+
+    private var composerContextLabels: [String] {
+        var labels = [model.project(id: thread.projectID)?.name ?? "No project"]
+        if let worktree = latestCodingWorktree {
+            labels.append("isolated worktree")
+            labels.append(worktree.branch)
+        } else if thread.kind == .coding {
+            labels.append("plan first")
+            labels.append("network off")
+        } else {
+            labels.append(thread.kind.label)
+            labels.append(thread.runtimeMode.label)
+        }
+        return labels
     }
 
     private var hasSendableContent: Bool {
@@ -3328,7 +3606,12 @@ private struct DesktopThreadConversation: View {
                 ? "Run \(selectedComposerCommand.invocation) command"
                 : "\(selectedComposerCommand.invocation) command unavailable"
         }
-        return runtime.isRunning(threadID: thread.id) ? "Queue follow-up" : "Send message"
+        return switch composerPrimaryAction.kind {
+        case .send: "Send message"
+        case .queue: "Queue follow-up"
+        case .stop: "Stop current turn"
+        case .run: "Run composer command"
+        }
     }
 
     private func sendMessage() {
@@ -3756,10 +4039,15 @@ private struct DesktopUnifiedDiffLine: View {
 }
 
 private struct DesktopCodingWorkflowBanner: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var showsJourney = false
+
     let stage: DesktopCodingWorkflowStage
     let provider: String
     let evidencePassed: Bool
     let error: String?
+    let showsPlanReviewActions: Bool
+    let reviewPlan: () -> Void
     let approvePlan: () -> Void
     let beginReview: () -> Void
     let recheckEvidence: () -> Void
@@ -3768,76 +4056,113 @@ private struct DesktopCodingWorkflowBanner: View {
     let reviewKnowledge: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
+        VStack(alignment: .leading, spacing: hasSupportingContent ? 8 : 0) {
             ViewThatFits(in: .horizontal) {
-                Text(Self.workflowPath).lineLimit(1)
-                Text(progressLabel).lineLimit(1)
-            }
-            .font(.caption2.weight(.medium))
-            .foregroundStyle(.secondary)
-            .help(Self.workflowPath)
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .center, spacing: 10) {
-                    statusContent
-                    actions
+                HStack(spacing: 10) {
+                    gateDisclosure
+                    Spacer(minLength: 8)
+                    if hasActions { actionButtons }
                 }
-                VStack(alignment: .leading, spacing: 9) {
-                    statusContent
-                    HStack(spacing: 7) { actions }
+                VStack(alignment: .leading, spacing: 8) {
+                    gateDisclosure
+                    if hasActions { actionButtons }
                 }
             }
-            if let error {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(Nord.auroraRed)
-                    .textSelection(.enabled)
+
+            if showsJourney {
+                DesktopKanameGateJourney(stage: stage)
+            }
+
+            if needsAttention || showsJourney {
+                Text(stage.detail)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if let error {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Nord.auroraRed)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
-        .padding(12)
-        .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+        .padding(.horizontal, 11)
+        .padding(.vertical, hasSupportingContent ? 10 : 8)
+        .background(tint.opacity(needsAttention ? 0.11 : 0.065), in: RoundedRectangle(cornerRadius: 10))
         .overlay {
-            RoundedRectangle(cornerRadius: 12).strokeBorder(tint.opacity(0.25), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 10).strokeBorder(tint.opacity(needsAttention ? 0.34 : 0.18), lineWidth: 1)
         }
+        .help(DesktopCodingWorkflowStage.workflowPath)
         .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(stage.progressLabel). \(stage.compactStatus)")
     }
 
-    private var statusContent: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: symbol).foregroundStyle(tint)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.subheadline.weight(.semibold))
-                Text(detail).font(.caption).foregroundStyle(.secondary)
+    private var needsAttention: Bool {
+        stage.needsExpandedPresentation || error != nil
+    }
+
+    private var hasSupportingContent: Bool {
+        needsAttention || showsJourney
+    }
+
+    private var hasActions: Bool {
+        stage.action != .none && (stage != .planReview || showsPlanReviewActions)
+    }
+
+    private var gateDisclosure: some View {
+        Button(action: toggleJourney) {
+            HStack(spacing: 7) {
+                Image(systemName: "shield.lefthalf.filled")
+                    .foregroundStyle(tint)
+                Text(stage.progressLabel)
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .lineLimit(1)
+                Image(systemName: showsJourney ? "chevron.up" : "chevron.down")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.secondary)
             }
-            Spacer(minLength: 0)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .help(showsJourney ? "Hide the seven Kaname gates" : "Show the seven Kaname gates")
+        .accessibilityLabel(stage.progressLabel)
+        .accessibilityValue(showsJourney ? "Expanded" : "Collapsed")
+        .accessibilityHint(showsJourney ? "Hides the full workflow" : "Shows the full workflow")
     }
 
-    private static let workflowPath = "Discuss → Plan → Approve → Implement → Review changes → Review evidence (Accept) → Update knowledge"
+    private var actionButtons: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 7) { actions }
+            VStack(alignment: .leading, spacing: 7) { actions }
+        }
+        .controlSize(.small)
+    }
 
-    private var progressLabel: String {
-        switch stage {
-        case .discuss: "Stage 1 of 7 · Discuss"
-        case .planning: "Stage 2 of 7 · Plan"
-        case .planReview: "Stage 3 of 7 · Approve"
-        case .preparing, .implementing: "Stage 4 of 7 · Implement"
-        case .implementationReview: "Stage 5 of 7 · Review changes"
-        case .evidenceReview: "Stage 6 of 7 · Review evidence"
-        case .knowledgeReview: "Stage 7 of 7 · Knowledge update"
-        case .completed: "Complete · Knowledge reconciled or waived"
-        case .rejected: "Stopped · Rejected"
-        case .failed: "Stopped safely · no accepted result"
+    private func toggleJourney() {
+        if reduceMotion {
+            showsJourney.toggle()
+        } else {
+            withAnimation(.easeInOut(duration: 0.16)) {
+                showsJourney.toggle()
+            }
         }
     }
 
     @ViewBuilder private var actions: some View {
         switch stage {
         case .planReview:
-            Button("Approve plan & implement", action: approvePlan)
-                .buttonStyle(.borderedProminent)
-                .disabled(provider.caseInsensitiveCompare("Codex") != .orderedSame)
-                .help(provider.caseInsensitiveCompare("Codex") == .orderedSame
-                    ? "Create an isolated worktree and authorize one network-denied implementation turn"
-                    : "Choose Codex to use Kaname's signed isolated implementation flow")
+            if showsPlanReviewActions {
+                Button("Review plan", systemImage: "list.bullet.clipboard", action: reviewPlan)
+                    .buttonStyle(.bordered)
+                Button("Approve & implement", systemImage: "checkmark.shield.fill", action: approvePlan)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(provider.caseInsensitiveCompare("Codex") != .orderedSame)
+                    .help(provider.caseInsensitiveCompare("Codex") == .orderedSame
+                        ? "Create an isolated worktree and authorize one network-denied implementation turn"
+                        : "Choose Codex to use Kaname's signed isolated implementation flow")
+            }
         case .implementationReview:
             Button("Review changes & run checks", systemImage: "checkmark.shield", action: beginReview)
                 .buttonStyle(.borderedProminent)
@@ -3856,56 +4181,55 @@ private struct DesktopCodingWorkflowBanner: View {
         }
     }
 
-    private var title: String {
-        switch stage {
-        case .discuss: "Discuss the task"
-        case .planning: "Planning read-only"
-        case .planReview: "Plan needs your approval"
-        case .preparing: "Preparing the next guarded stage"
-        case .implementing: "Implementing in an isolated worktree"
-        case .implementationReview: "Review changes before checks"
-        case .evidenceReview: "Evidence needs your review"
-        case .knowledgeReview: "Accepted · knowledge update pending"
-        case .completed: "Completed"
-        case .rejected: "Rejected; isolated changes retained"
-        case .failed: "Stopped safely"
-        }
-    }
-
-    private var detail: String {
-        switch stage {
-        case .discuss: "Your next message starts a read-only planning turn. It cannot write code."
-        case .planning: "No write authority or network access is available. The structured plan will appear in the Plan tab."
-        case .planReview: "Review or revise the plan. Implementation cannot start until you press the approval button."
-        case .preparing: "Kaname is creating or checking the isolated worktree and signed evidence boundary."
-        case .implementing: "One approved, network-denied turn may write only inside the linked worktree."
-        case .implementationReview: "Review the isolated changes and run independent checks before evidence acceptance."
-        case .evidenceReview: "Provider completion is not acceptance. Inspect the diff and verification evidence, then accept or reject."
-        case .knowledgeReview: "The code is accepted locally. Review the proposed knowledge edit or provide a reason for no durable update."
-        case .completed: "The knowledge update was reconciled or explicitly waived. Nothing was pushed, published, or merged."
-        case .rejected: "The changes remain isolated and recoverable. Send revision guidance to request a fresh plan."
-        case .failed: "No result was accepted. Inspect the error, then send a revised request or retry the planning turn."
-        }
-    }
-
-    private var symbol: String {
-        switch stage {
-        case .failed, .rejected: "exclamationmark.shield.fill"
-        case .planning, .preparing, .implementing: "hourglass"
-        case .planReview, .implementationReview, .evidenceReview, .knowledgeReview: "person.crop.circle.badge.questionmark"
-        case .completed: "checkmark.seal.fill"
-        case .discuss: "text.bubble"
-        }
-    }
-
     private var tint: Color {
-        switch stage {
-        case .failed, .rejected: Nord.auroraRed
-        case .planReview, .evidenceReview: Nord.auroraYellow
-        case .implementationReview, .knowledgeReview: Nord.auroraYellow
-        case .planning, .preparing, .implementing: Nord.frost1
-        case .completed: Nord.auroraGreen
-        case .discuss: Nord.frost0
+        stage.accent.color
+    }
+}
+
+private struct DesktopKanameGateJourney: View {
+    let stage: DesktopCodingWorkflowStage
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 5) {
+            ForEach(Array(DesktopCodingWorkflowStage.gateLabels.enumerated()), id: \.offset) { index, label in
+                let state = stage.gateState(at: index)
+                VStack(spacing: 5) {
+                    Capsule()
+                        .fill(tint(for: state))
+                        .frame(height: state == .current || state == .stopped ? 4 : 3)
+                    Text(label)
+                        .font(.system(size: 10.5, weight: state == .current || state == .stopped ? .semibold : .medium))
+                        .foregroundStyle(state == .current || state == .stopped ? Color.primary : Color.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+                }
+                .frame(maxWidth: .infinity)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Gate \(index + 1) of 7, \(label), \(state.accessibilityLabel)")
+            }
+        }
+        .padding(.top, 2)
+        .accessibilityElement(children: .contain)
+    }
+
+    private func tint(for state: DesktopCodingGateState) -> Color {
+        switch state {
+        case .complete: Nord.auroraGreen.opacity(0.82)
+        case .current: stage.accent.color
+        case .upcoming: Nord.polarNight3.opacity(0.5)
+        case .stopped: Nord.auroraRed
+        }
+    }
+}
+
+private extension DesktopThreadChromeAccent {
+    var color: Color {
+        switch self {
+        case .calm: Nord.frost0
+        case .active: Nord.frost1
+        case .attention: Nord.auroraYellow
+        case .success: Nord.auroraGreen
+        case .failure: Nord.auroraRed
         }
     }
 }
@@ -4484,10 +4808,27 @@ private struct DesktopComposerRuntimeControls: View {
     }
 
     private func controlRow(compact: Bool) -> some View {
-        HStack(spacing: 3) {
-            providerAndModelMenu(compact: compact)
-            thinkingMenu(compact: compact)
-            authorityMenu(compact: compact)
+        Group {
+            if compact {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 4) {
+                        providerAndModelMenu(compact: false)
+                        thinkingMenu(compact: true)
+                        authorityMenu(compact: false)
+                    }
+                    HStack(spacing: 4) {
+                        providerAndModelMenu(compact: true)
+                        thinkingMenu(compact: true)
+                        authorityMenu(compact: true)
+                    }
+                }
+            } else {
+                HStack(spacing: 4) {
+                    providerAndModelMenu(compact: false)
+                    thinkingMenu(compact: false)
+                    authorityMenu(compact: false)
+                }
+            }
         }
     }
 
@@ -4506,6 +4847,7 @@ private struct DesktopComposerRuntimeControls: View {
                         Text(provider).tag(provider)
                     }
                 }
+                .disabled(isLocked)
             }
             Section("Model") {
                 Picker("Model", selection: modelSelection) {
@@ -4518,8 +4860,13 @@ private struct DesktopComposerRuntimeControls: View {
                         Text("\(thread.model) (custom)").tag(thread.model)
                     }
                 }
+                .disabled(isLocked)
             }
-            Button("Custom model or provider…", systemImage: "slider.horizontal.3", action: editDetails)
+            if isLocked {
+                Text("Changes unlock when the current turn finishes")
+            } else {
+                Button("Custom model or provider…", systemImage: "slider.horizontal.3", action: editDetails)
+            }
         }
     }
 
@@ -4551,8 +4898,13 @@ private struct DesktopComposerRuntimeControls: View {
                     Text("\(thinkingTitle) (custom)").tag(thread.reasoningEffort)
                 }
             }
-            Divider()
-            Button("Custom thinking or variant…", systemImage: "slider.horizontal.3", action: editDetails)
+            .disabled(isLocked)
+            if isLocked {
+                Text("Changes unlock when the current turn finishes")
+            } else {
+                Divider()
+                Button("Custom thinking or variant…", systemImage: "slider.horizontal.3", action: editDetails)
+            }
         }
     }
 
@@ -4573,9 +4925,8 @@ private struct DesktopComposerRuntimeControls: View {
             )
             .frame(maxWidth: compact ? nil : maximumWidth, alignment: .leading)
         }
-        .disabled(isLocked)
         .accessibilityLabel(accessibilityLabel)
-        .help(isLocked ? "Runtime controls unlock when the current turn finishes." : unlockedHelp)
+        .help(isLocked ? "Inspect runtime controls; changes unlock when the current turn finishes." : unlockedHelp)
     }
 
     private func authorityMenu(compact: Bool) -> some View {
@@ -4584,8 +4935,12 @@ private struct DesktopComposerRuntimeControls: View {
                 Menu {
                     Text("Coding always starts with a read-only, network-disabled plan.")
                     Text("Your explicit plan approval grants one network-disabled turn inside a new isolated worktree.")
-                    Divider()
-                    Button("Runtime details…", systemImage: "info.circle", action: editDetails)
+                    if isLocked {
+                        Text("Changes unlock when the current turn finishes")
+                    } else {
+                        Divider()
+                        Button("Runtime details…", systemImage: "info.circle", action: editDetails)
+                    }
                 } label: {
                     ComposerRuntimeControlLabel(
                         title: "Plan first",
@@ -4602,18 +4957,23 @@ private struct DesktopComposerRuntimeControls: View {
                             Text(mode.label).tag(mode)
                         }
                     }
+                    .disabled(isLocked)
                     Divider()
                     if ConversationRuntimeCatalog.managesNetwork(thread.provider) {
                         Toggle("Network access", isOn: networkSelection)
-                            .disabled(thread.runtimeMode == .fullAccess)
+                            .disabled(isLocked || thread.runtimeMode == .fullAccess)
                         if thread.runtimeMode == .fullAccess {
                             Text("Network is required by Full access")
                         }
                     } else {
                         Text("Network controlled by \(thread.provider)")
                     }
-                    Divider()
-                    Button("Runtime details…", systemImage: "info.circle", action: editDetails)
+                    if isLocked {
+                        Text("Changes unlock when the current turn finishes")
+                    } else {
+                        Divider()
+                        Button("Runtime details…", systemImage: "info.circle", action: editDetails)
+                    }
                 } label: {
                     ComposerRuntimeControlLabel(
                         title: thread.runtimeMode.label,
@@ -4634,7 +4994,6 @@ private struct DesktopComposerRuntimeControls: View {
                 ))
             }
         }
-        .disabled(isLocked)
     }
 }
 
@@ -4655,12 +5014,11 @@ private struct ComposerRuntimeControlLabel: View {
                     .foregroundStyle(.tertiary)
             }
         }
-        .font(.caption.weight(.medium))
+        .font(.system(size: DesktopComposerPresentation.toolbarPointSize, weight: .medium))
         .foregroundStyle(.secondary)
-        .padding(.horizontal, compact ? 7 : 8)
-        .frame(height: 25)
-        .background(Nord.polarNight2.opacity(0.72), in: Capsule())
-        .contentShape(Capsule())
+        .padding(.horizontal, compact ? 5 : 6)
+        .frame(height: 28)
+        .contentShape(Rectangle())
     }
 }
 
@@ -14511,29 +14869,253 @@ struct BoundaryCallout: View {
 
 private struct ThreadPlanView: View {
     let items: [DesktopPlanItem]
+    let phase: DesktopPlanPhase
+    let provider: String
+    let requestChanges: () -> Void
+    let approvePlan: () -> Void
+
+    private var presentation: DesktopPlanPresentation {
+        DesktopPlanPresentation(items: items, phase: phase)
+    }
 
     var body: some View {
+        VStack(spacing: 0) {
+            planScrollSurface
+
+            if phase == .awaitingApproval {
+                Divider()
+                planReviewFooter
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(presentation.accessibilityLabel)
+    }
+
+    private var planScrollSurface: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                if items.isEmpty {
-                    EmptyPanel(symbol: "list.bullet.clipboard", title: "No plan yet", detail: "A provider plan remains separate from write approval.")
-                } else {
-                    ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                        VStack(alignment: .leading, spacing: 5) {
-                            (Text("\(index + 1). ").foregroundColor(item.state.tint) + Text(item.title))
-                                .font(.subheadline.weight(.medium))
-                            Text(item.state.label)
-                                .font(.caption.weight(.medium))
-                                .foregroundStyle(item.state.tint)
-                        }
-                        .padding(15)
-                        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
-                    }
+            planScrollContent
+        }
+    }
+
+    private var planScrollContent: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            if presentation.rows.isEmpty {
+                emptyPlan
+            } else {
+                planHeader
+                planOutline
+            }
+        }
+        .padding(.horizontal, 22)
+        .padding(.vertical, 26)
+        .frame(maxWidth: 780, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .center)
+    }
+
+    private var emptyPlan: some View {
+        EmptyPanel(
+            symbol: "list.bullet.clipboard",
+            title: "No plan yet",
+            detail: "A provider plan remains separate from write approval. Request or revise it in Chat."
+        )
+    }
+
+    private var planOutline: some View {
+        LazyVStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(presentation.rows.enumerated()), id: \.element.id) { index, row in
+                ThreadPlanRow(row: row)
+                if index < presentation.rows.count - 1 {
+                    Divider().padding(.leading, 66)
                 }
             }
-            .padding(22)
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+        }
+    }
+
+    private var planHeader: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            planHeading
+            phaseCallout
+        }
+    }
+
+    private var planHeading: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            planTitle
+            planProgress
+        }
+    }
+
+    private var planTitle: some View {
+        Text("Implementation plan")
+            .font(.title2.weight(.bold))
+    }
+
+    private var planProgress: some View {
+        Label(presentation.progressLabel, systemImage: "list.number")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+    }
+
+    private var phaseCallout: some View {
+        HStack(alignment: .top, spacing: 11) {
+            phaseIcon
+            VStack(alignment: .leading, spacing: 3) {
+                phaseTitle
+                phaseDetail
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(phase.tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(phase.tint.opacity(0.24), lineWidth: 1)
+        }
+    }
+
+    private var phaseIcon: some View {
+        Image(systemName: phase.symbol)
+            .font(.title3)
+            .foregroundStyle(phase.tint)
+            .frame(width: 24)
+    }
+
+    private var phaseTitle: some View {
+        Text(phase.label)
+            .font(.subheadline.weight(.semibold))
+    }
+
+    private var phaseDetail: some View {
+        Text(phase.detail)
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var planReviewFooter: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .center, spacing: 18) {
+                reviewBoundaryText
+                Spacer(minLength: 12)
+                reviewActions
+            }
+            VStack(alignment: .leading, spacing: 12) {
+                reviewBoundaryText
+                reviewActions
+            }
+        }
+        .padding(.horizontal, 22)
+        .padding(.vertical, 16)
+        .background(Nord.polarNight1)
+    }
+
+    private var reviewBoundaryText: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            reviewDecisionTitle
+            reviewDecisionDetail
+        }
+    }
+
+    private var reviewDecisionTitle: some View {
+        Text("Ready for your decision")
+            .font(.subheadline.weight(.semibold))
+    }
+
+    private var reviewDecisionDetail: some View {
+        Text("Changes start another read-only plan. Approval authorizes one network-denied implementation turn in an isolated worktree.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var reviewActions: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 9) {
+                requestChangesButton
+                approvePlanButton
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                requestChangesButton
+                approvePlanButton
+            }
+        }
+    }
+
+    private var requestChangesButton: some View {
+        Button("Request changes", systemImage: "text.bubble", action: requestChanges)
+            .buttonStyle(.bordered)
+            .tint(Nord.frost1)
+    }
+
+    private var approvePlanButton: some View {
+        Button(action: approvePlan) {
+            Label("Approve plan & implement", systemImage: "checkmark.shield.fill")
+                .foregroundStyle(Nord.polarNight0)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(Nord.auroraGreen)
+        .disabled(items.isEmpty || !providerSupportsImplementation)
+        .help(approvalHelp)
+    }
+
+    private var providerSupportsImplementation: Bool {
+        provider.caseInsensitiveCompare("Codex") == .orderedSame
+    }
+
+    private var approvalHelp: String {
+        if items.isEmpty { return "Wait for a readable plan before approving implementation" }
+        return providerSupportsImplementation
+            ? "Create an isolated worktree and authorize one network-denied implementation turn"
+            : "Choose Codex to use Kaname's signed isolated implementation flow"
+    }
+}
+
+private struct ThreadPlanRow: View {
+    let row: DesktopPlanPresentation.Row
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            ordinalBadge
+            VStack(alignment: .leading, spacing: 8) {
+                planStepTitle
+                statusLabel
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(row.isCurrent ? row.tint.opacity(0.08) : Color.clear)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(row.accessibilityLabel)
+    }
+
+    private var ordinalBadge: some View {
+        Text("\(row.ordinal)")
+            .font(.caption.monospacedDigit().weight(.bold))
+            .foregroundStyle(row.tint)
+            .frame(width: 28, height: 28)
+            .background(row.tint.opacity(0.13), in: Circle())
+    }
+
+    private var planStepTitle: some View {
+        Text(row.title)
+            .font(.body.weight(.medium))
+            .foregroundStyle(.primary)
+            .fixedSize(horizontal: false, vertical: true)
+            .textSelection(.enabled)
+    }
+
+    private var statusLabel: some View {
+        Label(row.statusLabel, systemImage: row.statusSymbol)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(row.tint)
+            .fixedSize()
     }
 }
 
@@ -15105,27 +15687,52 @@ private extension DesktopMessageRole {
 
 private extension DesktopPlanItem.State {
     var label: String {
-        switch self {
-        case .pending: "Pending"
-        case .inProgress: "In progress"
-        case .complete: "Complete"
-        }
+        planStatusLabel
     }
 
     var symbol: String {
-        switch self {
-        case .pending: "circle"
-        case .inProgress: "circle.dotted"
-        case .complete: "checkmark.circle.fill"
-        }
+        planStatusSymbol
     }
 
     var tint: Color {
         switch self {
-        case .pending: Nord.polarNight3
+        case .pending: Nord.snowStorm0.opacity(0.78)
         case .inProgress: Nord.frost1
         case .complete: Nord.auroraGreen
         }
+    }
+}
+
+private extension DesktopCodingWorkflowStage {
+    func planPhase(hasSavedPlan: Bool) -> DesktopPlanPhase {
+        switch self {
+        case .discuss: hasSavedPlan ? .saved : .notStarted
+        case .planning: .drafting
+        case .planReview: .awaitingApproval
+        case .preparing, .implementing: .implementing
+        case .implementationReview, .evidenceReview, .knowledgeReview: .reviewingResult
+        case .completed: .completed
+        case .rejected, .failed: .stopped
+        }
+    }
+}
+
+private extension DesktopPlanPhase {
+    var tint: Color {
+        switch self {
+        case .notStarted: Color.secondary
+        case .saved: Nord.frost0
+        case .drafting, .implementing: Nord.frost1
+        case .awaitingApproval, .reviewingResult: Nord.auroraYellow
+        case .completed: Nord.auroraGreen
+        case .stopped: Nord.auroraRed
+        }
+    }
+}
+
+private extension DesktopPlanPresentation.Row {
+    var tint: Color {
+        state.tint
     }
 }
 

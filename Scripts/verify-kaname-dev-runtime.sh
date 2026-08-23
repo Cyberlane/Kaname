@@ -22,7 +22,7 @@ default_executable="$project_dir/.build/Kaname Prototype.app/Contents/MacOS/Kana
 [[ -f "$receipt_path" ]] || { echo "Missing Kaname dev runtime receipt: $receipt_path" >&2; exit 1; }
 jq -e \
     --arg bundle "$expected_bundle_identifier" \
-    '(.schemaVersion == 1 or .schemaVersion == 2)
+    '(.schemaVersion == 1 or .schemaVersion == 2 or .schemaVersion == 3)
      and .channel == "development"
      and .bundleIdentifier == $bundle
      and (.executablePath | type == "string" and startswith("/"))
@@ -148,6 +148,99 @@ if [[ "$schema_version" -ge 2 ]]; then
         echo "Kaname dev local-core service has unexpected executable: $actual_service_executable" >&2
         exit 1
     }
+fi
+
+if [[ "$schema_version" -ge 3 ]]; then
+    runtime_log_session_id="$(jq -r '.runtimeLogSessionID' "$receipt_path")"
+    runtime_log_schema_version="$(jq -r '.runtimeLogSchemaVersion' "$receipt_path")"
+    runtime_log_maximum_bytes="$(jq -r '.runtimeLogMaximumBytes' "$receipt_path")"
+    runtime_log_retention_sessions="$(jq -r '.runtimeLogRetentionSessions' "$receipt_path")"
+    runtime_log_directory="$(jq -r '.runtimeLogDirectory' "$receipt_path")"
+    ui_standard_output_log="$(jq -r '.uiStandardOutputPath' "$receipt_path")"
+    ui_standard_error_log="$(jq -r '.uiStandardErrorPath' "$receipt_path")"
+    runtime_root="$(dirname "$(jq -r '.localCoreLaunchAgentPlistPath' "$receipt_path")")"
+    runtime_root="$(dirname "$runtime_root")"
+    runtime_logs_root="$runtime_root/Logs"
+    expected_runtime_log_directory="$runtime_logs_root/$runtime_log_session_id"
+
+    jq -e \
+        '.runtimeLogSessionID
+            | type == "string"
+              and test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")' \
+        "$receipt_path" >/dev/null
+    [[ "$runtime_log_schema_version" == "1" ]] || {
+        echo "Unexpected Kaname Dev runtime log schema: $runtime_log_schema_version" >&2
+        exit 1
+    }
+    [[ "$runtime_log_maximum_bytes" == "16777216" ]] || {
+        echo "Unexpected Kaname Dev runtime log byte limit: $runtime_log_maximum_bytes" >&2
+        exit 1
+    }
+    [[ "$runtime_log_retention_sessions" == "8" ]] || {
+        echo "Unexpected Kaname Dev runtime log retention: $runtime_log_retention_sessions" >&2
+        exit 1
+    }
+    [[ "$runtime_log_directory" == "$expected_runtime_log_directory" ]] || {
+        echo "Kaname Dev runtime log directory is outside its session: $runtime_log_directory" >&2
+        exit 1
+    }
+    [[ "$ui_standard_output_log" == "$runtime_log_directory/ui.stdout.log" ]] || {
+        echo "Kaname Dev stdout log path mismatch: $ui_standard_output_log" >&2
+        exit 1
+    }
+    [[ "$ui_standard_error_log" == "$runtime_log_directory/ui.stderr.log" ]] || {
+        echo "Kaname Dev stderr log path mismatch: $ui_standard_error_log" >&2
+        exit 1
+    }
+
+    for private_directory in "$runtime_root" "$runtime_logs_root" "$runtime_log_directory"; do
+        [[ -d "$private_directory" && ! -L "$private_directory" ]] || {
+            echo "Missing private Kaname Dev runtime log directory: $private_directory" >&2
+            exit 1
+        }
+        [[ "$(stat -f %Lp "$private_directory")" == "700" ]] || {
+            echo "Kaname Dev runtime log directory is not private: $private_directory" >&2
+            exit 1
+        }
+        [[ "$(stat -f %u "$private_directory")" == "$(id -u)" ]] || {
+            echo "Kaname Dev runtime log directory has unexpected ownership: $private_directory" >&2
+            exit 1
+        }
+    done
+
+    for runtime_log_file in "$ui_standard_output_log" "$ui_standard_error_log"; do
+        [[ -f "$runtime_log_file" && ! -L "$runtime_log_file" ]] || {
+            echo "Missing private Kaname Dev runtime log: $runtime_log_file" >&2
+            exit 1
+        }
+        [[ "$(stat -f %Lp "$runtime_log_file")" == "600" ]] || {
+            echo "Kaname Dev runtime log is not private: $runtime_log_file" >&2
+            exit 1
+        }
+        [[ "$(stat -f %u "$runtime_log_file")" == "$(id -u)" ]] || {
+            echo "Kaname Dev runtime log has unexpected ownership: $runtime_log_file" >&2
+            exit 1
+        }
+        [[ "$(stat -f %l "$runtime_log_file")" == "1" ]] || {
+            echo "Kaname Dev runtime log must not be hard linked: $runtime_log_file" >&2
+            exit 1
+        }
+        [[ "$(stat -f %z "$runtime_log_file")" -le "$runtime_log_maximum_bytes" ]] || {
+            echo "Kaname Dev runtime log exceeded its declared bound: $runtime_log_file" >&2
+            exit 1
+        }
+    done
+
+    [[ "$(stat -f %Lp "$receipt_path")" == "600" ]] || {
+        echo "Kaname Dev runtime receipt is not private: $receipt_path" >&2
+        exit 1
+    }
+    health_path="$runtime_root/ui-health.json"
+    jq -e \
+        --arg session "$runtime_log_session_id" \
+        --argjson schema "$runtime_log_schema_version" \
+        '.runtimeLogSessionID == $session and .runtimeLogSchemaVersion == $schema' \
+        "$health_path" >/dev/null
 fi
 
 printf '%s\n' "$receipt_path"
