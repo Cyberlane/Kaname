@@ -2098,11 +2098,11 @@ private struct CommandCenterSelectableLabel: View {
 }
 
 #if os(macOS)
-struct DesktopPaletteKeyMonitor: NSViewRepresentable {
-    let move: (DesktopGlobalSearchSelectionDirection) -> Void
+struct DesktopLocalKeyMonitor: NSViewRepresentable {
+    let handle: (NSEvent) -> Bool
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(move: move)
+        Coordinator(handle: handle)
     }
 
     func makeNSView(context: Context) -> NSView {
@@ -2111,7 +2111,7 @@ struct DesktopPaletteKeyMonitor: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
-        context.coordinator.move = move
+        context.coordinator.handle = handle
     }
 
     static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
@@ -2120,34 +2120,44 @@ struct DesktopPaletteKeyMonitor: NSViewRepresentable {
 
     @MainActor
     final class Coordinator {
-        var move: (DesktopGlobalSearchSelectionDirection) -> Void
+        var handle: (NSEvent) -> Bool
         private var monitor: Any?
 
-        init(move: @escaping (DesktopGlobalSearchSelectionDirection) -> Void) {
-            self.move = move
+        init(handle: @escaping (NSEvent) -> Bool) {
+            self.handle = handle
         }
 
         func install() {
             guard monitor == nil else { return }
             monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                let commandModifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
-                guard commandModifiers.isEmpty else { return event }
-                switch event.keyCode {
-                case 125:
-                    self?.move(.next)
-                    return nil
-                case 126:
-                    self?.move(.previous)
-                    return nil
-                default:
-                    return event
-                }
+                self?.handle(event) == true ? nil : event
             }
         }
 
         func remove() {
             if let monitor { NSEvent.removeMonitor(monitor) }
             monitor = nil
+        }
+    }
+}
+
+struct DesktopPaletteKeyMonitor: View {
+    let move: (DesktopGlobalSearchSelectionDirection) -> Void
+
+    var body: some View {
+        DesktopLocalKeyMonitor { event in
+            let commandModifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+            guard commandModifiers.isEmpty else { return false }
+            switch event.keyCode {
+            case 125:
+                move(.next)
+                return true
+            case 126:
+                move(.previous)
+                return true
+            default:
+                return false
+            }
         }
     }
 }
@@ -2487,6 +2497,11 @@ private struct DesktopInboxView: View {
     }
 }
 
+private enum DesktopConversationRuntimeSheetFocus {
+    case full
+    case model
+}
+
 private struct DesktopThreadConversation: View {
     @ObservedObject var model: DesktopAppModel
     @ObservedObject var runtime: DesktopConversationRuntime
@@ -2496,6 +2511,12 @@ private struct DesktopThreadConversation: View {
     @Binding var conversationAnchorID: String?
     let composerFocusRequest: DesktopComposerFocusRequest?
     @State private var draft = ""
+    @State private var composerSelection: TextSelection?
+    @State private var composerCursorOffset: Int?
+    @State private var composerHasSelection = false
+    @State private var composerCommandSelection = DesktopComposerCommandSelectionState()
+    @State private var composerCommandMenuDismissed = false
+    @State private var composerCommandKeyboardScrollRevision: UInt = 0
     @State private var attachments: [ConversationImageAttachment] = []
     @State private var attachmentError: String?
     @State private var isImportingAttachments = false
@@ -2504,6 +2525,7 @@ private struct DesktopThreadConversation: View {
     @State private var showsRename = false
     @State private var renamedTitle = ""
     @State private var showsRuntimeSettings = false
+    @State private var runtimeSheetFocus = DesktopConversationRuntimeSheetFocus.full
     @State private var runtimeProvider = "Codex"
     @State private var runtimeModel = "Use provider default"
     @State private var runtimeReasoning = "xhigh"
@@ -2598,6 +2620,7 @@ private struct DesktopThreadConversation: View {
                 networkAccess: $runtimeNetworkAccess,
                 capabilities: capabilities,
                 stagedCoding: thread.kind == .coding,
+                initialFocus: runtimeSheetFocus,
                 cancel: { showsRuntimeSettings = false },
                 save: {
                     if model.updateThreadRuntime(
@@ -2626,6 +2649,12 @@ private struct DesktopThreadConversation: View {
 #endif
         }
         .onChange(of: composerFocusRequest) { _ in applyComposerFocusRequest() }
+        .onChange(of: composerFocused) { isFocused in
+            if isFocused {
+                composerCommandMenuDismissed = false
+                reconcileComposerCommandSelection()
+            }
+        }
         .onChange(of: thread.id) { _ in
             if thread.kind != .coding { panel = .conversation }
             narrativeRowLimit = DesktopConversationNarrativePresentation.defaultMaximumRows
@@ -2634,6 +2663,12 @@ private struct DesktopThreadConversation: View {
             conversationAnchorID = nil
             followsLatest = true
             hasNewNarrativeContent = false
+            draft = model.composerDraft(threadID: thread.id)
+            composerSelection = nil
+            composerCursorOffset = nil
+            composerHasSelection = false
+            composerCommandSelection = DesktopComposerCommandSelectionState()
+            composerCommandMenuDismissed = false
             attachments = model.composerAttachments(threadID: thread.id)
             attachmentError = nil
         }
@@ -2906,16 +2941,43 @@ private struct DesktopThreadConversation: View {
                         .padding(.top, 8)
                 }
 
-                TextField("Message \(thread.provider)", text: $draft, axis: .vertical)
+                if let commandQuery = composerCommandQuery {
+                    DesktopComposerCommandDrawer(
+                        query: commandQuery.fragment,
+                        commands: filteredComposerCommands,
+                        selectedCommandID: selectedComposerCommand?.id,
+                        keyboardScrollRevision: composerCommandKeyboardScrollRevision,
+                        select: selectComposerCommand,
+                        activate: activateComposerCommand
+                    )
+                    .padding(.horizontal, 8)
+                    .padding(.top, 8)
+                }
+
+                TextField(
+                    "Message \(thread.provider)",
+                    text: $draft,
+                    selection: $composerSelection,
+                    axis: .vertical
+                )
                     .textFieldStyle(.plain)
-                    .lineLimit(1...6)
+                    .lineLimit(DesktopComposerPresentation.minimumLines...DesktopComposerPresentation.maximumLines)
                     .padding(.horizontal, 12)
                     .padding(.top, 11)
                     .padding(.bottom, 8)
                     .focused($composerFocused)
                     .disabled(!canSendMessage)
-                    .onSubmit(send)
-                    .onChange(of: draft) { model.updateComposerDraft(threadID: thread.id, body: $0) }
+                    .onSubmit(submitComposer)
+                    .onChange(of: draft) { body in
+                        composerCommandMenuDismissed = false
+                        composerCursorOffset = min(composerCursorOffset ?? body.count, body.count)
+                        model.updateComposerDraft(threadID: thread.id, body: body)
+                    }
+                    .onChange(of: composerSelection) { _ in
+                        composerCommandMenuDismissed = false
+                        updateComposerSelectionState()
+                        reconcileComposerCommandSelection()
+                    }
                     .accessibilityLabel("Message composer for \(thread.title)")
 
                 GeometryReader { geometry in
@@ -2934,6 +2996,10 @@ private struct DesktopThreadConversation: View {
 #if os(macOS)
             .dropDestination(for: URL.self) { urls, _ in
                 importImageURLs(urls)
+            }
+            .background {
+                DesktopLocalKeyMonitor(handle: handleComposerCommandKey)
+                    .frame(width: 0, height: 0)
             }
 #endif
             .padding(14)
@@ -2966,8 +3032,192 @@ private struct DesktopThreadConversation: View {
 #endif
     }
 
-    private func openRuntimeSettings() {
+    private var runtimeSettingsLocked: Bool {
+        runtime.isRunning(threadID: thread.id)
+            || runtime.codingWorkflowBusyThreadIDs.contains(thread.id)
+    }
+
+    private var composerCommands: [DesktopComposerCommand] {
+        DesktopComposerCommands.catalog { command in
+            guard runtimeSettingsLocked, command == .model || command == .runtime else { return nil }
+            return "Runtime settings are locked while work is active."
+        }
+    }
+
+    private var composerCommandQuery: DesktopComposerCommandQuery? {
+        guard composerFocused, !composerCommandMenuDismissed else { return nil }
+        return DesktopComposerCommands.query(
+            in: draft,
+            cursorOffset: composerCursorOffset ?? draft.count,
+            hasSelection: composerHasSelection
+        )
+    }
+
+    private var filteredComposerCommands: [DesktopComposerCommand] {
+        guard let composerCommandQuery else { return [] }
+        return DesktopComposerCommands.matching(composerCommandQuery, in: composerCommands)
+    }
+
+    private var selectedComposerCommand: DesktopComposerCommand? {
+        composerCommandSelection.command(in: filteredComposerCommands) ?? filteredComposerCommands.first
+    }
+
+    private func updateComposerSelectionState() {
+        guard let composerSelection else {
+            composerCursorOffset = draft.count
+            composerHasSelection = false
+            return
+        }
+        switch composerSelection.indices {
+        case let .selection(range):
+            composerCursorOffset = draft.distance(from: draft.startIndex, to: range.lowerBound)
+            composerHasSelection = !range.isEmpty
+        case .multiSelection:
+            composerCursorOffset = nil
+            composerHasSelection = true
+        @unknown default:
+            composerCursorOffset = nil
+            composerHasSelection = true
+        }
+    }
+
+    private func reconcileComposerCommandSelection() {
+        composerCommandSelection.reconcile(with: filteredComposerCommands)
+    }
+
+    private func selectComposerCommand(_ commandID: DesktopComposerCommandID) {
+        composerCommandSelection = DesktopComposerCommandSelectionState(selectedCommandID: commandID)
+    }
+
+#if os(macOS)
+    private func handleComposerCommandKey(_ event: NSEvent) -> Bool {
+        guard composerCommandQuery != nil else { return false }
+        let commandModifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        guard commandModifiers.isEmpty else { return false }
+        if let inputClient = NSApp.keyWindow?.firstResponder as? NSTextInputClient,
+           inputClient.hasMarkedText() {
+            return false
+        }
+
+        switch event.keyCode {
+        case 125:
+            return moveComposerCommandSelection(.next)
+        case 126:
+            return moveComposerCommandSelection(.previous)
+        case 48:
+            return activateSelectedComposerCommand()
+        case 53:
+            composerCommandMenuDismissed = true
+            composerCommandSelection = DesktopComposerCommandSelectionState()
+            postDesktopAccessibilityAnnouncement("Command menu dismissed")
+            return true
+        default:
+            return false
+        }
+    }
+#endif
+
+    private func moveComposerCommandSelection(
+        _ direction: DesktopComposerCommandSelectionDirection
+    ) -> Bool {
+        guard !filteredComposerCommands.isEmpty else { return false }
+        composerCommandSelection.reconcile(with: filteredComposerCommands)
+        composerCommandSelection.move(direction, in: filteredComposerCommands)
+        composerCommandKeyboardScrollRevision &+= 1
+        announceSelectedComposerCommand()
+        return true
+    }
+
+    private func announceSelectedComposerCommand() {
+        guard let selectedComposerCommand else { return }
+        let state = selectedComposerCommand.disabledReason.map { "Unavailable. \($0)" } ?? "Selected"
+        postDesktopAccessibilityAnnouncement("\(selectedComposerCommand.invocation), \(state)")
+    }
+
+    private func submitComposer() {
+        guard !activateSelectedComposerCommand() else { return }
+        sendMessage()
+    }
+
+    @discardableResult
+    private func activateSelectedComposerCommand() -> Bool {
+        guard let composerCommandQuery else { return false }
+        let resolution = DesktopComposerCommands.resolveSubmission(
+            text: draft,
+            query: composerCommandQuery,
+            selectedCommandID: selectedComposerCommand?.id,
+            commands: composerCommands
+        )
+        switch resolution {
+        case let .local(command, edit):
+            applyComposerCommandEdit(edit)
+            performComposerCommand(command)
+            return true
+        case let .disabled(_, reason):
+            postDesktopAccessibilityAnnouncement(reason)
+            return true
+        case .message:
+            return false
+        }
+    }
+
+    private func activateComposerCommand(_ commandID: DesktopComposerCommandID) {
+        selectComposerCommand(commandID)
+        guard let composerCommandQuery else { return }
+        let resolution = DesktopComposerCommands.resolveSubmission(
+            text: draft,
+            query: composerCommandQuery,
+            selectedCommandID: commandID,
+            commands: composerCommands
+        )
+        switch resolution {
+        case let .local(command, edit):
+            applyComposerCommandEdit(edit)
+            performComposerCommand(command)
+        case let .disabled(_, reason):
+            postDesktopAccessibilityAnnouncement(reason)
+        case .message:
+            break
+        }
+    }
+
+    private func applyComposerCommandEdit(_ edit: DesktopComposerCommandEdit) {
+        draft = edit.text
+        let insertionOffset = min(edit.insertionOffset, draft.count)
+        let insertionPoint = draft.index(draft.startIndex, offsetBy: insertionOffset)
+        composerSelection = TextSelection(insertionPoint: insertionPoint)
+        composerCursorOffset = insertionOffset
+        composerHasSelection = false
+        composerCommandSelection = DesktopComposerCommandSelectionState()
+        model.updateComposerDraft(threadID: thread.id, body: draft)
+    }
+
+    private func performComposerCommand(_ command: DesktopComposerCommandID) {
+        switch command {
+        case .model:
+            openRuntimeSettings(focus: .model)
+        case .runtime:
+            openRuntimeSettings(focus: .full)
+        case .chat:
+            panel = .conversation
+            DispatchQueue.main.async { composerFocused = true }
+        case .diff:
+            panel = .changes
+        case .plan:
+            panel = .plan
+        case .checks:
+            panel = .evidence
+        case .rename:
+            captureSheetFocus()
+            renamedTitle = thread.title
+            showsRename = true
+        }
+        postDesktopAccessibilityAnnouncement("\(command.title) opened")
+    }
+
+    private func openRuntimeSettings(focus: DesktopConversationRuntimeSheetFocus = .full) {
         captureSheetFocus()
+        runtimeSheetFocus = focus
         runtimeProvider = thread.provider
         runtimeModel = thread.model
         runtimeReasoning = thread.reasoningEffort
@@ -3016,10 +3266,9 @@ private struct DesktopThreadConversation: View {
             DesktopComposerRuntimeControls(
                 thread: thread,
                 capabilities: capabilities,
-                isLocked: runtime.isRunning(threadID: thread.id)
-                    || runtime.codingWorkflowBusyThreadIDs.contains(thread.id),
+                isLocked: runtimeSettingsLocked,
                 compact: compact,
-                editDetails: openRuntimeSettings,
+                editDetails: { openRuntimeSettings() },
                 update: updateRuntime
             )
 
@@ -3039,7 +3288,7 @@ private struct DesktopThreadConversation: View {
                     .accessibilityLabel("\(thread.provider) is responding; new messages queue in order")
             }
 
-            Button(action: send) {
+            Button(action: submitComposer) {
                 Image(systemName: "arrow.up.circle.fill")
                     .font(.title2)
                     .foregroundStyle(
@@ -3050,7 +3299,7 @@ private struct DesktopThreadConversation: View {
             }
             .buttonStyle(.plain)
             .disabled(!canSendMessage || !hasSendableContent || isImportingAttachments)
-            .accessibilityLabel(runtime.isRunning(threadID: thread.id) ? "Queue follow-up" : "Send message")
+            .accessibilityLabel(composerSubmissionAccessibilityLabel)
         }
     }
 
@@ -3073,7 +3322,16 @@ private struct DesktopThreadConversation: View {
         DesktopConversationRuntime.supportsImageAttachments(provider: thread.provider)
     }
 
-    private func send() {
+    private var composerSubmissionAccessibilityLabel: String {
+        if let selectedComposerCommand {
+            return selectedComposerCommand.disabledReason == nil
+                ? "Run \(selectedComposerCommand.invocation) command"
+                : "\(selectedComposerCommand.invocation) command unavailable"
+        }
+        return runtime.isRunning(threadID: thread.id) ? "Queue follow-up" : "Send message"
+    }
+
+    private func sendMessage() {
         let body = draft
         if canSendMessage,
            hasSendableContent,
@@ -3213,6 +3471,125 @@ private struct DesktopThreadConversation: View {
     }
 #endif
 
+}
+
+private struct DesktopComposerCommandDrawer: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    let query: String
+    let commands: [DesktopComposerCommand]
+    let selectedCommandID: DesktopComposerCommandID?
+    let keyboardScrollRevision: UInt
+    let select: (DesktopComposerCommandID) -> Void
+    let activate: (DesktopComposerCommandID) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Label("Commands", systemImage: "command")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Nord.frost1)
+                Spacer()
+                Text("\(commands.count) match\(commands.count == 1 ? "" : "es")")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 8)
+            .padding(.top, 7)
+
+            if commands.isEmpty {
+                Text("No local command matches /\(query). Press Return to send this as ordinary chat text.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 9)
+                .padding(.bottom, 9)
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 3) {
+                            ForEach(commands) { command in
+                                commandRow(command)
+                                    .id(command.id)
+                            }
+                        }
+                        .padding(.horizontal, 4)
+                        .padding(.bottom, 5)
+                    }
+                    .onChange(of: keyboardScrollRevision) { _, _ in
+                        guard let selectedCommandID,
+                              commands.contains(where: { $0.id == selectedCommandID }) else { return }
+                        if reduceMotion {
+                            proxy.scrollTo(selectedCommandID, anchor: .center)
+                        } else {
+                            withAnimation(.easeOut(duration: 0.12)) {
+                                proxy.scrollTo(selectedCommandID, anchor: .center)
+                            }
+                        }
+                    }
+                }
+                .frame(maxHeight: 238)
+            }
+        }
+        .background(Nord.polarNight2.opacity(0.98), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .strokeBorder(Nord.polarNight3, lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.24), radius: 12, y: 6)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Composer commands")
+        .accessibilityValue("\(commands.count) available")
+    }
+
+    private func commandRow(_ command: DesktopComposerCommand) -> some View {
+        let isSelected = command.id == selectedCommandID
+        return Button {
+            activate(command.id)
+        } label: {
+            HStack(alignment: .top, spacing: 9) {
+                Image(systemName: command.systemImage)
+                    .frame(width: 18)
+                    .foregroundStyle(command.isEnabled ? Nord.frost1 : Color.secondary)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(
+                        "\(Text(command.invocation).font(.system(.callout, design: .monospaced).weight(.semibold))) "
+                            + "\(Text(command.title).font(.callout.weight(.medium)))"
+                    )
+                    Text(command.disabledReason ?? command.detail)
+                        .font(.caption)
+                        .foregroundStyle(command.isEnabled ? Color.secondary : Nord.auroraYellow)
+                        .lineLimit(2)
+                }
+                Spacer(minLength: 4)
+                if isSelected {
+                    Image(systemName: "return")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Nord.polarNight1)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 7)
+            .contentShape(Rectangle())
+            .background(
+                isSelected ? Nord.frost1.opacity(command.isEnabled ? 1 : 0.62) : Color.clear,
+                in: RoundedRectangle(cornerRadius: 8)
+            )
+            .foregroundStyle(isSelected ? Nord.polarNight0 : Color.primary)
+        }
+        .buttonStyle(.plain)
+        .focusable(false)
+        .onHover { hovering in
+            if hovering { select(command.id) }
+        }
+        .accessibilityLabel("\(command.invocation), \(command.title)")
+        .accessibilityValue(
+            "\(isSelected ? "Selected. " : "")\(command.disabledReason ?? command.detail)"
+        )
+        .accessibilityHint(command.isEnabled ? "Press Return or Tab to run locally" : "Unavailable")
+    }
 }
 
 private struct DesktopThreadChangesView: View {
@@ -3819,6 +4196,7 @@ private struct DesktopConversationRuntimeSheet: View {
     @Binding var networkAccess: Bool
     let capabilities: [ProviderCapabilitySnapshot]
     let stagedCoding: Bool
+    let initialFocus: DesktopConversationRuntimeSheetFocus
     let cancel: () -> Void
     let save: () -> Void
 
@@ -3853,7 +4231,8 @@ private struct DesktopConversationRuntimeSheet: View {
                 runtimeMode: $runtimeMode,
                 networkAccess: $networkAccess,
                 capabilities: capabilities,
-                stagedCoding: stagedCoding
+                stagedCoding: stagedCoding,
+                initialFocus: initialFocus
             )
         }
         .formStyle(.grouped)
@@ -4287,6 +4666,7 @@ private struct ComposerRuntimeControlLabel: View {
 
 private struct ConversationRuntimeEditor: View {
     private static let customChoice = "__kaname_custom_choice__"
+    private enum Field: Hashable { case model }
 
     @Binding var provider: String
     @Binding var model: String
@@ -4295,6 +4675,8 @@ private struct ConversationRuntimeEditor: View {
     @Binding var networkAccess: Bool
     let capabilities: [ProviderCapabilitySnapshot]
     let stagedCoding: Bool
+    let initialFocus: DesktopConversationRuntimeSheetFocus
+    @FocusState private var focusedField: Field?
 
     private var advertisedModels: [ProviderModel] {
         ConversationRuntimeCatalog.models(for: provider, capabilities: capabilities)
@@ -4351,6 +4733,7 @@ private struct ConversationRuntimeEditor: View {
                 }
                 Text("Custom…").tag(Self.customChoice)
             }
+            .focused($focusedField, equals: .model)
             if usesCustomModel {
                 TextField("Custom model ID", text: $model)
             }
@@ -4423,6 +4806,10 @@ private struct ConversationRuntimeEditor: View {
         }
         .onChange(of: runtimeMode) { newMode in
             if newMode == .fullAccess { networkAccess = true }
+        }
+        .onAppear {
+            guard initialFocus == .model else { return }
+            DispatchQueue.main.async { focusedField = .model }
         }
     }
 }
@@ -13233,7 +13620,8 @@ private struct NewDesktopThreadSheet: View {
                     runtimeMode: $runtimeMode,
                     networkAccess: $networkAccess,
                     capabilities: capabilities,
-                    stagedCoding: kind == .coding
+                    stagedCoding: kind == .coding,
+                    initialFocus: .full
                 )
                 Section {
                     Label("No subject required", systemImage: "sparkles")

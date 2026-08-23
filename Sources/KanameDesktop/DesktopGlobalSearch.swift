@@ -327,10 +327,7 @@ public struct DesktopGlobalSearchSection: Equatable, Identifiable, Sendable {
     public var title: String { domain.label }
 }
 
-public enum DesktopGlobalSearchSelectionDirection: Sendable {
-    case previous
-    case next
-}
+public typealias DesktopGlobalSearchSelectionDirection = DesktopCyclicSelectionDirection
 
 public struct DesktopGlobalSearchSelectionState: Equatable, Sendable {
     public private(set) var selectedResultID: String?
@@ -352,22 +349,11 @@ public struct DesktopGlobalSearchSelectionState: Equatable, Sendable {
         in sections: [DesktopGlobalSearchSection]
     ) {
         let results = sections.flatMap(\.results)
-        guard !results.isEmpty else {
-            selectedResultID = nil
-            return
-        }
-        guard let selectedResultID,
-              let currentIndex = results.firstIndex(where: { $0.selectionID == selectedResultID }) else {
-            self.selectedResultID = results.first?.selectionID
-            return
-        }
-        switch direction {
-        case .previous:
-            self.selectedResultID = results[currentIndex == results.startIndex ? results.index(before: results.endIndex) : results.index(before: currentIndex)].selectionID
-        case .next:
-            let nextIndex = results.index(after: currentIndex)
-            self.selectedResultID = results[nextIndex == results.endIndex ? results.startIndex : nextIndex].selectionID
-        }
+        selectedResultID = DesktopCyclicSelection.moving(
+            selectedResultID,
+            direction,
+            in: results.map(\.selectionID)
+        )
     }
 
     public func result(in sections: [DesktopGlobalSearchSection]) -> DesktopGlobalSearchResult? {

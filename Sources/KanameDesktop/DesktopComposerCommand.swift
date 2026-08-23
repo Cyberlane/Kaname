@@ -1,0 +1,262 @@
+import Foundation
+
+public enum DesktopComposerCommandID: String, CaseIterable, Identifiable, Sendable {
+    case model
+    case runtime
+    case chat
+    case diff
+    case plan
+    case checks
+    case rename
+
+    public var id: String { rawValue }
+    public var invocation: String { "/\(rawValue)" }
+
+    public var title: String {
+        switch self {
+        case .model: "Choose model"
+        case .runtime: "Conversation runtime"
+        case .chat: "Open Chat"
+        case .diff: "Open Diff"
+        case .plan: "Open Plan"
+        case .checks: "Open Checks"
+        case .rename: "Rename conversation"
+        }
+    }
+
+    public var detail: String {
+        switch self {
+        case .model: "Choose the provider model used for future turns."
+        case .runtime: "Review provider, model, thinking, permissions, and network access."
+        case .chat: "Return to the conversation timeline."
+        case .diff: "Inspect the current conversation changes."
+        case .plan: "Review the structured plan without changing its authority."
+        case .checks: "Inspect verification and implementation evidence."
+        case .rename: "Give this conversation a durable manual title."
+        }
+    }
+
+    public var systemImage: String {
+        switch self {
+        case .model: "cpu"
+        case .runtime: "slider.horizontal.3"
+        case .chat: "bubble.left.and.bubble.right"
+        case .diff: "doc.text.magnifyingglass"
+        case .plan: "list.bullet.clipboard"
+        case .checks: "checkmark.seal"
+        case .rename: "pencil"
+        }
+    }
+
+    fileprivate var searchTerms: [String] {
+        switch self {
+        case .model: [rawValue, title, detail, "provider choose"]
+        case .runtime: [rawValue, title, detail, "settings permissions network thinking"]
+        case .chat: [rawValue, title, detail, "conversation messages"]
+        case .diff: [rawValue, title, detail, "changes patch"]
+        case .plan: [rawValue, title, detail, "planning steps"]
+        case .checks: [rawValue, title, detail, "evidence tests verification"]
+        case .rename: [rawValue, title, detail, "title"]
+        }
+    }
+}
+
+public struct DesktopComposerCommand: Identifiable, Equatable, Sendable {
+    public let id: DesktopComposerCommandID
+    public let disabledReason: String?
+
+    public init(id: DesktopComposerCommandID, disabledReason: String? = nil) {
+        self.id = id
+        self.disabledReason = disabledReason
+    }
+
+    public var isEnabled: Bool { disabledReason == nil }
+    public var invocation: String { id.invocation }
+    public var title: String { id.title }
+    public var detail: String { id.detail }
+    public var systemImage: String { id.systemImage }
+}
+
+public struct DesktopComposerCommandQuery: Equatable, Sendable {
+    public let fragment: String
+    public let triggerRange: Range<Int>
+
+    public init(fragment: String, triggerRange: Range<Int>) {
+        self.fragment = fragment
+        self.triggerRange = triggerRange
+    }
+}
+
+public struct DesktopComposerCommandEdit: Equatable, Sendable {
+    public let text: String
+    public let insertionOffset: Int
+
+    public init(text: String, insertionOffset: Int) {
+        self.text = text
+        self.insertionOffset = insertionOffset
+    }
+}
+
+public enum DesktopComposerCommandResolution: Equatable, Sendable {
+    case local(DesktopComposerCommandID, edit: DesktopComposerCommandEdit)
+    case disabled(DesktopComposerCommandID, reason: String)
+    case message
+}
+
+public typealias DesktopComposerCommandSelectionDirection = DesktopCyclicSelectionDirection
+
+public struct DesktopComposerCommandSelectionState: Equatable, Sendable {
+    public private(set) var selectedCommandID: DesktopComposerCommandID?
+
+    public init(selectedCommandID: DesktopComposerCommandID? = nil) {
+        self.selectedCommandID = selectedCommandID
+    }
+
+    public mutating func reconcile(with commands: [DesktopComposerCommand]) {
+        if let selectedCommandID, commands.contains(where: { $0.id == selectedCommandID }) {
+            return
+        }
+        selectedCommandID = commands.first?.id
+    }
+
+    public mutating func move(
+        _ direction: DesktopComposerCommandSelectionDirection,
+        in commands: [DesktopComposerCommand]
+    ) {
+        selectedCommandID = DesktopCyclicSelection.moving(
+            selectedCommandID,
+            direction,
+            in: commands.map(\.id)
+        )
+    }
+
+    public func command(in commands: [DesktopComposerCommand]) -> DesktopComposerCommand? {
+        guard let selectedCommandID else { return nil }
+        return commands.first { $0.id == selectedCommandID }
+    }
+}
+
+public enum DesktopComposerPresentation {
+    public static let minimumLines = 3
+    public static let maximumLines = 8
+}
+
+public enum DesktopComposerCommands {
+    public static func catalog(
+        disabledReason: (DesktopComposerCommandID) -> String? = { _ in nil }
+    ) -> [DesktopComposerCommand] {
+        DesktopComposerCommandID.allCases.map {
+            DesktopComposerCommand(id: $0, disabledReason: disabledReason($0))
+        }
+    }
+
+    public static func query(
+        in text: String,
+        selection: Range<String.Index>? = nil
+    ) -> DesktopComposerCommandQuery? {
+        let selectedRange = selection ?? text.endIndex..<text.endIndex
+        guard selectedRange.isEmpty else { return nil }
+        return query(
+            in: text,
+            cursorOffset: text.distance(from: text.startIndex, to: selectedRange.lowerBound)
+        )
+    }
+
+    public static func query(
+        in text: String,
+        cursorOffset: Int,
+        hasSelection: Bool = false
+    ) -> DesktopComposerCommandQuery? {
+        guard !hasSelection, cursorOffset >= 0, cursorOffset <= text.count else { return nil }
+        let cursor = text.index(text.startIndex, offsetBy: cursorOffset)
+        let prefix = text[..<cursor]
+        let lineStart = prefix.lastIndex(of: "\n").map { text.index(after: $0) } ?? text.startIndex
+        guard lineStart < text.endIndex, text[lineStart] == "/" else { return nil }
+
+        let queryStart = text.index(after: lineStart)
+        var tokenEnd = queryStart
+        while tokenEnd < text.endIndex, !text[tokenEnd].isWhitespace {
+            tokenEnd = text.index(after: tokenEnd)
+        }
+        guard cursor >= queryStart, cursor <= tokenEnd else { return nil }
+
+        let triggerStart = text.distance(from: text.startIndex, to: lineStart)
+        let triggerEnd = text.distance(from: text.startIndex, to: tokenEnd)
+        return DesktopComposerCommandQuery(
+            fragment: String(text[queryStart..<cursor]),
+            triggerRange: triggerStart..<triggerEnd
+        )
+    }
+
+    public static func matching(
+        _ query: DesktopComposerCommandQuery,
+        in commands: [DesktopComposerCommand]
+    ) -> [DesktopComposerCommand] {
+        let normalizedQuery = normalized(query.fragment)
+        guard !normalizedQuery.isEmpty else { return commands }
+
+        return commands.enumerated().compactMap { index, command -> (Int, Int, DesktopComposerCommand)? in
+            guard let rank = rank(command.id, for: normalizedQuery) else { return nil }
+            return (rank, index, command)
+        }
+        .sorted { lhs, rhs in
+            lhs.0 == rhs.0 ? lhs.1 < rhs.1 : lhs.0 < rhs.0
+        }
+        .map(\.2)
+    }
+
+    public static func consuming(
+        _ query: DesktopComposerCommandQuery,
+        from text: String
+    ) -> DesktopComposerCommandEdit? {
+        guard query.triggerRange.lowerBound >= 0,
+              query.triggerRange.upperBound <= text.count else { return nil }
+        let lowerBound = text.index(text.startIndex, offsetBy: query.triggerRange.lowerBound)
+        let upperBound = text.index(text.startIndex, offsetBy: query.triggerRange.upperBound)
+        var updated = text
+        updated.removeSubrange(lowerBound..<upperBound)
+        return DesktopComposerCommandEdit(
+            text: updated,
+            insertionOffset: query.triggerRange.lowerBound
+        )
+    }
+
+    public static func resolveSubmission(
+        text: String,
+        query: DesktopComposerCommandQuery?,
+        selectedCommandID: DesktopComposerCommandID?,
+        commands: [DesktopComposerCommand]
+    ) -> DesktopComposerCommandResolution {
+        guard let query else { return .message }
+        let matches = matching(query, in: commands)
+        guard let command = matches.first(where: { $0.id == selectedCommandID }) ?? matches.first else {
+            return .message
+        }
+        if let disabledReason = command.disabledReason {
+            return .disabled(command.id, reason: disabledReason)
+        }
+        guard let edit = consuming(query, from: text) else { return .message }
+        return .local(command.id, edit: edit)
+    }
+
+    private static func rank(_ command: DesktopComposerCommandID, for query: String) -> Int? {
+        let terms = command.searchTerms.map(normalized)
+        guard let name = terms.first else { return nil }
+        if name == query { return 0 }
+        if name.hasPrefix(query) { return 1 }
+        guard query.count > 1 else { return nil }
+        if terms.dropFirst().contains(where: { $0.hasPrefix(query) }) { return 2 }
+        if terms.contains(where: { term in
+            term.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).contains(where: { $0.hasPrefix(query) })
+        }) { return 3 }
+        if terms.contains(where: { $0.contains(query) }) { return 4 }
+        return nil
+    }
+
+    private static func normalized(_ value: String) -> String {
+        value.folding(
+            options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
+            locale: Locale(identifier: "en_US_POSIX")
+        ).lowercased()
+    }
+}
