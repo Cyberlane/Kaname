@@ -3114,7 +3114,10 @@ private struct DesktopThreadConversation: View {
                     .accessibilityIdentifier("thread-composer")
 
                 GeometryReader { geometry in
-                    composerAccessoryRow(compact: geometry.size.width < 520)
+                    composerAccessoryRow(
+                        compact: Double(geometry.size.width)
+                            < DesktopComposerRuntimePresentation.compactWidthThreshold
+                    )
                 }
                 .frame(height: 32)
                 .padding(.leading, 9)
@@ -3593,7 +3596,7 @@ private struct DesktopThreadConversation: View {
             labels.append("network off")
         } else {
             labels.append(thread.kind.label)
-            labels.append(thread.runtimeMode.label)
+            labels.append(DesktopComposerRuntimePresentation.access(thread.runtimeMode).title)
         }
         return labels
     }
@@ -4690,27 +4693,7 @@ private enum ConversationRuntimeCatalog {
         let network = managesNetwork(provider)
             ? (networkAccess ? "network on" : "network off")
             : "network follows \(provider)"
-        return "\(runtimeMode.label), \(network)"
-    }
-}
-
-private extension ConversationRuntimeMode {
-    var label: String {
-        switch self {
-        case .approvalRequired: "Supervised"
-        case .autoAcceptEdits: "Auto-accept edits"
-        case .auto: "Auto"
-        case .fullAccess: "Full access"
-        }
-    }
-
-    var detail: String {
-        switch self {
-        case .approvalRequired: "Read-only by default; stop for broader actions."
-        case .autoAcceptEdits: "Allow workspace edits; ask before other escalation."
-        case .auto: "Allow routine work and review risky escalation automatically."
-        case .fullAccess: "Allow commands, files, and network without prompts."
-        }
+        return "\(DesktopComposerRuntimePresentation.access(runtimeMode).title), \(network)"
     }
 }
 
@@ -4721,6 +4704,7 @@ private struct DesktopComposerRuntimeControls: View {
     let compact: Bool
     let editDetails: () -> Void
     let update: (String, String, String, ConversationRuntimeMode, Bool) -> Void
+    @State private var showsAccessOptions = false
 
     private var advertisedModels: [ProviderModel] {
         ConversationRuntimeCatalog.models(for: thread.provider, capabilities: capabilities)
@@ -4733,6 +4717,23 @@ private struct DesktopComposerRuntimeControls: View {
 
     private var thinkingTitle: String {
         thread.reasoningEffort == "xhigh" ? "Extra high" : thread.reasoningEffort.capitalized
+    }
+
+    private var layout: DesktopComposerRuntimeLayout {
+        DesktopComposerRuntimePresentation.layout(for: thread.kind, compact: compact)
+    }
+
+    private var currentAccess: DesktopComposerAccessPresentation {
+        DesktopComposerRuntimePresentation.access(thread.runtimeMode)
+    }
+
+    private var providerTint: Color {
+        switch thread.provider.lowercased() {
+        case "codex": Nord.frost1
+        case "claude": Nord.auroraOrange
+        case "opencode", "open code": Nord.auroraPurple
+        default: .secondary
+        }
     }
 
     private var providerSelection: Binding<String> {
@@ -4831,26 +4832,19 @@ private struct DesktopComposerRuntimeControls: View {
     }
 
     private func controlRow(compact: Bool) -> some View {
-        Group {
-            if compact {
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 4) {
-                        providerAndModelMenu(compact: false)
-                        thinkingMenu(compact: true)
-                        authorityMenu(compact: false)
-                    }
-                    HStack(spacing: 4) {
-                        providerAndModelMenu(compact: true)
-                        thinkingMenu(compact: true)
-                        authorityMenu(compact: true)
-                    }
-                }
-            } else {
-                HStack(spacing: 4) {
-                    providerAndModelMenu(compact: false)
-                    thinkingMenu(compact: false)
-                    authorityMenu(compact: false)
-                }
+        HStack(spacing: 2) {
+            providerAndModelMenu(compact: compact)
+            if layout.visibleControls.contains(.thinking) {
+                controlDivider
+                thinkingMenu
+            }
+            if layout.visibleControls.contains(.access) {
+                controlDivider
+                accessControl
+            }
+            if layout.visibleControls.contains(.overflow) {
+                controlDivider
+                overflowMenu
             }
         }
     }
@@ -4858,9 +4852,9 @@ private struct DesktopComposerRuntimeControls: View {
     private func providerAndModelMenu(compact: Bool) -> some View {
         runtimeMenu(
             title: "\(thread.provider) · \(modelTitle)",
-            systemImage: "cpu",
-            compact: compact,
-            maximumWidth: 220,
+            systemImage: DesktopComposerRuntimePresentation.providerSystemImage(thread.provider),
+            maximumWidth: compact ? 190 : 220,
+            tint: providerTint,
             accessibilityLabel: "Provider and model, \(thread.provider), \(modelTitle)",
             unlockedHelp: "Choose provider and model"
         ) {
@@ -4893,11 +4887,10 @@ private struct DesktopComposerRuntimeControls: View {
         }
     }
 
-    private func thinkingMenu(compact: Bool) -> some View {
+    private var thinkingMenu: some View {
         runtimeMenu(
             title: thinkingTitle,
             systemImage: "brain.head.profile",
-            compact: compact,
             accessibilityLabel: "Thinking, \(thinkingTitle)",
             unlockedHelp: "Choose thinking level"
         ) {
@@ -4934,8 +4927,8 @@ private struct DesktopComposerRuntimeControls: View {
     private func runtimeMenu<Content: View>(
         title: String,
         systemImage: String,
-        compact: Bool,
         maximumWidth: CGFloat? = nil,
+        tint: Color = .secondary,
         accessibilityLabel: String,
         unlockedHelp: String,
         @ViewBuilder content: () -> Content
@@ -4944,104 +4937,332 @@ private struct DesktopComposerRuntimeControls: View {
             ComposerRuntimeControlLabel(
                 title: title,
                 systemImage: systemImage,
-                compact: compact
+                showsChevron: true,
+                tint: tint
             )
-            .frame(maxWidth: compact ? nil : maximumWidth, alignment: .leading)
+            .frame(maxWidth: maximumWidth, alignment: .leading)
         }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
         .accessibilityLabel(accessibilityLabel)
         .help(isLocked ? "Inspect runtime controls; changes unlock when the current turn finishes." : unlockedHelp)
     }
 
-    private func authorityMenu(compact: Bool) -> some View {
-        Group {
-            if thread.kind == .coding {
-                Menu {
-                    Text("Coding always starts with a read-only, network-disabled plan.")
-                    Text("Your explicit plan approval grants one network-disabled turn inside a new isolated worktree.")
-                    if isLocked {
-                        Text("Changes unlock when the current turn finishes")
-                    } else {
-                        Divider()
-                        Button("Runtime details…", systemImage: "info.circle", action: editDetails)
-                    }
-                } label: {
-                    ComposerRuntimeControlLabel(
-                        title: "Plan first",
-                        systemImage: "checkmark.shield.fill",
-                        compact: compact
-                    )
-                }
-                .accessibilityLabel("Access, plan first with explicit isolated implementation approval")
-                .help("Read-only plan first; isolated implementation only after explicit approval")
-            } else {
-                Menu {
-                    Picker("Access", selection: authoritySelection) {
-                        ForEach(ConversationRuntimeMode.allCases, id: \.self) { mode in
-                            Text(mode.label).tag(mode)
+    private var accessControl: some View {
+        Button {
+            showsAccessOptions.toggle()
+        } label: {
+            ComposerRuntimeControlLabel(
+                title: currentAccess.title,
+                systemImage: currentAccess.systemImage,
+                showsChevron: true,
+                tint: currentAccess.isWarning ? Nord.auroraYellow : .secondary
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(
+            "Access, \(ConversationRuntimeCatalog.boundarySummary(provider: thread.provider, runtimeMode: thread.runtimeMode, networkAccess: thread.networkAccess))"
+        )
+        .help(isLocked
+            ? "Inspect access controls; changes unlock when the current turn finishes."
+            : ConversationRuntimeCatalog.boundarySummary(
+                provider: thread.provider,
+                runtimeMode: thread.runtimeMode,
+                networkAccess: thread.networkAccess
+            ))
+        .popover(isPresented: $showsAccessOptions, arrowEdge: .bottom) {
+            DesktopComposerAccessPopover(
+                provider: thread.provider,
+                selectedMode: thread.runtimeMode,
+                networkAccess: thread.networkAccess,
+                managesNetwork: ConversationRuntimeCatalog.managesNetwork(thread.provider),
+                isLocked: isLocked,
+                selectMode: { authoritySelection.wrappedValue = $0 },
+                setNetworkAccess: { networkSelection.wrappedValue = $0 },
+                editDetails: editDetails
+            )
+        }
+    }
+
+    private var overflowMenu: some View {
+        Menu {
+            if layout.overflowControls.contains(.thinking) {
+                Section("Thinking") {
+                    Picker("Thinking", selection: reasoningSelection) {
+                        ForEach(
+                            ConversationRuntimeCatalog.reasoningEfforts(
+                                provider: thread.provider,
+                                model: thread.model,
+                                capabilities: capabilities
+                            ),
+                            id: \.self
+                        ) { effort in
+                            Text(effort == "xhigh" ? "Extra high" : effort.capitalized).tag(effort)
                         }
                     }
                     .disabled(isLocked)
-                    Divider()
+                }
+            }
+            if layout.overflowControls.contains(.access) {
+                Section("Access") {
+                    Picker("Access", selection: authoritySelection) {
+                        ForEach(ConversationRuntimeMode.allCases, id: \.self) { mode in
+                            Text(DesktopComposerRuntimePresentation.access(mode).title).tag(mode)
+                        }
+                    }
+                    .disabled(isLocked)
                     if ConversationRuntimeCatalog.managesNetwork(thread.provider) {
                         Toggle("Network access", isOn: networkSelection)
                             .disabled(isLocked || thread.runtimeMode == .fullAccess)
                         if thread.runtimeMode == .fullAccess {
-                            Text("Network is required by Full access")
+                            Label("Network is required by Full access", systemImage: "exclamationmark.triangle.fill")
+                                .foregroundStyle(Nord.auroraYellow)
                         }
                     } else {
                         Text("Network controlled by \(thread.provider)")
                     }
-                    if isLocked {
-                        Text("Changes unlock when the current turn finishes")
-                    } else {
-                        Divider()
-                        Button("Runtime details…", systemImage: "info.circle", action: editDetails)
-                    }
-                } label: {
-                    ComposerRuntimeControlLabel(
-                        title: thread.runtimeMode.label,
-                        systemImage: thread.runtimeMode == .fullAccess
-                            ? "exclamationmark.shield.fill"
-                            : "checkmark.shield",
-                        compact: compact
-                    )
-                    .foregroundStyle(thread.runtimeMode == .fullAccess ? Nord.auroraYellow : .secondary)
                 }
-                .accessibilityLabel(
-                    "Access, \(ConversationRuntimeCatalog.boundarySummary(provider: thread.provider, runtimeMode: thread.runtimeMode, networkAccess: thread.networkAccess))"
-                )
-                .help(ConversationRuntimeCatalog.boundarySummary(
-                    provider: thread.provider,
-                    runtimeMode: thread.runtimeMode,
-                    networkAccess: thread.networkAccess
-                ))
+            }
+            if isLocked {
+                Divider()
+                Text("Changes unlock when the current turn finishes")
+            } else {
+                Divider()
+                Button("Runtime details…", systemImage: "info.circle", action: editDetails)
+            }
+        } label: {
+            ComposerRuntimeControlLabel(
+                title: nil,
+                systemImage: "ellipsis",
+                showsChevron: false
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .accessibilityLabel("More runtime settings")
+        .accessibilityValue(
+            layout.overflowControls.contains(.access)
+                ? "Thinking \(thinkingTitle), access \(currentAccess.title)"
+                : "Thinking \(thinkingTitle)"
+        )
+        .help(isLocked ? "Inspect runtime controls; changes unlock when the current turn finishes." : "More runtime settings")
+    }
+
+    private var controlDivider: some View {
+        Rectangle()
+            .fill(Nord.polarNight3.opacity(0.72))
+            .frame(width: 1, height: 14)
+            .padding(.horizontal, 2)
+            .accessibilityHidden(true)
+    }
+}
+
+private struct ComposerRuntimeControlLabel: View {
+    let title: String?
+    let systemImage: String
+    let showsChevron: Bool
+    var tint: Color = .secondary
+    @State private var isHovering = false
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: systemImage)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(tint)
+            if let title {
+                Text(title)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if showsChevron {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+        }
+        .font(.system(size: DesktopComposerPresentation.toolbarPointSize, weight: .medium))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, title == nil ? 7 : 8)
+        .frame(height: 28)
+        .background(
+            isHovering ? Nord.polarNight2.opacity(0.72) : Color.clear,
+            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .onHover { isHovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: isHovering)
+    }
+}
+
+private struct DesktopComposerAccessPopover: View {
+    let provider: String
+    let selectedMode: ConversationRuntimeMode
+    let networkAccess: Bool
+    let managesNetwork: Bool
+    let isLocked: Bool
+    let selectMode: (ConversationRuntimeMode) -> Void
+    let setNetworkAccess: (Bool) -> Void
+    let editDetails: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 3) {
+                Label("Access", systemImage: "lock.shield")
+                    .font(.headline)
+                Text("Choose how much routine work can proceed without stopping for approval.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, 4)
+            .padding(.bottom, 2)
+
+            if isLocked {
+                Label("Inspecting while the current turn finishes", systemImage: "lock.fill")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 4)
+            }
+
+            ForEach(ConversationRuntimeMode.allCases, id: \.self) { mode in
+                DesktopComposerAccessOptionButton(
+                    presentation: DesktopComposerRuntimePresentation.access(mode),
+                    isSelected: selectedMode == mode
+                ) {
+                    selectMode(mode)
+                    dismiss()
+                }
+                .disabled(isLocked)
+            }
+
+            Divider()
+                .padding(.vertical, 2)
+
+            if managesNetwork {
+                Toggle(isOn: Binding(
+                    get: { selectedMode == .fullAccess ? true : networkAccess },
+                    set: { newValue in setNetworkAccess(newValue) }
+                )) {
+                    DesktopComposerNetworkAccessLabel(
+                        isRequired: selectedMode == .fullAccess
+                    )
+                }
+                .toggleStyle(.switch)
+                .disabled(isLocked || selectedMode == .fullAccess)
+                .padding(.horizontal, 6)
+            } else {
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Network follows \(provider)")
+                            .font(.subheadline.weight(.medium))
+                        Text("The provider's native permission mode remains authoritative.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                } icon: {
+                    Image(systemName: "network")
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 6)
+            }
+
+            Divider()
+                .padding(.vertical, 2)
+
+            Button {
+                dismiss()
+                DispatchQueue.main.async { editDetails() }
+            } label: {
+                Label("Runtime details…", systemImage: "slider.horizontal.3")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 7)
+                    .frame(height: 28)
+            }
+            .buttonStyle(.plain)
+            .disabled(isLocked)
+            .contentShape(Rectangle())
+            .accessibilityHint("Opens all conversation runtime settings")
+        }
+        .padding(10)
+        .frame(width: 350)
+        .background(Nord.polarNight1)
+    }
+}
+
+private struct DesktopComposerNetworkAccessLabel: View {
+    let isRequired: Bool
+
+    var body: some View {
+        Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 2) {
+            GridRow {
+                Image(systemName: "network")
+                    .foregroundStyle(.secondary)
+                Text("Network access")
+                    .font(.subheadline.weight(.medium))
+            }
+            GridRow {
+                Color.clear
+                    .frame(width: 16, height: 1)
+                Text(isRequired
+                    ? "Required while Full access is selected."
+                    : "Allow this provider to reach network services.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
     }
 }
 
-private struct ComposerRuntimeControlLabel: View {
-    let title: String
-    let systemImage: String
-    let compact: Bool
+private struct DesktopComposerAccessOptionButton: View {
+    let presentation: DesktopComposerAccessPresentation
+    let isSelected: Bool
+    let action: () -> Void
+    @State private var isHovering = false
 
     var body: some View {
-        HStack(spacing: 5) {
-            Image(systemName: systemImage)
-            if !compact {
-                Text(title)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .bold))
-                    .foregroundStyle(.tertiary)
+        Button(action: action) {
+            Label {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(presentation.title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(presentation.isWarning ? Nord.auroraYellow : Color.primary)
+                    Text(presentation.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } icon: {
+                Image(systemName: presentation.systemImage)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(presentation.isWarning ? Nord.auroraYellow : Nord.frost1)
+                    .frame(width: 18, height: 20)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .overlay(alignment: .topTrailing) {
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(Nord.frost1)
+                        .padding(.top, 3)
+                }
+            }
+            .padding(.trailing, isSelected ? 20 : 0)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 8)
+            .background(
+                isSelected
+                    ? (presentation.isWarning ? Nord.auroraYellow.opacity(0.12) : Nord.frost1.opacity(0.12))
+                    : (isHovering ? Nord.polarNight2.opacity(0.72) : Color.clear),
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
-        .font(.system(size: DesktopComposerPresentation.toolbarPointSize, weight: .medium))
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, compact ? 5 : 6)
-        .frame(height: 28)
-        .contentShape(Rectangle())
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .accessibilityLabel("\(presentation.title). \(presentation.detail)")
+        .accessibilityValue(isSelected ? "Selected" : "Not selected")
     }
 }
 
@@ -5142,10 +5363,10 @@ private struct ConversationRuntimeEditor: View {
             } else {
                 Picker("Permission mode", selection: $runtimeMode) {
                     ForEach(ConversationRuntimeMode.allCases, id: \.self) { mode in
-                        Text(mode.label).tag(mode)
+                        Text(DesktopComposerRuntimePresentation.access(mode).title).tag(mode)
                     }
                 }
-                Text(runtimeMode.detail)
+                Text(DesktopComposerRuntimePresentation.access(runtimeMode).detail)
                     .font(.caption)
                     .foregroundStyle(runtimeMode == .fullAccess ? Nord.auroraYellow : .secondary)
                 if ConversationRuntimeCatalog.managesNetwork(provider) {
