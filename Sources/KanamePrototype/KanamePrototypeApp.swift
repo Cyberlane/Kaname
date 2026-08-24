@@ -130,6 +130,7 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        KanameDevelopmentRuntimeLogger.shared.record(.applicationStarted)
         mouseBackMonitor = NSEvent.addLocalMonitorForEvents(matching: .otherMouseUp) { event in
             guard event.buttonNumber == 3 else { return event }
             let handled = DesktopBackCommandRouter.shared.performBack()
@@ -157,7 +158,7 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
         let buildValue = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion")
         let version = (versionValue as? String) ?? "development"
         let build = (buildValue as? String) ?? "0"
-        let payload: [String: Any] = [
+        var payload: [String: Any] = [
             "channel": environment.channel.rawValue,
             "bundleIdentifier": Bundle.main.bundleIdentifier ?? environment.bundleIdentifier,
             "executablePath": Bundle.main.executableURL?.resolvingSymlinksInPath().path ?? "",
@@ -172,6 +173,10 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
             "healthNonce": commandLineValue(after: "--kaname-update-nonce") ?? "",
             "bundleDigest": commandLineValue(after: "--kaname-update-bundle-digest") ?? "",
         ]
+        if let runtimeLogSessionID = KanameDevelopmentRuntimeLogger.shared.sessionID {
+            payload["runtimeLogSessionID"] = runtimeLogSessionID
+            payload["runtimeLogSchemaVersion"] = KanameDevelopmentRuntimeLogRecord.currentSchemaVersion
+        }
         do {
             try FileManager.default.createDirectory(
                 at: environment.runtimeDirectory,
@@ -188,12 +193,15 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
                 [.posixPermissions: 0o600],
                 ofItemAtPath: environment.healthHandshakeURL.path
             )
+            KanameDevelopmentRuntimeLogger.shared.record(.applicationReady)
         } catch {
+            KanameDevelopmentRuntimeLogger.shared.record(.healthHandshakeFailed)
             fputs("Kaname could not write its private UI health handshake.\n", stderr)
         }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        KanameDevelopmentRuntimeLogger.shared.record(.applicationWillTerminate)
         if let mouseBackMonitor {
             NSEvent.removeMonitor(mouseBackMonitor)
             self.mouseBackMonitor = nil

@@ -34,6 +34,35 @@ struct DesktopComposerCommandTests {
     }
 
     @Test
+    func selectionProjectionHandlesCurrentUnicodeAndAStalePreviousDraftIndex() {
+        let currentDraft = "日本語👩🏽‍💻xyz"
+        let currentLowerBound = currentDraft.index(currentDraft.startIndex, offsetBy: 3)
+        let currentUpperBound = currentDraft.index(after: currentLowerBound)
+        #expect(DesktopComposerSelectionProjection.project(
+            currentLowerBound..<currentUpperBound,
+            in: currentDraft,
+            fallbackCursorOffset: nil
+        ) == DesktopComposerSelectionProjection(
+            cursorOffset: 3,
+            hasSelection: true,
+            recoveredStaleSelection: false
+        ))
+
+        let previousDraft = "abcdef"
+        let staleLowerBound = previousDraft.index(previousDraft.startIndex, offsetBy: 4)
+        let replacementDraft = "x"
+        #expect(DesktopComposerSelectionProjection.project(
+            staleLowerBound..<previousDraft.endIndex,
+            in: replacementDraft,
+            fallbackCursorOffset: 42
+        ) == DesktopComposerSelectionProjection(
+            cursorOffset: 1,
+            hasSelection: false,
+            recoveredStaleSelection: true
+        ))
+    }
+
+    @Test
     func queryRejectsSelectionsArgumentsAndSlashInsideProse() throws {
         let selectedText = "/plan"
         let selectionEnd = selectedText.endIndex
@@ -112,9 +141,34 @@ struct DesktopComposerCommandTests {
     }
 
     @Test
-    func composerPresentationReservesThreeLinesAndCapsAtEight() {
-        #expect(DesktopComposerPresentation.minimumLines == 3)
+    func composerPresentationStartsCompactStaysReadableAndCapsAtEightLines() {
+        #expect(DesktopComposerPresentation.minimumLines == 1)
         #expect(DesktopComposerPresentation.maximumLines == 8)
+        #expect(DesktopComposerPresentation.inputPointSize == 16)
+        #expect(DesktopComposerPresentation.toolbarPointSize >= 13)
+        #expect(DesktopComposerPresentation.contextPointSize >= 12.5)
+        #expect(DesktopComposerPresentation.maximumWidth == 760)
+        #expect(DesktopComposerPresentation.inputHorizontalPadding == 16)
+        #expect(DesktopComposerPresentation.inputTopPadding == 14)
+        #expect(DesktopComposerPresentation.inputBottomPadding == 12)
+    }
+
+    @Test
+    func returnPolicySubmitsOnlyPlainReturnOutsideIMEComposition() {
+        #expect(DesktopComposerReturnPolicy.disposition() == .submit)
+        #expect(DesktopComposerReturnPolicy.disposition(shift: true) == .insertNewline)
+        #expect(DesktopComposerReturnPolicy.disposition(command: true) == .nativeEditing)
+        #expect(DesktopComposerReturnPolicy.disposition(option: true) == .nativeEditing)
+        #expect(DesktopComposerReturnPolicy.disposition(control: true) == .nativeEditing)
+        #expect(DesktopComposerReturnPolicy.disposition(hasMarkedText: true) == .nativeEditing)
+        #expect(DesktopComposerReturnPolicy.disposition(
+            shift: true,
+            hasMarkedText: true
+        ) == .nativeEditing)
+        #expect(DesktopComposerReturnPolicy.disposition(
+            shift: true,
+            command: true
+        ) == .nativeEditing)
     }
 
     private func resolvedQueryAndEdit(

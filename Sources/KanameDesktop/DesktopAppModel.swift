@@ -1551,16 +1551,25 @@ public final class DesktopAppModel: ObservableObject {
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
     private var providerEventIDs: Set<String>
+    // SwiftUI owns the visible draft. This non-published cache keeps keystrokes
+    // off the monolithic workspace encoder until an idle or explicit checkpoint.
+    private var composerDraftCache: [String: String] = [:]
+    private var composerDraftSaveTask: _Concurrency.Task<Void, Never>?
+    private var composerDraftGeneration: UInt64 = 0
+    private var persistedComposerDraftGeneration: UInt64 = 0
+    private let composerDraftSaveDelay: Duration
 
     public init(
         store: any DesktopStateStoring = FileDesktopStateStore.applicationSupport(),
-        now: @escaping () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1_000) }
+        now: @escaping () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1_000) },
+        composerDraftSaveDelay: Duration = .milliseconds(300)
     ) {
         self.store = store
         self.now = now
         self.encoder = JSONEncoder()
         self.decoder = JSONDecoder()
         self.providerEventIDs = []
+        self.composerDraftSaveDelay = composerDraftSaveDelay
         self.recoveryStatus = nil
         let timestamp = now()
         let runtimeRecoveryLockDetected: Bool
@@ -1696,6 +1705,8 @@ public final class DesktopAppModel: ObservableObject {
             }
         }
         providerEventIDs = Set(snapshot.operations.providerEvents.map(\.id))
+        composerDraftCache = snapshot.operations.composerDrafts
+        persistedComposerDraftGeneration = composerDraftGeneration
     }
 
     public var isRecoveryReadOnly: Bool { recoveryStatus != nil }
@@ -1972,7 +1983,7 @@ public final class DesktopAppModel: ObservableObject {
     }
 
     public func composerDraft(threadID: String) -> String {
-        snapshot.operations.composerDrafts[threadID] ?? ""
+        composerDraftCache[threadID] ?? ""
     }
 
     public func composerAttachments(threadID: String) -> [ConversationImageAttachment] {
@@ -1982,14 +1993,29 @@ public final class DesktopAppModel: ObservableObject {
     @discardableResult
     public func updateComposerDraft(threadID: String, body: String) -> Bool {
         guard snapshot.threads.contains(where: { $0.id == threadID }), body.utf8.count <= 32_000 else { return false }
-        mutate { snapshot in
-            if body.isEmpty {
-                snapshot.operations.composerDrafts.removeValue(forKey: threadID)
-            } else {
-                snapshot.operations.composerDrafts[threadID] = body
-            }
+        guard recoveryStatus == nil else {
+            persistenceError = "Kaname is keeping this recovery workspace read-only until verified state is restored or exported."
+            return false
         }
+        guard composerDraftCache[threadID] != body else { return persistenceError == nil }
+        if body.isEmpty {
+            composerDraftCache.removeValue(forKey: threadID)
+        } else {
+            composerDraftCache[threadID] = body
+        }
+        composerDraftGeneration &+= 1
+        scheduleComposerDraftPersistence()
         return persistenceError == nil
+    }
+
+    @discardableResult
+    public func flushComposerDrafts() -> Bool {
+        guard composerDraftGeneration != persistedComposerDraftGeneration else {
+            return true
+        }
+        composerDraftSaveTask?.cancel()
+        composerDraftSaveTask = nil
+        return mutate { _ in }
     }
 
     @discardableResult
@@ -2025,6 +2051,11 @@ public final class DesktopAppModel: ObservableObject {
     }
 
     public func clearComposerDraft(threadID: String) {
+        if composerDraftCache.removeValue(forKey: threadID) != nil {
+            composerDraftGeneration &+= 1
+        }
+        composerDraftSaveTask?.cancel()
+        composerDraftSaveTask = nil
         mutate { snapshot in
             snapshot.operations.composerDrafts.removeValue(forKey: threadID)
             snapshot.operations.composerAttachmentDrafts.removeValue(forKey: threadID)
@@ -4796,6 +4827,9 @@ public final class DesktopAppModel: ObservableObject {
 
     @discardableResult
     public func exportRecoveryBackup(to destination: URL) throws -> DesktopBackupManifest {
+        guard flushComposerDrafts() else {
+            throw DesktopModelRecoveryError.persistenceVerificationFailed
+        }
         guard let fileStore = store as? FileDesktopStateStore else {
             throw DesktopModelRecoveryError.recoveryUnavailable
         }
@@ -5036,6 +5070,7 @@ public final class DesktopAppModel: ObservableObject {
             throw error
         }
         snapshot = starter
+        resetComposerDraftCacheFromSnapshot()
         providerEventIDs = []
         recoveryStatus = nil
         persistenceError = nil
@@ -5122,10 +5157,14 @@ public final class DesktopAppModel: ObservableObject {
         }
         var changed = snapshot
         change(&changed)
+        changed.operations.composerDrafts = composerDraftCache
         changed.lastSavedAtUnixMillis = now()
         do {
             try store.save(try encoder.encode(changed))
             snapshot = changed
+            persistedComposerDraftGeneration = composerDraftGeneration
+            composerDraftSaveTask?.cancel()
+            composerDraftSaveTask = nil
             persistenceError = nil
             return true
         } catch {
@@ -5436,9 +5475,36 @@ public final class DesktopAppModel: ObservableObject {
             try (store as? FileDesktopStateStore)?.clearRecoveryLockMarker()
         }
         snapshot = restored.snapshot
+        resetComposerDraftCacheFromSnapshot()
         providerEventIDs = Set(restored.snapshot.operations.providerEvents.map(\.id))
         recoveryStatus = nil
         persistenceError = nil
+    }
+
+    private func scheduleComposerDraftPersistence() {
+        let generation = composerDraftGeneration
+        composerDraftSaveTask?.cancel()
+        composerDraftSaveTask = _Concurrency.Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await _Concurrency.Task<Never, Never>.sleep(for: composerDraftSaveDelay)
+            } catch is CancellationError {
+                return
+            } catch {
+                return
+            }
+            guard generation == composerDraftGeneration else { return }
+            composerDraftSaveTask = nil
+            _ = mutate { _ in }
+        }
+    }
+
+    private func resetComposerDraftCacheFromSnapshot() {
+        composerDraftSaveTask?.cancel()
+        composerDraftSaveTask = nil
+        composerDraftCache = snapshot.operations.composerDrafts
+        composerDraftGeneration &+= 1
+        persistedComposerDraftGeneration = composerDraftGeneration
     }
 }
 

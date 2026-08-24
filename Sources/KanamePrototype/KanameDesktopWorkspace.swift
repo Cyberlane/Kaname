@@ -10,6 +10,11 @@ import SwiftUI
 #if os(macOS)
 import AppKit
 import UniformTypeIdentifiers
+private let kanameDesktopDidResignActiveNotification = NSApplication.didResignActiveNotification
+private let kanameDesktopWillTerminateNotification = NSApplication.willTerminateNotification
+#else
+private let kanameDesktopDidResignActiveNotification = Notification.Name("com.cyberlane.kaname.desktop.lifecycle.did-resign-active")
+private let kanameDesktopWillTerminateNotification = Notification.Name("com.cyberlane.kaname.desktop.lifecycle.will-terminate")
 #endif
 
 extension Notification.Name {
@@ -545,6 +550,12 @@ struct KanameDesktopWorkspace: View {
         .onChange(of: showsInspector) { _ in persistUIRestoreState() }
         .onDisappear {
             _Concurrency.Task { await link.stop() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: kanameDesktopDidResignActiveNotification)) { _ in
+            _ = model.flushComposerDrafts()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: kanameDesktopWillTerminateNotification)) { _ in
+            _ = model.flushComposerDrafts()
         }
     }
 
@@ -2588,9 +2599,11 @@ private struct DesktopThreadConversation: View {
     @State private var runtimeNetworkAccess = false
     @State private var narrativeRowLimit = DesktopConversationNarrativePresentation.defaultMaximumRows
     @State private var conversationSearch = ""
+    @State private var showsConversationSearch = false
     @State private var followsLatest = true
     @State private var hasNewNarrativeContent = false
     @FocusState private var composerFocused: Bool
+    @FocusState private var conversationSearchFocused: Bool
 #if os(macOS)
     @State private var sheetPreviousResponder: NSResponder?
     @State private var pasteMonitor: Any?
@@ -2706,6 +2719,7 @@ private struct DesktopThreadConversation: View {
 #endif
         }
         .onDisappear {
+            _ = model.flushComposerDrafts()
 #if os(macOS)
             removeImagePasteMonitor()
 #endif
@@ -2721,6 +2735,7 @@ private struct DesktopThreadConversation: View {
             panel = .conversation
             narrativeRowLimit = DesktopConversationNarrativePresentation.defaultMaximumRows
             conversationSearch = ""
+            showsConversationSearch = false
             selectedRunID = nil
             conversationAnchorID = nil
             followsLatest = true
@@ -2766,6 +2781,7 @@ private struct DesktopThreadConversation: View {
                     AttentionPill(attention: thread.attention)
                 }
 
+                conversationSearchButton
                 conversationActionsMenu
             }
             .padding(.horizontal, 18)
@@ -2781,6 +2797,28 @@ private struct DesktopThreadConversation: View {
             .frame(height: 42)
         }
         .background(Nord.polarNight1)
+    }
+
+    private var conversationSearchButton: some View {
+        Button {
+            if panel == .conversation {
+                showsConversationSearch.toggle()
+            } else {
+                panel = .conversation
+                showsConversationSearch = true
+            }
+            if showsConversationSearch {
+                DispatchQueue.main.async { conversationSearchFocused = true }
+            } else {
+                conversationSearch = ""
+            }
+        } label: {
+            Image(systemName: showsConversationSearch ? "xmark" : "magnifyingglass")
+                .frame(width: 28, height: 28)
+        }
+        .buttonStyle(.plain)
+        .help(showsConversationSearch ? "Close conversation search" : "Search conversation")
+        .accessibilityLabel(showsConversationSearch ? "Close conversation search" : "Search conversation")
     }
 
     private var conversationActionsMenu: some View {
@@ -2859,29 +2897,33 @@ private struct DesktopThreadConversation: View {
 
     private var conversation: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
-                TextField("Find conversation or activity", text: $conversationSearch)
-                    .textFieldStyle(.plain)
-                if !conversationSearch.isEmpty {
-                    Text("\(narrative.count) result\(narrative.count == 1 ? "" : "s")")
-                        .font(.caption)
+            if showsConversationSearch {
+                HStack(spacing: 10) {
+                    Image(systemName: "magnifyingglass")
                         .foregroundStyle(.secondary)
-                    Button {
-                        conversationSearch = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
+                    TextField("Find conversation or activity", text: $conversationSearch)
+                        .font(.system(size: 14))
+                        .textFieldStyle(.plain)
+                        .focused($conversationSearchFocused)
+                    if !conversationSearch.isEmpty {
+                        Text("\(narrative.count) result\(narrative.count == 1 ? "" : "s")")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                        Button {
+                            conversationSearch = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Clear conversation search")
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Clear conversation search")
                 }
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .background(Nord.polarNight1)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 9)
+                .background(Nord.polarNight1)
 
-            Divider()
+                Divider()
+            }
 
             ScrollViewReader { proxy in
                 ZStack(alignment: .bottomTrailing) {
@@ -2978,7 +3020,6 @@ private struct DesktopThreadConversation: View {
                 }
             }
 
-            Divider()
             if let run = latestRecoverableRun,
                model.nextQueuedProviderRun(threadID: thread.id) == nil,
                !runtime.isRunning(threadID: thread.id) {
@@ -2995,7 +3036,14 @@ private struct DesktopThreadConversation: View {
                 }
                 .padding(.horizontal, 14)
                 .padding(.top, 10)
+                .frame(maxWidth: DesktopComposerPresentation.maximumWidth)
             }
+            composerDock
+        }
+    }
+
+    private var composerDock: some View {
+        VStack(alignment: .leading, spacing: 6) {
             VStack(alignment: .leading, spacing: 0) {
                 if !attachments.isEmpty {
                     ScrollView(.horizontal, showsIndicators: false) {
@@ -3043,13 +3091,14 @@ private struct DesktopThreadConversation: View {
                     axis: .vertical
                 )
                     .textFieldStyle(.plain)
+                    .font(.system(size: DesktopComposerPresentation.inputPointSize))
                     .lineLimit(DesktopComposerPresentation.minimumLines...DesktopComposerPresentation.maximumLines)
-                    .padding(.horizontal, 12)
-                    .padding(.top, 11)
-                    .padding(.bottom, 8)
+                    .padding(.horizontal, DesktopComposerPresentation.inputHorizontalPadding)
+                    .padding(.top, DesktopComposerPresentation.inputTopPadding)
+                    .padding(.bottom, DesktopComposerPresentation.inputBottomPadding)
                     .focused($composerFocused)
                     .disabled(!canSendMessage)
-                    .onSubmit(submitComposer)
+                    .onKeyPress(.return, phases: .down, action: handleComposerReturn)
                     .onChange(of: draft) { body in
                         composerCommandMenuDismissed = false
                         composerCursorOffset = min(composerCursorOffset ?? body.count, body.count)
@@ -3061,20 +3110,26 @@ private struct DesktopThreadConversation: View {
                         reconcileComposerCommandSelection()
                     }
                     .accessibilityLabel("Message composer for \(thread.title)")
+                    .accessibilityHint("Return sends. Shift-Return inserts a new line.")
+                    .accessibilityIdentifier("thread-composer")
 
                 GeometryReader { geometry in
-                    composerAccessoryRow(compact: geometry.size.width < 360)
+                    composerAccessoryRow(compact: geometry.size.width < 520)
                 }
-                .frame(height: 25)
-                .padding(.leading, 7)
-                .padding(.trailing, 8)
-                .padding(.bottom, 8)
+                .frame(height: 32)
+                .padding(.leading, 9)
+                .padding(.trailing, 9)
+                .padding(.bottom, 9)
             }
-            .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .background(
+                Nord.polarNight1,
+                in: RoundedRectangle(cornerRadius: DesktopComposerPresentation.cornerRadius, style: .continuous)
+            )
             .overlay {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .strokeBorder(Nord.polarNight3.opacity(0.55), lineWidth: 1)
+                RoundedRectangle(cornerRadius: DesktopComposerPresentation.cornerRadius, style: .continuous)
+                    .strokeBorder(conversationAccent.opacity(thread.kind == .coding ? 0.58 : 0.32), lineWidth: 1)
             }
+            .shadow(color: Color.black.opacity(0.2), radius: 10, y: 4)
 #if os(macOS)
             .dropDestination(for: URL.self) { urls, _ in
                 importImageURLs(urls)
@@ -3084,14 +3139,42 @@ private struct DesktopThreadConversation: View {
                     .frame(width: 0, height: 0)
             }
 #endif
-            .padding(14)
-            .background(Nord.polarNight0)
-            .onChange(of: runtime.isRunning(threadID: thread.id)) { isRunning in
-                postDesktopAccessibilityAnnouncement(
-                    isRunning ? "\(thread.provider) is responding" : "\(thread.provider) finished responding"
-                )
-            }
+
+            composerContextShelf
         }
+        .frame(maxWidth: DesktopComposerPresentation.maximumWidth)
+        .padding(.horizontal, 14)
+        .padding(.top, 10)
+        .padding(.bottom, 11)
+        .frame(maxWidth: .infinity)
+        .background(Nord.polarNight0)
+        .onChange(of: runtime.isRunning(threadID: thread.id)) { isRunning in
+            postDesktopAccessibilityAnnouncement(
+                isRunning ? "\(thread.provider) is responding" : "\(thread.provider) finished responding"
+            )
+        }
+    }
+
+    private var composerContextShelf: some View {
+        HStack(spacing: 6) {
+            ForEach(Array(composerContextLabels.enumerated()), id: \.offset) { index, label in
+                if index > 0 {
+                    Circle()
+                        .fill(Color.secondary.opacity(0.65))
+                        .frame(width: 3, height: 3)
+                        .accessibilityHidden(true)
+                }
+                Text(label)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer(minLength: 0)
+        }
+        .font(.system(size: DesktopComposerPresentation.contextPointSize, weight: .medium))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 8)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Context: \(composerContextLabels.joined(separator: ", "))")
     }
 
     private func applyComposerFocusRequest() {
@@ -3152,8 +3235,22 @@ private struct DesktopThreadConversation: View {
         }
         switch composerSelection.indices {
         case let .selection(range):
-            composerCursorOffset = draft.distance(from: draft.startIndex, to: range.lowerBound)
-            composerHasSelection = !range.isEmpty
+            let projection = DesktopComposerSelectionProjection.project(
+                range,
+                in: draft,
+                fallbackCursorOffset: composerCursorOffset
+            )
+            composerCursorOffset = projection.cursorOffset
+            composerHasSelection = projection.hasSelection
+            if projection.recoveredStaleSelection {
+                KanameDevelopmentRuntimeLogger.shared.record(
+                    .composerSelectionRecovered,
+                    measurements: [
+                        .draftCharacterCount: draft.count,
+                        .fallbackCursorOffset: projection.cursorOffset,
+                    ]
+                )
+            }
         case .multiSelection:
             composerCursorOffset = nil
             composerHasSelection = true
@@ -3169,6 +3266,40 @@ private struct DesktopThreadConversation: View {
 
     private func selectComposerCommand(_ commandID: DesktopComposerCommandID) {
         composerCommandSelection = DesktopComposerCommandSelectionState(selectedCommandID: commandID)
+    }
+
+    private func handleComposerReturn(_ press: KeyPress) -> KeyPress.Result {
+        let modifiers = press.modifiers
+#if os(macOS)
+        let responder = currentDesktopResponder()
+        let hasMarkedText = (responder as? NSTextInputClient)?.hasMarkedText() == true
+#else
+        let hasMarkedText = false
+#endif
+        let disposition = DesktopComposerReturnPolicy.disposition(
+            shift: modifiers.contains(.shift),
+            command: modifiers.contains(.command),
+            option: modifiers.contains(.option),
+            control: modifiers.contains(.control),
+            hasMarkedText: hasMarkedText
+        )
+        switch disposition {
+        case .submit:
+            submitComposer()
+            return .handled
+        case .insertNewline:
+#if os(macOS)
+            guard let editor = responder as? NSTextView else {
+                return .handled
+            }
+            editor.insertNewlineIgnoringFieldEditor(nil)
+            return .handled
+#else
+            return .ignored
+#endif
+        case .nativeEditing:
+            return .ignored
+        }
     }
 
 #if os(macOS)
@@ -3265,7 +3396,7 @@ private struct DesktopThreadConversation: View {
 
     private func applyComposerCommandEdit(_ edit: DesktopComposerCommandEdit) {
         draft = edit.text
-        let insertionOffset = min(edit.insertionOffset, draft.count)
+        let insertionOffset = min(max(edit.insertionOffset, 0), draft.count)
         let insertionPoint = draft.index(draft.startIndex, offsetBy: insertionOffset)
         composerSelection = TextSelection(insertionPoint: insertionPoint)
         composerCursorOffset = insertionOffset
@@ -3326,23 +3457,24 @@ private struct DesktopThreadConversation: View {
     }
 
     private func composerAccessoryRow(compact: Bool) -> some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 5) {
 #if os(macOS)
-            Button(action: chooseImages) {
-                Image(systemName: "paperclip")
-            }
-            .buttonStyle(.plain)
-            .disabled(
-                !imageAttachmentsSupported
-                    || isImportingAttachments
-                    || attachments.count >= ConversationImageAttachment.maximumCountPerMessage
-            )
-            .help(
-                imageAttachmentsSupported
-                    ? "Attach images, or paste with Command-V"
-                    : "Choose Codex, Claude, or OpenCode to attach images"
-            )
-            .accessibilityLabel("Attach images")
+            Button("Attach images", systemImage: "plus", action: chooseImages)
+                .labelStyle(.iconOnly)
+                .font(.system(size: DesktopComposerPresentation.toolbarPointSize, weight: .semibold))
+                .frame(width: 26, height: 26)
+                .buttonStyle(.plain)
+                .disabled(
+                    !imageAttachmentsSupported
+                        || isImportingAttachments
+                        || attachments.count >= ConversationImageAttachment.maximumCountPerMessage
+                )
+                .help(
+                    imageAttachmentsSupported
+                        ? "Attach images, or paste with Command-V"
+                        : "Choose Codex, Claude, or OpenCode to attach images"
+                )
+                .accessibilityLabel("Attach images")
 #endif
 
             DesktopComposerRuntimeControls(
@@ -3363,25 +3495,66 @@ private struct DesktopThreadConversation: View {
                     .accessibilityLabel("Preparing image attachments")
             }
 
-            if runtime.isRunning(threadID: thread.id) {
+            if runtime.isRunning(threadID: thread.id), composerPrimaryAction.kind != .stop {
                 ProgressView()
                     .controlSize(.small)
                     .help("\(thread.provider) is responding. New messages queue in order.")
                     .accessibilityLabel("\(thread.provider) is responding; new messages queue in order")
             }
 
-            Button(action: submitComposer) {
-                Image(systemName: "arrow.up.circle.fill")
-                    .font(.title2)
-                    .foregroundStyle(
-                        !hasSendableContent
-                            ? Color.secondary
-                            : Nord.frost1
-                    )
+            if composerPrimaryAction.kind == .queue {
+                Button {
+                    runtime.interrupt(threadID: thread.id)
+                } label: {
+                    Image(systemName: "stop.fill")
+                        .font(.system(size: 11, weight: .bold))
+                        .frame(width: 27, height: 27)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Nord.auroraRed)
+                .help("Stop the current turn")
+                .accessibilityLabel("Stop current turn")
+            }
+
+            Button(action: performComposerPrimaryAction) {
+                ViewThatFits(in: .horizontal) {
+                    Label(composerPrimaryAction.title, systemImage: composerPrimaryAction.systemImage)
+                    Image(systemName: composerPrimaryAction.systemImage)
+                }
+                .font(.system(size: DesktopComposerPresentation.toolbarPointSize, weight: .semibold))
+                .padding(.horizontal, compact ? 8 : 10)
+                .frame(minWidth: 30, minHeight: 29)
+                .foregroundStyle(composerPrimaryAction.isEnabled ? Nord.polarNight0 : Color.secondary)
+                .background(
+                    composerPrimaryAction.isEnabled
+                        ? (composerPrimaryAction.kind == .stop ? Nord.auroraRed : conversationAccent)
+                        : Nord.polarNight2,
+                    in: Capsule()
+                )
             }
             .buttonStyle(.plain)
-            .disabled(!canSendMessage || !hasSendableContent || isImportingAttachments)
+            .disabled(!composerPrimaryAction.isEnabled)
+            .help(composerSubmissionAccessibilityLabel)
             .accessibilityLabel(composerSubmissionAccessibilityLabel)
+            .accessibilityIdentifier("thread-composer-primary-action")
+        }
+    }
+
+    private var composerPrimaryAction: DesktopComposerPrimaryAction {
+        DesktopComposerPresentation.primaryAction(
+            isRunning: runtime.isRunning(threadID: thread.id),
+            hasSendableContent: hasSendableContent,
+            canSend: canSendMessage,
+            isImportingAttachments: isImportingAttachments,
+            selectedCommandIsEnabled: selectedComposerCommand.map { $0.disabledReason == nil }
+        )
+    }
+
+    private func performComposerPrimaryAction() {
+        if composerPrimaryAction.kind == .stop {
+            runtime.interrupt(threadID: thread.id)
+        } else {
+            submitComposer()
         }
     }
 
@@ -3394,6 +3567,35 @@ private struct DesktopThreadConversation: View {
 
     private var availablePanels: [DesktopThreadPanel] {
         DesktopThreadPanel.available(forCodingThread: thread.kind == .coding)
+    }
+
+    private var latestCodingWorktree: DesktopWorktreeRecord? {
+        model.snapshot.operations.worktrees
+            .filter { $0.threadID == thread.id && $0.state != .removed }
+            .max { $0.updatedAtUnixMillis < $1.updatedAtUnixMillis }
+    }
+
+    private var codingStage: DesktopCodingWorkflowStage? {
+        thread.kind == .coding ? runtime.codingStage(threadID: thread.id) : nil
+    }
+
+    private var conversationAccent: Color {
+        codingStage?.tint ?? Nord.frost2
+    }
+
+    private var composerContextLabels: [String] {
+        var labels = [model.project(id: thread.projectID)?.name ?? "No project"]
+        if let worktree = latestCodingWorktree {
+            labels.append("isolated worktree")
+            labels.append(worktree.branch)
+        } else if thread.kind == .coding {
+            labels.append("plan first")
+            labels.append("network off")
+        } else {
+            labels.append(thread.kind.label)
+            labels.append(thread.runtimeMode.label)
+        }
+        return labels
     }
 
     private var hasSendableContent: Bool {
@@ -3410,7 +3612,12 @@ private struct DesktopThreadConversation: View {
                 ? "Run \(selectedComposerCommand.invocation) command"
                 : "\(selectedComposerCommand.invocation) command unavailable"
         }
-        return runtime.isRunning(threadID: thread.id) ? "Queue follow-up" : "Send message"
+        return switch composerPrimaryAction.kind {
+        case .send: "Send message"
+        case .queue: "Queue follow-up"
+        case .stop: "Stop current turn"
+        case .run: "Run composer command"
+        }
     }
 
     private func sendMessage() {
@@ -4028,6 +4235,7 @@ private struct DesktopCodingWorkflowStatusControl: View {
         .padding(16)
         .frame(width: 360, alignment: .leading)
         .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(stage.progressLabel). \(stage.compactStatus)")
     }
 
     @ViewBuilder private var statusActions: some View {
@@ -4623,10 +4831,27 @@ private struct DesktopComposerRuntimeControls: View {
     }
 
     private func controlRow(compact: Bool) -> some View {
-        HStack(spacing: 3) {
-            providerAndModelMenu(compact: compact)
-            thinkingMenu(compact: compact)
-            authorityMenu(compact: compact)
+        Group {
+            if compact {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 4) {
+                        providerAndModelMenu(compact: false)
+                        thinkingMenu(compact: true)
+                        authorityMenu(compact: false)
+                    }
+                    HStack(spacing: 4) {
+                        providerAndModelMenu(compact: true)
+                        thinkingMenu(compact: true)
+                        authorityMenu(compact: true)
+                    }
+                }
+            } else {
+                HStack(spacing: 4) {
+                    providerAndModelMenu(compact: false)
+                    thinkingMenu(compact: false)
+                    authorityMenu(compact: false)
+                }
+            }
         }
     }
 
@@ -4645,6 +4870,7 @@ private struct DesktopComposerRuntimeControls: View {
                         Text(provider).tag(provider)
                     }
                 }
+                .disabled(isLocked)
             }
             Section("Model") {
                 Picker("Model", selection: modelSelection) {
@@ -4657,8 +4883,13 @@ private struct DesktopComposerRuntimeControls: View {
                         Text("\(thread.model) (custom)").tag(thread.model)
                     }
                 }
+                .disabled(isLocked)
             }
-            Button("Custom model or provider…", systemImage: "slider.horizontal.3", action: editDetails)
+            if isLocked {
+                Text("Changes unlock when the current turn finishes")
+            } else {
+                Button("Custom model or provider…", systemImage: "slider.horizontal.3", action: editDetails)
+            }
         }
     }
 
@@ -4690,8 +4921,13 @@ private struct DesktopComposerRuntimeControls: View {
                     Text("\(thinkingTitle) (custom)").tag(thread.reasoningEffort)
                 }
             }
-            Divider()
-            Button("Custom thinking or variant…", systemImage: "slider.horizontal.3", action: editDetails)
+            .disabled(isLocked)
+            if isLocked {
+                Text("Changes unlock when the current turn finishes")
+            } else {
+                Divider()
+                Button("Custom thinking or variant…", systemImage: "slider.horizontal.3", action: editDetails)
+            }
         }
     }
 
@@ -4712,9 +4948,8 @@ private struct DesktopComposerRuntimeControls: View {
             )
             .frame(maxWidth: compact ? nil : maximumWidth, alignment: .leading)
         }
-        .disabled(isLocked)
         .accessibilityLabel(accessibilityLabel)
-        .help(isLocked ? "Runtime controls unlock when the current turn finishes." : unlockedHelp)
+        .help(isLocked ? "Inspect runtime controls; changes unlock when the current turn finishes." : unlockedHelp)
     }
 
     private func authorityMenu(compact: Bool) -> some View {
@@ -4723,8 +4958,12 @@ private struct DesktopComposerRuntimeControls: View {
                 Menu {
                     Text("Coding always starts with a read-only, network-disabled plan.")
                     Text("Your explicit plan approval grants one network-disabled turn inside a new isolated worktree.")
-                    Divider()
-                    Button("Runtime details…", systemImage: "info.circle", action: editDetails)
+                    if isLocked {
+                        Text("Changes unlock when the current turn finishes")
+                    } else {
+                        Divider()
+                        Button("Runtime details…", systemImage: "info.circle", action: editDetails)
+                    }
                 } label: {
                     ComposerRuntimeControlLabel(
                         title: "Plan first",
@@ -4741,18 +4980,23 @@ private struct DesktopComposerRuntimeControls: View {
                             Text(mode.label).tag(mode)
                         }
                     }
+                    .disabled(isLocked)
                     Divider()
                     if ConversationRuntimeCatalog.managesNetwork(thread.provider) {
                         Toggle("Network access", isOn: networkSelection)
-                            .disabled(thread.runtimeMode == .fullAccess)
+                            .disabled(isLocked || thread.runtimeMode == .fullAccess)
                         if thread.runtimeMode == .fullAccess {
                             Text("Network is required by Full access")
                         }
                     } else {
                         Text("Network controlled by \(thread.provider)")
                     }
-                    Divider()
-                    Button("Runtime details…", systemImage: "info.circle", action: editDetails)
+                    if isLocked {
+                        Text("Changes unlock when the current turn finishes")
+                    } else {
+                        Divider()
+                        Button("Runtime details…", systemImage: "info.circle", action: editDetails)
+                    }
                 } label: {
                     ComposerRuntimeControlLabel(
                         title: thread.runtimeMode.label,
@@ -4773,7 +5017,6 @@ private struct DesktopComposerRuntimeControls: View {
                 ))
             }
         }
-        .disabled(isLocked)
     }
 }
 
@@ -4794,12 +5037,11 @@ private struct ComposerRuntimeControlLabel: View {
                     .foregroundStyle(.tertiary)
             }
         }
-        .font(.caption.weight(.medium))
+        .font(.system(size: DesktopComposerPresentation.toolbarPointSize, weight: .medium))
         .foregroundStyle(.secondary)
-        .padding(.horizontal, compact ? 7 : 8)
-        .frame(height: 25)
-        .background(Nord.polarNight2.opacity(0.72), in: Capsule())
-        .contentShape(Capsule())
+        .padding(.horizontal, compact ? 5 : 6)
+        .frame(height: 28)
+        .contentShape(Rectangle())
     }
 }
 
@@ -5915,50 +6157,65 @@ private final class DesktopUpdateViewModel: ObservableObject {
 
     func switchAndRelaunch(model: DesktopAppModel) {
 #if os(macOS)
-        let hasActiveApproval = model.snapshot.operations.approvals.contains { $0.state == .awaitingApproval }
-        isBusy = true
-        _Concurrency.Task {
-            do {
-                let request = try await coordinator.switchRequest(
-                    installedBundleURL: Bundle.main.bundleURL,
-                    processIdentifier: ProcessInfo.processInfo.processIdentifier,
-                    composerCheckpointed: model.persistenceError == nil,
-                    hasActiveApproval: hasActiveApproval
-                )
-                try launchHelper(request)
-                message = "Switching after the current UI closes…"
-                NSApplication.shared.terminate(nil)
-            } catch {
-                message = error.localizedDescription
-                isBusy = false
-            }
-        }
+        beginRelaunch(model: model, operation: .installUpdate)
 #endif
     }
 
     func rollback(model: DesktopAppModel) {
 #if os(macOS)
         guard !isBusy else { return }
+        beginRelaunch(model: model, operation: .rollback)
+#endif
+    }
+
+#if os(macOS)
+    private enum RelaunchOperation {
+        case installUpdate
+        case rollback
+
+        var completionMessage: String {
+            switch self {
+            case .installUpdate:
+                "Switching after the current UI closes…"
+            case .rollback:
+                "Restoring the previous Kaname UI…"
+            }
+        }
+    }
+
+    private func beginRelaunch(model: DesktopAppModel, operation: RelaunchOperation) {
         let hasActiveApproval = model.snapshot.operations.approvals.contains { $0.state == .awaitingApproval }
+        let composerCheckpointed = model.flushComposerDrafts() && model.persistenceError == nil
         isBusy = true
         _Concurrency.Task {
             do {
-                let request = try await coordinator.rollbackRequest(
-                    installedBundleURL: Bundle.main.bundleURL,
-                    processIdentifier: ProcessInfo.processInfo.processIdentifier,
-                    composerCheckpointed: model.persistenceError == nil,
-                    hasActiveApproval: hasActiveApproval
-                )
+                let request: KanameUpdateLaunchRequest
+                switch operation {
+                case .installUpdate:
+                    request = try await coordinator.switchRequest(
+                        installedBundleURL: Bundle.main.bundleURL,
+                        processIdentifier: ProcessInfo.processInfo.processIdentifier,
+                        composerCheckpointed: composerCheckpointed,
+                        hasActiveApproval: hasActiveApproval
+                    )
+                case .rollback:
+                    request = try await coordinator.rollbackRequest(
+                        installedBundleURL: Bundle.main.bundleURL,
+                        processIdentifier: ProcessInfo.processInfo.processIdentifier,
+                        composerCheckpointed: composerCheckpointed,
+                        hasActiveApproval: hasActiveApproval
+                    )
+                }
                 try launchHelper(request)
-                message = "Restoring the previous Kaname UI…"
+                message = operation.completionMessage
                 NSApplication.shared.terminate(nil)
             } catch {
                 message = error.localizedDescription
                 isBusy = false
             }
         }
-#endif
     }
+#endif
 
     private func launchHelper(_ request: KanameUpdateLaunchRequest) throws {
         let process = Process()

@@ -90,6 +90,10 @@ health_path="$support_root/Runtime/ui-health.json"
 journal_directory="$support_root/LocalCore/journal"
 launch_agent_plist="$support_root/Runtime/LaunchAgents/$service_identifier.plist"
 service_error_log="$(dirname "$launch_agent_plist")/kaname-local-control-service.stderr.log"
+runtime_logs_root="$support_root/Runtime/Logs"
+runtime_log_schema_version=1
+runtime_log_maximum_bytes=16777216
+runtime_log_retention_sessions=8
 google_oauth_config_path="${KANAME_GOOGLE_OAUTH_CONFIG:-$support_root/Google/oauth-client.json}"
 
 replacement_pid=""
@@ -213,8 +217,40 @@ done
 [[ "$(codesign -dvv "$link_gateway_path" 2>&1 | sed -n 's/^Identifier=//p')" == "$link_gateway_identifier" ]]
 codesign --verify --deep --strict "$app_path"
 
-mkdir -p "$(dirname "$launch_agent_plist")" "$journal_directory"
-chmod 700 "$support_root/Runtime" "$(dirname "$launch_agent_plist")" "$journal_directory"
+mkdir -p "$(dirname "$launch_agent_plist")" "$journal_directory" "$runtime_logs_root"
+chmod 700 \
+    "$support_root/Runtime" \
+    "$(dirname "$launch_agent_plist")" \
+    "$journal_directory" \
+    "$runtime_logs_root"
+
+while IFS=$'\t' read -r _ old_runtime_log_directory; do
+    old_runtime_log_name="$(basename "$old_runtime_log_directory")"
+    if [[ "$(dirname "$old_runtime_log_directory")" == "$runtime_logs_root" \
+          && "$old_runtime_log_name" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ \
+          && -d "$old_runtime_log_directory" \
+          && ! -L "$old_runtime_log_directory" ]]; then
+        rm -rf -- "$old_runtime_log_directory"
+    fi
+done < <(
+    find "$runtime_logs_root" \
+        -mindepth 1 \
+        -maxdepth 1 \
+        -type d \
+        -exec stat -f '%m%t%N' {} \; \
+        | sort -rn \
+        | tail -n "+$runtime_log_retention_sessions"
+)
+
+runtime_log_session_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+runtime_log_directory="$runtime_logs_root/$runtime_log_session_id"
+ui_standard_output_log="$runtime_log_directory/ui.stdout.log"
+ui_standard_error_log="$runtime_log_directory/ui.stderr.log"
+mkdir "$runtime_log_directory"
+chmod 700 "$runtime_log_directory"
+touch "$ui_standard_output_log" "$ui_standard_error_log"
+chmod 600 "$ui_standard_output_log" "$ui_standard_error_log"
+
 touch "$service_error_log"
 chmod 600 "$service_error_log"
 client_requirement="identifier \"$app_identifier\" or identifier \"$conversation_worker_identifier\" or identifier \"$workflow_worker_identifier\""
@@ -271,7 +307,13 @@ fi
 
 launch_nonce="$(uuidgen)"
 
-open -n "$app_path" --args \
+open -n \
+    --stdout "$ui_standard_output_log" \
+    --stderr "$ui_standard_error_log" \
+    --env "KANAME_DEV_RUNTIME_SESSION_ID=$runtime_log_session_id" \
+    --env "KANAME_DEV_RUNTIME_LOG_SCHEMA_VERSION=$runtime_log_schema_version" \
+    --env "KANAME_DEV_RUNTIME_LOG_MAXIMUM_BYTES=$runtime_log_maximum_bytes" \
+    "$app_path" --args \
     "${app_arguments[@]+"${app_arguments[@]}"}" \
     --kaname-update-nonce "$launch_nonce"
 
@@ -281,10 +323,14 @@ for _ in {1..200}; do
         --arg nonce "$launch_nonce" \
         --arg bundle "$app_identifier" \
         --arg executable "$executable_path" \
+        --arg runtimeLogSession "$runtime_log_session_id" \
+        --argjson runtimeLogSchema "$runtime_log_schema_version" \
         '.channel == "development"
          and .healthNonce == $nonce
          and .bundleIdentifier == $bundle
          and .executablePath == $executable
+         and .runtimeLogSessionID == $runtimeLogSession
+         and .runtimeLogSchemaVersion == $runtimeLogSchema
          and (.processID | type == "number" and . > 0)
          and (.windowID | type == "number" and . > 0)' \
         "$health_path" >/dev/null 2>&1; then
@@ -316,6 +362,13 @@ jq \
     --arg launchAgentPlist "$launch_agent_plist" \
     --arg serviceErrorLog "$service_error_log" \
     --arg journal "$journal_directory" \
+    --arg runtimeLogSession "$runtime_log_session_id" \
+    --arg runtimeLogDirectory "$runtime_log_directory" \
+    --arg uiStandardOutput "$ui_standard_output_log" \
+    --arg uiStandardError "$ui_standard_error_log" \
+    --argjson runtimeLogSchema "$runtime_log_schema_version" \
+    --argjson runtimeLogMaximumBytes "$runtime_log_maximum_bytes" \
+    --argjson runtimeLogRetentionSessions "$runtime_log_retention_sessions" \
     '{
         schemaVersion: 3,
         channel,
@@ -330,7 +383,14 @@ jq \
         linkGatewayExecutablePath: $linkGatewayPath,
         localCoreLaunchAgentPlistPath: $launchAgentPlist,
         localCoreStandardErrorPath: $serviceErrorLog,
-        journalDirectory: $journal
+        journalDirectory: $journal,
+        runtimeLogSessionID: $runtimeLogSession,
+        runtimeLogSchemaVersion: $runtimeLogSchema,
+        runtimeLogMaximumBytes: $runtimeLogMaximumBytes,
+        runtimeLogRetentionSessions: $runtimeLogRetentionSessions,
+        runtimeLogDirectory: $runtimeLogDirectory,
+        uiStandardOutputPath: $uiStandardOutput,
+        uiStandardErrorPath: $uiStandardError
     }' "$health_path" > "$temporary_receipt"
 chmod 600 "$temporary_receipt"
 mv "$temporary_receipt" "$receipt_path"

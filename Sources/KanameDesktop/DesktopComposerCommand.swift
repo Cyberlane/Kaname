@@ -97,6 +97,41 @@ public struct DesktopComposerCommandEdit: Equatable, Sendable {
     }
 }
 
+public struct DesktopComposerSelectionProjection: Equatable, Sendable {
+    public let cursorOffset: Int
+    public let hasSelection: Bool
+    public let recoveredStaleSelection: Bool
+
+    public init(cursorOffset: Int, hasSelection: Bool, recoveredStaleSelection: Bool) {
+        self.cursorOffset = cursorOffset
+        self.hasSelection = hasSelection
+        self.recoveredStaleSelection = recoveredStaleSelection
+    }
+
+    public static func project(
+        _ range: Range<String.Index>,
+        in text: String,
+        fallbackCursorOffset: Int?
+    ) -> DesktopComposerSelectionProjection {
+        guard
+            let lowerBound = range.lowerBound.samePosition(in: text),
+            let upperBound = range.upperBound.samePosition(in: text)
+        else {
+            return DesktopComposerSelectionProjection(
+                cursorOffset: min(max(fallbackCursorOffset ?? text.count, 0), text.count),
+                hasSelection: false,
+                recoveredStaleSelection: true
+            )
+        }
+
+        return DesktopComposerSelectionProjection(
+            cursorOffset: text.distance(from: text.startIndex, to: lowerBound),
+            hasSelection: lowerBound != upperBound,
+            recoveredStaleSelection: false
+        )
+    }
+}
+
 public enum DesktopComposerCommandResolution: Equatable, Sendable {
     case local(DesktopComposerCommandID, edit: DesktopComposerCommandEdit)
     case disabled(DesktopComposerCommandID, reason: String)
@@ -136,9 +171,93 @@ public struct DesktopComposerCommandSelectionState: Equatable, Sendable {
     }
 }
 
+public enum DesktopComposerReturnDisposition: Equatable, Sendable {
+    case submit
+    case insertNewline
+    case nativeEditing
+}
+
+public enum DesktopComposerReturnPolicy {
+    public static func disposition(
+        shift: Bool = false,
+        command: Bool = false,
+        option: Bool = false,
+        control: Bool = false,
+        hasMarkedText: Bool = false
+    ) -> DesktopComposerReturnDisposition {
+        guard !hasMarkedText, !command, !option, !control else {
+            return .nativeEditing
+        }
+        return shift ? .insertNewline : .submit
+    }
+}
+
 public enum DesktopComposerPresentation {
-    public static let minimumLines = 3
+    public static let minimumLines = 1
     public static let maximumLines = 8
+    public static let inputPointSize: CGFloat = 16
+    public static let toolbarPointSize: CGFloat = 13
+    public static let contextPointSize: CGFloat = 12.5
+    public static let maximumWidth: CGFloat = 760
+    public static let cornerRadius: CGFloat = 20
+    public static let inputHorizontalPadding: CGFloat = 16
+    public static let inputTopPadding: CGFloat = 14
+    public static let inputBottomPadding: CGFloat = 12
+
+    public static func primaryAction(
+        isRunning: Bool,
+        hasSendableContent: Bool,
+        canSend: Bool,
+        isImportingAttachments: Bool,
+        selectedCommandIsEnabled: Bool?
+    ) -> DesktopComposerPrimaryAction {
+        if let selectedCommandIsEnabled {
+            return DesktopComposerPrimaryAction(kind: .run, isEnabled: selectedCommandIsEnabled)
+        }
+        if isRunning, !hasSendableContent {
+            return DesktopComposerPrimaryAction(kind: .stop, isEnabled: true)
+        }
+        let kind: DesktopComposerPrimaryAction.Kind = isRunning ? .queue : .send
+        return DesktopComposerPrimaryAction(
+            kind: kind,
+            isEnabled: canSend && hasSendableContent && !isImportingAttachments
+        )
+    }
+}
+
+public struct DesktopComposerPrimaryAction: Equatable, Sendable {
+    public enum Kind: Equatable, Sendable {
+        case send
+        case queue
+        case stop
+        case run
+    }
+
+    public let kind: Kind
+    public let isEnabled: Bool
+
+    public init(kind: Kind, isEnabled: Bool) {
+        self.kind = kind
+        self.isEnabled = isEnabled
+    }
+
+    public var title: String {
+        switch kind {
+        case .send: "Send"
+        case .queue: "Queue"
+        case .stop: "Stop"
+        case .run: "Run"
+        }
+    }
+
+    public var systemImage: String {
+        switch kind {
+        case .send: "arrow.up"
+        case .queue: "text.badge.plus"
+        case .stop: "stop.fill"
+        case .run: "return"
+        }
+    }
 }
 
 public enum DesktopComposerCommands {
