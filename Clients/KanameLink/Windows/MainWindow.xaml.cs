@@ -1,4 +1,3 @@
-using Microsoft.UI;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -59,9 +58,9 @@ public sealed partial class MainWindow : Window
             ? Visibility.Visible
             : Visibility.Collapsed;
         ConnectionLabel.Text = ConnectionText(snapshot.Connection);
-        ConnectionDot.Fill = new SolidColorBrush(snapshot.Connection == "hostOnline"
-            ? ColorHelper.FromArgb(255, 163, 190, 140)
-            : ColorHelper.FromArgb(255, 235, 203, 139));
+        ConnectionDot.Fill = (Brush)Application.Current.Resources[
+            snapshot.Connection == "hostOnline" ? "KanameSuccessBrush" : "KanameWarningBrush"
+        ];
         SpacesList.ItemsSource = snapshot.Spaces;
         SpacesList.DisplayMemberPath = "Name";
         if (snapshot.Spaces.Count > 0) SpacesList.SelectedIndex = 0;

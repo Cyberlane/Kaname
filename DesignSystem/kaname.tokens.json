@@ -1,0 +1,105 @@
+{
+  "metadata": {
+    "name": "Kaname Design System",
+    "schemaVersion": 1,
+    "version": "0.1.0",
+    "format": "kaname-design-tokens",
+    "colorSpace": "sRGB",
+    "sourceOfTruth": true,
+    "privacy": "synthetic-public"
+  },
+  "primitive": {
+    "color": {
+      "nord": {
+        "polarNight0": "#2E3440",
+        "polarNight1": "#3B4252",
+        "polarNight2": "#434C5E",
+        "polarNight3": "#4C566A",
+        "snowStorm0": "#D8DEE9",
+        "snowStorm1": "#E5E9F0",
+        "snowStorm2": "#ECEFF4",
+        "frost0": "#8FBCBB",
+        "frost1": "#88C0D0",
+        "frost2": "#81A1C1",
+        "frost3": "#5E81AC",
+        "auroraRed": "#BF616A",
+        "auroraOrange": "#D08770",
+        "auroraYellow": "#EBCB8B",
+        "auroraGreen": "#A3BE8C",
+        "auroraPurple": "#B48EAD"
+      }
+    }
+  },
+  "semantic": {
+    "color": {
+      "dark": {
+        "canvas": "#181B22",
+        "sidebar": "#20242D",
+        "surface": "#252A35",
+        "raised": "#2A303B",
+        "selected": "#34445A",
+        "separator": "#434C5E",
+        "textPrimary": "#ECEFF4",
+        "textSecondary": "#AAB2C0",
+        "textTertiary": "#929CAA",
+        "accent": "#88C0D0",
+        "accentStrong": "#5E81AC",
+        "active": "#8FBCBB",
+        "success": "#A3BE8C",
+        "warning": "#EBCB8B",
+        "danger": "#BF616A",
+        "blocked": "#B48EAD",
+        "external": "#D08770",
+        "focus": "#88C0D0"
+      },
+      "light": {
+        "canvas": "#F4F6FA",
+        "sidebar": "#E9EDF4",
+        "surface": "#FFFFFF",
+        "raised": "#FFFFFF",
+        "selected": "#DCE7F4",
+        "separator": "#CDD3DE",
+        "textPrimary": "#20242D",
+        "textSecondary": "#556070",
+        "textTertiary": "#616B78",
+        "accent": "#466D99",
+        "accentStrong": "#365D8C",
+        "active": "#39706D",
+        "success": "#42713E",
+        "warning": "#8B6518",
+        "danger": "#9B3F49",
+        "blocked": "#764C72",
+        "external": "#92533D",
+        "focus": "#365D8C"
+      }
+    },
+    "icon": {
+      "status.neutral": { "swiftUI": "circle", "winUI": "Circle", "gtk": "media-record-symbolic" },
+      "status.informational": { "swiftUI": "info.circle.fill", "winUI": "Help", "gtk": "dialog-information-symbolic" },
+      "status.active": { "swiftUI": "waveform.path.ecg", "winUI": "Play", "gtk": "media-playback-start-symbolic" },
+      "status.attention": { "swiftUI": "bell.badge.fill", "winUI": "Important", "gtk": "appointment-soon-symbolic" },
+      "status.success": { "swiftUI": "checkmark.circle.fill", "winUI": "Accept", "gtk": "emblem-ok-symbolic" },
+      "status.warning": { "swiftUI": "exclamationmark.triangle.fill", "winUI": "ReportHacked", "gtk": "dialog-warning-symbolic" },
+      "status.danger": { "swiftUI": "xmark.octagon.fill", "winUI": "Cancel", "gtk": "dialog-error-symbolic" },
+      "status.blocked": { "swiftUI": "hand.raised.fill", "winUI": "BlockContact", "gtk": "action-unavailable-symbolic" },
+      "status.external": { "swiftUI": "person.2.badge.gearshape.fill", "winUI": "People", "gtk": "system-users-symbolic" }
+    },
+    "status": {
+      "neutral": { "icon": "status.neutral", "color": "textSecondary" },
+      "informational": { "icon": "status.informational", "color": "accentStrong" },
+      "active": { "icon": "status.active", "color": "active" },
+      "attention": { "icon": "status.attention", "color": "warning" },
+      "success": { "icon": "status.success", "color": "success" },
+      "warning": { "icon": "status.warning", "color": "warning" },
+      "danger": { "icon": "status.danger", "color": "danger" },
+      "blocked": { "icon": "status.blocked", "color": "blocked" },
+      "external": { "icon": "status.external", "color": "external" }
+    }
+  },
+  "dimension": {
+    "spacing": { "hairline": 2, "xSmall": 4, "small": 8, "medium": 12, "large": 16, "xLarge": 20, "xxLarge": 24, "xxxLarge": 32, "huge": 40 },
+    "radius": { "control": 8, "card": 12, "panel": 16, "hero": 20 },
+    "size": { "minimumInteractiveTarget": 44, "compactControlHeight": 28, "regularControlHeight": 36, "sidebarIdealWidth": 260, "collectionIdealWidth": 330, "readableContentWidth": 720 },
+    "motionSeconds": { "quick": 0.12, "standard": 0.2, "deliberate": 0.32 }
+  }
+}

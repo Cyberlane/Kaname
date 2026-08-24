@@ -1,21 +1,21 @@
 import SwiftUI
 import KanameDomain
+import KanameDesignSystem
 
-public enum Nord {
-    public static let polarNight0 = Color(red: 46 / 255, green: 52 / 255, blue: 64 / 255)
-    public static let polarNight1 = Color(red: 59 / 255, green: 66 / 255, blue: 82 / 255)
-    public static let polarNight2 = Color(red: 67 / 255, green: 76 / 255, blue: 94 / 255)
-    public static let polarNight3 = Color(red: 76 / 255, green: 86 / 255, blue: 106 / 255)
-    public static let snowStorm0 = Color(red: 216 / 255, green: 222 / 255, blue: 233 / 255)
-    public static let frost0 = Color(red: 143 / 255, green: 188 / 255, blue: 187 / 255)
-    public static let frost1 = Color(red: 136 / 255, green: 192 / 255, blue: 208 / 255)
-    public static let frost2 = Color(red: 129 / 255, green: 161 / 255, blue: 193 / 255)
-    public static let frost3 = Color(red: 94 / 255, green: 129 / 255, blue: 172 / 255)
-    public static let auroraRed = Color(red: 191 / 255, green: 97 / 255, blue: 106 / 255)
-    public static let auroraOrange = Color(red: 208 / 255, green: 135 / 255, blue: 112 / 255)
-    public static let auroraYellow = Color(red: 235 / 255, green: 203 / 255, blue: 139 / 255)
-    public static let auroraGreen = Color(red: 163 / 255, green: 190 / 255, blue: 140 / 255)
-    public static let auroraPurple = Color(red: 180 / 255, green: 142 / 255, blue: 173 / 255)
+/// Compatibility alias while existing Kaname screens migrate from primitive
+/// Nord colors to semantic design-system roles.
+public typealias Nord = KanameDesignSystem.Nord
+
+private func attentionDisplayName(_ state: AttentionState) -> String {
+    switch state {
+    case .none: "No attention needed"
+    case .queued: "Queued"
+    case .running: "Running"
+    case .needsResponse: "Needs response"
+    case .needsReview: "Needs review"
+    case .failed: "Failed"
+    case .interrupted: "Interrupted"
+    }
 }
 
 public extension AttentionState {
@@ -29,15 +29,7 @@ public extension AttentionState {
     ]
 
     var displayName: String {
-        switch self {
-        case .none: "No attention needed"
-        case .queued: "Queued"
-        case .running: "Running"
-        case .needsResponse: "Needs response"
-        case .needsReview: "Needs review"
-        case .failed: "Failed"
-        case .interrupted: "Interrupted"
-        }
+        attentionDisplayName(self)
     }
 
     var tint: Color {

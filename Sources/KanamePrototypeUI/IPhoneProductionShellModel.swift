@@ -150,6 +150,45 @@ final class IPhoneProductionShellModel: ObservableObject {
         )
     }
 
+    /// A deterministic, memory-only shell for screenshots and previews.
+    /// It cannot read live configuration, Keychain credentials, or persisted state.
+    static func syntheticPreview() -> IPhoneProductionShellModel {
+        let phoneKey = try! Curve25519.KeyAgreement.PrivateKey(
+            rawRepresentation: Data(repeating: 0x31, count: 32)
+        )
+        let macKey = try! Curve25519.KeyAgreement.PrivateKey(
+            rawRepresentation: Data(repeating: 0x32, count: 32)
+        )
+        let store = InMemoryMobileSyncPrivateKeyStore(
+            initialKeys: ["iphone-design-preview-key": phoneKey]
+        )
+        let shell = try! MobileEnrollmentShell(
+            deviceID: "iphone-design-preview",
+            displayName: "Kaname iPhone Synthetic Preview",
+            keyStore: store
+        )
+        let configuration = try! MobileSyncEndpointConfiguration(
+            deviceID: "iphone-design-preview",
+            keyID: "iphone-design-preview-key",
+            peerDeviceID: "mac-design-preview",
+            peerKeyID: "mac-design-preview-key",
+            peerPublicKey: macKey.publicKey
+        )
+        let syncSession = try! MobileSyncSession(
+            configuration: configuration,
+            keyStore: store,
+            transport: LocalCiphertextRelay(),
+            stateStore: InMemoryMobileSyncStateStore()
+        )
+        return IPhoneProductionShellModel(
+            shell: shell,
+            syncSession: syncSession,
+            initialSnapshot: MobileEnrollmentSnapshot(deviceID: "iphone-design-preview"),
+            initialQueue: MobileQueuedCommand.simulatorItems,
+            seedQueueOnRestore: true
+        )
+    }
+
     private static func live(
         configuration: Phase3LiveConfiguration
     ) throws -> IPhoneProductionShellModel {

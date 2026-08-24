@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "privacyClass": "synthetic-public",
+  "scenarios": [
+    {
+      "id": "desktop-link-host",
+      "captureVariant": "links",
+      "outputFile": "kaname-desktop-link-host.png",
+      "platform": "macOS",
+      "surface": "desktop.link-host",
+      "fixture": "desktop-link-synthetic-fixture",
+      "viewport": "1520x940",
+      "appearance": "dark",
+      "differentiateWithoutColor": false,
+      "reduceMotion": false,
+      "textScale": "standard",
+      "activeWindow": true,
+      "locale": "en_US",
+      "expectedAccessibilityLabels": ["Kaname Link", "Untrusted external content"],
+      "privacyClass": "synthetic-public",
+      "evidenceClass": "fixture-projection"
+    },
+    {
+      "id": "ios-home-synthetic",
+      "captureVariant": "home",
+      "outputFile": "kaname-ios-home.png",
+      "platform": "iOS",
+      "surface": "ios.home",
+      "fixture": "iphone-phase0-fixtures-and-memory-only-shell",
+      "viewport": "iPhone 15",
+      "appearance": "dark",
+      "differentiateWithoutColor": false,
+      "reduceMotion": false,
+      "textScale": "standard",
+      "activeWindow": true,
+      "locale": "en_US",
+      "expectedAccessibilityLabels": ["Home", "Work", "Projects", "Operate", "Library"],
+      "privacyClass": "synthetic-public",
+      "evidenceClass": "fixture-projection"
+    },
+    {
+      "id": "link-macos-synthetic",
+      "captureVariant": "discussion",
+      "outputFile": "kaname-link-macos.png",
+      "platform": "macOS",
+      "surface": "link.macos.discussion",
+      "fixture": "kaname-link-synthetic-preview",
+      "viewport": "1180x760",
+      "appearance": "dark",
+      "differentiateWithoutColor": false,
+      "reduceMotion": false,
+      "textScale": "standard",
+      "activeWindow": true,
+      "locale": "en_US",
+      "expectedAccessibilityLabels": ["Kaname Link", "Restricted collaborator", "Monthly reporting correction", "Response actions pending"],
+      "privacyClass": "synthetic-public",
+      "evidenceClass": "fixture-projection"
+    }
+  ]
+}

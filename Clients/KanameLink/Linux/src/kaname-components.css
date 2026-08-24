@@ -1,0 +1,24 @@
+/* Hand-authored GTK component adapter. Color roles come from generated kaname-theme.css. */
+window {
+  background: @kaname_canvas;
+  color: @kaname_textPrimary;
+}
+
+.sidebar { background: @kaname_sidebar; }
+.title { font-size: 22px; font-weight: 700; }
+.section-label, .message-author { font-size: 12px; font-weight: 700; }
+.discussion-title { font-weight: 650; }
+.muted { color: @kaname_textSecondary; font-size: 12px; }
+.online { color: @kaname_success; font-weight: 650; }
+.warning { color: @kaname_warning; font-weight: 650; }
+
+.space-card, .host-message, .own-message, .enrollment-panel {
+  background: @kaname_raised;
+  border: 1px solid @kaname_separator;
+  border-radius: 12px;
+  padding: 14px;
+}
+
+.own-message { background: alpha(@kaname_accentStrong, 0.42); }
+.preview-banner { background: alpha(@kaname_external, 0.35); padding: 6px; font-weight: 650; }
+.notice-banner { background: alpha(@kaname_accentStrong, 0.28); padding: 10px; }

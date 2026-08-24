@@ -1,6 +1,8 @@
 #if os(iOS)
+import Foundation
 import SwiftUI
 import UIKit
+import KanameDesignSystem
 import KanameDomain
 import KanameFixtures
 import KanameMobileSync
@@ -10,11 +12,24 @@ public struct IPhoneControlSurface: View {
     @State private var workProjection: IPhoneWorkProjection = .inbox
     @State private var fixtureState = IPhoneFixtureState()
     @State private var showsSettings = false
-    @StateObject private var mobileShell = IPhoneProductionShellModel.configured()
+    @StateObject private var mobileShell: IPhoneProductionShellModel
 
     public init() {
-        let polarNight = UIColor(red: 46 / 255, green: 52 / 255, blue: 64 / 255, alpha: 1)
-        let snowStorm = UIColor(red: 216 / 255, green: 222 / 255, blue: 233 / 255, alpha: 1)
+        self.init(mobileShell: IPhoneProductionShellModel.configured())
+    }
+
+    static func syntheticPreview() -> Self {
+        Self.init(mobileShell: IPhoneProductionShellModel.syntheticPreview())
+    }
+
+    private init(mobileShell: IPhoneProductionShellModel) {
+        _mobileShell = StateObject(wrappedValue: mobileShell)
+        Self.configureNativeAppearance()
+    }
+
+    private static func configureNativeAppearance() {
+        let polarNight = UIColor(KanameColor.sidebar)
+        let snowStorm = UIColor(KanameColor.textPrimary)
 
         let navigationAppearance = UINavigationBarAppearance()
         navigationAppearance.configureWithOpaqueBackground()
@@ -3464,6 +3479,26 @@ private struct IPhoneNewDraftSheet: View {
                 }
             }
         }
+    }
+}
+
+/// Privacy-safe screenshot host for a clean simulator. It intentionally keeps
+/// production notification prompts and private persisted state out of captures.
+public struct IPhoneSyntheticScreenshotRoot: View {
+    public init() {}
+
+    public var body: some View {
+        VStack(spacing: 0) {
+            KanameSyntheticDataBanner()
+                .fixedSize(horizontal: false, vertical: true)
+            IPhoneControlSurface.syntheticPreview()
+        }
+        .background(KanameColor.canvas)
+        .preferredColorScheme(.dark)
+        .dynamicTypeSize(.large)
+        .environment(\.locale, Locale(identifier: "en_US"))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("kaname-ios-synthetic-preview")
     }
 }
 

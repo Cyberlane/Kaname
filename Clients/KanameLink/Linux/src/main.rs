@@ -581,20 +581,11 @@ fn connection_label(state: &str) -> &str {
 
 fn install_css() {
     let css = CssProvider::new();
-    css.load_from_data(
-        "window { background: #181b22; color: #eceff4; }\n\
-         .sidebar { background: #20242d; }\n\
-         .title { font-size: 22px; font-weight: 700; }\n\
-         .section-label, .message-author { font-size: 12px; font-weight: 700; }\n\
-         .discussion-title { font-weight: 650; }\n\
-         .muted { color: #aab2c0; font-size: 12px; }\n\
-         .online { color: #a3be8c; font-weight: 650; }\n\
-         .warning { color: #ebcb8b; font-weight: 650; }\n\
-         .space-card, .host-message, .own-message, .enrollment-panel { background: #2a303b; border-radius: 12px; padding: 14px; }\n\
-         .own-message { background: alpha(#5e81ac, 0.42); }\n\
-         .preview-banner { background: alpha(#d08770, 0.35); padding: 6px; font-weight: 650; }\n\
-         .notice-banner { background: alpha(#5e81ac, 0.28); padding: 10px; }",
-    );
+    css.load_from_data(concat!(
+        include_str!("kaname-theme.css"),
+        "\n",
+        include_str!("kaname-components.css")
+    ));
     if let Some(display) = Display::default() {
         gtk::style_context_add_provider_for_display(
             &display,

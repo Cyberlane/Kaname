@@ -8,6 +8,9 @@ final class KanameAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificati
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
+        if ProcessInfo.processInfo.environment["KANAME_SYNTHETIC_SCREENSHOT"] == "1" {
+            return true
+        }
         let center = UNUserNotificationCenter.current()
         center.delegate = self
         center.requestAuthorization(options: [.alert, .badge, .sound]) { granted, _ in
@@ -48,8 +51,13 @@ struct KanameIPhonePrototypeApp: App {
 
     var body: some Scene {
         WindowGroup {
-            IPhoneControlSurface()
-                .preferredColorScheme(.dark)
+            if ProcessInfo.processInfo.environment["KANAME_SYNTHETIC_SCREENSHOT"] == "1" {
+                IPhoneSyntheticScreenshotRoot()
+                    .preferredColorScheme(.dark)
+            } else {
+                IPhoneControlSurface()
+                    .preferredColorScheme(.dark)
+            }
         }
     }
 }

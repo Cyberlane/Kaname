@@ -17,12 +17,14 @@ let package = Package(
         .library(name: "KanameLinkProtocol", targets: ["KanameLinkProtocol"]),
         .library(name: "KanameLinkHost", targets: ["KanameLinkHost"]),
         .library(name: "KanameLinkTunnelHost", targets: ["KanameLinkTunnelHost"]),
+        .library(name: "KanameDesignSystem", targets: ["KanameDesignSystem"]),
         .library(name: "KanameDesktop", targets: ["KanameDesktop"]),
         .library(name: "KanameWorkflowHost", targets: ["KanameWorkflowHost"]),
         .library(name: "KanameFixtures", targets: ["KanameFixtures"]),
         .library(name: "KanamePrototypeUI", targets: ["KanamePrototypeUI"]),
         .executable(name: "KanamePrototype", targets: ["KanamePrototype"]),
         .executable(name: "KanameLink", targets: ["KanameLinkMac"]),
+        .executable(name: "KanameDesignCatalog", targets: ["KanameDesignCatalog"]),
         .executable(name: "KanameLinkTunnelTool", targets: ["KanameLinkTunnelTool"]),
         .executable(name: "KanameProviderProbe", targets: ["KanameProviderProbe"]),
         .executable(name: "KanameCodexSessionProbe", targets: ["KanameCodexSessionProbe"]),
@@ -101,6 +103,7 @@ let package = Package(
             ]
         ),
         .target(name: "KanameLinkHost"),
+        .target(name: "KanameDesignSystem"),
         .target(
             name: "KanameLinkTunnelHost",
             path: "Sources/KanameLinkTunnelHost",
@@ -120,7 +123,7 @@ let package = Package(
         ),
         .target(
             name: "KanamePrototypeUI",
-            dependencies: ["KanameDomain", "KanameFixtures", "KanameMobileSync", "KanameProtocol"]
+            dependencies: ["KanameDesignSystem", "KanameDomain", "KanameFixtures", "KanameMobileSync", "KanameProtocol"]
         ),
         .target(
             name: "KanameDesktop",
@@ -149,7 +152,12 @@ let package = Package(
         ),
         .executableTarget(
             name: "KanameLinkMac",
+            dependencies: ["KanameDesignSystem"],
             path: "Sources/KanameLinkMac"
+        ),
+        .executableTarget(
+            name: "KanameDesignCatalog",
+            dependencies: ["KanameDesignSystem"]
         ),
         .executableTarget(
             name: "KanameProviderProbe",
@@ -230,6 +238,10 @@ let package = Package(
             name: "KanameLinkTunnelToolTests",
             dependencies: ["KanameLinkTunnelTool", "KanameLinkTunnelHost"],
             path: "Tests/KanameLinkTunnelToolTests"
+        ),
+        .testTarget(
+            name: "KanameDesignSystemTests",
+            dependencies: ["KanameDesignSystem"]
         ),
         .testTarget(
             name: "KanameDesktopTests",

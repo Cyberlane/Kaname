@@ -6,7 +6,7 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d"
     Title="Kaname Link">
-  <Grid Background="#181B22">
+  <Grid Background="{ThemeResource KanameCanvasBrush}">
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto" />
       <RowDefinition Height="*" />
@@ -27,31 +27,31 @@
         <ColumnDefinition Width="*" />
       </Grid.ColumnDefinitions>
 
-      <StackPanel Grid.Column="0" Padding="20" Spacing="16" Background="#20242D">
+      <StackPanel Grid.Column="0" Padding="20" Spacing="16" Background="{ThemeResource KanameSidebarBrush}">
         <StackPanel Spacing="2">
           <TextBlock Text="Kaname Link" Style="{StaticResource TitleTextBlockStyle}" />
-          <TextBlock Text="External collaboration" Foreground="#AAB2C0" />
+          <TextBlock Text="External collaboration" Foreground="{ThemeResource KanameTextSecondaryBrush}" />
         </StackPanel>
-        <Border Padding="12" CornerRadius="10" Background="#2A303B">
+        <Border Padding="12" CornerRadius="10" Background="{ThemeResource KanameRaisedBrush}">
           <StackPanel Spacing="4">
             <StackPanel Orientation="Horizontal" Spacing="8">
-              <Ellipse x:Name="ConnectionDot" Width="10" Height="10" Fill="#A3BE8C" />
+              <Ellipse x:Name="ConnectionDot" Width="10" Height="10" Fill="{ThemeResource KanameSuccessBrush}" />
               <TextBlock x:Name="ConnectionLabel" Text="Connecting" FontWeight="SemiBold" />
             </StackPanel>
-            <TextBlock x:Name="HostLabel" Foreground="#AAB2C0" FontSize="12" />
+            <TextBlock x:Name="HostLabel" Foreground="{ThemeResource KanameTextSecondaryBrush}" FontSize="12" />
           </StackPanel>
         </Border>
-        <TextBlock Text="LINK SPACES" Foreground="#AAB2C0" FontSize="12" FontWeight="SemiBold" />
+        <TextBlock Text="LINK SPACES" Foreground="{ThemeResource KanameTextSecondaryBrush}" FontSize="12" FontWeight="SemiBold" />
         <ListView x:Name="SpacesList" SelectionChanged="SpacesList_SelectionChanged" />
-        <Border Padding="12" CornerRadius="10" Background="#2A303B" VerticalAlignment="Bottom">
+        <Border Padding="12" CornerRadius="10" Background="{ThemeResource KanameRaisedBrush}" VerticalAlignment="Bottom">
           <TextBlock TextWrapping="Wrap"
-                     Foreground="#AAB2C0"
+                     Foreground="{ThemeResource KanameTextSecondaryBrush}"
                      FontSize="12"
                      Text="This app cannot control Kaname, tools, models, files, or the host computer." />
         </Border>
       </StackPanel>
 
-      <Grid Grid.Column="1" Background="#1D2129">
+      <Grid Grid.Column="1" Background="{ThemeResource KanameSurfaceBrush}">
         <Grid.RowDefinitions>
           <RowDefinition Height="Auto" />
           <RowDefinition Height="*" />
@@ -71,23 +71,23 @@
         </Grid.RowDefinitions>
         <StackPanel Padding="22,18" Spacing="4">
           <TextBlock x:Name="DiscussionTitle" FontSize="22" FontWeight="Bold" Text="No discussion selected" />
-          <TextBlock x:Name="DiscussionStatus" Foreground="#AAB2C0" />
+          <TextBlock x:Name="DiscussionStatus" Foreground="{ThemeResource KanameTextSecondaryBrush}" />
         </StackPanel>
         <ListView x:Name="MessagesList" Grid.Row="1" Padding="22" IsItemClickEnabled="False">
           <ListView.ItemTemplate>
             <DataTemplate>
-              <Border Margin="0,0,0,12" Padding="14" CornerRadius="12" Background="#2A303B" MaxWidth="600">
+              <Border Margin="0,0,0,12" Padding="14" CornerRadius="12" Background="{ThemeResource KanameRaisedBrush}" MaxWidth="600">
                 <StackPanel Spacing="7">
                   <TextBlock Text="{Binding AuthorName}" FontSize="12" FontWeight="Bold" />
                   <TextBlock Text="{Binding Body}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
-                  <TextBlock Text="{Binding Receipt}" Foreground="#AAB2C0" FontSize="12" />
+                  <TextBlock Text="{Binding Receipt}" Foreground="{ThemeResource KanameTextSecondaryBrush}" FontSize="12" />
                 </StackPanel>
               </Border>
             </DataTemplate>
           </ListView.ItemTemplate>
         </ListView>
         <InfoBar x:Name="NoticeBar" Grid.Row="2" IsOpen="False" IsClosable="True" Severity="Warning" />
-        <Grid Grid.Row="3" Padding="18" ColumnSpacing="12" Background="#20242D">
+        <Grid Grid.Row="3" Padding="18" ColumnSpacing="12" Background="{ThemeResource KanameSidebarBrush}">
           <Grid.ColumnDefinitions>
             <ColumnDefinition Width="*" />
             <ColumnDefinition Width="Auto" />
@@ -101,13 +101,13 @@
               Grid.Column="2"
               Canvas.ZIndex="10"
               Visibility="Collapsed"
-              Background="#181B22"
+              Background="{ThemeResource KanameCanvasBrush}"
               Padding="36">
         <ScrollViewer>
           <StackPanel MaxWidth="720" HorizontalAlignment="Left" Spacing="16">
             <TextBlock Text="Connect to a Kaname host" FontSize="24" FontWeight="Bold" />
             <TextBlock TextWrapping="Wrap"
-                       Foreground="#AAB2C0"
+                       Foreground="{ThemeResource KanameTextSecondaryBrush}"
                        Text="Paste the complete invitation created by the host. It is single-use, expires, and grants access only to the named Link space." />
             <InfoBar IsOpen="True"
                      IsClosable="False"
