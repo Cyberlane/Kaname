@@ -1,0 +1,11 @@
+{
+  "invocations": [
+    {
+      "protoFiles": [
+        "kaname/link/v1/link.proto"
+      ],
+      "visibility": "public",
+      "fileNaming": "fullPath"
+    }
+  ]
+}

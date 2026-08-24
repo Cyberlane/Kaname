@@ -59,10 +59,12 @@ service_path="$resources_path/KanameLocalControlService"
 conversation_worker_path="$resources_path/KanameConversationWorker"
 workflow_worker_path="$resources_path/KanameWorkflowWorker"
 core_path="$resources_path/kaname-local-core"
+link_gateway_path="$resources_path/kaname-link-gateway"
 app_identifier="com.cyberlane.kaname.desktop.dev"
 service_identifier="$app_identifier.localcore.service"
 conversation_worker_identifier="$app_identifier.conversation-worker"
 workflow_worker_identifier="$app_identifier.workflow-worker"
+link_gateway_identifier="$app_identifier.link-gateway"
 stable_executable="$HOME/Applications/Kaname.app/Contents/MacOS/KanamePrototype"
 candidate_executable="$HOME/Applications/Kaname Candidate.app/Contents/MacOS/KanamePrototype"
 receipt_path="${receipt_path:-$project_dir/.build/kaname-dev-launch-receipt.json}"
@@ -194,7 +196,8 @@ for required_executable in \
     "$service_path" \
     "$conversation_worker_path" \
     "$workflow_worker_path" \
-    "$core_path"
+    "$core_path" \
+    "$link_gateway_path"
 do
     [[ -x "$required_executable" ]] || {
         echo "The Kaname development bundle is missing a runtime helper: $required_executable" >&2
@@ -207,6 +210,7 @@ done
 [[ "$(codesign -dvv "$service_path" 2>&1 | sed -n 's/^Identifier=//p')" == "$service_identifier" ]]
 [[ "$(codesign -dvv "$conversation_worker_path" 2>&1 | sed -n 's/^Identifier=//p')" == "$conversation_worker_identifier" ]]
 [[ "$(codesign -dvv "$workflow_worker_path" 2>&1 | sed -n 's/^Identifier=//p')" == "$workflow_worker_identifier" ]]
+[[ "$(codesign -dvv "$link_gateway_path" 2>&1 | sed -n 's/^Identifier=//p')" == "$link_gateway_identifier" ]]
 codesign --verify --deep --strict "$app_path"
 
 mkdir -p "$(dirname "$launch_agent_plist")" "$journal_directory"
@@ -308,11 +312,12 @@ jq \
     --arg service "$service_identifier" \
     --arg servicePath "$service_path" \
     --arg workerPath "$conversation_worker_path" \
+    --arg linkGatewayPath "$link_gateway_path" \
     --arg launchAgentPlist "$launch_agent_plist" \
     --arg serviceErrorLog "$service_error_log" \
     --arg journal "$journal_directory" \
     '{
-        schemaVersion: 2,
+        schemaVersion: 3,
         channel,
         bundleIdentifier,
         executablePath,
@@ -322,6 +327,7 @@ jq \
         localCoreMachService: $service,
         localCoreServiceExecutablePath: $servicePath,
         conversationWorkerExecutablePath: $workerPath,
+        linkGatewayExecutablePath: $linkGatewayPath,
         localCoreLaunchAgentPlistPath: $launchAgentPlist,
         localCoreStandardErrorPath: $serviceErrorLog,
         journalDirectory: $journal

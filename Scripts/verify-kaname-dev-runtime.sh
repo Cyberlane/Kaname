@@ -22,7 +22,7 @@ default_executable="$project_dir/.build/Kaname Prototype.app/Contents/MacOS/Kana
 [[ -f "$receipt_path" ]] || { echo "Missing Kaname dev runtime receipt: $receipt_path" >&2; exit 1; }
 jq -e \
     --arg bundle "$expected_bundle_identifier" \
-    '(.schemaVersion == 1 or .schemaVersion == 2)
+    '(.schemaVersion == 1 or .schemaVersion == 2 or .schemaVersion == 3)
      and .channel == "development"
      and .bundleIdentifier == $bundle
      and (.executablePath | type == "string" and startswith("/"))
@@ -129,6 +129,19 @@ if [[ "$schema_version" -ge 2 ]]; then
     [[ "$(codesign -dvv "$workflow_worker_path" 2>&1 | sed -n 's/^Identifier=//p')" == "$workflow_worker_identifier" ]]
     [[ "$(plutil -extract KanameLocalCoreMachService raw "$info_plist")" == "$service_identifier" ]]
     [[ "$(plutil -extract KanameLocalCoreServiceRequirement raw "$info_plist")" == "identifier \"$service_identifier\"" ]]
+
+    if [[ "$schema_version" -ge 3 ]]; then
+        link_gateway_path="$resources_path/kaname-link-gateway"
+        link_gateway_identifier="$expected_bundle_identifier.link-gateway"
+        jq -e --arg linkGatewayPath "$link_gateway_path" \
+            '.linkGatewayExecutablePath == $linkGatewayPath' \
+            "$receipt_path" >/dev/null
+        [[ -x "$link_gateway_path" ]] || {
+            echo "Missing executable Kaname dev runtime helper: $link_gateway_path" >&2
+            exit 1
+        }
+        [[ "$(codesign -dvv "$link_gateway_path" 2>&1 | sed -n 's/^Identifier=//p')" == "$link_gateway_identifier" ]]
+    fi
 
     [[ -f "$launch_agent_plist" ]] || { echo "Missing Kaname dev local-core LaunchAgent." >&2; exit 1; }
     [[ "$(plutil -extract Label raw "$launch_agent_plist")" == "$service_identifier" ]]

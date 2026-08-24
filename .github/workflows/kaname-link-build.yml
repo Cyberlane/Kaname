@@ -1,0 +1,136 @@
+name: Kaname Link target-native builds
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "Clients/KanameLink/**"
+      - "Rust/KanameLinkCore/**"
+      - "Sources/KanameLinkMac/**"
+      - "Sources/KanameLinkHost/**"
+      - "Sources/KanamePrototype/DesktopLinkView.swift"
+      - "proto-link/**"
+      - "Package.swift"
+      - "Package.resolved"
+      - ".github/workflows/kaname-link-build.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kaname-link-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  macos-arm64:
+    name: macOS arm64
+    runs-on: macos-26
+    timeout-minutes: 35
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Select pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal --component clippy,rustfmt && rustup default 1.97.1
+      - name: Test Link core
+        run: |
+          cargo fmt --manifest-path Rust/KanameLinkCore/Cargo.toml --check
+          cargo clippy --locked --manifest-path Rust/KanameLinkCore/Cargo.toml --all-targets -- -D warnings
+          cargo test --locked --manifest-path Rust/KanameLinkCore/Cargo.toml
+      - name: Test Swift Link boundaries
+        run: swift test --filter KanameLink
+      - name: Build macOS app bundle
+        run: Scripts/build-kaname-link-macos.sh
+      - name: Inspect and digest bundle
+        run: |
+          codesign --verify --deep --strict .build/Kaname\ Link.app
+          find .build/Kaname\ Link.app -type f -print0 | sort -z | xargs -0 shasum -a 256 > .build/Kaname-Link-macOS-arm64.sha256
+          ditto -c -k --keepParent .build/Kaname\ Link.app .build/Kaname-Link-macOS-arm64.zip
+      - name: Upload unsigned build evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: kaname-link-macos-arm64-unsigned
+          path: |
+            .build/Kaname-Link-macOS-arm64.zip
+            .build/Kaname-Link-macOS-arm64.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  windows-x64:
+    name: Windows x64
+    runs-on: windows-2025
+    timeout-minutes: 40
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          dotnet-version: 8.0.x
+      - name: Select pinned Rust toolchain
+        shell: pwsh
+        run: rustup toolchain install 1.97.1 --profile minimal --component clippy,rustfmt; rustup default 1.97.1
+      - name: Test and build Link core
+        shell: pwsh
+        run: |
+          cargo fmt --manifest-path Rust/KanameLinkCore/Cargo.toml --check
+          cargo clippy --locked --manifest-path Rust/KanameLinkCore/Cargo.toml --all-targets -- -D warnings
+          cargo test --locked --manifest-path Rust/KanameLinkCore/Cargo.toml
+          cargo build --locked --release --manifest-path Rust/KanameLinkCore/Cargo.toml --bins
+      - name: Restore and publish native WinUI shell
+        shell: pwsh
+        run: |
+          dotnet restore Clients/KanameLink/Windows/KanameLink.Windows.csproj -r win-x64
+          dotnet publish Clients/KanameLink/Windows/KanameLink.Windows.csproj -c Release -r win-x64 --self-contained true --no-restore -o artifacts/windows-x64
+          Copy-Item Rust/KanameLinkCore/target/release/kaname-link-client.exe artifacts/windows-x64/kaname-link-client.exe
+          Get-ChildItem artifacts/windows-x64 -File -Recurse | Sort-Object FullName | Get-FileHash -Algorithm SHA256 | ForEach-Object { "{0}  {1}" -f $_.Hash.ToLower(), $_.Path } | Set-Content artifacts/Kaname-Link-windows-x64.sha256
+          Compress-Archive -Path artifacts/windows-x64/* -DestinationPath artifacts/Kaname-Link-windows-x64.zip
+      - name: Upload unsigned build evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: kaname-link-windows-x64-unsigned
+          path: |
+            artifacts/Kaname-Link-windows-x64.zip
+            artifacts/Kaname-Link-windows-x64.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  linux-x64:
+    name: Linux x64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Install GTK build dependencies
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends libgtk-4-dev
+      - name: Select pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal --component clippy,rustfmt && rustup default 1.97.1
+      - name: Test Link core
+        run: |
+          cargo fmt --manifest-path Rust/KanameLinkCore/Cargo.toml --check
+          cargo clippy --locked --manifest-path Rust/KanameLinkCore/Cargo.toml --all-targets -- -D warnings
+          cargo test --locked --manifest-path Rust/KanameLinkCore/Cargo.toml
+          cargo build --locked --release --manifest-path Rust/KanameLinkCore/Cargo.toml --bins
+      - name: Build native GTK shell
+        run: cargo build --locked --release --manifest-path Clients/KanameLink/Linux/Cargo.toml
+      - name: Assemble and digest portable bundle
+        run: |
+          mkdir -p artifacts/linux-x64
+          cp Clients/KanameLink/Linux/target/release/kaname-link-linux artifacts/linux-x64/
+          cp Rust/KanameLinkCore/target/release/kaname-link-client artifacts/linux-x64/
+          cp LICENSE artifacts/linux-x64/
+          find artifacts/linux-x64 -type f -print0 | sort -z | xargs -0 sha256sum > artifacts/Kaname-Link-linux-x64.sha256
+          tar -C artifacts -czf artifacts/Kaname-Link-linux-x64.tar.gz linux-x64
+      - name: Upload unsigned build evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: kaname-link-linux-x64-unsigned
+          path: |
+            artifacts/Kaname-Link-linux-x64.tar.gz
+            artifacts/Kaname-Link-linux-x64.sha256
+          if-no-files-found: error
+          retention-days: 14

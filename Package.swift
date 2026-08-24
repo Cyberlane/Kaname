@@ -14,11 +14,16 @@ let package = Package(
         .library(name: "KanameProtocol", targets: ["KanameProtocol"]),
         .library(name: "KanameConnectivity", targets: ["KanameConnectivity"]),
         .library(name: "KanameMobileSync", targets: ["KanameMobileSync"]),
+        .library(name: "KanameLinkProtocol", targets: ["KanameLinkProtocol"]),
+        .library(name: "KanameLinkHost", targets: ["KanameLinkHost"]),
+        .library(name: "KanameLinkTunnelHost", targets: ["KanameLinkTunnelHost"]),
         .library(name: "KanameDesktop", targets: ["KanameDesktop"]),
         .library(name: "KanameWorkflowHost", targets: ["KanameWorkflowHost"]),
         .library(name: "KanameFixtures", targets: ["KanameFixtures"]),
         .library(name: "KanamePrototypeUI", targets: ["KanamePrototypeUI"]),
         .executable(name: "KanamePrototype", targets: ["KanamePrototype"]),
+        .executable(name: "KanameLink", targets: ["KanameLinkMac"]),
+        .executable(name: "KanameLinkTunnelTool", targets: ["KanameLinkTunnelTool"]),
         .executable(name: "KanameProviderProbe", targets: ["KanameProviderProbe"]),
         .executable(name: "KanameCodexSessionProbe", targets: ["KanameCodexSessionProbe"]),
         .executable(name: "KanameXPCQualification", targets: ["KanameXPCQualification"]),
@@ -86,6 +91,30 @@ let package = Package(
             ]
         ),
         .target(
+            name: "KanameLinkProtocol",
+            dependencies: [
+                .product(name: "SwiftProtobuf", package: "swift-protobuf"),
+            ],
+            path: "proto-link",
+            plugins: [
+                .plugin(name: "SwiftProtobufPlugin", package: "swift-protobuf"),
+            ]
+        ),
+        .target(name: "KanameLinkHost"),
+        .target(
+            name: "KanameLinkTunnelHost",
+            path: "Sources/KanameLinkTunnelHost",
+            linkerSettings: [
+                .linkedFramework("Security"),
+                .linkedFramework("LocalAuthentication"),
+            ]
+        ),
+        .executableTarget(
+            name: "KanameLinkTunnelTool",
+            dependencies: ["KanameLinkTunnelHost"],
+            path: "Sources/KanameLinkTunnelTool"
+        ),
+        .target(
             name: "KanameFixtures",
             dependencies: ["KanameDomain"]
         ),
@@ -111,11 +140,16 @@ let package = Package(
                 "KanameDomain",
                 "KanameFixtures",
                 "KanamePrototypeUI",
+                "KanameLinkHost",
                 "KanameLocalCore",
                 "KanameConnectivity",
                 "KanameWorkflowHost",
                 .product(name: "SwiftFlow", package: "swift-flow"),
             ]
+        ),
+        .executableTarget(
+            name: "KanameLinkMac",
+            path: "Sources/KanameLinkMac"
         ),
         .executableTarget(
             name: "KanameProviderProbe",
@@ -178,6 +212,24 @@ let package = Package(
         .testTarget(
             name: "KanameMobileSyncTests",
             dependencies: ["KanameMobileSync", "KanameProtocol"]
+        ),
+        .testTarget(
+            name: "KanameLinkProtocolTests",
+            dependencies: ["KanameLinkProtocol"]
+        ),
+        .testTarget(
+            name: "KanameLinkHostTests",
+            dependencies: ["KanameLinkHost"]
+        ),
+        .testTarget(
+            name: "KanameLinkTunnelHostTests",
+            dependencies: ["KanameLinkTunnelHost"],
+            path: "Tests/KanameLinkTunnelHostTests"
+        ),
+        .testTarget(
+            name: "KanameLinkTunnelToolTests",
+            dependencies: ["KanameLinkTunnelTool", "KanameLinkTunnelHost"],
+            path: "Tests/KanameLinkTunnelToolTests"
         ),
         .testTarget(
             name: "KanameDesktopTests",

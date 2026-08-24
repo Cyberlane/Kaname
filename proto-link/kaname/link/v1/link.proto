@@ -1,0 +1,162 @@
+syntax = "proto3";
+
+package kaname.link.v1;
+
+// Kaname Link is deliberately separate from kaname.v1.sync. Link devices are
+// external principals and can never decode into trusted-device, approval,
+// workflow, provider, filesystem, or computer-control commands.
+
+message SchemaVersion {
+  uint32 major = 1;
+  uint32 minor = 2;
+}
+
+enum Capability {
+  CAPABILITY_UNSPECIFIED = 0;
+  CAPABILITY_DISCUSSION_READ = 1;
+  CAPABILITY_DISCUSSION_CREATE = 2;
+  CAPABILITY_MESSAGE_SEND = 3;
+  CAPABILITY_STATUS_READ = 4;
+  CAPABILITY_RECEIPT_WRITE = 5;
+  CAPABILITY_REQUEST_CHANGE = 6;
+}
+
+enum Platform {
+  PLATFORM_UNSPECIFIED = 0;
+  PLATFORM_MACOS = 1;
+  PLATFORM_WINDOWS = 2;
+  PLATFORM_LINUX = 3;
+}
+
+enum EnrollmentState {
+  ENROLLMENT_STATE_UNSPECIFIED = 0;
+  ENROLLMENT_STATE_PENDING_HOST_APPROVAL = 1;
+  ENROLLMENT_STATE_APPROVED = 2;
+  ENROLLMENT_STATE_REJECTED = 3;
+  ENROLLMENT_STATE_REVOKED = 4;
+  ENROLLMENT_STATE_EXPIRED = 5;
+}
+
+enum MessageKind {
+  MESSAGE_KIND_UNSPECIFIED = 0;
+  MESSAGE_KIND_TEXT = 1;
+  MESSAGE_KIND_STATUS = 2;
+  MESSAGE_KIND_QUESTION = 3;
+}
+
+enum ReceiptState {
+  RECEIPT_STATE_UNSPECIFIED = 0;
+  RECEIPT_STATE_ON_THIS_DEVICE = 1;
+  RECEIPT_STATE_SENT_TO_HOST = 2;
+  RECEIPT_STATE_RECEIVED_BY_HOST = 3;
+  RECEIPT_STATE_SEEN = 4;
+  RECEIPT_STATE_PUBLISHED_RESULT = 5;
+}
+
+// This is the only object intended for QR/deep-link export. invite_secret is
+// high entropy, single use, short lived, and must never enter logs, receipts,
+// screenshots, diagnostics, or Obsidian.
+message InvitationArtifact {
+  SchemaVersion schema_version = 1;
+  string invitation_id = 2;
+  string public_endpoint = 3;
+  string host_display_name = 4;
+  bytes host_noise_static_public_key = 5;
+  string space_id = 6;
+  string space_display_name = 7;
+  repeated Capability capabilities = 8;
+  int64 expires_at_unix_millis = 9;
+  bytes invite_secret = 10;
+}
+
+// Sent only inside an encrypted Noise enrollment session whose responder key
+// is pinned by InvitationArtifact.host_noise_static_public_key.
+message EnrollmentProposal {
+  SchemaVersion schema_version = 1;
+  string invitation_id = 2;
+  bytes invite_secret = 3;
+  string device_id = 4;
+  string collaborator_display_name = 5;
+  string device_display_name = 6;
+  Platform platform = 7;
+  bytes device_noise_static_public_key = 8;
+  string client_version = 9;
+  bytes proposal_nonce = 10;
+}
+
+message EnrollmentReceipt {
+  SchemaVersion schema_version = 1;
+  string enrollment_id = 2;
+  string space_id = 3;
+  string device_id = 4;
+  EnrollmentState state = 5;
+  string safety_phrase = 6;
+  int64 decided_at_unix_millis = 7;
+  string reason_code = 8;
+}
+
+message LinkMessage {
+  SchemaVersion schema_version = 1;
+  string message_id = 2;
+  string space_id = 3;
+  string discussion_id = 4;
+  string author_principal_id = 5;
+  MessageKind kind = 6;
+  string body = 7;
+  uint64 author_sequence = 8;
+  bytes previous_message_digest = 9;
+  int64 created_at_unix_millis = 10;
+  bytes idempotency_key = 11;
+}
+
+message DeliveryReceipt {
+  SchemaVersion schema_version = 1;
+  string receipt_id = 2;
+  string message_id = 3;
+  string space_id = 4;
+  string actor_principal_id = 5;
+  ReceiptState state = 6;
+  int64 recorded_at_unix_millis = 7;
+}
+
+// A publication is a new immutable collaborator-visible object. It is never a
+// view over a private case and cannot silently change when Kaname changes.
+message PublicationSnapshot {
+  SchemaVersion schema_version = 1;
+  string publication_id = 2;
+  string space_id = 3;
+  string discussion_id = 4;
+  uint64 version = 5;
+  string status_label = 6;
+  string summary = 7;
+  repeated string source_receipt_ids = 8;
+  int64 published_at_unix_millis = 9;
+  string supersedes_publication_id = 10;
+}
+
+message ClientFrame {
+  SchemaVersion schema_version = 1;
+  string request_id = 2;
+  oneof payload {
+    LinkMessage message = 10;
+    DeliveryReceipt receipt = 11;
+    PublicationSnapshot publication = 12;
+    SyncRequest sync = 13;
+  }
+}
+
+message SyncRequest {
+  string space_id = 1;
+  uint64 after_server_sequence = 2;
+  uint32 limit = 3;
+}
+
+message ServerFrame {
+  SchemaVersion schema_version = 1;
+  string request_id = 2;
+  string error_code = 3;
+  uint64 latest_server_sequence = 4;
+  repeated LinkMessage messages = 10;
+  repeated DeliveryReceipt receipts = 11;
+  repeated PublicationSnapshot publications = 12;
+}

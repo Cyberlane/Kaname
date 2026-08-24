@@ -1,0 +1,137 @@
+{
+  "enums": {
+    "link.Capability": {
+      "0": "CAPABILITY_UNSPECIFIED",
+      "1": "CAPABILITY_DISCUSSION_READ",
+      "2": "CAPABILITY_DISCUSSION_CREATE",
+      "3": "CAPABILITY_MESSAGE_SEND",
+      "4": "CAPABILITY_STATUS_READ",
+      "5": "CAPABILITY_RECEIPT_WRITE",
+      "6": "CAPABILITY_REQUEST_CHANGE"
+    },
+    "link.EnrollmentState": {
+      "0": "ENROLLMENT_STATE_UNSPECIFIED",
+      "1": "ENROLLMENT_STATE_PENDING_HOST_APPROVAL",
+      "2": "ENROLLMENT_STATE_APPROVED",
+      "3": "ENROLLMENT_STATE_REJECTED",
+      "4": "ENROLLMENT_STATE_REVOKED",
+      "5": "ENROLLMENT_STATE_EXPIRED"
+    },
+    "link.MessageKind": {
+      "0": "MESSAGE_KIND_UNSPECIFIED",
+      "1": "MESSAGE_KIND_TEXT",
+      "2": "MESSAGE_KIND_STATUS",
+      "3": "MESSAGE_KIND_QUESTION"
+    },
+    "link.Platform": {
+      "0": "PLATFORM_UNSPECIFIED",
+      "1": "PLATFORM_MACOS",
+      "2": "PLATFORM_WINDOWS",
+      "3": "PLATFORM_LINUX"
+    },
+    "link.ReceiptState": {
+      "0": "RECEIPT_STATE_UNSPECIFIED",
+      "1": "RECEIPT_STATE_ON_THIS_DEVICE",
+      "2": "RECEIPT_STATE_SENT_TO_HOST",
+      "3": "RECEIPT_STATE_RECEIVED_BY_HOST",
+      "4": "RECEIPT_STATE_SEEN",
+      "5": "RECEIPT_STATE_PUBLISHED_RESULT"
+    }
+  },
+  "messages": {
+    "link.ClientFrame": {
+      "1": "SchemaVersion schema_version",
+      "10": "LinkMessage message",
+      "11": "DeliveryReceipt receipt",
+      "12": "PublicationSnapshot publication",
+      "13": "SyncRequest sync",
+      "2": "string request_id"
+    },
+    "link.DeliveryReceipt": {
+      "1": "SchemaVersion schema_version",
+      "2": "string receipt_id",
+      "3": "string message_id",
+      "4": "string space_id",
+      "5": "string actor_principal_id",
+      "6": "ReceiptState state",
+      "7": "int64 recorded_at_unix_millis"
+    },
+    "link.EnrollmentProposal": {
+      "1": "SchemaVersion schema_version",
+      "10": "bytes proposal_nonce",
+      "2": "string invitation_id",
+      "3": "bytes invite_secret",
+      "4": "string device_id",
+      "5": "string collaborator_display_name",
+      "6": "string device_display_name",
+      "7": "Platform platform",
+      "8": "bytes device_noise_static_public_key",
+      "9": "string client_version"
+    },
+    "link.EnrollmentReceipt": {
+      "1": "SchemaVersion schema_version",
+      "2": "string enrollment_id",
+      "3": "string space_id",
+      "4": "string device_id",
+      "5": "EnrollmentState state",
+      "6": "string safety_phrase",
+      "7": "int64 decided_at_unix_millis",
+      "8": "string reason_code"
+    },
+    "link.InvitationArtifact": {
+      "1": "SchemaVersion schema_version",
+      "10": "bytes invite_secret",
+      "2": "string invitation_id",
+      "3": "string public_endpoint",
+      "4": "string host_display_name",
+      "5": "bytes host_noise_static_public_key",
+      "6": "string space_id",
+      "7": "string space_display_name",
+      "8": "Capability capabilities",
+      "9": "int64 expires_at_unix_millis"
+    },
+    "link.LinkMessage": {
+      "1": "SchemaVersion schema_version",
+      "10": "int64 created_at_unix_millis",
+      "11": "bytes idempotency_key",
+      "2": "string message_id",
+      "3": "string space_id",
+      "4": "string discussion_id",
+      "5": "string author_principal_id",
+      "6": "MessageKind kind",
+      "7": "string body",
+      "8": "uint64 author_sequence",
+      "9": "bytes previous_message_digest"
+    },
+    "link.PublicationSnapshot": {
+      "1": "SchemaVersion schema_version",
+      "10": "string supersedes_publication_id",
+      "2": "string publication_id",
+      "3": "string space_id",
+      "4": "string discussion_id",
+      "5": "uint64 version",
+      "6": "string status_label",
+      "7": "string summary",
+      "8": "string source_receipt_ids",
+      "9": "int64 published_at_unix_millis"
+    },
+    "link.SchemaVersion": {
+      "1": "uint32 major",
+      "2": "uint32 minor"
+    },
+    "link.ServerFrame": {
+      "1": "SchemaVersion schema_version",
+      "10": "LinkMessage messages",
+      "11": "DeliveryReceipt receipts",
+      "12": "PublicationSnapshot publications",
+      "2": "string request_id",
+      "3": "string error_code",
+      "4": "uint64 latest_server_sequence"
+    },
+    "link.SyncRequest": {
+      "1": "string space_id",
+      "2": "uint64 after_server_sequence",
+      "3": "uint32 limit"
+    }
+  }
+}

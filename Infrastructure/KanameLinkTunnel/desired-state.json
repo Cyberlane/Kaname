@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "tunnelName": "kaname-link-production",
+  "zoneName": "cyber-lane.com",
+  "hostname": "kaname-tunnel.cyber-lane.com",
+  "publicPathRegex": "^/v1/(enroll|rpc)$",
+  "originService": "http://127.0.0.1:43110",
+  "originRequest": {
+    "connectTimeout": "5s",
+    "httpHostHeader": "kaname-tunnel.cyber-lane.com"
+  },
+  "catchAllService": "http_status:404",
+  "dns": {
+    "type": "CNAME",
+    "proxied": true,
+    "ttl": 1
+  }
+}

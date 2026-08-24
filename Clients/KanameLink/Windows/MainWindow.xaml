@@ -1,0 +1,139 @@
+<Window
+    x:Class="Cyberlane.KanameLink.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Title="Kaname Link">
+  <Grid Background="#181B22">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="*" />
+    </Grid.RowDefinitions>
+
+    <InfoBar x:Name="PreviewBanner"
+             Grid.Row="0"
+             IsOpen="False"
+             IsClosable="False"
+             Severity="Warning"
+             Title="Synthetic preview"
+             Message="No real collaborator data or connection." />
+
+    <Grid Grid.Row="1">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="260" />
+        <ColumnDefinition Width="330" />
+        <ColumnDefinition Width="*" />
+      </Grid.ColumnDefinitions>
+
+      <StackPanel Grid.Column="0" Padding="20" Spacing="16" Background="#20242D">
+        <StackPanel Spacing="2">
+          <TextBlock Text="Kaname Link" Style="{StaticResource TitleTextBlockStyle}" />
+          <TextBlock Text="External collaboration" Foreground="#AAB2C0" />
+        </StackPanel>
+        <Border Padding="12" CornerRadius="10" Background="#2A303B">
+          <StackPanel Spacing="4">
+            <StackPanel Orientation="Horizontal" Spacing="8">
+              <Ellipse x:Name="ConnectionDot" Width="10" Height="10" Fill="#A3BE8C" />
+              <TextBlock x:Name="ConnectionLabel" Text="Connecting" FontWeight="SemiBold" />
+            </StackPanel>
+            <TextBlock x:Name="HostLabel" Foreground="#AAB2C0" FontSize="12" />
+          </StackPanel>
+        </Border>
+        <TextBlock Text="LINK SPACES" Foreground="#AAB2C0" FontSize="12" FontWeight="SemiBold" />
+        <ListView x:Name="SpacesList" SelectionChanged="SpacesList_SelectionChanged" />
+        <Border Padding="12" CornerRadius="10" Background="#2A303B" VerticalAlignment="Bottom">
+          <TextBlock TextWrapping="Wrap"
+                     Foreground="#AAB2C0"
+                     FontSize="12"
+                     Text="This app cannot control Kaname, tools, models, files, or the host computer." />
+        </Border>
+      </StackPanel>
+
+      <Grid Grid.Column="1" Background="#1D2129">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+        <TextBlock x:Name="SpaceTitle" Padding="20" FontSize="22" FontWeight="Bold" Text="Discussions" />
+        <ListView x:Name="DiscussionsList"
+                  Grid.Row="1"
+                  SelectionChanged="DiscussionsList_SelectionChanged" />
+      </Grid>
+
+      <Grid Grid.Column="2">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="*" />
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+        <StackPanel Padding="22,18" Spacing="4">
+          <TextBlock x:Name="DiscussionTitle" FontSize="22" FontWeight="Bold" Text="No discussion selected" />
+          <TextBlock x:Name="DiscussionStatus" Foreground="#AAB2C0" />
+        </StackPanel>
+        <ListView x:Name="MessagesList" Grid.Row="1" Padding="22" IsItemClickEnabled="False">
+          <ListView.ItemTemplate>
+            <DataTemplate>
+              <Border Margin="0,0,0,12" Padding="14" CornerRadius="12" Background="#2A303B" MaxWidth="600">
+                <StackPanel Spacing="7">
+                  <TextBlock Text="{Binding AuthorName}" FontSize="12" FontWeight="Bold" />
+                  <TextBlock Text="{Binding Body}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                  <TextBlock Text="{Binding Receipt}" Foreground="#AAB2C0" FontSize="12" />
+                </StackPanel>
+              </Border>
+            </DataTemplate>
+          </ListView.ItemTemplate>
+        </ListView>
+        <InfoBar x:Name="NoticeBar" Grid.Row="2" IsOpen="False" IsClosable="True" Severity="Warning" />
+        <Grid Grid.Row="3" Padding="18" ColumnSpacing="12" Background="#20242D">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="Auto" />
+          </Grid.ColumnDefinitions>
+          <TextBox x:Name="Composer" PlaceholderText="Message the host" TextWrapping="Wrap" AcceptsReturn="True" />
+          <Button x:Name="SendButton" Grid.Column="1" Content="Send" Click="SendButton_Click" Style="{StaticResource AccentButtonStyle}" />
+        </Grid>
+      </Grid>
+
+      <Border x:Name="EnrollmentPanel"
+              Grid.Column="2"
+              Canvas.ZIndex="10"
+              Visibility="Collapsed"
+              Background="#181B22"
+              Padding="36">
+        <ScrollViewer>
+          <StackPanel MaxWidth="720" HorizontalAlignment="Left" Spacing="16">
+            <TextBlock Text="Connect to a Kaname host" FontSize="24" FontWeight="Bold" />
+            <TextBlock TextWrapping="Wrap"
+                       Foreground="#AAB2C0"
+                       Text="Paste the complete invitation created by the host. It is single-use, expires, and grants access only to the named Link space." />
+            <InfoBar IsOpen="True"
+                     IsClosable="False"
+                     Severity="Warning"
+                     Title="Treat the invitation like a password"
+                     Message="Do not place it in screenshots, notes, logs, tickets, or chat. Confirm the host and Link space through a separate channel." />
+            <TextBox x:Name="EnrollmentDisplayName" Header="Your display name" MaxLength="128" />
+            <TextBox x:Name="InvitationInput"
+                     Header="Invitation JSON"
+                     AcceptsReturn="True"
+                     TextWrapping="Wrap"
+                     MinHeight="180"
+                     MaxLength="65536"
+                     FontFamily="Cascadia Mono" />
+            <InfoBar x:Name="EnrollmentNoticeBar"
+                     IsOpen="False"
+                     IsClosable="True"
+                     Severity="Warning" />
+            <Button x:Name="EnrollButton"
+                    Content="Request enrollment"
+                    HorizontalAlignment="Right"
+                    Style="{StaticResource AccentButtonStyle}"
+                    Click="EnrollButton_Click" />
+          </StackPanel>
+        </ScrollViewer>
+      </Border>
+    </Grid>
+  </Grid>
+</Window>

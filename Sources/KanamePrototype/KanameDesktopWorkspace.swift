@@ -4,6 +4,7 @@ import KanameConnectivity
 import KanameDomain
 import KanamePrototypeUI
 import KanameLocalCore
+import KanameLinkHost
 import Foundation
 import SwiftUI
 #if os(macOS)
@@ -40,6 +41,7 @@ private enum DesktopDestination: String, CaseIterable, Identifiable {
     case github
     case skills
     case devices
+    case links
     case liveCodex
     case localCore
     case settings
@@ -60,6 +62,7 @@ private enum DesktopDestination: String, CaseIterable, Identifiable {
         case .github: "GitHub"
         case .skills: "Skills & Tools"
         case .devices: "Devices & Remote"
+        case .links: "Kaname Link"
         case .liveCodex: "Coding"
         case .localCore: "Local Core"
         case .settings: "Settings"
@@ -80,6 +83,7 @@ private enum DesktopDestination: String, CaseIterable, Identifiable {
         case .github: "point.3.connected.trianglepath.dotted"
         case .skills: "hammer.fill"
         case .devices: "iphone.and.arrow.forward"
+        case .links: "link"
         case .liveCodex: "chevron.left.forwardslash.chevron.right"
         case .localCore: "internaldrive.fill"
         case .settings: "gearshape.fill"
@@ -222,6 +226,7 @@ struct KanameDesktopWorkspace: View {
     @StateObject private var personalIntegrations: DesktopPersonalIntegrationViewModel
     @StateObject private var updates: DesktopUpdateViewModel
     @StateObject private var automaticBackup: DesktopAutomaticBackupViewModel
+    @StateObject private var link: DesktopLinkViewModel
     @StateObject private var portableTransfer = DesktopPortableTransferViewModel()
     @State private var destination: DesktopDestination
     @State private var selectedThreadID: String?
@@ -256,6 +261,7 @@ struct KanameDesktopWorkspace: View {
 
     init() {
         let environment = KanameDesktopEnvironment.current
+        let arguments = CommandLine.arguments
         let desktopStore: any DesktopStateStoring
         let forkFailure: String?
         do {
@@ -278,7 +284,34 @@ struct KanameDesktopWorkspace: View {
         _personalIntegrations = StateObject(wrappedValue: DesktopPersonalIntegrationViewModel(environment: environment))
         _updates = StateObject(wrappedValue: DesktopUpdateViewModel(environment: environment))
         _automaticBackup = StateObject(wrappedValue: DesktopAutomaticBackupViewModel(environment: environment))
-        let arguments = CommandLine.arguments
+        if arguments.contains("--desktop-link-synthetic-fixture") {
+            _link = StateObject(wrappedValue: DesktopLinkViewModel(
+                service: KanameLinkSyntheticGatewayService.fixture(),
+                initialSnapshot: KanameLinkSyntheticGatewayService.fixtureSnapshot
+            ))
+        } else {
+#if os(macOS)
+            let linkRoot = environment.applicationSupportRoot
+                .appending(path: "Link", directoryHint: .isDirectory)
+            if let gatewayURL = Bundle.main.url(
+                forResource: "kaname-link-gateway",
+                withExtension: nil
+            ), let gatewayRuntime = try? KanameLinkGatewayRuntime(
+                executableURL: gatewayURL,
+                stateRootURL: linkRoot
+            ) {
+                _link = StateObject(wrappedValue: DesktopLinkViewModel(runtime: gatewayRuntime))
+            } else {
+                _link = StateObject(wrappedValue: DesktopLinkViewModel(
+                    unavailableMessage: "The exact bundled Link gateway is unavailable in this app build."
+                ))
+            }
+#else
+            _link = StateObject(wrappedValue: DesktopLinkViewModel(
+                unavailableMessage: "The Link gateway host is available only in the macOS primary app."
+            ))
+#endif
+        }
         if let fixtureIndex = arguments.firstIndex(of: "--desktop-workflow-fixture"),
            arguments.indices.contains(fixtureIndex + 1) {
             seedSyntheticWorkflowFixture(model: desktopModel, manifestPath: arguments[fixtureIndex + 1])
@@ -479,6 +512,7 @@ struct KanameDesktopWorkspace: View {
             await _Concurrency.Task<Never, Never>.yield()
             NotificationCenter.default.post(name: .kanameDesktopReady, object: nil)
             updates.startAutomaticChecks()
+            await link.startIfNeeded()
         }
         .onChange(of: model.isRecoveryReadOnly) { isReadOnly in
             if isReadOnly {
@@ -490,11 +524,15 @@ struct KanameDesktopWorkspace: View {
             automaticBackup.start(model: model)
             NotificationCenter.default.post(name: .kanameDesktopReady, object: nil)
             updates.startAutomaticChecks()
+            _Concurrency.Task { await link.startIfNeeded() }
         }
         .onChange(of: destination) { _ in persistUIRestoreState() }
         .onChange(of: selectedThreadID) { _ in persistUIRestoreState() }
         .onChange(of: selectedProjectID) { _ in persistUIRestoreState() }
         .onChange(of: showsInspector) { _ in persistUIRestoreState() }
+        .onDisappear {
+            _Concurrency.Task { await link.stop() }
+        }
     }
 
     private var primaryCommandWorkspace: some View {
@@ -726,6 +764,7 @@ struct KanameDesktopWorkspace: View {
                     Button("Create automation") { navigate(to: .automations) }
                     Divider()
                     Button("Open Devices & Remote") { navigate(to: .devices) }
+                    Button("Open Kaname Link") { navigate(to: .links) }
                     Button("Open Coding") { navigate(to: .liveCodex) }
                 } label: {
                     Label("More", systemImage: "ellipsis.circle")
@@ -780,6 +819,7 @@ struct KanameDesktopWorkspace: View {
 
                 Section("System") {
                     destinationButton(.devices)
+                    destinationButton(.links, count: link.pendingDeviceCount)
                 }
             }
             .scrollContentBackground(.hidden)
@@ -932,6 +972,8 @@ struct KanameDesktopWorkspace: View {
                 DesktopSkillsView(model: model)
             case .devices:
                 DesktopDevicesView(model: model)
+            case .links:
+                DesktopLinkView(model: link)
             case .liveCodex:
                 DesktopCodingView(
                     model: model,
@@ -1672,7 +1714,7 @@ private struct DesktopGlobalSearchPalette: View {
         actions.append(contentsOf: [
             .open(.inbox), .open(.projects), .open(.research), .open(.liveCodex),
             .open(.github), .open(.knowledge), .open(.calendar), .open(.automations),
-            .open(.skills), .open(.devices),
+            .open(.skills), .open(.devices), .open(.links),
         ])
         guard !commandQuery.isEmpty else { return Array(actions.prefix(8)) }
         return actions.filter {
@@ -14916,6 +14958,7 @@ private extension DesktopDestination {
         case .github: "Local and remote repository state, checks, reviews, and stack relationships."
         case .skills: "Capability provenance, scope, permissions, compatibility, and updates."
         case .devices: "Encrypted reachability and recovery without silently widening authority."
+        case .links: "Explicitly published collaboration with external principals who never inherit device authority."
         case .liveCodex: "Isolated worktree inspection, planning, explicit write approval, and evidence review."
         case .localCore: "Provider-free replay, failure, and recovery evidence from the durable authority."
         case .settings: "Presentation and privacy defaults that never grant external authority."

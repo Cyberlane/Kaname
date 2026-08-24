@@ -13,6 +13,7 @@ case "$channel" in
         identifier="com.cyberlane.kaname.desktop"
         service_identifier="com.cyberlane.kaname.desktop.localcore.service"
         core_identifier="com.cyberlane.kaname.desktop.localcore"
+        link_gateway_identifier="com.cyberlane.kaname.desktop.link-gateway"
         default_app_version="0.23.0"
         default_app_build="43"
         ;;
@@ -22,6 +23,7 @@ case "$channel" in
         identifier="com.cyberlane.kaname.desktop.candidate"
         service_identifier="com.cyberlane.kaname.desktop.candidate.localcore.service"
         core_identifier="com.cyberlane.kaname.desktop.candidate.localcore"
+        link_gateway_identifier="com.cyberlane.kaname.desktop.candidate.link-gateway"
         default_app_version="0.23.0"
         default_app_build="43"
         ;;
@@ -31,6 +33,7 @@ case "$channel" in
         identifier="com.cyberlane.kaname.desktop.dev"
         service_identifier="com.cyberlane.kaname.desktop.dev.localcore.service"
         core_identifier="com.cyberlane.kaname.desktop.dev.localcore"
+        link_gateway_identifier="com.cyberlane.kaname.desktop.dev.link-gateway"
         default_app_version="0.0.0"
         default_app_build="1"
         ;;
@@ -50,9 +53,11 @@ workflow_worker_path="$project_dir/.build/$configuration/KanameWorkflowWorker"
 core_configuration="$configuration"
 if [[ "$configuration" == "debug" ]]; then
     core_binary_path="$project_dir/Rust/KanameCore/target/debug/kaname-local-core"
+    link_gateway_binary_path="$project_dir/Rust/KanameLinkCore/target/debug/kaname-link-gateway"
 else
     core_configuration="release"
     core_binary_path="$project_dir/Rust/KanameCore/target/release/kaname-local-core"
+    link_gateway_binary_path="$project_dir/Rust/KanameLinkCore/target/release/kaname-link-gateway"
 fi
 info_plist="$contents_path/Info.plist"
 icon_source="$project_dir/.build/KanameIcon-1024.png"
@@ -110,8 +115,10 @@ swift build -c "$configuration" --product KanameConversationWorker
 swift build -c "$configuration" --product KanameWorkflowWorker
 if [[ "$core_configuration" == "debug" ]]; then
     cargo build --locked --manifest-path Rust/KanameCore/Cargo.toml --bin kaname-local-core
+    cargo build --locked --manifest-path Rust/KanameLinkCore/Cargo.toml --bin kaname-link-gateway
 else
     cargo build --locked --release --manifest-path Rust/KanameCore/Cargo.toml --bin kaname-local-core
+    cargo build --locked --release --manifest-path Rust/KanameLinkCore/Cargo.toml --bin kaname-link-gateway
 fi
 
 if [[ -e "$app_path" ]]; then
@@ -178,6 +185,7 @@ cp "$update_helper_path" "$resources_path/KanameUpdateHelper"
 cp "$conversation_worker_path" "$resources_path/KanameConversationWorker"
 cp "$workflow_worker_path" "$resources_path/KanameWorkflowWorker"
 cp "$core_binary_path" "$resources_path/kaname-local-core"
+cp "$link_gateway_binary_path" "$resources_path/kaname-link-gateway"
 cp "$project_dir/LICENSE" "$resources_path/LICENSE"
 cp "$release_notes_path" "$resources_path/ReleaseNotes.md"
 python3 "$script_dir/generate-release-metadata.py" "$resources_path"
@@ -191,12 +199,13 @@ jq -n \
     '{schemaVersion: 1, channel: $channel, bundleIdentifier: $bundleIdentifier, version: $version, build: $build, minimumWorkspaceSchema: 1, maximumWorkspaceSchema: $maximumWorkspaceSchema, releaseNotes: $releaseNotes}' \
     > "$resources_path/KanameUpdateManifest.json"
 chmod 755 "$contents_path/MacOS/KanamePrototype"
-chmod 755 "$resources_path/KanameLocalControlService" "$resources_path/KanameUpdateHelper" "$resources_path/KanameConversationWorker" "$resources_path/KanameWorkflowWorker" "$resources_path/kaname-local-core"
+chmod 755 "$resources_path/KanameLocalControlService" "$resources_path/KanameUpdateHelper" "$resources_path/KanameConversationWorker" "$resources_path/KanameWorkflowWorker" "$resources_path/kaname-local-core" "$resources_path/kaname-link-gateway"
 codesign "${codesign_arguments[@]}" --identifier "$service_identifier" "$resources_path/KanameLocalControlService"
 codesign "${codesign_arguments[@]}" --identifier "$identifier.update-helper" "$resources_path/KanameUpdateHelper"
 codesign "${codesign_arguments[@]}" --identifier "$identifier.conversation-worker" "$resources_path/KanameConversationWorker"
 codesign "${codesign_arguments[@]}" --identifier "$identifier.workflow-worker" "$resources_path/KanameWorkflowWorker"
 codesign "${codesign_arguments[@]}" --identifier "$core_identifier" "$resources_path/kaname-local-core"
+codesign "${codesign_arguments[@]}" --identifier "$link_gateway_identifier" "$resources_path/kaname-link-gateway"
 codesign "${codesign_arguments[@]}" --identifier "$identifier" "$app_path"
 codesign --verify --deep --strict "$app_path"
 if [[ "$release_notarization" == "YES" ]]; then
