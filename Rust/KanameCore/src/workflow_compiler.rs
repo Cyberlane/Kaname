@@ -549,6 +549,23 @@ fn execution_availability(node: &Node) -> &'static str {
         {
             "executable"
         }
+        "effect.connector"
+            if string_field(&node.config, "connectorClass").is_some_and(|id| !id.is_empty())
+                && string_field(&node.config, "action")
+                    .is_some_and(|action| !action.is_empty())
+                && node
+                    .config
+                    .get("input")
+                    .is_some_and(crate::workflow_expression::executable_mapping)
+                && bounded_contract_field(&node.config, "previewContract")
+                && bounded_contract_field(&node.config, "reconciliationContract")
+                && matches!(
+                    string_field(&node.config, "idempotency"),
+                    Some("required" | "reconcile-only")
+                ) =>
+        {
+            "executable"
+        }
         "data.register-artifact"
             if string_field(&node.config, "role").is_some()
                 && array_field(&node.config, "mediaTypes").is_some_and(|types| {
@@ -1810,6 +1827,12 @@ fn canonical_value(
 
 fn string_field<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
     value.as_object()?.get(field)?.as_str()
+}
+
+/// A named contract reference the runtime pins verbatim, bounded by the same
+/// length the configuration schema admits.
+fn bounded_contract_field(value: &Value, field: &str) -> bool {
+    string_field(value, field).is_some_and(|contract| !contract.is_empty() && contract.len() <= 240)
 }
 
 fn integer_field(value: &Value, field: &str) -> Option<u64> {

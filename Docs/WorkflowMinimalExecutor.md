@@ -61,12 +61,18 @@ configuration matches the executable subset of their schema: `data.map`,
 `storage.write`, `storage.promote`, `compute.capability`, `compute.llm`,
 `control.match`, `control.decision`, `control.parallel`, `control.join`,
 `control.for-each`, `control.retry`, `control.wait`, `control.reconcile`,
-`control.human-review`, `control.subflow`, `terminal.complete`, `terminal.fail`,
-and `terminal.cancel`.
+`control.human-review`, `control.subflow`, `effect.connector`,
+`terminal.complete`, `terminal.fail`, and `terminal.cancel`.
 
-`effect.connector` remains schema-only. The executor rejects resources,
-policies, and every external effect before it records a run token, so no
-executable graph can read or write a live provider account.
+`effect.connector` executes only against a connector host the caller injects,
+and the only host this repository ships is a deterministic in-process fixture.
+The executor still rejects resources before it records a run token, and it
+admits a revision's policies only as authority policies whose approval it can
+honour. No executable graph reads or writes a live provider account: there is no
+network client, credential store, or account binding behind the connector
+boundary. See [Executable effect.connector](WorkflowEffectConnector.md) for the
+mail effect kinds, the executable configuration, and the durable
+propose/authorize/dispatch/reconcile phases.
 
 ## Durable transition rule
 
@@ -93,10 +99,13 @@ Cancellation is a typed idempotent command/event. It settles an active attempt
 as cancelled, then records terminal run cancellation. The run projection can
 rebuild every resulting attempt, node, value, edge, trace, and final outcome.
 
-Nothing here grants provider, account, credential, connector, or effect
-authority. Scoped storage, capabilities, and models reach the executor only
-through a host the caller supplies explicitly, and a trigger contributes an
-identity and a payload, never an authority.
+Nothing here grants provider, account, or credential authority. Scoped storage,
+capabilities, models, and connectors reach the executor only through a host the
+caller supplies explicitly, and a trigger contributes an identity and a payload,
+never an authority. Effect authority likewise stays outside the executor: a host
+returns the resolution an owner recorded for one exact approval request, and the
+executor verifies that identity and fingerprint before any effect crosses the
+boundary.
 
 ## Injectable capability and model hosts
 

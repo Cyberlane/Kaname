@@ -19,12 +19,20 @@ use crate::{
         WorkflowCapabilityDefinition, WorkflowCapabilityHost, WorkflowCapabilityHostResult,
         WorkflowCapabilityInvocation, WorkflowCapabilityLog, WorkflowCapabilityValue,
     },
+    workflow_effect_authority::stable_effect_id,
+    workflow_effect_connector::{
+        UnavailableWorkflowEffectHost, WorkflowEffectConnectorRequest, WorkflowEffectHost,
+        dispatch_result_payload, reconciliation_result_payload, registration_matches,
+    },
     workflow_expression::{self, ExpressionRoots},
     workflow_library::{WorkflowLibraryError, WorkflowLibraryStore},
     workflow_llm::{
         UnavailableWorkflowLlmProvider, WorkflowLlmInvocation, WorkflowLlmProvider,
         WorkflowLlmProviderDefinition, WorkflowLlmProviderResult, WorkflowLlmProviderToolResult,
         WorkflowLlmProviderTrace,
+    },
+    workflow_mail_effect::{
+        WorkflowMailEffectClass, WorkflowMailEffectRequest, mail_effect_proposal,
     },
     workflow_match::{self, EvaluationOutcome, MatchConfig, MatchRoots, TraceOutcome},
     workflow_retention::WorkflowRunRetentionPolicy,
@@ -61,6 +69,13 @@ const MAXIMUM_LLM_RESPONSE_MESSAGES: usize = 128;
 const MAXIMUM_LLM_TRACE_VALUE_BYTES: usize = 24 * 1024;
 const DEFAULT_CANCEL_REASON_CODE: &str = "cancel.requested";
 const REVIEW_WAIT_KIND: &str = "event";
+/// How long an `effect.connector` proposal stays approvable and dispatchable.
+const EFFECT_AUTHORITY_WINDOW_MILLISECONDS: i64 = 900_000;
+/// The read-only reconciliation checks one attempt may perform before it hands
+/// the still-unknown outcome to the graph.
+const MAXIMUM_EFFECT_RECONCILIATION_CHECKS: usize = 3;
+/// How long a started dispatch may stay unsettled before its deadline passes.
+const EFFECT_DISPATCH_TIMEOUT_MILLISECONDS: i64 = 60_000;
 
 #[derive(Default)]
 struct AdmittedLlmTrace {
@@ -383,6 +398,42 @@ struct LlmConfig {
     maximum_tool_calls: Option<u32>,
 }
 
+/// One `effect.connector` node. The action names the mail effect kind, and the
+/// two contract fields are the exact preview and reconciliation contracts the
+/// journaled evidence pins.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ConnectorEffectConfig {
+    connector_class: String,
+    action: String,
+    input: Value,
+    preview_contract: String,
+    reconciliation_contract: String,
+    idempotency: String,
+}
+
+/// One compiled authority policy. The compiled artifact carries policies at the
+/// top level without the per-node references the definition declares, so the
+/// executor can only check that every declared policy is an authority policy it
+/// can honour: it always demands a recorded owner resolution before dispatch.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompiledAuthorityPolicy {
+    key: String,
+    #[serde(rename = "type")]
+    policy_type: String,
+    type_version: u32,
+    config: CompiledAuthorityPolicyConfig,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompiledAuthorityPolicyConfig {
+    authority_class: String,
+    approval: String,
+    reversible: bool,
+}
+
 fn default_job_conversation_scope() -> String {
     "job".into()
 }
@@ -417,6 +468,7 @@ struct RecordedRun {
     attempts: Vec<RecordedAttempt>,
     capability_attempts: BTreeMap<String, RecordedCapabilityAttempt>,
     llm_attempts: BTreeMap<String, RecordedLlmAttempt>,
+    effects: BTreeMap<String, RecordedEffect>,
     emissions: BTreeMap<String, RecordedEmission>,
     edges: Vec<RecordedEdge>,
     cancellation: Option<v1::WorkflowRunCancellationRequested>,
@@ -499,6 +551,55 @@ struct RecordedEmission {
     payload: v1::WorkflowPortEmitted,
 }
 
+/// The journaled facts of one durable effect. Every phase carries the time it
+/// was recorded, so a later phase can derive its own occurrence from durable
+/// evidence instead of a wall clock and stay identical across replay.
+struct RecordedEffect {
+    proposed_event_id: String,
+    proposed: v1::WorkflowEffectProposed,
+    authorized_event_id: Option<String>,
+    authorized: Option<v1::WorkflowEffectAuthorized>,
+    dispatch_started_event_id: Option<String>,
+    dispatch_started: Option<v1::WorkflowEffectDispatchStarted>,
+    dispatch_started_at_unix_millis: i64,
+    dispatch_settled_event_id: Option<String>,
+    dispatch_settled: Option<v1::WorkflowEffectDispatchSettled>,
+    dispatch_settled_at_unix_millis: i64,
+    reconciliations: Vec<RecordedEffectReconciliation>,
+}
+
+struct RecordedEffectReconciliation {
+    event_id: String,
+    occurred_at_unix_millis: i64,
+    payload: v1::WorkflowEffectReconciled,
+}
+
+impl RecordedEffect {
+    fn latest_reconciliation(&self) -> Option<&RecordedEffectReconciliation> {
+        self.reconciliations.last()
+    }
+
+    /// The event a further effect fact is caused by.
+    fn latest_event_id(&self) -> &str {
+        self.reconciliations
+            .last()
+            .map(|reconciliation| reconciliation.event_id.as_str())
+            .or(self.dispatch_settled_event_id.as_deref())
+            .or(self.dispatch_started_event_id.as_deref())
+            .or(self.authorized_event_id.as_deref())
+            .unwrap_or(&self.proposed_event_id)
+    }
+
+    /// The latest durable moment in this effect's history, which is the base a
+    /// new reconciliation measures its own elapsed time from.
+    fn latest_occurred_at_unix_millis(&self) -> i64 {
+        self.reconciliations
+            .last()
+            .map(|reconciliation| reconciliation.occurred_at_unix_millis)
+            .unwrap_or(self.dispatch_settled_at_unix_millis)
+    }
+}
+
 struct RecordedEdge {
     event_id: String,
     store_position: u64,
@@ -544,6 +645,7 @@ pub fn execute(
 ) -> Result<WorkflowExecutionResult> {
     let mut capabilities = UnavailableWorkflowCapabilityHost;
     let mut llm = UnavailableWorkflowLlmProvider;
+    let mut effects = UnavailableWorkflowEffectHost;
     execute_internal(
         journal,
         library,
@@ -551,6 +653,7 @@ pub fn execute(
         None,
         &mut capabilities,
         &mut llm,
+        &mut effects,
         command,
         current_unix_millis(),
         None,
@@ -567,6 +670,7 @@ pub fn execute_at_unix_millis(
 ) -> Result<WorkflowExecutionResult> {
     let mut capabilities = UnavailableWorkflowCapabilityHost;
     let mut llm = UnavailableWorkflowLlmProvider;
+    let mut effects = UnavailableWorkflowEffectHost;
     execute_internal(
         journal,
         library,
@@ -574,6 +678,7 @@ pub fn execute_at_unix_millis(
         None,
         &mut capabilities,
         &mut llm,
+        &mut effects,
         command,
         now_unix_millis,
         None,
@@ -591,6 +696,7 @@ pub fn execute_with_storage(
 ) -> Result<WorkflowExecutionResult> {
     let mut capabilities = UnavailableWorkflowCapabilityHost;
     let mut llm = UnavailableWorkflowLlmProvider;
+    let mut effects = UnavailableWorkflowEffectHost;
     execute_internal(
         journal,
         library,
@@ -598,6 +704,7 @@ pub fn execute_with_storage(
         Some(authority),
         &mut capabilities,
         &mut llm,
+        &mut effects,
         command,
         current_unix_millis(),
         None,
@@ -613,6 +720,7 @@ pub fn execute_with_capabilities(
     command: &v1::CommandEnvelope,
 ) -> Result<WorkflowExecutionResult> {
     let mut llm = UnavailableWorkflowLlmProvider;
+    let mut effects = UnavailableWorkflowEffectHost;
     execute_internal(
         journal,
         library,
@@ -620,6 +728,7 @@ pub fn execute_with_capabilities(
         None,
         capabilities,
         &mut llm,
+        &mut effects,
         command,
         current_unix_millis(),
         None,
@@ -637,6 +746,7 @@ pub fn execute_with_storage_and_capabilities(
     command: &v1::CommandEnvelope,
 ) -> Result<WorkflowExecutionResult> {
     let mut llm = UnavailableWorkflowLlmProvider;
+    let mut effects = UnavailableWorkflowEffectHost;
     execute_internal(
         journal,
         library,
@@ -644,6 +754,7 @@ pub fn execute_with_storage_and_capabilities(
         Some(authority),
         capabilities,
         &mut llm,
+        &mut effects,
         command,
         current_unix_millis(),
         None,
@@ -659,6 +770,7 @@ pub fn execute_with_llm(
     command: &v1::CommandEnvelope,
 ) -> Result<WorkflowExecutionResult> {
     let mut capabilities = UnavailableWorkflowCapabilityHost;
+    let mut effects = UnavailableWorkflowEffectHost;
     execute_internal(
         journal,
         library,
@@ -666,8 +778,37 @@ pub fn execute_with_llm(
         None,
         &mut capabilities,
         llm,
+        &mut effects,
         command,
         current_unix_millis(),
+        None,
+        0,
+        None,
+    )
+}
+
+/// Runs a revision whose `effect.connector` nodes dispatch through `effects`.
+/// The host owns the connector registration and the local approval authority;
+/// the executor only journals what the host returns.
+pub fn execute_with_effects(
+    journal: &mut Journal,
+    library: &WorkflowLibraryStore,
+    effects: &mut dyn WorkflowEffectHost,
+    command: &v1::CommandEnvelope,
+    now_unix_millis: i64,
+) -> Result<WorkflowExecutionResult> {
+    let mut capabilities = UnavailableWorkflowCapabilityHost;
+    let mut llm = UnavailableWorkflowLlmProvider;
+    execute_internal(
+        journal,
+        library,
+        None,
+        None,
+        &mut capabilities,
+        &mut llm,
+        effects,
+        command,
+        now_unix_millis,
         None,
         0,
         None,
@@ -683,6 +824,7 @@ pub fn execute_with_storage_capabilities_and_llm(
     llm: &mut dyn WorkflowLlmProvider,
     command: &v1::CommandEnvelope,
 ) -> Result<WorkflowExecutionResult> {
+    let mut effects = UnavailableWorkflowEffectHost;
     execute_internal(
         journal,
         library,
@@ -690,6 +832,7 @@ pub fn execute_with_storage_capabilities_and_llm(
         Some(authority),
         capabilities,
         llm,
+        &mut effects,
         command,
         current_unix_millis(),
         None,
@@ -707,6 +850,7 @@ pub fn execute_with_fault_for_test(
 ) -> Result<WorkflowExecutionResult> {
     let mut capabilities = UnavailableWorkflowCapabilityHost;
     let mut llm = UnavailableWorkflowLlmProvider;
+    let mut effects = UnavailableWorkflowEffectHost;
     execute_internal(
         journal,
         library,
@@ -714,6 +858,7 @@ pub fn execute_with_fault_for_test(
         None,
         &mut capabilities,
         &mut llm,
+        &mut effects,
         command,
         current_unix_millis(),
         Some(fault),
@@ -733,6 +878,7 @@ pub fn execute_with_storage_fault_for_test(
 ) -> Result<WorkflowExecutionResult> {
     let mut capabilities = UnavailableWorkflowCapabilityHost;
     let mut llm = UnavailableWorkflowLlmProvider;
+    let mut effects = UnavailableWorkflowEffectHost;
     execute_internal(
         journal,
         library,
@@ -740,6 +886,7 @@ pub fn execute_with_storage_fault_for_test(
         Some(authority),
         &mut capabilities,
         &mut llm,
+        &mut effects,
         command,
         current_unix_millis(),
         Some(fault),
@@ -757,6 +904,7 @@ pub fn execute_with_capabilities_fault_for_test(
     fault: WorkflowExecutionFault,
 ) -> Result<WorkflowExecutionResult> {
     let mut llm = UnavailableWorkflowLlmProvider;
+    let mut effects = UnavailableWorkflowEffectHost;
     execute_internal(
         journal,
         library,
@@ -764,6 +912,7 @@ pub fn execute_with_capabilities_fault_for_test(
         None,
         capabilities,
         &mut llm,
+        &mut effects,
         command,
         current_unix_millis(),
         Some(fault),
@@ -781,6 +930,7 @@ pub fn execute_with_llm_fault_for_test(
     fault: WorkflowExecutionFault,
 ) -> Result<WorkflowExecutionResult> {
     let mut capabilities = UnavailableWorkflowCapabilityHost;
+    let mut effects = UnavailableWorkflowEffectHost;
     execute_internal(
         journal,
         library,
@@ -788,8 +938,36 @@ pub fn execute_with_llm_fault_for_test(
         None,
         &mut capabilities,
         llm,
+        &mut effects,
         command,
         current_unix_millis(),
+        Some(fault),
+        0,
+        None,
+    )
+}
+
+#[doc(hidden)]
+pub fn execute_with_effects_fault_for_test(
+    journal: &mut Journal,
+    library: &WorkflowLibraryStore,
+    effects: &mut dyn WorkflowEffectHost,
+    command: &v1::CommandEnvelope,
+    now_unix_millis: i64,
+    fault: WorkflowExecutionFault,
+) -> Result<WorkflowExecutionResult> {
+    let mut capabilities = UnavailableWorkflowCapabilityHost;
+    let mut llm = UnavailableWorkflowLlmProvider;
+    execute_internal(
+        journal,
+        library,
+        None,
+        None,
+        &mut capabilities,
+        &mut llm,
+        effects,
+        command,
+        now_unix_millis,
         Some(fault),
         0,
         None,
@@ -804,6 +982,7 @@ fn execute_internal(
     authority: Option<&WorkflowStorageExecutionAuthority>,
     capabilities: &mut dyn WorkflowCapabilityHost,
     llm: &mut dyn WorkflowLlmProvider,
+    effects: &mut dyn WorkflowEffectHost,
     command: &v1::CommandEnvelope,
     now_unix_millis: i64,
     fault: Option<WorkflowExecutionFault>,
@@ -867,6 +1046,7 @@ fn execute_internal(
             authority,
             capabilities,
             llm,
+            effects,
             command,
             &request,
             &token_id,
@@ -1154,6 +1334,7 @@ fn admit_trigger_run(
     }
     let mut capabilities = UnavailableWorkflowCapabilityHost;
     let mut llm = UnavailableWorkflowLlmProvider;
+    let mut effects = UnavailableWorkflowEffectHost;
     let result = execute_internal(
         journal,
         library,
@@ -1161,6 +1342,7 @@ fn admit_trigger_run(
         None,
         &mut capabilities,
         &mut llm,
+        &mut effects,
         &command,
         binding.observed_at_unix_millis,
         None,
@@ -1270,7 +1452,6 @@ fn load_execution_package(
         || compiled.workflow_id != request.workflow_id
         || compiled.entrypoints.len() != 1
         || !compiled.resources.is_empty()
-        || !compiled.policies.is_empty()
         || compiled.definition_digest.is_empty()
         || compiled.layout_digest.is_empty()
         || compiled.schema_bundle_digest.is_empty()
@@ -1295,6 +1476,7 @@ fn load_execution_package(
         ));
     }
     validate_compiled_subset(&compiled)?;
+    validate_compiled_policies(&compiled)?;
     let (requires_storage, requires_case) =
         compiled_storage_requirements(library, &compiled, &mut BTreeSet::new(), 0)?;
     if requires_storage && request.installation_id.is_empty() {
@@ -1304,6 +1486,16 @@ fn load_execution_package(
     }
     if requires_case && request.case_id.is_empty() {
         return Err(WorkflowExecutionError::InvalidCommand("case_id_required"));
+    }
+    if compiled
+        .nodes
+        .iter()
+        .any(|node| node.node_type == "effect.connector")
+        && request.installation_id.is_empty()
+    {
+        return Err(WorkflowExecutionError::InvalidCommand(
+            "installation_id_required",
+        ));
     }
     if compiled
         .nodes
@@ -1505,6 +1697,9 @@ fn load_execution_package(
         }
         if node.node_type == "control.subflow" {
             resolve_subflow_revision(library, &compiled, node)?;
+        }
+        if node.node_type == "effect.connector" {
+            validate_compiled_connector_effect(&compiled, node)?;
         }
     }
     for (key, declaration) in &compiled.storage {
@@ -1946,6 +2141,75 @@ fn compiled_storage_requirements(
     Ok((requires_storage, requires_case))
 }
 
+/// Admits the policies a compiled revision may carry. Only authority policies
+/// that require an owner decision are executable here, because the effect path
+/// records an approval grant for every dispatch and cannot honour a policy that
+/// waives one.
+fn validate_compiled_policies(compiled: &CompiledWorkflow) -> Result<()> {
+    if compiled.policies.len() > 256 {
+        return Err(WorkflowExecutionError::Unsupported(
+            "compiled_policy_count".into(),
+        ));
+    }
+    for (key, policy) in &compiled.policies {
+        let policy: CompiledAuthorityPolicy = serde_json::from_value(policy.clone())
+            .map_err(|_| WorkflowExecutionError::Unsupported("policy_not_executable".into()))?;
+        if &policy.key != key
+            || policy.policy_type != "authority"
+            || policy.type_version != 1
+            || policy.config.authority_class.is_empty()
+            || policy.config.authority_class.len() > 128
+            || !matches!(
+                policy.config.approval.as_str(),
+                "always" | "standing-grant-eligible"
+            )
+            // A standing grant pre-approves later effects, so it may only cover
+            // an authority class the owner can undo.
+            || (policy.config.approval == "standing-grant-eligible" && !policy.config.reversible)
+        {
+            return Err(WorkflowExecutionError::Unsupported(
+                "policy_not_executable".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The exact connector package this executable slice admits, and the durable
+/// connector class its intents carry.
+const MAIL_CONNECTOR_PACKAGE_ID: &str = "dev.kaname.mail";
+
+fn validate_compiled_connector_effect(
+    compiled: &CompiledWorkflow,
+    node: &CompiledNode,
+) -> Result<()> {
+    let config: ConnectorEffectConfig = serde_json::from_value(node.config.clone())
+        .map_err(|_| WorkflowExecutionError::Integrity("connector_effect_config".into()))?;
+    if config.connector_class != MAIL_CONNECTOR_PACKAGE_ID
+        || WorkflowMailEffectClass::from_action(&config.action).is_none()
+        || !workflow_expression::executable_mapping(&config.input)
+        || config.preview_contract.is_empty()
+        || config.preview_contract.len() > 240
+        || config.reconciliation_contract.is_empty()
+        || config.reconciliation_contract.len() > 240
+        || !matches!(config.idempotency.as_str(), "required" | "reconcile-only")
+    {
+        return Err(WorkflowExecutionError::Unsupported(
+            "connector_effect_contract".into(),
+        ));
+    }
+    if !compiled
+        .dependencies
+        .iter()
+        .any(|dependency| dependency.kind == "connector" && dependency.id == config.connector_class)
+    {
+        return Err(WorkflowExecutionError::Integrity(
+            "connector_effect_dependency".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_compiled_subset(compiled: &CompiledWorkflow) -> Result<()> {
     compiled
         .retention
@@ -2005,6 +2269,7 @@ fn validate_compiled_subset(compiled: &CompiledWorkflow) -> Result<()> {
                     | "storage.promote"
                     | "compute.capability"
                     | "compute.llm"
+                    | "effect.connector"
                     | "terminal.complete"
                     | "terminal.fail"
                     | "terminal.cancel"
@@ -2506,6 +2771,7 @@ fn next_events(
     authority: Option<&WorkflowStorageExecutionAuthority>,
     capabilities: &mut dyn WorkflowCapabilityHost,
     llm: &mut dyn WorkflowLlmProvider,
+    effects: &mut dyn WorkflowEffectHost,
     command: &v1::CommandEnvelope,
     request: &v1::RequestWorkflowRun,
     token_id: &str,
@@ -2604,6 +2870,7 @@ fn next_events(
                     authority,
                     capabilities,
                     llm,
+                    effects,
                     command,
                     request,
                     recorded,
@@ -2759,6 +3026,7 @@ fn next_events(
             authority,
             capabilities,
             llm,
+            effects,
             command,
             request,
             token_id,
@@ -2891,7 +3159,7 @@ fn mapping_failure_value(
 /// before the node runs, if the node type declares one.
 fn node_config_mapping(node: &CompiledNode) -> Option<&Value> {
     let field = match node.node_type.as_str() {
-        "compute.capability" | "control.subflow" => "input",
+        "compute.capability" | "control.subflow" | "effect.connector" => "input",
         "compute.llm" => "prompt",
         "control.human-review" => "proposal",
         _ => return None,
@@ -2969,6 +3237,7 @@ fn mapped_node_inputs<'a>(
     Ok((inputs, None))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn node_event_sequence(
     journal: &mut Journal,
     library: &WorkflowLibraryStore,
@@ -2977,6 +3246,7 @@ fn node_event_sequence(
     authority: Option<&WorkflowStorageExecutionAuthority>,
     capabilities: &mut dyn WorkflowCapabilityHost,
     llm: &mut dyn WorkflowLlmProvider,
+    effects: &mut dyn WorkflowEffectHost,
     command: &v1::CommandEnvelope,
     request: &v1::RequestWorkflowRun,
     token_id: &str,
@@ -3004,6 +3274,7 @@ fn node_event_sequence(
             authority,
             capabilities,
             llm,
+            effects,
             command,
             request,
             token_id,
@@ -3038,6 +3309,14 @@ fn node_event_sequence(
         && node.node_type == "compute.llm"
         && let Some(events) = pending_llm_event_sequence(
             package, llm, request, token_id, state, attempt, node, &inputs,
+        )?
+    {
+        return Ok(events);
+    }
+    if mapping_failure.is_none()
+        && node.node_type == "effect.connector"
+        && let Some(events) = pending_effect_event_sequence(
+            effects, request, token_id, state, attempt, node, &inputs,
         )?
     {
         return Ok(events);
@@ -3099,6 +3378,8 @@ fn node_event_sequence(
         execute_settled_capability_node(request, state, attempt, node)?
     } else if node.node_type == "compute.llm" {
         execute_settled_llm_node(request, state, attempt, node)?
+    } else if node.node_type == "effect.connector" {
+        execute_settled_effect_node(request, state, attempt, node, &inputs)?
     } else if node.node_type == "control.subflow" {
         execute_settled_subflow_node(request, state, attempt, node)?
     } else if node.node_type == "control.join" {
@@ -4594,6 +4875,7 @@ fn pending_subflow_event_sequence(
     authority: Option<&WorkflowStorageExecutionAuthority>,
     capabilities: &mut dyn WorkflowCapabilityHost,
     llm: &mut dyn WorkflowLlmProvider,
+    effects: &mut dyn WorkflowEffectHost,
     command: &v1::CommandEnvelope,
     request: &v1::RequestWorkflowRun,
     run_token_id: &str,
@@ -4677,6 +4959,7 @@ fn pending_subflow_event_sequence(
         authority,
         capabilities,
         llm,
+        effects,
         &child_command,
         now_unix_millis,
         None,
@@ -4798,6 +5081,7 @@ fn cascade_subflow_cancellation(
     authority: Option<&WorkflowStorageExecutionAuthority>,
     capabilities: &mut dyn WorkflowCapabilityHost,
     llm: &mut dyn WorkflowLlmProvider,
+    effects: &mut dyn WorkflowEffectHost,
     parent_command: &v1::CommandEnvelope,
     parent_request: &v1::RequestWorkflowRun,
     recorded: &RecordedSubflow,
@@ -4816,6 +5100,7 @@ fn cascade_subflow_cancellation(
             authority,
             capabilities,
             llm,
+            effects,
             &child_command,
             now_unix_millis,
             None,
@@ -4850,6 +5135,7 @@ fn cascade_subflow_cancellation(
         authority,
         capabilities,
         llm,
+        effects,
         &child_command,
         now_unix_millis,
         None,
@@ -6980,6 +7266,501 @@ fn llm_invocation_id(
     stable_id(
         "llm",
         &[&request.run_id, &attempt.started.attempt_id, &node.id],
+    )
+}
+
+/// One `effect.connector` attempt, either ready to reach the connector host or
+/// already refused before any authority exists.
+enum EffectPreparation {
+    Ready(Box<PreparedEffect>),
+    Refused { code: &'static str, detail: Value },
+}
+
+struct PreparedEffect {
+    proposal: v1::WorkflowEffectProposed,
+    effect_id: String,
+}
+
+/// Builds the exact proposal one attempt would record. The result is derived
+/// only from the compiled node, the mapped input, and durable attempt facts, so
+/// every replay of the same attempt produces the same effect identity.
+fn prepare_effect(
+    request: &v1::RequestWorkflowRun,
+    run_token_id: &str,
+    attempt: &RecordedAttempt,
+    node: &CompiledNode,
+    inputs: &[(
+        Option<&v1::WorkflowEdgeCheckpointed>,
+        v1::WorkflowValueReference,
+    )],
+) -> Result<EffectPreparation> {
+    let config: ConnectorEffectConfig = serde_json::from_value(node.config.clone())
+        .map_err(|_| WorkflowExecutionError::Integrity("connector_effect_config".into()))?;
+    let class = WorkflowMailEffectClass::from_action(&config.action)
+        .ok_or_else(|| WorkflowExecutionError::Integrity("connector_effect_action".into()))?;
+    let edge_input = inputs
+        .last()
+        .ok_or_else(|| WorkflowExecutionError::Lifecycle("effect_input_missing".into()))?
+        .1
+        .clone();
+    let mapped = apply_mapping(
+        &config.input,
+        &edge_input,
+        &stable_id(
+            "value",
+            &[&request.run_id, &attempt.started.attempt_id, "effect-input"],
+        ),
+    )?;
+    let input = match mapped {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(EffectPreparation::Refused {
+                code: "effect.input-mapping-failed",
+                detail: json!({
+                    "action": config.action,
+                    "expressionPath": error.expression_path,
+                    "reason": error.code
+                }),
+            });
+        }
+    };
+    let payload = inline_json(&input)?;
+    let account_binding_id = payload
+        .get("accountBindingId")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let destination_fingerprint = payload
+        .get("destinationFingerprint")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let proposal = mail_effect_proposal(WorkflowMailEffectRequest {
+        class,
+        run_id: request.run_id.clone(),
+        run_token_id: run_token_id.to_owned(),
+        attempt_id: attempt.started.attempt_id.clone(),
+        execution_token_id: attempt.started.execution_token_id.clone(),
+        node_id: node.id.clone(),
+        workflow_id: request.workflow_id.clone(),
+        revision_id: request.revision_id.clone(),
+        project_id: request.installation_id.clone(),
+        workspace_id: request.case_id.clone(),
+        account_binding_id,
+        destination_fingerprint,
+        input_digest: input.sha256.clone(),
+        expires_at_unix_millis: attempt
+            .started_at_unix_millis
+            .saturating_add(EFFECT_AUTHORITY_WINDOW_MILLISECONDS),
+    });
+    let proposal = match proposal {
+        Ok(proposal) => proposal,
+        Err(error) => {
+            return Ok(EffectPreparation::Refused {
+                code: "effect.input-rejected",
+                detail: json!({"action": config.action, "reason": error.to_string()}),
+            });
+        }
+    };
+    let effect_id = proposal
+        .intent
+        .as_ref()
+        .ok_or_else(|| WorkflowExecutionError::Integrity("effect_intent_missing".into()))?
+        .effect_id
+        .clone();
+    Ok(EffectPreparation::Ready(Box::new(PreparedEffect {
+        proposal,
+        effect_id,
+    })))
+}
+
+/// Advances one `effect.connector` attempt by a single durable fact: propose,
+/// authorize, start dispatch, settle dispatch, then bounded reconciliation.
+///
+/// The journaled dispatch-started fact is the outbox boundary. The executor
+/// offers a dispatch record to the connector at most once per pass, and an
+/// interrupted pass re-offers the same record under the same idempotency key,
+/// which the registration must honour (`idempotent` and `supportsReconciliation`
+/// are both required before an intent may cross the boundary at all). Returning
+/// `None` hands the attempt to `execute_settled_effect_node`, which reads the
+/// journaled facts and selects the node's port.
+#[allow(clippy::too_many_arguments)]
+fn pending_effect_event_sequence(
+    effects: &mut dyn WorkflowEffectHost,
+    request: &v1::RequestWorkflowRun,
+    run_token_id: &str,
+    state: &RecordedRun,
+    attempt: &RecordedAttempt,
+    node: &CompiledNode,
+    inputs: &[(
+        Option<&v1::WorkflowEdgeCheckpointed>,
+        v1::WorkflowValueReference,
+    )],
+) -> Result<Option<Vec<v1::EventEnvelope>>> {
+    let EffectPreparation::Ready(prepared) =
+        prepare_effect(request, run_token_id, attempt, node, inputs)?
+    else {
+        return Ok(None);
+    };
+    let proposal = &prepared.proposal;
+    let effect_id = prepared.effect_id.as_str();
+    let intent = proposal
+        .intent
+        .as_ref()
+        .ok_or_else(|| WorkflowExecutionError::Integrity("effect_intent_missing".into()))?;
+    let approval = proposal
+        .approval_request
+        .as_ref()
+        .ok_or_else(|| WorkflowExecutionError::Integrity("effect_approval_missing".into()))?;
+    let preview = proposal
+        .preview
+        .as_ref()
+        .ok_or_else(|| WorkflowExecutionError::Integrity("effect_preview_missing".into()))?;
+    let Some(recorded) = state.effects.get(effect_id) else {
+        return Ok(Some(vec![runtime_event(
+            attempt.started_at_unix_millis,
+            &effect_event_id(request, "effect-proposed", effect_id),
+            workflow_runtime::WORKFLOW_EFFECT_PROPOSED_KIND,
+            workflow_runtime::WORKFLOW_EFFECT_PROPOSED_TYPE,
+            proposal.clone(),
+            &attempt.started_event_id,
+            &request.run_id,
+        )]));
+    };
+    if &recorded.proposed != proposal {
+        return Err(WorkflowExecutionError::Integrity(
+            "recorded_effect_proposal_mismatch".into(),
+        ));
+    }
+    let Some(authorization) = recorded.authorized.as_ref() else {
+        // Authority stays outside the executor: the host returns the exact
+        // resolution an owner recorded for this approval request, or nothing.
+        let Some(resolution) = effects.authorize(proposal) else {
+            return Ok(None);
+        };
+        if resolution.approval_id != approval.approval_id
+            || resolution.expected_fingerprint != approval.fingerprint
+            || v1::ApprovalDecision::try_from(resolution.decision)
+                != Ok(v1::ApprovalDecision::Approve)
+        {
+            return Ok(None);
+        }
+        return Ok(Some(vec![runtime_event(
+            attempt.started_at_unix_millis,
+            &effect_event_id(request, "effect-authorized", effect_id),
+            workflow_runtime::WORKFLOW_EFFECT_AUTHORIZED_KIND,
+            workflow_runtime::WORKFLOW_EFFECT_AUTHORIZED_TYPE,
+            v1::WorkflowEffectAuthorized {
+                run_id: request.run_id.clone(),
+                run_token_id: run_token_id.to_owned(),
+                effect_id: effect_id.to_owned(),
+                grant_id: stable_effect_id("effect-grant", &approval.approval_id, effect_id),
+                resolution: Some(resolution),
+                approval_fingerprint: approval.fingerprint.clone(),
+                intent_digest: proposal.intent_digest.clone(),
+                preview_digest: preview.preview_digest.clone(),
+                destination_fingerprint: intent.destination_fingerprint.clone(),
+                idempotency_key: intent.idempotency_key.clone(),
+                expires_at_unix_millis: approval.expires_at_unix_millis,
+            },
+            &recorded.proposed_event_id,
+            &request.run_id,
+        )]));
+    };
+    let Some(dispatch) = recorded.dispatch_started.as_ref() else {
+        let Some(registration) =
+            effects.registration(&intent.connector_class, &intent.account_binding_id)
+        else {
+            return Ok(None);
+        };
+        if !registration_matches(&registration, intent) {
+            return Ok(None);
+        }
+        let dispatch_id = stable_effect_id("effect-dispatch", effect_id, &intent.idempotency_key);
+        return Ok(Some(vec![runtime_event(
+            attempt.started_at_unix_millis,
+            &effect_event_id(request, "effect-dispatch-started", effect_id),
+            workflow_runtime::WORKFLOW_EFFECT_DISPATCH_STARTED_KIND,
+            workflow_runtime::WORKFLOW_EFFECT_DISPATCH_STARTED_TYPE,
+            v1::WorkflowEffectDispatchStarted {
+                run_id: request.run_id.clone(),
+                run_token_id: run_token_id.to_owned(),
+                effect_id: effect_id.to_owned(),
+                dispatch_id,
+                grant_id: authorization.grant_id.clone(),
+                intent_digest: proposal.intent_digest.clone(),
+                preview_digest: preview.preview_digest.clone(),
+                destination_fingerprint: intent.destination_fingerprint.clone(),
+                idempotency_key: intent.idempotency_key.clone(),
+                registration: Some(registration),
+                deadline_unix_millis: authorization.expires_at_unix_millis.min(
+                    attempt
+                        .started_at_unix_millis
+                        .saturating_add(EFFECT_DISPATCH_TIMEOUT_MILLISECONDS),
+                ),
+            },
+            recorded.latest_event_id(),
+            &request.run_id,
+        )]));
+    };
+    let mut connector_request = WorkflowEffectConnectorRequest {
+        proposal: proposal.clone(),
+        authorization: authorization.clone(),
+        dispatch: dispatch.clone(),
+        prior_receipt: None,
+    };
+    let Some(settled) = recorded.dispatch_settled.as_ref() else {
+        let result =
+            dispatch_result_payload(&connector_request, effects.dispatch(&connector_request));
+        return Ok(Some(vec![runtime_event(
+            occurred_after_effect_phase(
+                recorded.dispatch_started_at_unix_millis,
+                result.elapsed_milliseconds,
+            ),
+            &effect_event_id(request, "effect-dispatch-settled", effect_id),
+            workflow_runtime::WORKFLOW_EFFECT_DISPATCH_SETTLED_KIND,
+            workflow_runtime::WORKFLOW_EFFECT_DISPATCH_SETTLED_TYPE,
+            result,
+            recorded.latest_event_id(),
+            &request.run_id,
+        )]));
+    };
+    if v1::WorkflowEffectDispatchOutcome::try_from(settled.outcome)
+        .map_err(|_| WorkflowExecutionError::Integrity("effect_dispatch_outcome".into()))?
+        != v1::WorkflowEffectDispatchOutcome::Unknown
+    {
+        return Ok(None);
+    }
+    if let Some(latest) = recorded.latest_reconciliation()
+        && v1::WorkflowEffectReconciliationOutcome::try_from(latest.payload.outcome).map_err(
+            |_| WorkflowExecutionError::Integrity("effect_reconciliation_outcome".into()),
+        )? != v1::WorkflowEffectReconciliationOutcome::StillUnknown
+    {
+        return Ok(None);
+    }
+    let ordinal = recorded.reconciliations.len();
+    if ordinal >= MAXIMUM_EFFECT_RECONCILIATION_CHECKS {
+        return Ok(None);
+    }
+    connector_request.prior_receipt = settled.receipt.clone();
+    let reconciliation_id = stable_effect_id(
+        "effect-reconciliation",
+        effect_id,
+        &format!("{}:{}", dispatch.dispatch_id, ordinal + 1),
+    );
+    let reconciled = reconciliation_result_payload(
+        &connector_request,
+        reconciliation_id,
+        effects.reconcile(&connector_request),
+    );
+    Ok(Some(vec![runtime_event(
+        occurred_after_effect_phase(
+            recorded.latest_occurred_at_unix_millis(),
+            reconciled.elapsed_milliseconds,
+        ),
+        &effect_event_id(
+            request,
+            &format!("effect-reconciled-{}", ordinal + 1),
+            effect_id,
+        ),
+        workflow_runtime::WORKFLOW_EFFECT_RECONCILED_KIND,
+        workflow_runtime::WORKFLOW_EFFECT_RECONCILED_TYPE,
+        reconciled,
+        recorded.latest_event_id(),
+        &request.run_id,
+    )]))
+}
+
+fn effect_event_id(request: &v1::RequestWorkflowRun, phase: &str, effect_id: &str) -> String {
+    stable_id("event", &[&request.run_id, phase, effect_id])
+}
+
+fn occurred_after_effect_phase(started_at_unix_millis: i64, elapsed_milliseconds: u64) -> i64 {
+    started_at_unix_millis.saturating_add(i64::try_from(elapsed_milliseconds).unwrap_or(i64::MAX))
+}
+
+/// Selects the node's port from the journaled effect facts. `success` carries
+/// the applied receipt; `error` carries the projection status and the number of
+/// reconciliation checks already spent, which is exactly what a downstream
+/// `control.reconcile` node reads to continue an unknown outcome.
+fn execute_settled_effect_node(
+    request: &v1::RequestWorkflowRun,
+    state: &RecordedRun,
+    attempt: &RecordedAttempt,
+    node: &CompiledNode,
+    inputs: &[(
+        Option<&v1::WorkflowEdgeCheckpointed>,
+        v1::WorkflowValueReference,
+    )],
+) -> Result<NodeExecution> {
+    let prepared = match prepare_effect(
+        request,
+        &attempt.started.run_token_id,
+        attempt,
+        node,
+        inputs,
+    )? {
+        EffectPreparation::Ready(prepared) => prepared,
+        EffectPreparation::Refused { code, detail } => {
+            let value = effect_outcome_value(request, node, code, String::new(), 0, detail)?;
+            return Ok(failure_output("error", code, value));
+        }
+    };
+    let effect_id = prepared.effect_id.as_str();
+    let recorded = state
+        .effects
+        .get(effect_id)
+        .ok_or_else(|| WorkflowExecutionError::Lifecycle("effect_not_proposed".into()))?;
+    let checks = recorded.reconciliations.len() as u64;
+    let failure = |code: &'static str, status: &str, detail: Value| -> Result<NodeExecution> {
+        let value = effect_outcome_value(
+            request,
+            node,
+            code,
+            effect_id.to_owned(),
+            checks,
+            merged_effect_detail(status, detail),
+        )?;
+        Ok(failure_output("error", code, value))
+    };
+    if recorded.authorized.is_none() {
+        return failure("effect.not-authorized", "proposed", json!({}));
+    }
+    let Some(dispatch) = recorded.dispatch_started.as_ref() else {
+        return failure("effect.connector-unavailable", "authorized", json!({}));
+    };
+    let Some(settled) = recorded.dispatch_settled.as_ref() else {
+        return failure("effect.dispatch-interrupted", "dispatching", json!({}));
+    };
+    if let Some(latest) = recorded.latest_reconciliation() {
+        let outcome = v1::WorkflowEffectReconciliationOutcome::try_from(latest.payload.outcome)
+            .map_err(|_| {
+                WorkflowExecutionError::Integrity("effect_reconciliation_outcome".into())
+            })?;
+        return match outcome {
+            v1::WorkflowEffectReconciliationOutcome::Applied => Ok(success_output(
+                "success",
+                effect_applied_value(
+                    request,
+                    node,
+                    effect_id,
+                    checks,
+                    "reconciled_applied",
+                    &latest.payload.receipt,
+                )?,
+            )),
+            v1::WorkflowEffectReconciliationOutcome::NotApplied => failure(
+                "effect.not-applied",
+                "reconciled_not_applied",
+                json!({"reason": latest.payload.error_code}),
+            ),
+            v1::WorkflowEffectReconciliationOutcome::StillUnknown => failure(
+                "effect.outcome-unknown",
+                "outcome_unknown",
+                json!({
+                    "dispatchId": dispatch.dispatch_id,
+                    "reason": latest.payload.error_code
+                }),
+            ),
+            v1::WorkflowEffectReconciliationOutcome::Unspecified => Err(
+                WorkflowExecutionError::Integrity("effect_reconciliation_outcome".into()),
+            ),
+        };
+    }
+    match v1::WorkflowEffectDispatchOutcome::try_from(settled.outcome)
+        .map_err(|_| WorkflowExecutionError::Integrity("effect_dispatch_outcome".into()))?
+    {
+        v1::WorkflowEffectDispatchOutcome::Succeeded => Ok(success_output(
+            "success",
+            effect_applied_value(
+                request,
+                node,
+                effect_id,
+                checks,
+                "succeeded",
+                &settled.receipt,
+            )?,
+        )),
+        v1::WorkflowEffectDispatchOutcome::Rejected => failure(
+            "effect.rejected",
+            "rejected",
+            json!({"reason": settled.error_code}),
+        ),
+        v1::WorkflowEffectDispatchOutcome::NotSent => failure(
+            "effect.not-sent",
+            "not_sent",
+            json!({"reason": settled.error_code}),
+        ),
+        v1::WorkflowEffectDispatchOutcome::Unknown => failure(
+            "effect.outcome-unknown",
+            "outcome_unknown",
+            json!({
+                "dispatchId": dispatch.dispatch_id,
+                "reason": settled.error_code
+            }),
+        ),
+        v1::WorkflowEffectDispatchOutcome::Unspecified => Err(WorkflowExecutionError::Integrity(
+            "effect_dispatch_outcome".into(),
+        )),
+    }
+}
+
+fn merged_effect_detail(status: &str, detail: Value) -> Value {
+    let mut merged = json!({"status": status});
+    if let (Some(target), Some(fields)) = (merged.as_object_mut(), detail.as_object()) {
+        for (key, value) in fields {
+            target.insert(key.clone(), value.clone());
+        }
+    }
+    merged
+}
+
+fn effect_outcome_value(
+    request: &v1::RequestWorkflowRun,
+    node: &CompiledNode,
+    code: &str,
+    effect_id: String,
+    checks: u64,
+    detail: Value,
+) -> Result<v1::WorkflowValueReference> {
+    let mut payload = json!({
+        "code": code,
+        "effectId": effect_id,
+        "checks": checks
+    });
+    if let (Some(target), Some(fields)) = (payload.as_object_mut(), detail.as_object()) {
+        for (key, value) in fields {
+            target.insert(key.clone(), value.clone());
+        }
+    }
+    value_from_json(
+        &stable_id("value", &[&request.run_id, &node.id, code, &effect_id]),
+        &payload,
+    )
+}
+
+fn effect_applied_value(
+    request: &v1::RequestWorkflowRun,
+    node: &CompiledNode,
+    effect_id: &str,
+    checks: u64,
+    status: &str,
+    receipt: &Option<v1::WorkflowEffectReceipt>,
+) -> Result<v1::WorkflowValueReference> {
+    let receipt = receipt
+        .as_ref()
+        .ok_or_else(|| WorkflowExecutionError::Integrity("effect_receipt_missing".into()))?;
+    effect_outcome_value(
+        request,
+        node,
+        "effect.applied",
+        effect_id.to_owned(),
+        checks,
+        json!({
+            "status": status,
+            "receiptId": receipt.receipt_id,
+            "evidenceDigest": receipt.evidence_digest
+        }),
     )
 }
 
@@ -9724,14 +10505,76 @@ fn recorded_run(journal: &Journal, run_id: &str) -> Result<RecordedRun> {
                 });
             }
             WorkflowRuntimeEvent::MatchTraceRecorded(_) => {}
-            WorkflowRuntimeEvent::EffectProposed(_)
-            | WorkflowRuntimeEvent::EffectAuthorized(_)
-            | WorkflowRuntimeEvent::EffectDispatchStarted(_)
-            | WorkflowRuntimeEvent::EffectDispatchSettled(_)
-            | WorkflowRuntimeEvent::EffectReconciled(_) => {
-                // Effect execution has its own durable outbox/reconciliation
-                // coordinator. Executor replay consumes these as evidence and
-                // never invokes a connector from journal replay.
+            WorkflowRuntimeEvent::EffectProposed(payload) => {
+                let effect_id = payload
+                    .intent
+                    .as_ref()
+                    .ok_or_else(|| {
+                        WorkflowExecutionError::Integrity("effect_intent_missing".into())
+                    })?
+                    .effect_id
+                    .clone();
+                if state
+                    .effects
+                    .insert(
+                        effect_id,
+                        RecordedEffect {
+                            proposed_event_id: envelope.event_id,
+                            proposed: payload,
+                            authorized_event_id: None,
+                            authorized: None,
+                            dispatch_started_event_id: None,
+                            dispatch_started: None,
+                            dispatch_started_at_unix_millis: 0,
+                            dispatch_settled_event_id: None,
+                            dispatch_settled: None,
+                            dispatch_settled_at_unix_millis: 0,
+                            reconciliations: Vec::new(),
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(WorkflowExecutionError::Lifecycle(
+                        "duplicate_effect_proposal".into(),
+                    ));
+                }
+            }
+            WorkflowRuntimeEvent::EffectAuthorized(payload) => {
+                let effect = recorded_effect_mut(&mut state, &payload.effect_id)?;
+                if effect.authorized.replace(payload).is_some() {
+                    return Err(WorkflowExecutionError::Lifecycle(
+                        "effect_authorized_twice".into(),
+                    ));
+                }
+                effect.authorized_event_id = Some(envelope.event_id);
+            }
+            WorkflowRuntimeEvent::EffectDispatchStarted(payload) => {
+                let effect = recorded_effect_mut(&mut state, &payload.effect_id)?;
+                if effect.dispatch_started.replace(payload).is_some() {
+                    return Err(WorkflowExecutionError::Lifecycle(
+                        "effect_dispatched_twice".into(),
+                    ));
+                }
+                effect.dispatch_started_event_id = Some(envelope.event_id);
+                effect.dispatch_started_at_unix_millis = envelope.occurred_at_unix_millis;
+            }
+            WorkflowRuntimeEvent::EffectDispatchSettled(payload) => {
+                let effect = recorded_effect_mut(&mut state, &payload.effect_id)?;
+                if effect.dispatch_settled.replace(payload).is_some() {
+                    return Err(WorkflowExecutionError::Lifecycle(
+                        "effect_dispatch_settled_twice".into(),
+                    ));
+                }
+                effect.dispatch_settled_event_id = Some(envelope.event_id);
+                effect.dispatch_settled_at_unix_millis = envelope.occurred_at_unix_millis;
+            }
+            WorkflowRuntimeEvent::EffectReconciled(payload) => {
+                let effect = recorded_effect_mut(&mut state, &payload.effect_id)?;
+                effect.reconciliations.push(RecordedEffectReconciliation {
+                    event_id: envelope.event_id,
+                    occurred_at_unix_millis: envelope.occurred_at_unix_millis,
+                    payload,
+                });
             }
             WorkflowRuntimeEvent::ConnectorObservationStarted(_)
             | WorkflowRuntimeEvent::ConnectorObservationSettled(_) => {
@@ -9762,6 +10605,16 @@ fn recorded_run(journal: &Journal, run_id: &str) -> Result<RecordedRun> {
         .attempts
         .sort_by_key(|attempt| attempt.started_store_position);
     Ok(state)
+}
+
+fn recorded_effect_mut<'a>(
+    state: &'a mut RecordedRun,
+    effect_id: &str,
+) -> Result<&'a mut RecordedEffect> {
+    state
+        .effects
+        .get_mut(effect_id)
+        .ok_or_else(|| WorkflowExecutionError::Lifecycle("effect_proposal_missing".into()))
 }
 
 fn active_attempt(state: &RecordedRun) -> Result<Option<&RecordedAttempt>> {

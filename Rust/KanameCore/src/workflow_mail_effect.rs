@@ -1,7 +1,8 @@
 //! Mail-specific proposal construction for the shared durable effect authority.
 //!
-//! This module constructs exact send/archive intent, preview, and approval
-//! records. It does not authorize, dispatch, reconcile, or contact a provider.
+//! This module constructs the exact intent, preview, and approval records for
+//! each admitted mail effect kind. It does not authorize, dispatch, reconcile,
+//! or contact a provider.
 
 use crate::{
     policy::approval_fingerprint,
@@ -16,26 +17,79 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkflowMailEffectClass {
     Send,
+    Draft,
     Archive,
+    Label,
+    Trash,
+    MarkRead,
 }
+
+/// Every mail effect kind the durable authority admits, in a stable order a
+/// connector registration can enumerate.
+pub const WORKFLOW_MAIL_EFFECT_CLASSES: [WorkflowMailEffectClass; 6] = [
+    WorkflowMailEffectClass::Send,
+    WorkflowMailEffectClass::Draft,
+    WorkflowMailEffectClass::Archive,
+    WorkflowMailEffectClass::Label,
+    WorkflowMailEffectClass::Trash,
+    WorkflowMailEffectClass::MarkRead,
+];
 
 impl WorkflowMailEffectClass {
     pub const fn action(self) -> &'static str {
         match self {
             Self::Send => "send",
+            Self::Draft => "draft",
             Self::Archive => "archive",
+            Self::Label => "label",
+            Self::Trash => "trash",
+            Self::MarkRead => "mark-read",
         }
     }
 
+    pub fn from_action(action: &str) -> Option<Self> {
+        WORKFLOW_MAIL_EFFECT_CLASSES
+            .into_iter()
+            .find(|class| class.action() == action)
+    }
+
+    /// The egress class the approval scope pins. Only `send` can move content
+    /// off the device; every other kind mutates the already synchronised
+    /// mailbox, and a local draft never leaves the account at all.
     const fn egress_class(self) -> &'static str {
         match self {
             Self::Send => "external_communication",
-            Self::Archive => "mailbox_mutation",
+            Self::Draft => "mailbox_draft",
+            Self::Archive | Self::Label | Self::Trash | Self::MarkRead => "mailbox_mutation",
         }
     }
 
+    /// Whether the owner can undo the effect from the same mailbox afterwards.
+    /// A sent message cannot be recalled.
     const fn reversible(self) -> bool {
-        matches!(self, Self::Archive)
+        !matches!(self, Self::Send)
+    }
+
+    const fn summary(self) -> &'static str {
+        match self {
+            Self::Send => "Send the exact approved mail draft",
+            Self::Draft => "Store the exact approved mail draft in the account",
+            Self::Archive => "Archive the exact approved conversation",
+            Self::Label => "Apply the exact approved label to the conversation",
+            Self::Trash => "Move the exact approved conversation to trash",
+            Self::MarkRead => "Mark the exact approved conversation read",
+        }
+    }
+
+    const fn consequence(self) -> &'static str {
+        match self {
+            Self::Send => "The approved message will leave the local device",
+            Self::Draft => "The approved draft will appear in the account draft folder",
+            Self::Archive => "The approved conversation will leave the inbox",
+            Self::Label => "The approved conversation will carry the label in the account",
+            Self::Trash => "The approved conversation will move to the account trash",
+            Self::MarkRead => "The approved conversation will lose its unread state",
+        }
     }
 }
 
@@ -99,19 +153,9 @@ pub fn mail_effect_proposal(
         idempotency_key: format!("mail-idempotency-{identity}"),
     };
     let intent_digest = workflow_effect_intent_digest(&intent);
-    let (summary, consequence) = match request.class {
-        WorkflowMailEffectClass::Send => (
-            "Send the exact approved mail draft",
-            "The approved message will leave the local device",
-        ),
-        WorkflowMailEffectClass::Archive => (
-            "Archive the exact approved conversation",
-            "The approved conversation will leave the inbox",
-        ),
-    };
     let mut preview = WorkflowEffectPreview {
-        summary: summary.into(),
-        consequence: consequence.into(),
+        summary: request.class.summary().into(),
+        consequence: request.class.consequence().into(),
         reversible: request.class.reversible(),
         destination_fingerprint: intent.destination_fingerprint.clone(),
         preview_digest: String::new(),
@@ -157,17 +201,16 @@ fn validate_request(request: &WorkflowMailEffectRequest) -> Result<(), WorkflowM
         &request.workflow_id,
         &request.revision_id,
         &request.project_id,
-        &request.workspace_id,
         &request.account_binding_id,
     ] {
-        if identity.is_empty()
-            || identity.len() > 128
-            || !identity
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        {
+        if !valid_identity(identity) {
             return Err(WorkflowMailEffectError::InvalidIdentity);
         }
+    }
+    // The approval scope admits an absent workspace, so a run outside a case
+    // carries the project alone.
+    if !request.workspace_id.is_empty() && !valid_identity(&request.workspace_id) {
+        return Err(WorkflowMailEffectError::InvalidIdentity);
     }
     if !valid_digest(&request.destination_fingerprint) || !valid_digest(&request.input_digest) {
         return Err(WorkflowMailEffectError::InvalidDigest);
@@ -176,6 +219,14 @@ fn validate_request(request: &WorkflowMailEffectRequest) -> Result<(), WorkflowM
         return Err(WorkflowMailEffectError::InvalidExpiry);
     }
     Ok(())
+}
+
+fn valid_identity(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 fn valid_digest(value: &str) -> bool {
