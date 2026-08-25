@@ -42,6 +42,9 @@ The system is native-first. It standardizes semantics, hierarchy, and state lang
 - <doc:Components>
 - ``KanameSurface``
 - ``KanameStatusBadge``
+- ``KanameStatusPresentation``
+- ``KanameBadgeDensity``
+- ``KanameMetadataChip``
 - ``KanameSectionHeader``
 - ``KanameCallout``
 - ``KanameEmptyState``

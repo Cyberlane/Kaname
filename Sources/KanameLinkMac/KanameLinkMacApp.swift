@@ -7,6 +7,16 @@ import SwiftUI
 private enum KanameLinkMacMain {
     @MainActor
     static func main() {
+        if let contractPath = statusContractPath {
+            do {
+                try LinkStatusContractVerifier.verify(at: contractPath)
+                print("Kaname Link macOS status contract passed.")
+                Darwin.exit(EXIT_SUCCESS)
+            } catch {
+                fputs("Kaname Link status contract failed: \(error)\n", stderr)
+                Darwin.exit(EXIT_FAILURE)
+            }
+        }
         guard let snapshotPath = snapshotPath else {
             KanameLinkInteractiveApp.main()
             return
@@ -33,11 +43,24 @@ private enum KanameLinkMacMain {
         return path
     }
 
+    private static var statusContractPath: String? {
+        let arguments = CommandLine.arguments
+        guard let index = arguments.firstIndex(of: "--verify-status-contract"),
+              arguments.indices.contains(index + 1) else { return nil }
+        let path = arguments[index + 1]
+        guard path.hasPrefix("/"), path != "/" else { return nil }
+        return path
+    }
+
     @MainActor
     private static func renderSyntheticSnapshot(at path: String) throws {
+        let configuration = LinkDesignCaptureConfiguration.current
         let content = LinkClientRootView(syntheticPreview: true, snapshotMode: true)
             .preferredColorScheme(.dark)
             .environment(\.colorScheme, .dark)
+            .dynamicTypeSize(configuration.dynamicTypeSize)
+            .environment(\.locale, configuration.locale)
+            .environment(\.kanameAccessibilityPreferences, configuration.accessibilityPreferences)
             .frame(width: 1_180, height: 760, alignment: .topLeading)
             .clipped()
         let renderer = ImageRenderer(content: content)
@@ -52,19 +75,68 @@ private enum KanameLinkMacMain {
     }
 }
 
+private struct LinkDesignCaptureConfiguration {
+    let dynamicTypeSize: DynamicTypeSize
+    let locale: Locale
+    let accessibilityPreferences: KanameAccessibilityPreferences
+
+    static var current: Self {
+        let environment = ProcessInfo.processInfo.environment
+        let identifier = environment["KANAME_DESIGN_SCENARIO_ID"] ?? "link-macos-synthetic"
+        guard ["link-macos-synthetic", "link-macos-synthetic-large-text"].contains(identifier) else {
+            preconditionFailure("Unsupported Kaname Link design screenshot scenario: \(identifier)")
+        }
+        guard (environment["KANAME_DESIGN_APPEARANCE"] ?? "dark") == "dark" else {
+            preconditionFailure("Kaname Link design screenshots currently support dark appearance only")
+        }
+
+        let textScale = environment["KANAME_DESIGN_TEXT_SCALE"] ?? "standard"
+        let dynamicTypeSize: DynamicTypeSize
+        switch textScale {
+        case "standard": dynamicTypeSize = .large
+        case "accessibility3": dynamicTypeSize = .accessibility3
+        default: preconditionFailure("Unsupported Kaname Link design screenshot text scale: \(textScale)")
+        }
+
+        let differentiate = parseBoolean(
+            environment["KANAME_DESIGN_DIFFERENTIATE_WITHOUT_COLOR"] ?? "false",
+            name: "KANAME_DESIGN_DIFFERENTIATE_WITHOUT_COLOR"
+        )
+        let reduceMotion = parseBoolean(
+            environment["KANAME_DESIGN_REDUCE_MOTION"] ?? "false",
+            name: "KANAME_DESIGN_REDUCE_MOTION"
+        )
+        return Self(
+            dynamicTypeSize: dynamicTypeSize,
+            locale: Locale(identifier: environment["KANAME_DESIGN_LOCALE"] ?? "en_US"),
+            accessibilityPreferences: KanameAccessibilityPreferences(
+                differentiateWithoutColor: differentiate,
+                reduceMotion: reduceMotion,
+                increasedContrast: false
+            )
+        )
+    }
+
+    private static func parseBoolean(_ value: String, name: String) -> Bool {
+        switch value {
+        case "true": true
+        case "false": false
+        default: preconditionFailure("\(name) must be true or false")
+        }
+    }
+}
+
 private struct KanameLinkSpaceIdentity: View {
     let name: String
     let isVerified: Bool
 
     var body: some View {
+        let verification = isVerified
+            ? LinkHostVerificationState.verified
+            : LinkHostVerificationState.approvalPending
         VStack(alignment: .leading, spacing: KanameSpacing.xSmall) {
             Text(name).fontWeight(.semibold)
-            Label(
-                isVerified ? "Verified host" : "Verification needed",
-                systemImage: isVerified ? "checkmark.shield.fill" : "exclamationmark.shield"
-            )
-            .font(.caption)
-            .foregroundStyle(isVerified ? KanameColor.success : KanameColor.warning)
+            KanameStatusBadge(verification.presentation, density: .compact)
         }
     }
 }
@@ -110,6 +182,10 @@ private struct LinkClientRootView: View {
         }
         .background(KanameColor.canvas)
         .task { await model.load() }
+        .onChange(of: model.snapshot.connection) { previous, current in
+            guard previous != current else { return }
+            KanameAccessibilityAnnouncement.post(current.presentation.accessibilityLabel)
+        }
     }
 
     private var snapshotWorkspace: some View {
@@ -144,6 +220,8 @@ private struct LinkClientRootView: View {
                 title: "Restricted collaborator",
                 detail: "This app cannot control Kaname, tools, models, files, or the host computer."
             )
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Trust boundary: Restricted collaborator")
         }
         .padding(KanameSpacing.large)
         .frame(width: 260)
@@ -160,9 +238,7 @@ private struct LinkClientRootView: View {
                 VStack(alignment: .leading, spacing: KanameSpacing.small) {
                     Text(discussion.title).fontWeight(.semibold)
                     HStack {
-                        Text(discussion.status)
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(discussion.status == "Waiting for you" ? KanameColor.warning : KanameColor.success)
+                        KanameStatusBadge(discussion.status.presentation, density: .compact)
                         Spacer()
                         Text(discussion.actionLabel)
                             .font(.caption)
@@ -186,12 +262,18 @@ private struct LinkClientRootView: View {
                 HStack {
                     VStack(alignment: .leading, spacing: KanameSpacing.xSmall) {
                         Text(discussion.title).font(.title2.bold())
-                        Label(discussion.status, systemImage: "clock.badge.checkmark")
-                            .font(.subheadline)
-                            .foregroundStyle(KanameColor.textSecondary)
+                        KanameStatusBadge(discussion.status.presentation, density: .compact)
                     }
                     Spacer()
-                    KanameStatusBadge("Response actions pending", tone: .neutral)
+                    KanameStatusBadge(
+                        KanameStatusPresentation(
+                            label: "Response actions pending",
+                            tone: .neutral,
+                            symbolName: KanameStatusTone.neutral.symbolName,
+                            accessibilityLabel: "Action status: Response actions pending"
+                        ),
+                        density: .compact
+                    )
                 }
                 .padding(KanameSpacing.large)
                 Rectangle().fill(KanameColor.separator).frame(height: 1)
@@ -250,6 +332,8 @@ private struct LinkClientRootView: View {
                 title: "Restricted collaborator",
                 detail: "This app cannot control Kaname, tools, models, files, or the host computer."
             )
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Trust boundary: Restricted collaborator")
         }
         .padding(16)
         .background(KanameColor.sidebar)
@@ -258,11 +342,8 @@ private struct LinkClientRootView: View {
 
     private var connectionCard: some View {
         HStack(spacing: 10) {
-            Circle()
-                .fill(connectionColor)
-                .frame(width: 10, height: 10)
             VStack(alignment: .leading, spacing: 2) {
-                Text(model.snapshot.connection.label).font(.subheadline.weight(.semibold))
+                KanameStatusBadge(model.snapshot.connection.presentation, density: .compact)
                 if let space = model.selectedSpace {
                     Text(space.hostName).font(.caption).foregroundStyle(.secondary)
                 }
@@ -285,9 +366,7 @@ private struct LinkClientRootView: View {
                     VStack(alignment: .leading, spacing: 7) {
                         Text(discussion.title).fontWeight(.semibold)
                         HStack {
-                            Text(discussion.status)
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(discussion.status == "Waiting for you" ? KanameColor.warning : KanameColor.success)
+                            KanameStatusBadge(discussion.status.presentation, density: .compact)
                             Spacer()
                             Text(discussion.actionLabel)
                                 .font(.caption)
@@ -311,9 +390,7 @@ private struct LinkClientRootView: View {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(discussion.title).font(.title2.bold())
-                        Label(discussion.status, systemImage: "clock.badge.checkmark")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                        KanameStatusBadge(discussion.status.presentation, density: .compact)
                     }
                     Spacer()
                     Button("Request change") {}
@@ -410,18 +487,34 @@ private struct LinkClientRootView: View {
         }
     }
 
+    @ViewBuilder
     private func messageBubble(_ message: LinkClientMessage) -> some View {
         HStack {
-            if message.author == .collaborator { Spacer(minLength: 90) }
-            KanameMessageBubble(
-                author: message.authorName,
-                body: message.body,
-                role: message.author == .collaborator ? .collaborator : .host,
-                receipt: KanameMessageReceipt(
-                    state: message.author == .collaborator ? .gatewayAccepted : .published
+            if message.author.isLocalPrincipal { Spacer(minLength: 90) }
+            if let role = message.author.kanameRole {
+                KanameMessageBubble(
+                    author: message.authorName,
+                    body: message.body,
+                    role: role,
+                    participantPresentation: message.author.presentation,
+                    receipt: KanameMessageReceipt(state: message.receipt.kanameState),
+                    receiptPresentation: message.receipt.presentation
                 )
-            )
-            if message.author == .host { Spacer(minLength: 90) }
+            } else {
+                KanameSurface(padding: KanameSpacing.medium) {
+                    VStack(alignment: .leading, spacing: KanameSpacing.small) {
+                        KanameStatusBadge(message.author.presentation, density: .compact)
+                        Text(message.authorName).font(.caption.weight(.bold))
+                        Text(message.body)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                        KanameStatusBadge(message.receipt.presentation, density: .compact)
+                    }
+                }
+                .frame(maxWidth: 520, alignment: .leading)
+                .accessibilityElement(children: .combine)
+            }
+            if !message.author.isLocalPrincipal { Spacer(minLength: 90) }
         }
     }
 
@@ -432,7 +525,10 @@ private struct LinkClientRootView: View {
                 .textFieldStyle(.plain)
                 .padding(12)
                 .background(KanameColor.raised, in: RoundedRectangle(cornerRadius: KanameRadius.card, style: .continuous))
-                .disabled(model.isSyntheticPreview || model.snapshot.connection != .hostOnline)
+                .disabled(
+                    model.isSyntheticPreview
+                        || !model.snapshot.connection.capabilities.canQueueMessage
+                )
             Button {
                 Task { await model.sendDraft() }
             } label: {
@@ -442,20 +538,12 @@ private struct LinkClientRootView: View {
             .buttonStyle(.plain)
             .disabled(model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 || model.isSyntheticPreview
-                || model.isWorking)
+                || model.isWorking
+                || !model.snapshot.connection.capabilities.canQueueMessage)
             .accessibilityLabel("Send message")
         }
         .padding(18)
         .background(.bar)
     }
 
-    private var connectionColor: Color {
-        switch model.snapshot.connection {
-        case .hostOnline: KanameColor.success
-        case .connecting: KanameColor.active
-        case .hostOffline: KanameColor.warning
-        case .enrollmentRequired: KanameColor.external
-        case .revoked: KanameColor.danger
-        }
-    }
 }

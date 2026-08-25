@@ -1,5 +1,6 @@
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using WinRT.Interop;
@@ -54,15 +55,20 @@ public sealed partial class MainWindow : Window
 
     private void RenderSnapshot()
     {
-        EnrollmentPanel.Visibility = !syntheticPreview && snapshot.Connection == "enrollmentRequired"
+        var connection = LinkConnectionStatus.FromWire(snapshot.Connection);
+        EnrollmentPanel.Visibility = !syntheticPreview && connection.Capabilities.CanRequestEnrollment
             ? Visibility.Visible
             : Visibility.Collapsed;
-        ConnectionLabel.Text = ConnectionText(snapshot.Connection);
-        ConnectionDot.Fill = (Brush)Application.Current.Resources[
-            snapshot.Connection == "hostOnline" ? "KanameSuccessBrush" : "KanameWarningBrush"
-        ];
+        ApplyStatus(
+            ConnectionStatusContainer,
+            ConnectionStatusIcon,
+            ConnectionLabel,
+            connection.Presentation
+        );
+        var canQueueMessage = !syntheticPreview && connection.Capabilities.CanQueueMessage;
+        Composer.IsEnabled = canQueueMessage;
+        SendButton.IsEnabled = canQueueMessage;
         SpacesList.ItemsSource = snapshot.Spaces;
-        SpacesList.DisplayMemberPath = "Name";
         if (snapshot.Spaces.Count > 0) SpacesList.SelectedIndex = 0;
     }
 
@@ -108,14 +114,33 @@ public sealed partial class MainWindow : Window
     {
         selectedDiscussion = DiscussionsList.SelectedItem as LinkDiscussion;
         DiscussionTitle.Text = selectedDiscussion?.Title ?? "No discussion selected";
-        DiscussionStatus.Text = selectedDiscussion?.Status ?? string.Empty;
-        MessagesList.ItemsSource = selectedDiscussion?.Messages;
+        DiscussionStatusContainer.Visibility = selectedDiscussion is null
+            ? Visibility.Collapsed
+            : Visibility.Visible;
+        if (selectedDiscussion is { } discussion)
+        {
+            ApplyStatus(
+                DiscussionStatusContainer,
+                DiscussionStatusIcon,
+                DiscussionStatus,
+                LinkDiscussionStatus.FromWire(discussion.Status).Presentation
+            );
+            MessagesList.ItemsSource = discussion.Messages.Select(PresentMessage).ToArray();
+        }
+        else
+        {
+            MessagesList.ItemsSource = Array.Empty<MessagePresentation>();
+        }
     }
 
     private async void SendButton_Click(object sender, RoutedEventArgs e)
     {
         var body = Composer.Text.Trim();
-        if (syntheticPreview || selectedSpace is null || selectedDiscussion is null || body.Length == 0)
+        if (syntheticPreview
+            || !LinkConnectionStatus.FromWire(snapshot.Connection).Capabilities.CanQueueMessage
+            || selectedSpace is null
+            || selectedDiscussion is null
+            || body.Length == 0)
         {
             return;
         }
@@ -134,7 +159,8 @@ public sealed partial class MainWindow : Window
         }
         finally
         {
-            SendButton.IsEnabled = true;
+            SendButton.IsEnabled = !syntheticPreview
+                && LinkConnectionStatus.FromWire(snapshot.Connection).Capabilities.CanQueueMessage;
         }
     }
 
@@ -146,14 +172,54 @@ public sealed partial class MainWindow : Window
         EnrollmentNoticeBar.IsOpen = true;
     }
 
-    private static string ConnectionText(string state) => state switch
+    private static void ApplyStatus(
+        FrameworkElement container,
+        SymbolIcon icon,
+        TextBlock label,
+        LinkStatusPresentation presentation
+    )
     {
-        "hostOnline" => "Host online",
-        "hostOffline" => "Host offline",
-        "revoked" => "Access revoked",
-        "enrollmentRequired" => "Enrollment required",
-        _ => "Connecting",
-    };
+        var brush = ResolveBrush(presentation.Tone);
+        icon.Symbol = ResolveSymbol(presentation.Tone);
+        icon.Foreground = brush;
+        label.Text = presentation.Label;
+        label.Foreground = brush;
+        AutomationProperties.SetName(container, presentation.AccessibilityLabel);
+    }
+
+    private static Brush ResolveBrush(LinkSemanticTone tone) =>
+        (Brush)Application.Current.Resources[tone.BrushResourceKey()];
+
+    private static Symbol ResolveSymbol(LinkSemanticTone tone)
+    {
+        var value = Application.Current.Resources[tone.IconResourceKey()] as string;
+        return value is not null && Enum.TryParse(value, out Symbol symbol) ? symbol : Symbol.Help;
+    }
+
+    private static MessagePresentation PresentMessage(LinkMessage message)
+    {
+        var participant = LinkParticipantRole.FromWire(message.Author);
+        var receipt = LinkReceiptStatus.FromWire(message.Receipt).Presentation;
+        return new MessagePresentation(
+            message.AuthorName,
+            message.Body,
+            participant.Presentation.AccessibilityLabel,
+            receipt.Label,
+            receipt.AccessibilityLabel,
+            ResolveSymbol(receipt.Tone),
+            ResolveBrush(receipt.Tone)
+        );
+    }
+
+    private sealed record MessagePresentation(
+        string AuthorName,
+        string Body,
+        string ParticipantAccessibilityLabel,
+        string ReceiptLabel,
+        string ReceiptAccessibilityLabel,
+        Symbol ReceiptSymbol,
+        Brush ReceiptBrush
+    );
 }
 
 internal static class SyntheticSnapshot
@@ -188,7 +254,7 @@ internal static class SyntheticSnapshot
                                 "Justin",
                                 "Version 2 is ready. I corrected the synthetic account total and validated the spreadsheet structure.",
                                 1_776_990_540_000,
-                                "Published result"
+                                "Published by host"
                             ),
                         ]
                     ),

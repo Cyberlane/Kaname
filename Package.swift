@@ -19,6 +19,7 @@ let package = Package(
         .library(name: "KanameLinkTunnelHost", targets: ["KanameLinkTunnelHost"]),
         .library(name: "KanameDesignSystem", targets: ["KanameDesignSystem"]),
         .library(name: "KanameDesktop", targets: ["KanameDesktop"]),
+        .library(name: "KanameDesktopUI", targets: ["KanameDesktopUI"]),
         .library(name: "KanameWorkflowHost", targets: ["KanameWorkflowHost"]),
         .library(name: "KanameFixtures", targets: ["KanameFixtures"]),
         .library(name: "KanamePrototypeUI", targets: ["KanamePrototypeUI"]),
@@ -130,6 +131,10 @@ let package = Package(
             dependencies: ["KanameDomain", "KanameLocalCore", "KanameMobileSync", "KanameProtocol"]
         ),
         .target(
+            name: "KanameDesktopUI",
+            dependencies: ["KanameDesignSystem", "KanameDesktop", "KanameLinkHost"]
+        ),
+        .target(
             name: "KanameWorkflowHost",
             dependencies: [
                 "KanameDesktop", "KanameConnectivity", "KanameLocalCore", "KanameProtocol",
@@ -140,6 +145,8 @@ let package = Package(
             name: "KanamePrototype",
             dependencies: [
                 "KanameDesktop",
+                "KanameDesktopUI",
+                "KanameDesignSystem",
                 "KanameDomain",
                 "KanameFixtures",
                 "KanamePrototypeUI",
@@ -246,6 +253,14 @@ let package = Package(
         .testTarget(
             name: "KanameDesktopTests",
             dependencies: ["KanameConnectivity", "KanameDesktop", "KanameProtocol", "KanameWorkflowHost"]
+        ),
+        .testTarget(
+            name: "KanameDesktopUITests",
+            dependencies: ["KanameDesktopUI", "KanameDesignSystem", "KanameDesktop", "KanameLinkHost"]
+        ),
+        .testTarget(
+            name: "KanamePrototypeUITests",
+            dependencies: ["KanamePrototypeUI", "KanameDesignSystem"]
         ),
     ]
 )

@@ -1,10 +1,14 @@
 use gtk::gdk::Display;
 use gtk::prelude::*;
 use gtk::{
-    Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Entry, Label,
-    ListBox, ListBoxRow, Orientation, Paned, ScrolledWindow, SelectionMode, TextView, WrapMode,
+    AccessibleRole, Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider,
+    Entry, Image, Label, ListBox, ListBoxRow, Orientation, Paned, ScrolledWindow, SelectionMode,
+    TextView, WrapMode,
 };
-use kaname_link_linux::{CoreClient, LinkDiscussion, LinkSnapshot, LinkSpace, synthetic_snapshot};
+use kaname_link_linux::{
+    CoreClient, LinkConnectionStatus, LinkDiscussion, LinkHostVerificationState, LinkSnapshot,
+    LinkSpace, LinkStatusPresentation, synthetic_snapshot,
+};
 use std::cell::RefCell;
 use std::env;
 use std::rc::Rc;
@@ -66,7 +70,11 @@ fn render_content(
     notice: Option<String>,
 ) {
     clear(container);
-    if snapshot.connection == "enrollmentRequired" {
+    if snapshot
+        .connection_status()
+        .capabilities()
+        .can_request_enrollment
+    {
         render_enrollment(container, client, notice);
     } else {
         render_workspace(container, snapshot, client, synthetic, notice);
@@ -190,7 +198,10 @@ fn render_workspace(
         container.append(&banner);
     }
     if !has_notice
-        && snapshot.connection == "connecting"
+        && matches!(
+            snapshot.connection_status(),
+            LinkConnectionStatus::Connecting
+        )
         && let Some(code) = snapshot.verification_code_for_display()
     {
         let banner = Label::new(Some(&format!(
@@ -237,7 +248,7 @@ fn render_workspace(
         initial_discussion.as_ref(),
         DetailContext {
             space_id: initial_space_id.as_deref(),
-            connection: &state.borrow().connection,
+            connection: state.borrow().connection_status(),
             destination: container,
             client: client.clone(),
             synthetic,
@@ -259,14 +270,14 @@ fn render_workspace(
                 .first()
                 .and_then(|space| space.discussions.get(index))
                 .cloned();
-            let connection = borrowed.connection.clone();
+            let connection = borrowed.connection_status();
             drop(borrowed);
             render_detail(
                 &detail,
                 selected.as_ref(),
                 DetailContext {
                     space_id: space_id.as_deref(),
-                    connection: &connection,
+                    connection,
                     destination: &destination,
                     client: client.clone(),
                     synthetic,
@@ -302,15 +313,7 @@ fn build_sidebar(
     subtitle.set_halign(Align::Start);
     sidebar.append(&subtitle);
 
-    let connection = Label::new(Some(&format!(
-        "●  {}",
-        connection_label(&snapshot.connection)
-    )));
-    connection.add_css_class(if snapshot.connection == "hostOnline" {
-        "online"
-    } else {
-        "warning"
-    });
+    let connection = status_badge(snapshot.connection_status().presentation());
     connection.set_halign(Align::Start);
     sidebar.append(&connection);
     if !synthetic && let Some(client) = client {
@@ -349,19 +352,22 @@ fn build_sidebar(
     spaces_label.set_halign(Align::Start);
     sidebar.append(&spaces_label);
     for space in &snapshot.spaces {
-        let row = Label::new(Some(&format!(
-            "{}\n{} · {}",
-            space.name,
-            space.host_name,
-            if space.verified {
-                "Verified host"
-            } else {
-                "Approval pending"
-            }
-        )));
-        row.set_wrap(true);
-        row.set_xalign(0.0);
+        let row = GtkBox::new(Orientation::Vertical, 4);
         row.add_css_class("space-card");
+
+        let name = Label::new(Some(&space.name));
+        name.set_wrap(true);
+        name.set_xalign(0.0);
+        row.append(&name);
+
+        let host = GtkBox::new(Orientation::Horizontal, 4);
+        let host_name = Label::new(Some(&format!("{} ·", space.host_name)));
+        host_name.add_css_class("muted");
+        host.append(&host_name);
+        let verification =
+            status_badge(LinkHostVerificationState::from_verified(space.verified).presentation());
+        host.append(&verification);
+        row.append(&host);
         sidebar.append(&row);
     }
     if let Some(code) = &snapshot.diagnostic_code {
@@ -394,13 +400,13 @@ fn populate_discussions(list: &ListBox, space: Option<&LinkSpace>) {
         title.set_halign(Align::Start);
         title.add_css_class("discussion-title");
         content.append(&title);
-        let status = Label::new(Some(&format!(
-            "{} · {}",
-            discussion.status, discussion.action_label
-        )));
+        let status = status_badge(discussion.status_kind().presentation());
         status.set_halign(Align::Start);
-        status.add_css_class("muted");
         content.append(&status);
+        let action = Label::new(Some(&discussion.action_label));
+        action.set_halign(Align::Start);
+        action.add_css_class("muted");
+        content.append(&action);
         row.set_child(Some(&content));
         list.append(&row);
     }
@@ -408,7 +414,7 @@ fn populate_discussions(list: &ListBox, space: Option<&LinkSpace>) {
 
 struct DetailContext<'a> {
     space_id: Option<&'a str>,
-    connection: &'a str,
+    connection: LinkConnectionStatus,
     destination: &'a GtkBox,
     client: Option<Rc<CoreClient>>,
     synthetic: bool,
@@ -421,7 +427,7 @@ fn render_detail(
 ) {
     clear(container);
     let Some(discussion) = discussion else {
-        let message = if context.connection == "connecting" {
+        let message = if matches!(&context.connection, LinkConnectionStatus::Connecting) {
             "Waiting for the host to approve this device. Use Refresh after approval."
         } else {
             "Select a Link discussion to see deliberately shared messages."
@@ -444,8 +450,7 @@ fn render_detail(
     title.add_css_class("title");
     title.set_halign(Align::Start);
     heading.append(&title);
-    let status = Label::new(Some(&discussion.status));
-    status.add_css_class("muted");
+    let status = status_badge(discussion.status_kind().presentation());
     status.set_halign(Align::Start);
     heading.append(&status);
     container.append(&heading);
@@ -456,26 +461,36 @@ fn render_detail(
     messages.set_margin_top(18);
     messages.set_margin_bottom(18);
     for message in &discussion.messages {
+        let participant = message.participant_role();
         let card = GtkBox::new(Orientation::Vertical, 7);
-        card.add_css_class(if message.author == "host" {
-            "host-message"
-        } else {
+        card.add_css_class(if participant.is_local_principal() {
             "own-message"
+        } else {
+            "host-message"
         });
-        card.set_margin_start(if message.author == "host" { 0 } else { 80 });
-        card.set_margin_end(if message.author == "host" { 80 } else { 0 });
+        card.set_margin_start(if participant.is_local_principal() {
+            80
+        } else {
+            0
+        });
+        card.set_margin_end(if participant.is_local_principal() {
+            0
+        } else {
+            80
+        });
         let author = Label::new(Some(&message.author_name));
         author.set_halign(Align::Start);
         author.add_css_class("message-author");
+        let participant_accessibility = participant.presentation().accessibility_label;
+        author.update_property(&[gtk::accessible::Property::Label(&participant_accessibility)]);
         card.append(&author);
         let body = Label::new(Some(&message.body));
         body.set_wrap(true);
         body.set_selectable(true);
         body.set_xalign(0.0);
         card.append(&body);
-        let receipt = Label::new(Some(&format!("✓ {}", message.receipt)));
+        let receipt = status_badge(message.receipt_status().presentation());
         receipt.set_halign(Align::Start);
-        receipt.add_css_class("muted");
         card.append(&receipt);
         messages.append(&card);
     }
@@ -498,9 +513,10 @@ fn render_detail(
         .build();
     let send = Button::with_label("Send");
     send.add_css_class("suggested-action");
-    let approved = matches!(context.connection, "hostOnline" | "hostOffline");
-    let enabled =
-        !context.synthetic && approved && context.client.is_some() && context.space_id.is_some();
+    let enabled = !context.synthetic
+        && context.connection.capabilities().can_queue_message
+        && context.client.is_some()
+        && context.space_id.is_some();
     entry.set_sensitive(enabled);
     send.set_sensitive(enabled);
     controls.append(&entry);
@@ -569,14 +585,28 @@ fn core_unavailable_snapshot() -> LinkSnapshot {
     }
 }
 
-fn connection_label(state: &str) -> &str {
-    match state {
-        "hostOnline" => "Host online",
-        "hostOffline" => "Host offline",
-        "revoked" => "Access revoked",
-        "enrollmentRequired" => "Enrollment required",
-        _ => "Connecting",
-    }
+fn status_badge(presentation: LinkStatusPresentation) -> GtkBox {
+    let badge = GtkBox::builder()
+        .orientation(Orientation::Horizontal)
+        .spacing(4)
+        .accessible_role(AccessibleRole::Group)
+        .build();
+    badge.add_css_class("status-badge");
+    badge.add_css_class(presentation.tone.css_class());
+    badge.update_property(&[gtk::accessible::Property::Label(
+        &presentation.accessibility_label,
+    )]);
+
+    let icon = Image::builder()
+        .accessible_role(AccessibleRole::Presentation)
+        .build();
+    icon.add_css_class("status-icon");
+    icon.add_css_class(presentation.tone.icon_css_class());
+    badge.append(&icon);
+
+    let label = Label::new(Some(presentation.label));
+    badge.append(&label);
+    badge
 }
 
 fn install_css() {

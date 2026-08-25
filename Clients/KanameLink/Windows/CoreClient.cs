@@ -274,7 +274,11 @@ internal sealed record LinkSpace(
     string HostName,
     bool Verified,
     IReadOnlyList<LinkDiscussion> Discussions
-);
+)
+{
+    public string HostVerificationAccessibilityLabel =>
+        LinkHostVerificationState.FromVerified(Verified).Presentation.AccessibilityLabel;
+}
 
 internal sealed record LinkDiscussion(
     string Id,

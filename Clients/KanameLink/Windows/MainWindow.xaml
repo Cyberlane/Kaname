@@ -34,15 +34,26 @@
         </StackPanel>
         <Border Padding="12" CornerRadius="10" Background="{ThemeResource KanameRaisedBrush}">
           <StackPanel Spacing="4">
-            <StackPanel Orientation="Horizontal" Spacing="8">
-              <Ellipse x:Name="ConnectionDot" Width="10" Height="10" Fill="{ThemeResource KanameSuccessBrush}" />
+            <StackPanel x:Name="ConnectionStatusContainer"
+                        Orientation="Horizontal"
+                        Spacing="8"
+                        AutomationProperties.LiveSetting="Polite">
+              <SymbolIcon x:Name="ConnectionStatusIcon"
+                          AutomationProperties.AccessibilityView="Raw" />
               <TextBlock x:Name="ConnectionLabel" Text="Connecting" FontWeight="SemiBold" />
             </StackPanel>
             <TextBlock x:Name="HostLabel" Foreground="{ThemeResource KanameTextSecondaryBrush}" FontSize="12" />
           </StackPanel>
         </Border>
         <TextBlock Text="LINK SPACES" Foreground="{ThemeResource KanameTextSecondaryBrush}" FontSize="12" FontWeight="SemiBold" />
-        <ListView x:Name="SpacesList" SelectionChanged="SpacesList_SelectionChanged" />
+        <ListView x:Name="SpacesList" SelectionChanged="SpacesList_SelectionChanged">
+          <ListView.ItemTemplate>
+            <DataTemplate>
+              <TextBlock Text="{Binding Name}"
+                         AutomationProperties.HelpText="{Binding HostVerificationAccessibilityLabel}" />
+            </DataTemplate>
+          </ListView.ItemTemplate>
+        </ListView>
         <Border Padding="12" CornerRadius="10" Background="{ThemeResource KanameRaisedBrush}" VerticalAlignment="Bottom">
           <TextBlock TextWrapping="Wrap"
                      Foreground="{ThemeResource KanameTextSecondaryBrush}"
@@ -71,22 +82,45 @@
         </Grid.RowDefinitions>
         <StackPanel Padding="22,18" Spacing="4">
           <TextBlock x:Name="DiscussionTitle" FontSize="22" FontWeight="Bold" Text="No discussion selected" />
-          <TextBlock x:Name="DiscussionStatus" Foreground="{ThemeResource KanameTextSecondaryBrush}" />
+          <StackPanel x:Name="DiscussionStatusContainer"
+                      Orientation="Horizontal"
+                      Spacing="6">
+            <SymbolIcon x:Name="DiscussionStatusIcon"
+                        AutomationProperties.AccessibilityView="Raw" />
+            <TextBlock x:Name="DiscussionStatus" />
+          </StackPanel>
         </StackPanel>
         <ListView x:Name="MessagesList" Grid.Row="1" Padding="22" IsItemClickEnabled="False">
           <ListView.ItemTemplate>
             <DataTemplate>
               <Border Margin="0,0,0,12" Padding="14" CornerRadius="12" Background="{ThemeResource KanameRaisedBrush}" MaxWidth="600">
                 <StackPanel Spacing="7">
-                  <TextBlock Text="{Binding AuthorName}" FontSize="12" FontWeight="Bold" />
+                  <TextBlock Text="{Binding AuthorName}"
+                             FontSize="12"
+                             FontWeight="Bold"
+                             AutomationProperties.Name="{Binding ParticipantAccessibilityLabel}" />
                   <TextBlock Text="{Binding Body}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
-                  <TextBlock Text="{Binding Receipt}" Foreground="{ThemeResource KanameTextSecondaryBrush}" FontSize="12" />
+                  <StackPanel Orientation="Horizontal"
+                              Spacing="5"
+                              AutomationProperties.Name="{Binding ReceiptAccessibilityLabel}">
+                    <SymbolIcon Symbol="{Binding ReceiptSymbol}"
+                                Foreground="{Binding ReceiptBrush}"
+                                AutomationProperties.AccessibilityView="Raw" />
+                    <TextBlock Text="{Binding ReceiptLabel}"
+                               Foreground="{Binding ReceiptBrush}"
+                               FontSize="12" />
+                  </StackPanel>
                 </StackPanel>
               </Border>
             </DataTemplate>
           </ListView.ItemTemplate>
         </ListView>
-        <InfoBar x:Name="NoticeBar" Grid.Row="2" IsOpen="False" IsClosable="True" Severity="Warning" />
+        <InfoBar x:Name="NoticeBar"
+                 Grid.Row="2"
+                 IsOpen="False"
+                 IsClosable="True"
+                 Severity="Warning"
+                 AutomationProperties.LiveSetting="Polite" />
         <Grid Grid.Row="3" Padding="18" ColumnSpacing="12" Background="{ThemeResource KanameSidebarBrush}">
           <Grid.ColumnDefinitions>
             <ColumnDefinition Width="*" />
@@ -125,7 +159,8 @@
             <InfoBar x:Name="EnrollmentNoticeBar"
                      IsOpen="False"
                      IsClosable="True"
-                     Severity="Warning" />
+                     Severity="Warning"
+                     AutomationProperties.LiveSetting="Polite" />
             <Button x:Name="EnrollButton"
                     Content="Request enrollment"
                     HorizontalAlignment="Right"

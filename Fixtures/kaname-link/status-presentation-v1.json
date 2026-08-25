@@ -1,0 +1,180 @@
+{
+  "schemaVersion": 1,
+  "privacyClass": "synthetic-public",
+  "semanticTones": [
+    "neutral",
+    "informational",
+    "active",
+    "attention",
+    "success",
+    "warning",
+    "danger",
+    "blocked",
+    "external"
+  ],
+  "connections": [
+    {
+      "wireValue": "hostOnline",
+      "kind": "hostOnline",
+      "label": "Host online",
+      "tone": "success",
+      "accessibilityLabel": "Connection status: Host online"
+    },
+    {
+      "wireValue": "connecting",
+      "kind": "connecting",
+      "label": "Connecting",
+      "tone": "active",
+      "accessibilityLabel": "Connection status: Connecting"
+    },
+    {
+      "wireValue": "hostOffline",
+      "kind": "hostOffline",
+      "label": "Host offline",
+      "tone": "warning",
+      "accessibilityLabel": "Connection status: Host offline"
+    },
+    {
+      "wireValue": "enrollmentRequired",
+      "kind": "enrollmentRequired",
+      "label": "Enrollment required",
+      "tone": "external",
+      "accessibilityLabel": "Connection status: Enrollment required"
+    },
+    {
+      "wireValue": "revoked",
+      "kind": "revoked",
+      "label": "Access revoked",
+      "tone": "blocked",
+      "accessibilityLabel": "Connection status: Access revoked"
+    }
+  ],
+  "discussions": [
+    {
+      "wireValue": "Waiting for you",
+      "kind": "actionRequired",
+      "label": "Waiting for you",
+      "tone": "attention",
+      "accessibilityLabel": "Discussion status: Waiting for you. Action required."
+    },
+    {
+      "wireValue": "Waiting for host",
+      "kind": "waitingForHost",
+      "label": "Waiting for host",
+      "tone": "active",
+      "accessibilityLabel": "Discussion status: Waiting for host"
+    },
+    {
+      "wireValue": "Up to date",
+      "kind": "upToDate",
+      "label": "Up to date",
+      "tone": "success",
+      "accessibilityLabel": "Discussion status: Up to date"
+    },
+    {
+      "wireValue": "Delivered",
+      "kind": "delivered",
+      "label": "Delivered",
+      "tone": "success",
+      "accessibilityLabel": "Discussion status: Delivered"
+    }
+  ],
+  "receipts": [
+    {
+      "wireValue": "Stored locally",
+      "kind": "localStored",
+      "label": "Stored locally",
+      "tone": "informational",
+      "accessibilityLabel": "Message status: Stored locally"
+    },
+    {
+      "wireValue": "Queued locally",
+      "kind": "queued",
+      "label": "Queued locally",
+      "tone": "active",
+      "accessibilityLabel": "Message status: Queued locally"
+    },
+    {
+      "wireValue": "Queued on this device",
+      "kind": "queued",
+      "label": "Queued locally",
+      "tone": "active",
+      "accessibilityLabel": "Message status: Queued locally"
+    },
+    {
+      "wireValue": "Received by host",
+      "kind": "gatewayAccepted",
+      "label": "Received by host",
+      "tone": "informational",
+      "accessibilityLabel": "Message status: Received by host"
+    },
+    {
+      "wireValue": "Published by host",
+      "kind": "published",
+      "label": "Published by host",
+      "tone": "external",
+      "accessibilityLabel": "Message status: Published by host"
+    },
+    {
+      "wireValue": "Published result",
+      "kind": "published",
+      "label": "Published by host",
+      "tone": "external",
+      "accessibilityLabel": "Message status: Published by host",
+      "legacyAlias": true
+    },
+    {
+      "wireValue": "Delivered",
+      "kind": "delivered",
+      "label": "Delivered",
+      "tone": "success",
+      "accessibilityLabel": "Message status: Delivered"
+    },
+    {
+      "wireValue": "Observed failure",
+      "kind": "failed",
+      "label": "Observed failure",
+      "tone": "danger",
+      "accessibilityLabel": "Message status: Observed failure"
+    },
+    {
+      "wireValue": "Outcome uncertain",
+      "kind": "outcomeUncertain",
+      "label": "Outcome uncertain",
+      "tone": "warning",
+      "accessibilityLabel": "Message status: Outcome uncertain"
+    }
+  ],
+  "hostVerifications": [
+    {
+      "verified": true,
+      "kind": "verified",
+      "tone": "success",
+      "accessibilityLabel": "Host verification: Verified"
+    },
+    {
+      "verified": false,
+      "kind": "approvalPending",
+      "tone": "attention",
+      "accessibilityLabel": "Host verification: Approval pending"
+    }
+  ],
+  "participants": [
+    {
+      "wireValue": "host",
+      "kind": "host",
+      "label": "Host",
+      "tone": "informational",
+      "accessibilityLabel": "Participant: Host",
+      "isLocalPrincipal": false
+    },
+    {
+      "wireValue": "collaborator",
+      "kind": "collaborator",
+      "label": "External collaborator",
+      "tone": "external",
+      "accessibilityLabel": "Participant: External collaborator",
+      "isLocalPrincipal": true
+    }
+  ]
+}

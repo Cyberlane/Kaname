@@ -2,7 +2,29 @@
 
 All design-system contract changes are recorded here. Dates mark qualification, not merely source creation.
 
-## 0.1.0 — Unreleased adoption slice
+## 0.2.0 — Adoption candidate
+
+### Added
+
+- Typed `KanameStatusPresentation`, compact/regular badge density, neutral metadata chips, and deterministic increased-contrast resolution.
+- Exhaustive Desktop record/action/attention and Link-host lifecycle/publication/receipt adapters in `KanameDesktopUI`.
+- Exhaustive iOS project delivery, check, CI, retry, and metadata presentation mappings.
+- Cross-platform standalone Link connection, discussion, receipt, participant, and verification adapters that preserve schema-v1 wire values and fail closed for unknown authority states.
+- Ten-scenario product screenshot contract, Desktop receipt-bound capture automation, multi-scenario iOS/Link capture routes, and complete-batch receipt verification.
+
+### Adopted
+
+- Removed the six named legacy product pill families, workflow work-state pill, and legacy attention badge; migrated raw iOS check/session states to typed shared badges.
+- Routed common Desktop panels, section headers, empty states, and authority callouts through shared semantic roles.
+- Added source-conformance tests for macOS, Windows, Linux, Desktop, and iOS status mappings.
+
+### Still pending
+
+- Target-native Windows/Linux runtime screenshots, high-contrast behavior, Narrator, and Orca qualification.
+- VoiceOver traversal and complete assistive-technology qualification on Apple targets.
+- Product-wide light appearance and migration of remaining specialized or primitive-role consumers.
+
+## 0.1.0 — 2026-08-24
 
 ### Added
 

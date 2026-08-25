@@ -6,12 +6,116 @@ if [[ -z "${KANAME_TASK_BUILD_DIR:-}" ]]; then
   exit 2
 fi
 
-if [[ $# -ne 1 || "$1" != /* || "$1" == "/" ]]; then
-  print -u2 "usage: $0 /absolute/output.png"
+if [[ $# -ne 2 || "$2" != /* || "$2" == "/" ]]; then
+  print -u2 "usage: $0 SCENARIO_ID /absolute/output.png"
   exit 2
 fi
 
-output_path="$1"
+scenario_id="$1"
+output_path="$2"
+manifest_path="Fixtures/design-system/product-scenarios.json"
+
+scenario_contract="$(python3 - "$manifest_path" "$scenario_id" "${output_path:t}" <<'PY'
+import json
+import sys
+
+manifest, identifier, output = sys.argv[1:]
+expected_scenarios = {
+    "ios-home-synthetic": {
+        "captureVariant": "home",
+        "outputFile": "kaname-ios-home.png",
+        "platform": "iOS",
+        "surface": "ios.home",
+        "fixture": "iphone-phase0-fixtures-and-memory-only-shell",
+        "viewport": "iPhone 15",
+        "appearance": "dark",
+        "differentiateWithoutColor": False,
+        "reduceMotion": False,
+        "textScale": "standard",
+        "activeWindow": True,
+        "locale": "en_US",
+        "privacyClass": "synthetic-public",
+        "evidenceClass": "fixture-projection",
+    },
+    "ios-project-github-statuses": {
+        "captureVariant": "project-github-statuses",
+        "outputFile": "kaname-ios-project-github-statuses.png",
+        "platform": "iOS",
+        "surface": "ios.projects.github.statuses",
+        "fixture": "iphone-status-synthetic-kaname-project",
+        "viewport": "iPhone 15",
+        "appearance": "dark",
+        "differentiateWithoutColor": True,
+        "reduceMotion": False,
+        "textScale": "standard",
+        "activeWindow": True,
+        "locale": "en_US",
+        "privacyClass": "synthetic-public",
+        "evidenceClass": "fixture-projection",
+    },
+    "ios-project-github-statuses-large-text": {
+        "captureVariant": "project-github-statuses",
+        "outputFile": "kaname-ios-project-github-statuses-large-text.png",
+        "platform": "iOS",
+        "surface": "ios.projects.github.statuses",
+        "fixture": "iphone-status-synthetic-kaname-project",
+        "viewport": "iPhone 15",
+        "appearance": "dark",
+        "differentiateWithoutColor": False,
+        "reduceMotion": False,
+        "textScale": "accessibility3",
+        "activeWindow": True,
+        "locale": "en_US",
+        "privacyClass": "synthetic-public",
+        "evidenceClass": "fixture-projection",
+    },
+}
+
+expected = expected_scenarios.get(identifier)
+if expected is None:
+    raise SystemExit(f"Unsupported iOS design scenario: {identifier}")
+
+with open(manifest, encoding="utf-8") as manifest_file:
+    document = json.load(manifest_file)
+if document.get("schemaVersion") != 1 or document.get("privacyClass") != "synthetic-public":
+    raise SystemExit("The product scenario manifest is not the accepted synthetic-public schema")
+scenarios = document.get("scenarios")
+if not isinstance(scenarios, list):
+    raise SystemExit("The product scenario manifest has no scenario list")
+matches = [item for item in scenarios if isinstance(item, dict) and item.get("id") == identifier]
+if len(matches) != 1:
+    raise SystemExit(f"Expected exactly one product scenario named {identifier}")
+scenario = matches[0]
+for field, expected_value in expected.items():
+    if scenario.get(field) != expected_value:
+        raise SystemExit(
+            f"Scenario {identifier} has invalid {field}: "
+            f"expected {expected_value!r}, found {scenario.get(field)!r}"
+        )
+if scenario["outputFile"] != output:
+    raise SystemExit(f"Output filename must be {scenario['outputFile']}")
+labels = scenario.get("expectedAccessibilityLabels")
+if not isinstance(labels, list) or not labels or not all(isinstance(label, str) and label for label in labels):
+    raise SystemExit(f"Scenario {identifier} has no valid expected accessibility labels")
+
+print("\t".join([
+    scenario["appearance"],
+    "true" if scenario["differentiateWithoutColor"] else "false",
+    "true" if scenario["reduceMotion"] else "false",
+    scenario["textScale"],
+    scenario["locale"],
+]))
+PY
+)"
+IFS=$'\t' read -r appearance differentiate_without_color reduce_motion text_scale locale_identifier \
+  <<< "$scenario_contract"
+if [[ -z "$appearance" || -z "$differentiate_without_color" || -z "$reduce_motion" || -z "$text_scale" || -z "$locale_identifier" ]]; then
+  print -u2 "Could not load the five renderer axes for iOS scenario $scenario_id"
+  exit 2
+fi
+
+Scripts/verify-kaname-design-tokens.py
+
 output_directory="${output_path:h}"
 mkdir -p "$output_directory"
 capture_path="$output_directory/.kaname-ios-capture-$$.png"
@@ -36,6 +140,10 @@ if not any(r.get("isAvailable") and r["identifier"] == identifier for r in runti
 ' "$runtime_identifier"
 
 device_type_name="${KANAME_IOS_SCREENSHOT_DEVICE:-iPhone 15}"
+if [[ "$device_type_name" != "iPhone 15" ]]; then
+  print -u2 "iOS design screenshots are qualified only for the manifest viewport: iPhone 15."
+  exit 2
+fi
 device_type_identifier="$(xcrun simctl list devicetypes --json | python3 -c '
 import json, sys
 devices = json.load(sys.stdin)["devicetypes"]
@@ -93,7 +201,7 @@ SWIFT
 
 xcrun simctl boot "$simulator_id"
 xcrun simctl bootstatus "$simulator_id" -b
-xcrun simctl ui "$simulator_id" appearance dark
+xcrun simctl ui "$simulator_id" appearance "$appearance"
 xcrun simctl status_bar "$simulator_id" override \
   --time "9:41" \
   --operatorName "Kaname" \
@@ -127,6 +235,12 @@ fi
 
 xcrun simctl install "$simulator_id" "$application_path"
 SIMCTL_CHILD_KANAME_SYNTHETIC_SCREENSHOT=1 \
+SIMCTL_CHILD_KANAME_DESIGN_SCENARIO_ID="$scenario_id" \
+SIMCTL_CHILD_KANAME_DESIGN_APPEARANCE="$appearance" \
+SIMCTL_CHILD_KANAME_DESIGN_DIFFERENTIATE_WITHOUT_COLOR="$differentiate_without_color" \
+SIMCTL_CHILD_KANAME_DESIGN_REDUCE_MOTION="$reduce_motion" \
+SIMCTL_CHILD_KANAME_DESIGN_TEXT_SCALE="$text_scale" \
+SIMCTL_CHILD_KANAME_DESIGN_LOCALE="$locale_identifier" \
   xcrun simctl launch --terminate-running-process \
     "$simulator_id" \
     com.cyberlane.kaname.iphoneprototype
@@ -166,11 +280,11 @@ fi
 
 mv -f "$capture_path" "$output_path"
 Scripts/write-kaname-design-screenshot-receipt.py \
-  --manifest "Fixtures/design-system/product-scenarios.json" \
-  --scenario "ios-home-synthetic" \
+  --manifest "$manifest_path" \
+  --scenario "$scenario_id" \
   --image "$output_path" \
   --capture-method "simctl io screenshot on task-owned clean simulator" \
   --renderer "KanameIPhonePrototype memory-only synthetic root" \
   --target-runtime "$device_type_name · $runtime_identifier"
 
-print "Captured one synthetic-public Kaname iOS screenshot at $output_path"
+print "Captured synthetic-public Kaname iOS scenario $scenario_id at $output_path"

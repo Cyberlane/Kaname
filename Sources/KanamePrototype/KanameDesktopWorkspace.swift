@@ -1,4 +1,6 @@
 import KanameDesktop
+import KanameDesktopUI
+import KanameDesignSystem
 import KanameWorkflowHost
 import KanameConnectivity
 import KanameDomain
@@ -221,10 +223,13 @@ private extension EnvironmentValues {
 
 struct KanameDesktopWorkspace: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
+    @Environment(\.locale) private var locale
     @Environment(\.sizeCategory) private var sizeCategory
     private let uiRestoreStore: DesktopUIRestoreStore
     private let initialGlobalSearchQuery: String
     private let usesQALargeText: Bool
+    private let designCapture: DesktopDesignCaptureConfiguration?
     @StateObject private var model: DesktopAppModel
     @StateObject private var conversationRuntime: DesktopConversationRuntime
     @StateObject private var automationScheduler: DesktopAutomationSchedulerViewModel
@@ -267,20 +272,28 @@ struct KanameDesktopWorkspace: View {
     init() {
         let environment = KanameDesktopEnvironment.current
         let arguments = CommandLine.arguments
+        let designCapture = DesktopDesignCaptureConfiguration.resolve(arguments: arguments)
+        self.designCapture = designCapture
         let desktopStore: any DesktopStateStoring
         let forkFailure: String?
-        do {
-            _ = try DesktopDevelopmentDataFork.prepareIfNeeded(environment: environment)
-            desktopStore = FileDesktopStateStore(fileURL: environment.workspaceFileURL)
-            forkFailure = nil
-        } catch {
+        if designCapture != nil {
             desktopStore = VolatileDesktopStateStore()
-            forkFailure = error.localizedDescription
+            forkFailure = nil
+        } else {
+            do {
+                _ = try DesktopDevelopmentDataFork.prepareIfNeeded(environment: environment)
+                desktopStore = FileDesktopStateStore(fileURL: environment.workspaceFileURL)
+                forkFailure = nil
+            } catch {
+                desktopStore = VolatileDesktopStateStore()
+                forkFailure = error.localizedDescription
+            }
         }
         let restoreStore = DesktopUIRestoreStore(fileURL: environment.desktopDirectory.appending(path: "ui-restore.json"))
-        let restoredUI = forkFailure == nil ? restoreStore.load() : nil
+        let restoredUI = forkFailure == nil && designCapture == nil ? restoreStore.load() : nil
         uiRestoreStore = restoreStore
         let desktopModel = DesktopAppModel(store: desktopStore)
+        designCapture?.seed(desktopModel)
         if arguments.contains("--desktop-plan-review-fixture") {
             desktopModel.replaceProviderPlan(
                 threadID: "thread-desktop-dogfood",
@@ -302,7 +315,7 @@ struct KanameDesktopWorkspace: View {
         _personalIntegrations = StateObject(wrappedValue: DesktopPersonalIntegrationViewModel(environment: environment))
         _updates = StateObject(wrappedValue: DesktopUpdateViewModel(environment: environment))
         _automaticBackup = StateObject(wrappedValue: DesktopAutomaticBackupViewModel(environment: environment))
-        if arguments.contains("--desktop-link-synthetic-fixture") {
+        if arguments.contains("--desktop-link-synthetic-fixture") || designCapture?.scenario.usesSyntheticLink == true {
             _link = StateObject(wrappedValue: DesktopLinkViewModel(
                 service: KanameLinkSyntheticGatewayService.fixture(),
                 initialSnapshot: KanameLinkSyntheticGatewayService.fixtureSnapshot
@@ -334,14 +347,15 @@ struct KanameDesktopWorkspace: View {
            arguments.indices.contains(fixtureIndex + 1) {
             seedSyntheticWorkflowFixture(model: desktopModel, manifestPath: arguments[fixtureIndex + 1])
         }
-        usesQALargeText = arguments.contains("--desktop-large-text")
+        usesQALargeText = arguments.contains("--desktop-large-text") || designCapture?.scenario.usesLargeText == true
         initialGlobalSearchQuery = arguments.firstIndex(of: "--desktop-search-query")
             .flatMap { arguments.indices.contains($0 + 1) ? arguments[$0 + 1] : nil }
             ?? ""
         _showsGlobalSearch = State(initialValue: arguments.contains("--desktop-global-search"))
         _showsDiagnostics = State(initialValue: arguments.contains("--desktop-diagnostics"))
-        let explicitDestination = arguments.firstIndex(of: "--desktop-destination")
-            .flatMap { arguments.indices.contains($0 + 1) ? DesktopDestination(rawValue: arguments[$0 + 1]) : nil }
+        let explicitDestination = designCapture.flatMap { DesktopDestination(rawValue: $0.scenario.destination) }
+            ?? arguments.firstIndex(of: "--desktop-destination")
+                .flatMap { arguments.indices.contains($0 + 1) ? DesktopDestination(rawValue: arguments[$0 + 1]) : nil }
         let requestedDestination = explicitDestination
             ?? restoredUI.flatMap { DesktopDestination(rawValue: $0.destination) }
             ?? .home
@@ -525,6 +539,10 @@ struct KanameDesktopWorkspace: View {
         presentedWorkspace
         .task {
             guard developmentForkFailure == nil, !model.isRecoveryReadOnly else { return }
+            if designCapture != nil {
+                NotificationCenter.default.post(name: .kanameDesktopReady, object: nil)
+                return
+            }
             personalIntegrations.startMonitoring(model: model)
             automaticBackup.start(model: model)
             await _Concurrency.Task<Never, Never>.yield()
@@ -603,8 +621,17 @@ struct KanameDesktopWorkspace: View {
         }
     }
 
-    var body: some View {
-        primaryCommandWorkspace
+    private var designCaptureWorkspace: some View {
+        VStack(spacing: 0) {
+            if designCapture != nil {
+                KanameSyntheticDataBanner()
+            }
+            primaryCommandWorkspace
+        }
+    }
+
+    private var navigationCommandWorkspace: some View {
+        designCaptureWorkspace
         .overlay {
             modalPresentationLayer
         }
@@ -629,6 +656,10 @@ struct KanameDesktopWorkspace: View {
             guard acceptsNonRecoveryCommands else { return }
             focusCurrentComposer()
         }
+    }
+
+    private var lifecycleCommandWorkspace: some View {
+        navigationCommandWorkspace
         .onReceive(NotificationCenter.default.publisher(for: .kanameGoBack)) { _ in
             _ = handleBack()
         }
@@ -654,13 +685,26 @@ struct KanameDesktopWorkspace: View {
         .onDisappear {
             DesktopBackCommandRouter.shared.removeHandler()
         }
+    }
+
+    var body: some View {
+        lifecycleCommandWorkspace
         .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: showsSettings)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: showsGlobalSearch)
         .environment(
             \.sizeCategory,
-            usesQALargeText ? .accessibilityExtraExtraExtraLarge : sizeCategory
+            usesQALargeText ? .accessibilityExtraLarge : sizeCategory
         )
         .environment(\.desktopQALargeText, usesQALargeText)
+        .environment(\.locale, designCapture?.locale ?? locale)
+        .environment(
+            \.kanameAccessibilityPreferences,
+            KanameAccessibilityPreferences(
+                differentiateWithoutColor: designCapture?.scenario.differentiatesWithoutColor ?? differentiateWithoutColor,
+                reduceMotion: designCapture?.reduceMotion ?? reduceMotion,
+                increasedContrast: false
+            )
+        )
     }
 
     private func persistUIRestoreState() {
@@ -856,7 +900,7 @@ struct KanameDesktopWorkspace: View {
                    notice,
                    dismissedIdentity: dismissedUpdateIdentity
                ) {
-                DesktopUpdateNotificationPill(
+                DesktopUpdateNotificationCard(
                     notice: notice,
                     releaseNotes: updates.availableUpdate?.releaseNotes,
                     failureMessage: notice.phase == .retry ? updates.message : nil,
@@ -1226,7 +1270,7 @@ struct KanameDesktopWorkspace: View {
         workspaceAnnouncement = ""
         DispatchQueue.main.async {
             workspaceAnnouncement = message
-            postDesktopAccessibilityAnnouncement(message)
+            KanameAccessibilityAnnouncement.post(message)
         }
     }
 
@@ -1639,19 +1683,6 @@ private func restoreDesktopResponder(_ responder: NSResponder?) {
     }
 }
 
-@MainActor
-private func postDesktopAccessibilityAnnouncement(_ message: String) {
-    guard !message.isEmpty,
-          let window = NSApplication.shared.keyWindow ?? NSApplication.shared.mainWindow else { return }
-    NSAccessibility.post(
-        element: window,
-        notification: .announcementRequested,
-        userInfo: [
-            .announcement: message,
-            .priority: NSAccessibilityPriorityLevel.medium.rawValue,
-        ]
-    )
-}
 #endif
 
 private enum DesktopGlobalSearchScheduledSource: Sendable {
@@ -2028,7 +2059,7 @@ private struct DesktopGlobalSearchPalette: View {
         }
         .accessibilityLabel("\(resultCount) search results")
         .onChange(of: resultCount) { count in
-            postDesktopAccessibilityAnnouncement("\(count) local search results")
+            KanameAccessibilityAnnouncement.post("\(count) local search results")
         }
     }
 
@@ -2281,7 +2312,11 @@ private struct DesktopHomeView: View {
             VStack(alignment: .leading, spacing: 18) {
                 HStack(alignment: .top, spacing: 18) {
                     VStack(alignment: .leading, spacing: 7) {
-                        ProductStatusPill()
+                        KanameMetadataChip(
+                            "Desktop dogfood · local-first",
+                            symbolName: "desktopcomputer",
+                            accessibilityLabel: "Environment: Desktop dogfood, local-first"
+                        )
                         Text("Command centre")
                             .font(.largeTitle.weight(.bold))
                             .lineLimit(1)
@@ -2778,7 +2813,10 @@ private struct DesktopThreadConversation: View {
                             : nil
                     )
                 } else {
-                    AttentionPill(attention: thread.attention)
+                    KanameStatusBadge(
+                        KanameDesktopStatusPresentation.attention(thread.attention),
+                        density: .compact
+                    )
                 }
 
                 conversationSearchButton
@@ -2846,14 +2884,14 @@ private struct DesktopThreadConversation: View {
     private func openPanel(_ destination: DesktopThreadPanel) {
         guard availablePanels.contains(destination) else { return }
         panel = destination
-        postDesktopAccessibilityAnnouncement("\(destination.label) opened")
+        KanameAccessibilityAnnouncement.post("\(destination.label) opened")
     }
 
     private func announceWorkflowAttentionIfNeeded(_ stage: DesktopCodingWorkflowStage) {
         guard thread.kind == .coding else { return }
         let presentation = DesktopCodingWorkflowPresentation(stage: stage)
         guard presentation.requiresAttention, let ownerPanel = presentation.ownerPanel else { return }
-        postDesktopAccessibilityAnnouncement(
+        KanameAccessibilityAnnouncement.post(
             "\(presentation.title). Open \(ownerPanel.label) when you are ready."
         )
     }
@@ -2861,7 +2899,7 @@ private struct DesktopThreadConversation: View {
     private func requestPlanChanges() {
         panel = .conversation
         DispatchQueue.main.async { composerFocused = true }
-        postDesktopAccessibilityAnnouncement("Chat opened. Describe the changes you want in the plan.")
+        KanameAccessibilityAnnouncement.post("Chat opened. Describe the changes you want in the plan.")
     }
 
     private func approvePlanAndImplement() {
@@ -3152,7 +3190,7 @@ private struct DesktopThreadConversation: View {
         .frame(maxWidth: .infinity)
         .background(Nord.polarNight0)
         .onChange(of: runtime.isRunning(threadID: thread.id)) { isRunning in
-            postDesktopAccessibilityAnnouncement(
+            KanameAccessibilityAnnouncement.post(
                 isRunning ? "\(thread.provider) is responding" : "\(thread.provider) finished responding"
             )
         }
@@ -3325,7 +3363,7 @@ private struct DesktopThreadConversation: View {
         case 53:
             composerCommandMenuDismissed = true
             composerCommandSelection = DesktopComposerCommandSelectionState()
-            postDesktopAccessibilityAnnouncement("Command menu dismissed")
+            KanameAccessibilityAnnouncement.post("Command menu dismissed")
             return true
         default:
             return false
@@ -3347,7 +3385,7 @@ private struct DesktopThreadConversation: View {
     private func announceSelectedComposerCommand() {
         guard let selectedComposerCommand else { return }
         let state = selectedComposerCommand.disabledReason.map { "Unavailable. \($0)" } ?? "Selected"
-        postDesktopAccessibilityAnnouncement("\(selectedComposerCommand.invocation), \(state)")
+        KanameAccessibilityAnnouncement.post("\(selectedComposerCommand.invocation), \(state)")
     }
 
     private func submitComposer() {
@@ -3370,7 +3408,7 @@ private struct DesktopThreadConversation: View {
             performComposerCommand(command)
             return true
         case let .disabled(_, reason):
-            postDesktopAccessibilityAnnouncement(reason)
+            KanameAccessibilityAnnouncement.post(reason)
             return true
         case .message:
             return false
@@ -3391,7 +3429,7 @@ private struct DesktopThreadConversation: View {
             applyComposerCommandEdit(edit)
             performComposerCommand(command)
         case let .disabled(_, reason):
-            postDesktopAccessibilityAnnouncement(reason)
+            KanameAccessibilityAnnouncement.post(reason)
         case .message:
             break
         }
@@ -3428,7 +3466,7 @@ private struct DesktopThreadConversation: View {
             renamedTitle = thread.title
             showsRename = true
         }
-        postDesktopAccessibilityAnnouncement("\(command.title) opened")
+        KanameAccessibilityAnnouncement.post("\(command.title) opened")
     }
 
     private func openRuntimeSettings(focus: DesktopConversationRuntimeSheetFocus = .full) {
@@ -5980,7 +6018,10 @@ private struct DesktopResearchView: View {
                                         .font(.title2)
                                         .foregroundStyle(Nord.frost1)
                                     Spacer()
-                                    RecordStatusPill(state: record.status)
+                                    KanameStatusBadge(
+                                        KanameDesktopStatusPresentation.record(record.status),
+                                        density: .compact
+                                    )
                                 }
                                 Text(record.title)
                                     .font(.headline)
@@ -6066,7 +6107,7 @@ private final class DesktopLocalReadViewModel: ObservableObject {
     }
 }
 
-private struct DesktopUpdateNotificationPill: View {
+private struct DesktopUpdateNotificationCard: View {
     let notice: KanameUpdateNotice
     let releaseNotes: String?
     let failureMessage: String?
@@ -6110,52 +6151,47 @@ private struct DesktopUpdateNotificationPill: View {
     }
 
     var body: some View {
-        HStack(spacing: 6) {
-            Button(action: primaryAction) {
-                HStack(spacing: 9) {
-                    if notice.phase == .preparing {
-                        ProgressView()
-                            .controlSize(.small)
-                            .frame(width: 16, height: 16)
-                    } else {
-                        Image(systemName: symbol)
-                            .frame(width: 16)
+        KanameSurface(padding: KanameSpacing.small, background: KanameColor.raised) {
+            HStack(spacing: KanameSpacing.xSmall) {
+                Button(action: primaryAction) {
+                    HStack(spacing: KanameSpacing.small) {
+                        if notice.phase == .preparing {
+                            ProgressView()
+                                .controlSize(.small)
+                                .frame(width: 16, height: 16)
+                        } else {
+                            Image(systemName: symbol)
+                                .frame(width: 16)
+                        }
+                        (
+                            Text(title).font(.caption.weight(.semibold))
+                                + Text("\nKaname \(notice.version) (\(notice.build))")
+                                    .font(.caption2)
+                                    .foregroundColor(KanameColor.textSecondary)
+                        )
+                        .lineLimit(2)
+                        Spacer(minLength: 4)
                     }
-                    (
-                        Text(title).font(.caption.weight(.semibold))
-                            + Text("\nKaname \(notice.version) (\(notice.build))")
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                    )
-                    .lineLimit(2)
-                    Spacer(minLength: 4)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .disabled(notice.phase == .preparing)
-            .help(helpText)
-            .accessibilityLabel("Kaname \(notice.version) build \(notice.build). \(accessibilityAction)")
-
-            if let dismiss {
-                Button(action: dismiss) {
-                    Image(systemName: "xmark")
-                        .font(.caption2.weight(.bold))
-                        .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help("Dismiss until next launch")
-                .accessibilityLabel("Dismiss update until next launch")
+                .disabled(notice.phase == .preparing)
+                .help(helpText)
+                .accessibilityLabel("Kaname \(notice.version) build \(notice.build). \(accessibilityAction)")
+
+                if let dismiss {
+                    Button(action: dismiss) {
+                        Image(systemName: "xmark")
+                            .font(.caption2.weight(.bold))
+                            .frame(width: 20, height: 20)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Dismiss until next launch")
+                    .accessibilityLabel("Dismiss update until next launch")
+                }
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .foregroundStyle(Nord.snowStorm0)
-        .background(Nord.frost1.opacity(0.14), in: RoundedRectangle(cornerRadius: 10))
-        .overlay {
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(Nord.frost1.opacity(0.38), lineWidth: 1)
-        }
+        .foregroundStyle(KanameColor.textPrimary)
     }
 }
 
@@ -7407,7 +7443,12 @@ private struct DesktopKnowledgeView: View {
                                         Button("Reject") { model.reviewCapabilityUpdate(id: update.id, accepted: false) }
                                     }
                                     .controlSize(.small)
-                                } else { ActionStatePill(state: update.state) }
+                                } else {
+                                    KanameStatusBadge(
+                                        KanameDesktopStatusPresentation.action(update.state),
+                                        density: .compact
+                                    )
+                                }
                             }
                         }
                     }
@@ -7491,7 +7532,12 @@ private struct DesktopKnowledgeView: View {
                                 Label(diff.summary, systemImage: "plusminus")
                                     .font(.headline)
                                 Spacer()
-                                if let activeWrite { ActionStatePill(state: activeWrite.state) }
+                                if let activeWrite {
+                                    KanameStatusBadge(
+                                        KanameDesktopStatusPresentation.action(activeWrite.state),
+                                        density: .compact
+                                    )
+                                }
                             }
                             ScrollView(.horizontal) {
                                 Text(diff.unifiedDiff).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
@@ -8318,7 +8364,14 @@ private struct DesktopEmailView: View {
                 }
                 ForEach(model.snapshot.domains.emailDrafts.sorted { $0.updatedAtUnixMillis > $1.updatedAtUnixMillis }) { draft in
                     VStack(alignment: .leading, spacing: 10) {
-                        HStack { Text(draft.subject.isEmpty ? "Untitled draft" : draft.subject).font(.headline); Spacer(); RecordStatusPill(state: draft.status) }
+                        HStack {
+                            Text(draft.subject.isEmpty ? "Untitled draft" : draft.subject).font(.headline)
+                            Spacer()
+                            KanameStatusBadge(
+                                KanameDesktopStatusPresentation.record(draft.status),
+                                density: .compact
+                            )
+                        }
                         LabeledContent("Recipients", value: draft.recipients.isEmpty ? "None" : draft.recipients)
                         Text(draft.body).foregroundStyle(.secondary).lineLimit(6)
                         if let account = googleAccount(for: draft) {
@@ -8752,7 +8805,14 @@ private struct DesktopEmailView: View {
     private var actionReview: some View {
         if let action = activeAction {
             VStack(alignment: .leading, spacing: 10) {
-                HStack { Label("Action preview", systemImage: "checkmark.shield").font(.headline); Spacer(); ActionStatePill(state: action.state) }
+                HStack {
+                    Label("Action preview", systemImage: "checkmark.shield").font(.headline)
+                    Spacer()
+                    KanameStatusBadge(
+                        KanameDesktopStatusPresentation.action(action.state),
+                        density: .compact
+                    )
+                }
                 Text(action.preview)
                 Text(action.exactTarget).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
                 if let draftID = pendingOutboundDraftID,
@@ -9050,6 +9110,10 @@ private struct WorkflowWorkItemCard: View {
         model.snapshot.operations.workflows.definitions.first { $0.id == item.workflowID }
     }
 
+    private var statusPresentation: KanameStatusPresentation {
+        KanameDesktopStatusPresentation.workflow(item.state)
+    }
+
     private var episodes: [DesktopWorkflowEpisodeRecord] {
         model.workflowEpisodes(workItemID: item.id)
     }
@@ -9146,7 +9210,7 @@ private struct WorkflowWorkItemCard: View {
                 HStack(alignment: .top, spacing: 12) {
                     Image(systemName: definition?.icon ?? "point.3.connected.trianglepath.dotted")
                         .font(.title3)
-                        .foregroundStyle(item.state.tint)
+                        .foregroundStyle(statusPresentation.tone.color)
                         .frame(width: 28)
                     VStack(alignment: .leading, spacing: 4) {
                         Text(item.title).font(.headline).foregroundStyle(.primary).lineLimit(2)
@@ -9156,7 +9220,10 @@ private struct WorkflowWorkItemCard: View {
                     }
                     Spacer(minLength: 12)
                     VStack(alignment: .trailing, spacing: 6) {
-                        WorkflowStatePill(state: item.state)
+                        KanameStatusBadge(
+                            statusPresentation,
+                            density: .compact
+                        )
                         Image(systemName: expanded ? "chevron.up" : "chevron.down")
                             .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                     }
@@ -9164,7 +9231,7 @@ private struct WorkflowWorkItemCard: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("\(item.title), \(item.state.label)")
+            .accessibilityLabel("\(item.title), \(statusPresentation.accessibilityLabel)")
             .accessibilityHint(expanded ? "Collapse workflow details" : "Show workflow details")
 
             if expanded {
@@ -10521,46 +10588,13 @@ private struct WorkflowTriggerBindingRow: View {
     }
 }
 
-private struct WorkflowStatePill: View {
-    let state: DesktopWorkflowWorkState
-
-    var body: some View {
-        Label(state.label, systemImage: state.symbol)
-            .font(.caption2.weight(.semibold))
-            .foregroundStyle(state.tint)
-            .padding(.horizontal, 8).padding(.vertical, 4)
-            .background(state.tint.opacity(0.14), in: Capsule())
-            .overlay(Capsule().strokeBorder(state.tint.opacity(0.8), lineWidth: 1))
-            .accessibilityLabel("Workflow status: \(state.label)")
-    }
-}
-
 private extension DesktopWorkflowWorkState {
     var symbol: String {
-        switch self {
-        case .open: "circle"
-        case .preparing: "hourglass"
-        case .running: "waveform.path.ecg"
-        case .needsAttention: "exclamationmark.triangle.fill"
-        case .readyForEffect: "checkmark.shield"
-        case .waitingExternal: "envelope.badge"
-        case .accepted: "checkmark.seal.fill"
-        case .operationallyClosed: "archivebox.fill"
-        case .failed: "xmark.octagon.fill"
-        case .cancelled: "slash.circle"
-        case .superseded: "arrow.uturn.forward.circle"
-        }
+        KanameDesktopStatusPresentation.workflow(self).symbolName
     }
 
     var tint: Color {
-        switch self {
-        case .accepted: Nord.auroraGreen
-        case .running, .preparing: Nord.frost1
-        case .needsAttention, .readyForEffect: Nord.auroraYellow
-        case .failed: Nord.auroraRed
-        case .waitingExternal: Nord.frost0
-        case .open, .operationallyClosed, .cancelled, .superseded: .secondary
-        }
+        KanameDesktopStatusPresentation.workflow(self).tone.color
     }
 }
 
@@ -10789,7 +10823,10 @@ private struct DesktopCalendarView: View {
                                         .font(.title2)
                                         .foregroundStyle(Nord.auroraPurple)
                                     Spacer()
-                                    RecordStatusPill(state: proposal.status)
+                                    KanameStatusBadge(
+                                        KanameDesktopStatusPresentation.record(proposal.status),
+                                        density: .compact
+                                    )
                                 }
                                 Text(proposal.title).font(.headline)
                                 Text(presentation?.anchored ?? eventDate.formatted())
@@ -11130,7 +11167,10 @@ private struct DesktopGitHubView: View {
                                     .font(.title2)
                                     .foregroundStyle(Nord.frost0)
                                 Spacer()
-                                RecordStatusPill(state: workspace.status)
+                                KanameStatusBadge(
+                                    KanameDesktopStatusPresentation.record(workspace.status),
+                                    density: .compact
+                                )
                             }
                             Text(workspace.name).font(.headline)
                             Text(workspace.localPath)
@@ -11158,7 +11198,10 @@ private struct DesktopGitHubView: View {
                             Label("Live local state", systemImage: "checkmark.shield.fill")
                                 .font(.headline)
                             Spacer()
-                            RecordStatusPill(state: inspection.isClean ? .ready : .needsReview)
+                            KanameStatusBadge(
+                                KanameDesktopStatusPresentation.record(inspection.isClean ? .ready : .needsReview),
+                                density: .compact
+                            )
                         }
                         LabeledContent("Branch", value: inspection.branch)
                         LabeledContent("HEAD", value: inspection.head)
@@ -11198,7 +11241,10 @@ private struct DesktopGitHubView: View {
                             HStack {
                                 Text("#\(pullRequest.number) \(pullRequest.title)").font(.headline)
                                 Spacer()
-                                ActionStatePill(state: pullRequest.state)
+                                KanameStatusBadge(
+                                    KanameDesktopStatusPresentation.action(pullRequest.state),
+                                    density: .compact
+                                )
                             }
                             Text("\(pullRequest.headBranch) → \(pullRequest.baseBranch)")
                                 .font(.system(.caption, design: .monospaced))
@@ -11246,7 +11292,10 @@ private struct DesktopGitHubView: View {
                                         .foregroundStyle(.secondary)
                                 }
                                 Spacer()
-                                ActionStatePill(state: layer.state)
+                                KanameStatusBadge(
+                                    KanameDesktopStatusPresentation.action(layer.state),
+                                    density: .compact
+                                )
                                 stackPullRequestButton(layer)
                             }
                             .panelStyle()
@@ -11368,7 +11417,10 @@ private struct DesktopSkillsView: View {
                                     HStack {
                                         Text("Trust")
                                         Spacer()
-                                        RecordStatusPill(state: skill.status)
+                                        KanameStatusBadge(
+                                            KanameDesktopStatusPresentation.record(skill.status),
+                                            density: .compact
+                                        )
                                     }
                                 }
                                 .font(.caption)
@@ -11579,7 +11631,10 @@ private struct DesktopCodingView: View {
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                         HStack {
-                            RecordStatusPill(state: .needsReview)
+                            KanameStatusBadge(
+                                KanameDesktopStatusPresentation.record(.needsReview),
+                                density: .compact
+                            )
                             Text("Select providers and cost limits before execution")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
@@ -11617,11 +11672,7 @@ private struct DesktopCodingView: View {
                     )
                     ForEach(model.snapshot.operations.comparisons) { comparison in
                         VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                Text(comparison.title).font(.headline)
-                                Spacer()
-                                ActionStatePill(state: comparison.state)
-                            }
+                            comparisonHeader(comparison)
                             Text(comparison.brief)
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
@@ -11894,7 +11945,7 @@ private struct DesktopCodingView: View {
                 }
                 ForEach(model.snapshot.operations.comparisons.sorted { $0.createdAtUnixMillis > $1.createdAtUnixMillis }) { comparison in
                     VStack(alignment: .leading, spacing: 10) {
-                        HStack { Text(comparison.title).font(.headline); Spacer(); ActionStatePill(state: comparison.state) }
+                        comparisonHeader(comparison)
                         Text(comparison.brief).font(.subheadline).foregroundStyle(.secondary)
                         ForEach(model.snapshot.operations.providerRuns.filter { comparison.runIDs.contains($0.id) }) { run in
                             HStack {
@@ -11935,7 +11986,15 @@ private struct DesktopCodingView: View {
                 SurfaceHeader(title: "Coding evidence", detail: "Tests, diagnostics, structural review, context, artifacts, and subagent activity", symbol: "checkmark.seal.fill")
                 evidenceSummary(title: "Quality gates", count: model.snapshot.operations.qualityGates.count, empty: "No verification evidence has been recorded.") {
                     ForEach(model.snapshot.operations.qualityGates.sorted { $0.recordedAtUnixMillis > $1.recordedAtUnixMillis }) { gate in
-                        HStack { Text(gate.kind.label).font(.headline); Text(gate.command).font(.system(.caption, design: .monospaced)); Spacer(); ActionStatePill(state: gate.state) }
+                        HStack {
+                            Text(gate.kind.label).font(.headline)
+                            Text(gate.command).font(.system(.caption, design: .monospaced))
+                            Spacer()
+                            KanameStatusBadge(
+                                KanameDesktopStatusPresentation.action(gate.state),
+                                density: .compact
+                            )
+                        }
                     }
                 }
                 evidenceSummary(title: "Subagents", count: model.snapshot.operations.subagents.count, empty: "No provider has reported subagent activity.") {
@@ -11951,6 +12010,17 @@ private struct DesktopCodingView: View {
             }
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func comparisonHeader(_ comparison: DesktopComparisonRecord) -> some View {
+        HStack {
+            Text(comparison.title).font(.headline)
+            Spacer()
+            KanameStatusBadge(
+                KanameDesktopStatusPresentation.action(comparison.state),
+                density: .compact
+            )
         }
     }
 
@@ -11998,7 +12068,10 @@ private struct ProviderCapabilityCard: View {
                     .foregroundStyle(status == .ready ? Nord.frost1 : .secondary)
                 Text(provider.name).font(.headline)
                 Spacer()
-                RecordStatusPill(state: status)
+                KanameStatusBadge(
+                    KanameDesktopStatusPresentation.record(status),
+                    density: .compact
+                )
             }
             Text(snapshot.map { "\(provider.adapter) · \($0.state.rawValue)" } ?? provider.adapter)
                 .font(.subheadline.weight(.semibold))
@@ -13096,7 +13169,10 @@ private struct DesktopThreadInspector: View {
         InspectorTitle(title: "Thread context", symbol: "sidebar.right")
         VStack(alignment: .leading, spacing: 10) {
             Text(thread.title).font(.headline)
-            AttentionPill(attention: thread.attention)
+            KanameStatusBadge(
+                KanameDesktopStatusPresentation.attention(thread.attention),
+                density: .compact
+            )
             Divider()
             InspectorFact(label: "Kind", value: thread.kind.label)
             InspectorFact(label: "Provider", value: thread.provider)
@@ -14476,7 +14552,10 @@ private struct AccountStrip: View {
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
-                    RecordStatusPill(state: account.status)
+                    KanameStatusBadge(
+                        KanameDesktopStatusPresentation.record(account.status),
+                        density: .compact
+                    )
                 }
             }
         }
@@ -14506,7 +14585,10 @@ private struct ApprovalQueueStrip: View {
                     HStack {
                         Text(approval.title).font(.subheadline.weight(.semibold))
                         Spacer()
-                        RecordStatusPill(state: .needsReview)
+                        KanameStatusBadge(
+                            KanameDesktopStatusPresentation.record(.needsReview),
+                            density: .compact
+                        )
                     }
                     Text(approval.exactTarget)
                         .font(.system(.caption, design: .monospaced))
@@ -14538,73 +14620,6 @@ private struct ApprovalQueueStrip: View {
                 .foregroundStyle(.tertiary)
         }
         .panelStyle()
-    }
-}
-
-private struct RecordStatusPill: View {
-    @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
-    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
-    let state: DesktopRecordState
-
-    var body: some View {
-        Label {
-            Text(state.label)
-        } icon: {
-            if differentiateWithoutColor {
-                Image(systemName: state.accessibilitySymbol)
-            }
-        }
-            .font(.caption2.weight(.bold))
-            .foregroundStyle(state.foreground)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(state.tint.opacity(0.18), in: Capsule())
-            .overlay {
-                if colorSchemeContrast == .increased {
-                    Capsule().strokeBorder(state.foreground, lineWidth: 1.5)
-                }
-            }
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel("Status: \(state.label)")
-    }
-}
-
-private struct ActionStatePill: View {
-    @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
-    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
-    let state: DesktopActionState
-
-    var body: some View {
-        Label {
-            Text(state.label)
-        } icon: {
-            if differentiateWithoutColor {
-                Image(systemName: state.accessibilitySymbol)
-            }
-        }
-            .font(.caption2.weight(.bold))
-            .foregroundStyle(state.tint)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(state.tint.opacity(0.18), in: Capsule())
-            .overlay {
-                if colorSchemeContrast == .increased {
-                    Capsule().strokeBorder(state.tint, lineWidth: 1.5)
-                }
-            }
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel("Action status: \(state.label)")
-    }
-}
-
-private struct ProductStatusPill: View {
-    var body: some View {
-        Label("Desktop dogfood · local-first", systemImage: "checkmark.shield.fill")
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(Nord.frost0)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(Nord.polarNight2, in: Capsule())
     }
 }
 
@@ -14652,9 +14667,16 @@ private struct MetricCard: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
-        .padding(16)
+        .padding(KanameSpacing.large)
         .frame(maxWidth: .infinity, minHeight: 130, alignment: .topLeading)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 16))
+        .background(
+            KanameColor.surface,
+            in: RoundedRectangle(cornerRadius: KanameRadius.card, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: KanameRadius.card, style: .continuous)
+                .stroke(KanameColor.separator.opacity(0.72), lineWidth: 1)
+        }
     }
 }
 
@@ -14663,14 +14685,7 @@ private struct SectionHeading: View {
     let detail: String
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text(title)
-                .font(.title3.weight(.bold))
-            Spacer()
-            Text(detail)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
+        KanameSectionHeader(title, detail: detail)
     }
 }
 
@@ -14682,7 +14697,10 @@ private struct ThreadCard: View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 11) {
                 HStack {
-                    AttentionPill(attention: thread.attention)
+                    KanameStatusBadge(
+                        KanameDesktopStatusPresentation.attention(thread.attention),
+                        density: .compact
+                    )
                     Spacer()
                     Image(systemName: thread.kind.symbol)
                         .foregroundStyle(.secondary)
@@ -14741,7 +14759,10 @@ private struct ThreadRow: View {
                         .lineLimit(1)
                 }
                 Spacer()
-                AttentionPill(attention: thread.attention)
+                KanameStatusBadge(
+                    KanameDesktopStatusPresentation.attention(thread.attention),
+                    density: .compact
+                )
                 Image(systemName: "chevron.right")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.tertiary)
@@ -14873,7 +14894,10 @@ private struct InboxThreadLabel: View {
                     .lineLimit(1)
             }
             Spacer()
-            AttentionPill(attention: thread.attention)
+            KanameStatusBadge(
+                KanameDesktopStatusPresentation.attention(thread.attention),
+                density: .compact
+            )
             RelativeTime(unixMillis: thread.updatedAtUnixMillis)
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
@@ -15107,22 +15131,8 @@ struct BoundaryCallout: View {
     let detail: String
 
     var body: some View {
-        HStack(alignment: .top, spacing: 13) {
-            Image(systemName: "hand.raised.fill")
-                .font(.title2)
-                .foregroundStyle(Nord.auroraYellow)
-            VStack(alignment: .leading, spacing: 5) {
-                Text(title).font(.headline)
-                Text(detail).font(.subheadline).foregroundStyle(.secondary)
-            }
-        }
-        .padding(18)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Nord.auroraYellow.opacity(0.09), in: RoundedRectangle(cornerRadius: 16))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16)
-                .stroke(Nord.auroraYellow.opacity(0.28), lineWidth: 1)
-        )
+        KanameCallout(title, message: detail, tone: .attention)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -15611,14 +15621,17 @@ struct SurfaceHeader<Actions: View>: View {
         HStack(alignment: .center, spacing: 14) {
             Image(systemName: symbol)
                 .font(.title)
-                .foregroundStyle(Nord.frost1)
+                .foregroundStyle(KanameColor.accentStrong)
                 .frame(width: 42, height: 42)
-                .background(Nord.polarNight2, in: RoundedRectangle(cornerRadius: 12))
+                .background(
+                    KanameColor.raised,
+                    in: RoundedRectangle(cornerRadius: KanameRadius.control, style: .continuous)
+                )
             VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(.largeTitle.weight(.bold))
+                Text(title).font(KanameTypography.display)
                 Text(detail)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .font(KanameTypography.supporting)
+                    .foregroundStyle(KanameColor.textSecondary)
                     .lineLimit(2)
             }
             .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
@@ -15640,47 +15653,10 @@ struct EmptyPanel: View {
     let detail: String
 
     var body: some View {
-        VStack(spacing: 10) {
-            Image(systemName: symbol)
-                .font(.largeTitle)
-                .foregroundStyle(Nord.frost2)
-            Text(title).font(.headline)
-            Text(detail)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
+        KanameSurface(padding: 0) {
+            KanameEmptyState(title, message: detail, symbolName: symbol)
+                .frame(maxWidth: .infinity, minHeight: 180)
         }
-        .padding(28)
-        .frame(maxWidth: .infinity, minHeight: 180)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 16))
-    }
-}
-
-private struct AttentionPill: View {
-    @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
-    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
-    let attention: DesktopAttention
-
-    var body: some View {
-        Label {
-            Text(attention.label)
-        } icon: {
-            if differentiateWithoutColor {
-                Image(systemName: attention.accessibilitySymbol)
-            }
-        }
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(attention.tint)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(attention.tint.opacity(0.12), in: Capsule())
-            .overlay {
-                if colorSchemeContrast == .increased {
-                    Capsule().strokeBorder(attention.tint, lineWidth: 1.5)
-                }
-            }
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel("Attention: \(attention.label)")
     }
 }
 
@@ -15753,9 +15729,16 @@ struct SettingsSection<Content: View>: View {
 
 extension View {
     func panelStyle() -> some View {
-        padding(16)
+        padding(KanameSpacing.large)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Nord.polarNight2.opacity(0.58), in: RoundedRectangle(cornerRadius: 15))
+            .background(
+                KanameColor.raised.opacity(0.72),
+                in: RoundedRectangle(cornerRadius: KanameRadius.card, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: KanameRadius.card, style: .continuous)
+                    .stroke(KanameColor.separator.opacity(0.72), lineWidth: 1)
+            }
     }
 
     fileprivate func desktopAdaptiveSheet(

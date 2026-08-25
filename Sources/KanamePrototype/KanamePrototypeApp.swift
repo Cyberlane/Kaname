@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import KanameConnectivity
+import KanameDesignSystem
 import KanameDesktop
 import KanameDomain
 import KanameFixtures
@@ -1352,7 +1353,10 @@ private struct AttentionCard: View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    AttentionBadge(attention: projection?.attention ?? .none)
+                    KanameStatusBadge(
+                        (projection?.attention ?? .none).legacyStatusPresentation,
+                        density: .compact
+                    )
                     Spacer()
                     Image(systemName: fixture.thread.workspaceKind.symbolName)
                         .foregroundStyle(.secondary)
@@ -1381,16 +1385,32 @@ private struct AttentionCard: View {
     }
 }
 
-private struct AttentionBadge: View {
-    let attention: AttentionState
-
-    var body: some View {
-        Text(attention.displayName)
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(attention.tint)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(attention.tint.opacity(0.13), in: Capsule())
+private extension AttentionState {
+    var legacyStatusPresentation: KanameStatusPresentation {
+        let tone: KanameStatusTone
+        let symbolName: String
+        switch self {
+        case .none:
+            (tone, symbolName) = (.neutral, "checkmark.circle")
+        case .queued:
+            (tone, symbolName) = (.informational, "clock")
+        case .running:
+            (tone, symbolName) = (.active, "arrow.triangle.2.circlepath")
+        case .needsResponse:
+            (tone, symbolName) = (.attention, "bubble.left")
+        case .needsReview:
+            (tone, symbolName) = (.attention, "eye.circle")
+        case .failed:
+            (tone, symbolName) = (.danger, "exclamationmark.triangle")
+        case .interrupted:
+            (tone, symbolName) = (.blocked, "pause.circle")
+        }
+        return KanameStatusPresentation(
+            label: displayName,
+            tone: tone,
+            symbolName: symbolName,
+            accessibilityLabel: "Attention: \(displayName)"
+        )
     }
 }
 
@@ -1506,7 +1526,10 @@ private struct ThreadDirectoryRow: View {
                     Text(fixture.thread.title)
                         .font(.headline)
                     Spacer()
-                    AttentionBadge(attention: projection?.attention ?? .none)
+                    KanameStatusBadge(
+                        (projection?.attention ?? .none).legacyStatusPresentation,
+                        density: .compact
+                    )
                 }
                 Text(fixture.task.title)
                     .font(.subheadline)
@@ -1569,7 +1592,10 @@ private struct ThreadWorkspaceView: View {
                         Text(fixture.thread.title)
                             .font(.largeTitle.weight(.bold))
                         Spacer()
-                        AttentionBadge(attention: projection?.attention ?? .none)
+                        KanameStatusBadge(
+                            (projection?.attention ?? .none).legacyStatusPresentation,
+                            density: .compact
+                        )
                     }
                     Text("\(fixture.providerSession.provider) · \(fixture.thread.workspaceKind.displayName) workspace")
                         .foregroundStyle(.secondary)
@@ -2029,7 +2055,10 @@ private struct CodeReviewView: View {
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
-                        AttentionBadge(attention: .needsReview)
+                        KanameStatusBadge(
+                            AttentionState.needsReview.legacyStatusPresentation,
+                            density: .compact
+                        )
                     }
 
                     HStack(alignment: .top, spacing: 14) {
@@ -2604,7 +2633,10 @@ private struct StackLayerDetail: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
-                AttentionBadge(attention: layer.status.attention)
+                KanameStatusBadge(
+                    layer.status.attention.legacyStatusPresentation,
+                    density: .compact
+                )
             }
             Text(layer.title)
                 .font(.title2.weight(.bold))

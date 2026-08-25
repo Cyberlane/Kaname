@@ -72,10 +72,90 @@ pub struct HostShellSnapshot {
     pub inbox: Vec<LinkMessage>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub enum ClientUiConnection {
+    #[serde(rename = "hostOnline")]
+    HostOnline,
+    #[serde(rename = "connecting")]
+    Connecting,
+    #[serde(rename = "hostOffline")]
+    HostOffline,
+    #[serde(rename = "enrollmentRequired")]
+    EnrollmentRequired,
+    #[serde(rename = "revoked")]
+    Revoked,
+    #[serde(rename = "connectionStateUnavailable")]
+    Unavailable,
+}
+
+impl ClientUiConnection {
+    fn from_enrollment_state(state: Option<&str>, connected: bool) -> Self {
+        match state {
+            None => Self::EnrollmentRequired,
+            Some("pending") => Self::Connecting,
+            Some("revoked") => Self::Revoked,
+            Some("approved") if connected => Self::HostOnline,
+            Some("approved") => Self::HostOffline,
+            Some(_) => Self::Unavailable,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub enum ClientUiDiscussionStatus {
+    #[serde(rename = "Waiting for host")]
+    WaitingForHost,
+    #[serde(rename = "Up to date")]
+    UpToDate,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub enum ClientUiParticipant {
+    #[serde(rename = "host")]
+    Host,
+    #[serde(rename = "collaborator")]
+    Collaborator,
+    #[serde(rename = "unrecognized")]
+    Unrecognized,
+}
+
+impl ClientUiParticipant {
+    fn from_sender(sender: &str) -> Self {
+        match sender {
+            "host" => Self::Host,
+            "collaborator" => Self::Collaborator,
+            _ => Self::Unrecognized,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub enum ClientUiReceipt {
+    #[serde(rename = "Received by host")]
+    ReceivedByHost,
+    #[serde(rename = "Queued on this device")]
+    QueuedOnDevice,
+    #[serde(rename = "Published by host")]
+    PublishedByHost,
+    #[serde(rename = "Outcome uncertain")]
+    OutcomeUncertain,
+}
+
+impl ClientUiReceipt {
+    fn from_client_state(state: &str) -> Self {
+        match state {
+            "hostReceived" => Self::ReceivedByHost,
+            "queued" => Self::QueuedOnDevice,
+            "hostPublished" => Self::PublishedByHost,
+            _ => Self::OutcomeUncertain,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientUiSnapshot {
-    pub connection: String,
+    pub connection: ClientUiConnection,
     pub last_sync_unix_millis: Option<i64>,
     pub spaces: Vec<ClientUiSpace>,
     pub diagnostic_code: Option<String>,
@@ -97,7 +177,7 @@ pub struct ClientUiSpace {
 pub struct ClientUiDiscussion {
     pub id: String,
     pub title: String,
-    pub status: String,
+    pub status: ClientUiDiscussionStatus,
     pub action_label: String,
     pub messages: Vec<ClientUiMessage>,
 }
@@ -106,11 +186,11 @@ pub struct ClientUiDiscussion {
 #[serde(rename_all = "camelCase")]
 pub struct ClientUiMessage {
     pub id: String,
-    pub author: String,
+    pub author: ClientUiParticipant,
     pub author_name: String,
     pub body: String,
     pub sent_at_unix_millis: i64,
-    pub receipt: String,
+    pub receipt: ClientUiReceipt,
 }
 
 impl ShellResponse {
@@ -360,36 +440,30 @@ fn client_ui_snapshot(
     connected: bool,
     last_error: Option<&str>,
 ) -> ClientUiSnapshot {
-    let connection = match raw.enrollment_state.as_deref() {
-        None => "enrollmentRequired",
-        Some("pending") => "connecting",
-        Some("revoked") => "revoked",
-        Some("approved") if connected => "hostOnline",
-        Some("approved") => "hostOffline",
-        Some(_) => "hostOffline",
-    };
+    let connection =
+        ClientUiConnection::from_enrollment_state(raw.enrollment_state.as_deref(), connected);
     let spaces = match (&raw.space_id, &raw.space_name) {
         (Some(space_id), Some(space_name)) => {
             let messages = raw
                 .timeline_messages
                 .iter()
-                .map(|message| ClientUiMessage {
-                    id: message.message_id.clone(),
-                    author: message.sender.clone(),
-                    author_name: if message.sender == "host" {
-                        "Host".to_owned()
-                    } else {
-                        raw.display_name
-                            .clone()
-                            .unwrap_or_else(|| "Collaborator".to_owned())
-                    },
-                    body: message.text.clone(),
-                    sent_at_unix_millis: message.sent_at_unix_millis,
-                    receipt: match message.receipt.as_str() {
-                        "hostReceived" => "Received by host".to_owned(),
-                        "queued" => "Queued on this device".to_owned(),
-                        _ => "Published by host".to_owned(),
-                    },
+                .map(|message| {
+                    let author = ClientUiParticipant::from_sender(&message.sender);
+                    ClientUiMessage {
+                        id: message.message_id.clone(),
+                        author,
+                        author_name: match author {
+                            ClientUiParticipant::Host => "Host".to_owned(),
+                            ClientUiParticipant::Collaborator => raw
+                                .display_name
+                                .clone()
+                                .unwrap_or_else(|| "Collaborator".to_owned()),
+                            ClientUiParticipant::Unrecognized => "External participant".to_owned(),
+                        },
+                        body: message.text.clone(),
+                        sent_at_unix_millis: message.sent_at_unix_millis,
+                        receipt: ClientUiReceipt::from_client_state(&message.receipt),
+                    }
                 })
                 .collect();
             vec![ClientUiSpace {
@@ -405,9 +479,9 @@ fn client_ui_snapshot(
                         .iter()
                         .any(|item| item.state == "queued")
                     {
-                        "Waiting for host".to_owned()
+                        ClientUiDiscussionStatus::WaitingForHost
                     } else {
-                        "Up to date".to_owned()
+                        ClientUiDiscussionStatus::UpToDate
                     },
                     action_label: "Send message".to_owned(),
                     messages,
@@ -417,7 +491,7 @@ fn client_ui_snapshot(
         _ => Vec::new(),
     };
     ClientUiSnapshot {
-        connection: connection.to_owned(),
+        connection,
         last_sync_unix_millis: connected.then(now_unix_millis),
         spaces,
         diagnostic_code: last_error.map(ToOwned::to_owned),
@@ -618,5 +692,69 @@ mod tests {
         assert_eq!(decoded["requestID"], "request-bounded-response");
         assert_eq!(decoded["ok"], false);
         assert_eq!(decoded["errorCode"], "response_bounds");
+    }
+
+    #[test]
+    fn client_ui_status_types_preserve_schema_v1_wire_values() {
+        let connections = [
+            (ClientUiConnection::HostOnline, "hostOnline"),
+            (ClientUiConnection::Connecting, "connecting"),
+            (ClientUiConnection::HostOffline, "hostOffline"),
+            (ClientUiConnection::EnrollmentRequired, "enrollmentRequired"),
+            (ClientUiConnection::Revoked, "revoked"),
+        ];
+        for (value, expected) in connections {
+            assert_eq!(serde_json::to_value(value).unwrap(), json!(expected));
+        }
+
+        let discussions = [
+            (ClientUiDiscussionStatus::WaitingForHost, "Waiting for host"),
+            (ClientUiDiscussionStatus::UpToDate, "Up to date"),
+        ];
+        for (value, expected) in discussions {
+            assert_eq!(serde_json::to_value(value).unwrap(), json!(expected));
+        }
+
+        let receipts = [
+            (ClientUiReceipt::ReceivedByHost, "Received by host"),
+            (ClientUiReceipt::QueuedOnDevice, "Queued on this device"),
+            (ClientUiReceipt::PublishedByHost, "Published by host"),
+        ];
+        for (value, expected) in receipts {
+            assert_eq!(serde_json::to_value(value).unwrap(), json!(expected));
+        }
+
+        assert_eq!(
+            serde_json::to_value(ClientUiParticipant::Host).unwrap(),
+            json!("host")
+        );
+        assert_eq!(
+            serde_json::to_value(ClientUiParticipant::Collaborator).unwrap(),
+            json!("collaborator")
+        );
+    }
+
+    #[test]
+    fn client_ui_unknown_source_states_fail_closed() {
+        assert_eq!(
+            ClientUiConnection::from_enrollment_state(Some("future-state"), true),
+            ClientUiConnection::Unavailable
+        );
+        assert_eq!(
+            ClientUiParticipant::from_sender("future-participant"),
+            ClientUiParticipant::Unrecognized
+        );
+        assert_eq!(
+            ClientUiReceipt::from_client_state("future-receipt"),
+            ClientUiReceipt::OutcomeUncertain
+        );
+        assert_eq!(
+            serde_json::to_value(ClientUiConnection::Unavailable).unwrap(),
+            json!("connectionStateUnavailable")
+        );
+        assert_eq!(
+            serde_json::to_value(ClientUiReceipt::OutcomeUncertain).unwrap(),
+            json!("Outcome uncertain")
+        );
     }
 }

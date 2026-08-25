@@ -7,11 +7,12 @@ import json
 import os
 import platform
 import stat
-import struct
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from kaname_design_screenshot_png import png_dimensions
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -64,12 +65,6 @@ def working_snapshot_digest(root: Path = ROOT) -> str:
     return value.hexdigest()
 
 
-def png_dimensions(data: bytes) -> tuple[int, int]:
-    if len(data) < 24 or data[:8] != b"\x89PNG\r\n\x1a\n":
-        raise SystemExit("Screenshot receipt input is not a PNG")
-    return struct.unpack(">II", data[16:24])
-
-
 def scenario_from(path: Path, identifier: str) -> dict[str, Any]:
     document = json.loads(path.read_text(encoding="utf-8"))
     if document.get("privacyClass") != "synthetic-public":
@@ -91,6 +86,9 @@ def main() -> int:
     parser.add_argument("--capture-method", required=True)
     parser.add_argument("--renderer", required=True)
     parser.add_argument("--target-runtime")
+    parser.add_argument("--desktop-launcher-receipt", type=Path)
+    parser.add_argument("--desktop-preverified", action="store_true")
+    parser.add_argument("--desktop-postverified", action="store_true")
     arguments = parser.parse_args()
 
     manifest = arguments.manifest.resolve()
@@ -98,11 +96,17 @@ def main() -> int:
     if not manifest.is_file() or not image.is_file() or not image.is_absolute():
         raise SystemExit("Manifest and absolute PNG path must exist")
     scenario = scenario_from(manifest, arguments.scenario)
+    is_desktop_scenario = str(scenario.get("surface", "")).startswith("desktop.")
+    if is_desktop_scenario and arguments.desktop_launcher_receipt is None:
+        raise SystemExit("Desktop scenarios require a verified Development launcher receipt")
     image_data = image.read_bytes()
-    width, height = png_dimensions(image_data)
+    try:
+        width, height = png_dimensions(image_data)
+    except ValueError as error:
+        raise SystemExit("Screenshot receipt input is not a PNG") from error
     token_document = json.loads(TOKENS.read_text(encoding="utf-8"))
-    receipt = {
-        "schemaVersion": 1,
+    receipt: dict[str, Any] = {
+        "schemaVersion": 2,
         "capturedAt": datetime.now(timezone.utc).isoformat(),
         "source": {
             "head": git("rev-parse", "HEAD").decode().strip(),
@@ -130,6 +134,46 @@ def main() -> int:
             "sha256": digest(image_data),
         },
     }
+    if arguments.desktop_launcher_receipt is not None:
+        launcher_receipt_path = arguments.desktop_launcher_receipt.resolve()
+        if not launcher_receipt_path.is_file():
+            raise SystemExit("Desktop launcher receipt does not exist")
+        if not arguments.desktop_preverified or not arguments.desktop_postverified:
+            raise SystemExit("Desktop captures require successful pre- and post-action runtime verification")
+        launcher_data = launcher_receipt_path.read_bytes()
+        launcher = json.loads(launcher_data)
+        if not isinstance(launcher, dict):
+            raise SystemExit("Desktop launcher receipt must be a JSON object")
+        required_launcher_fields = {
+            "schemaVersion", "channel", "bundleIdentifier", "executablePath", "processID", "windowID",
+        }
+        if required_launcher_fields - set(launcher):
+            raise SystemExit("Desktop launcher receipt is missing runtime identity fields")
+        if launcher.get("channel") != "development" or launcher.get("bundleIdentifier") != "com.cyberlane.kaname.desktop.dev":
+            raise SystemExit("Desktop launcher receipt is not bound to the Development app")
+        if type(launcher.get("schemaVersion")) is not int or launcher["schemaVersion"] not in {1, 2, 3}:
+            raise SystemExit("Desktop launcher receipt has an unsupported schema version")
+        if type(launcher.get("processID")) is not int or launcher["processID"] <= 0:
+            raise SystemExit("Desktop launcher receipt has an invalid process ID")
+        if type(launcher.get("windowID")) is not int or launcher["windowID"] <= 0:
+            raise SystemExit("Desktop launcher receipt has an invalid window ID")
+        executable = launcher.get("executablePath")
+        if not isinstance(executable, str) or not Path(executable).is_absolute():
+            raise SystemExit("Desktop launcher receipt executable path must be absolute")
+        canonical_executable = str(Path(executable).resolve())
+        if not canonical_executable.endswith("/.build/Kaname Prototype.app/Contents/MacOS/KanamePrototype"):
+            raise SystemExit("Desktop launcher receipt executable path is not task-canonical")
+        receipt["desktopRuntimeEvidence"] = {
+            "launcherReceiptSHA256": digest(launcher_data),
+            "launcherReceiptSchemaVersion": launcher["schemaVersion"],
+            "channel": launcher["channel"],
+            "bundleIdentifier": launcher["bundleIdentifier"],
+            "canonicalExecutablePath": canonical_executable,
+            "processID": launcher["processID"],
+            "windowID": launcher["windowID"],
+            "preActionVerificationPassed": True,
+            "postActionVerificationPassed": True,
+        }
     receipt_path = image.with_suffix(".receipt.json")
     receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(f"Wrote screenshot provenance receipt: {receipt_path}")

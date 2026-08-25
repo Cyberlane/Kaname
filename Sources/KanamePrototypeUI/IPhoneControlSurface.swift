@@ -790,6 +790,7 @@ private struct IPhoneProjectsHub: View {
                                 IPhoneProjectDirectoryRow(project: project)
                             }
                             .buttonStyle(.plain)
+                            .kanameMinimumInteractiveTarget()
                         }
                     }
                 }
@@ -1139,7 +1140,10 @@ private struct IPhoneProjectDirectoryRow: View {
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(Nord.snowStorm0)
                     Spacer(minLength: 4)
-                    IPhonePill(project.deliveryState, tint: project.tint)
+                    KanameStatusBadge(
+                        IPhoneDeliveryStatus.presentation(for: project.deliveryState),
+                        density: .compact
+                    )
                 }
                 Text(project.summary)
                     .font(.caption)
@@ -1553,11 +1557,13 @@ private struct IPhoneProjectHeroCard: View {
     let project: IPhoneProject
 
     var body: some View {
+        let delivery = IPhoneDeliveryStatus.presentation(for: project.deliveryState)
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Label("\(project.deliveryState.uppercased()) PROJECT", systemImage: "circle.fill")
+                Label("\(project.deliveryState.uppercased()) PROJECT", systemImage: delivery.symbolName)
                     .font(.caption2.weight(.bold))
-                    .foregroundStyle(project.tint)
+                    .foregroundStyle(delivery.tone.color)
+                    .accessibilityLabel("\(delivery.accessibilityLabel) project")
                 Spacer()
                 Image(systemName: "chevron.right")
                     .font(.caption.weight(.bold))
@@ -1569,10 +1575,22 @@ private struct IPhoneProjectHeroCard: View {
             Text(project.summary)
                 .font(.subheadline)
                 .foregroundStyle(Nord.snowStorm0.opacity(0.68))
-            HStack(spacing: 8) {
-                IPhonePill(project.changedFiles, tint: project.tint)
-                IPhonePill(project.checks, tint: Nord.auroraGreen)
-                IPhonePill(project.ciStatus, tint: project.ciStatus == "Healthy" ? Nord.auroraGreen : Nord.auroraYellow)
+            IPhoneAdaptiveBadgeRow {
+                let changedFiles = IPhoneMetadataKind.changedFiles.presentation(label: project.changedFiles)
+                KanameMetadataChip(
+                    changedFiles.label,
+                    symbolName: changedFiles.symbolName,
+                    accessibilityLabel: changedFiles.accessibilityLabel,
+                    density: .compact
+                )
+                KanameStatusBadge(
+                    IPhoneCheckStatus.presentation(for: project.checks),
+                    density: .compact
+                )
+                KanameStatusBadge(
+                    IPhoneCIStatus.presentation(for: project.ciStatus),
+                    density: .compact
+                )
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1592,22 +1610,44 @@ private struct IPhoneProjectHeroCard: View {
     }
 }
 
-private struct IPhonePill: View {
-    let title: String
-    let tint: Color
+private struct IPhoneAdaptiveBadgeRow<Content: View>: View {
+    private let content: Content
 
-    init(_ title: String, tint: Color) {
-        self.title = title
-        self.tint = tint
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
     }
 
     var body: some View {
-        Text(title)
-            .font(.system(size: 10, weight: .semibold))
-            .foregroundStyle(tint)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .background(tint.opacity(0.14), in: Capsule())
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) {
+                content
+            }
+            .fixedSize(horizontal: true, vertical: false)
+            VStack(alignment: .leading, spacing: 8) {
+                content
+            }
+        }
+    }
+}
+
+@MainActor
+private enum IPhoneProjectControlBadge {
+    case status(KanameStatusPresentation)
+    case metadata(IPhoneMetadataPresentation)
+
+    @ViewBuilder
+    var view: some View {
+        switch self {
+        case let .status(presentation):
+            KanameStatusBadge(presentation, density: .compact)
+        case let .metadata(presentation):
+            KanameMetadataChip(
+                presentation.label,
+                symbolName: presentation.symbolName,
+                accessibilityLabel: presentation.accessibilityLabel,
+                density: .compact
+            )
+        }
     }
 }
 
@@ -1616,7 +1656,7 @@ private struct IPhoneProjectControlRow: View {
     let detail: String
     let icon: String
     let tint: Color
-    let badge: String
+    let badge: IPhoneProjectControlBadge
 
     var body: some View {
         HStack(spacing: 12) {
@@ -1636,7 +1676,7 @@ private struct IPhoneProjectControlRow: View {
             }
             Spacer(minLength: 2)
             VStack(alignment: .trailing, spacing: 7) {
-                IPhonePill(badge, tint: tint)
+                badge.view
                 Image(systemName: "chevron.right")
                     .font(.caption.weight(.bold))
                     .foregroundStyle(Nord.snowStorm0.opacity(0.40))
@@ -1875,10 +1915,11 @@ private struct IPhoneProjectOverview: View {
                             detail: "\(project.changedFiles) · \(project.checks)",
                             icon: "doc.text.magnifyingglass",
                             tint: Nord.auroraGreen,
-                            badge: project.deliveryState
+                            badge: .status(IPhoneDeliveryStatus.presentation(for: project.deliveryState))
                         )
                     }
                     .buttonStyle(.plain)
+                    .kanameMinimumInteractiveTarget()
 
                     NavigationLink {
                         IPhoneGitHubStackView(project: project)
@@ -1888,10 +1929,11 @@ private struct IPhoneProjectOverview: View {
                             detail: project.ciStatus == "Healthy" ? "Checks are healthy" : project.ciStatus,
                             icon: "arrow.triangle.branch",
                             tint: project.ciStatus == "Healthy" ? Nord.auroraGreen : Nord.auroraRed,
-                            badge: project.ciStatus
+                            badge: .status(IPhoneCIStatus.presentation(for: project.ciStatus))
                         )
                     }
                     .buttonStyle(.plain)
+                    .kanameMinimumInteractiveTarget()
 
                     NavigationLink {
                         IPhoneProjectSessionsView()
@@ -1901,10 +1943,11 @@ private struct IPhoneProjectOverview: View {
                             detail: "\(project.name) context and provider runs",
                             icon: "cpu",
                             tint: Nord.frost1,
-                            badge: "2"
+                            badge: .metadata(IPhoneMetadataKind.sessions.presentation(label: "2"))
                         )
                     }
                     .buttonStyle(.plain)
+                    .kanameMinimumInteractiveTarget()
 
                     NavigationLink {
                         IPhoneWorktreeView()
@@ -1914,10 +1957,11 @@ private struct IPhoneProjectOverview: View {
                             detail: project.branch,
                             icon: "folder.badge.gearshape",
                             tint: Nord.auroraPurple,
-                            badge: project.changedFiles
+                            badge: .metadata(IPhoneMetadataKind.changedFiles.presentation(label: project.changedFiles))
                         )
                     }
                     .buttonStyle(.plain)
+                    .kanameMinimumInteractiveTarget()
                 }
 
                 if let notice {
@@ -1967,14 +2011,17 @@ private struct IPhoneProjectStatusTable: View {
     let project: IPhoneProject
 
     var body: some View {
+        let delivery = IPhoneDeliveryStatus.presentation(for: project.deliveryState)
+        let checks = IPhoneCheckStatus.presentation(for: project.checks)
+        let ci = IPhoneCIStatus.presentation(for: project.ciStatus)
         VStack(spacing: 0) {
             IPhoneMetricRow(label: "Branch", value: project.branch, icon: "arrow.triangle.branch", tint: project.tint)
             Divider().overlay(Nord.polarNight3)
-            IPhoneMetricRow(label: "Delivery", value: project.deliveryDetail, icon: "cpu", tint: project.tint)
+            IPhoneMetricRow(label: "Delivery", value: project.deliveryDetail, icon: delivery.symbolName, tint: delivery.tone.color)
             Divider().overlay(Nord.polarNight3)
-            IPhoneMetricRow(label: "Checks", value: project.checks, icon: "checkmark.seal", tint: Nord.auroraGreen)
+            IPhoneMetricRow(label: "Checks", value: project.checks, icon: checks.symbolName, tint: checks.tone.color)
             Divider().overlay(Nord.polarNight3)
-            IPhoneMetricRow(label: "CI / CD", value: project.ciStatus, icon: "arrow.triangle.branch", tint: project.ciStatus == "Healthy" ? Nord.auroraGreen : Nord.auroraYellow)
+            IPhoneMetricRow(label: "CI / CD", value: project.ciStatus, icon: ci.symbolName, tint: ci.tone.color)
         }
         .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
@@ -2002,11 +2049,11 @@ private struct IPhoneMobileDiffView: View {
 
                 IPhoneSectionHeader(title: "Checks", detail: "Result from the local fixture")
                 VStack(spacing: 0) {
-                    IPhoneCheckRow(name: "Swift tests", result: "Passed", tint: Nord.auroraGreen)
+                    IPhoneCheckRow(name: "Swift tests", status: .passed)
                     Divider().overlay(Nord.polarNight3)
-                    IPhoneCheckRow(name: "iOS simulator build", result: "Passed", tint: Nord.auroraGreen)
+                    IPhoneCheckRow(name: "iOS simulator build", status: .passed)
                     Divider().overlay(Nord.polarNight3)
-                    IPhoneCheckRow(name: "GitHub CI", result: "1 failed", tint: Nord.auroraRed)
+                    IPhoneCheckRow(name: "GitHub CI", status: .oneFailed)
                 }
                 .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
 
@@ -2130,20 +2177,15 @@ private struct IPhoneDiffCard: View {
 
 private struct IPhoneCheckRow: View {
     let name: String
-    let result: String
-    let tint: Color
+    let status: IPhoneCheckStatus
 
     var body: some View {
         HStack {
-            Image(systemName: result == "Passed" ? "checkmark.circle.fill" : "xmark.octagon.fill")
-                .foregroundStyle(tint)
             Text(name)
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(Nord.snowStorm0)
             Spacer()
-            Text(result)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(tint)
+            KanameStatusBadge(status.presentation, density: .compact)
         }
         .padding(13)
     }
@@ -2166,8 +2208,20 @@ private struct IPhoneGitHubStackView: View {
                 )
                 IPhoneSectionHeader(title: "Stack", detail: project.branch)
                 VStack(spacing: 10) {
-                    IPhonePullRequestCard(number: "#18", title: project.summary, branch: project.branch, state: project.deliveryState, tint: project.tint)
-                    IPhonePullRequestCard(number: "#15", title: "Project delivery baseline", branch: "main", state: project.checks, tint: Nord.auroraGreen)
+                    IPhonePullRequestCard(
+                        number: "#18",
+                        title: project.summary,
+                        branch: project.branch,
+                        status: IPhoneDeliveryStatus.presentation(for: project.deliveryState),
+                        accent: project.tint
+                    )
+                    IPhonePullRequestCard(
+                        number: "#15",
+                        title: "Project delivery baseline",
+                        branch: "main",
+                        status: IPhoneCheckStatus.presentation(for: project.checks),
+                        accent: Nord.auroraGreen
+                    )
                 }
                 IPhoneSectionHeader(title: "CI / CD", detail: "Errors belong beside the action that can resolve them")
                 IPhoneCIFailureCard(project: project)
@@ -2179,6 +2233,7 @@ private struct IPhoneGitHubStackView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(Nord.frost3)
+                .kanameMinimumInteractiveTarget()
                 if let notice {
                     IPhoneFixtureNotice(text: notice)
                 }
@@ -2196,17 +2251,17 @@ private struct IPhonePullRequestCard: View {
     let number: String
     let title: String
     let branch: String
-    let state: String
-    let tint: Color
+    let status: KanameStatusPresentation
+    let accent: Color
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text(number)
                     .font(.caption.weight(.bold))
-                    .foregroundStyle(tint)
+                    .foregroundStyle(accent)
                 Spacer()
-                IPhonePill(state, tint: tint)
+                KanameStatusBadge(status, density: .compact)
             }
             Text(title)
                 .font(.subheadline.weight(.semibold))
@@ -2225,30 +2280,45 @@ private struct IPhoneCIFailureCard: View {
     let project: IPhoneProject
 
     var body: some View {
+        let isHealthy = IPhoneCIStatus(rawValue: project.ciStatus) == .healthy
+        let ci = IPhoneCIStatus.presentation(for: project.ciStatus)
+        let retry = isHealthy ? IPhoneRetryStatus.noRetryNeeded : .retryNeedsApproval
         VStack(alignment: .leading, spacing: 9) {
             HStack {
-                Label("Build and test", systemImage: project.ciStatus == "Healthy" ? "checkmark.circle.fill" : "xmark.octagon.fill")
+                Label("Build and test", systemImage: ci.symbolName)
                     .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(project.ciStatus == "Healthy" ? Nord.auroraGreen : Nord.auroraRed)
+                    .foregroundStyle(ci.tone.color)
                 Spacer()
-                Text(project.ciStatus == "Healthy" ? "last run passed" : "needs triage")
+                Text(isHealthy ? "last run passed" : "needs triage")
                     .font(.caption)
                     .foregroundStyle(Nord.snowStorm0.opacity(0.55))
             }
-            Text(project.ciStatus == "Healthy"
+            Text(isHealthy
                  ? "The fixture reports no blocking CI issue for this project."
                  : "SwiftLint · IPhoneControlSurface.swift: tab label exceeds the configured length")
                 .font(.caption)
                 .foregroundStyle(Nord.snowStorm0.opacity(0.72))
                 .fixedSize(horizontal: false, vertical: true)
-            HStack {
-                IPhonePill("Logs", tint: Nord.frost1)
-                IPhonePill("Workflow", tint: Nord.frost1)
-                IPhonePill(project.ciStatus == "Healthy" ? "No retry needed" : "Retry needs approval", tint: project.ciStatus == "Healthy" ? Nord.auroraGreen : Nord.auroraYellow)
+            IPhoneAdaptiveBadgeRow {
+                let logs = IPhoneMetadataKind.logs.presentation(label: "Logs")
+                KanameMetadataChip(
+                    logs.label,
+                    symbolName: logs.symbolName,
+                    accessibilityLabel: logs.accessibilityLabel,
+                    density: .compact
+                )
+                let workflow = IPhoneMetadataKind.workflow.presentation(label: "Workflow")
+                KanameMetadataChip(
+                    workflow.label,
+                    symbolName: workflow.symbolName,
+                    accessibilityLabel: workflow.accessibilityLabel,
+                    density: .compact
+                )
+                KanameStatusBadge(retry.presentation, density: .compact)
             }
         }
         .padding(14)
-        .background((project.ciStatus == "Healthy" ? Nord.auroraGreen : Nord.auroraRed).opacity(0.11), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .background(ci.tone.color.opacity(0.11), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 }
 
@@ -2256,11 +2326,11 @@ private struct IPhoneProjectSessionsView: View {
     var body: some View {
         List {
             Section("Active") {
-                IPhoneSessionRow(name: "iPhone full remote", provider: "Codex", state: "Running", tint: Nord.frost1)
-                IPhoneSessionRow(name: "GitHub CI triage", provider: "Codex", state: "Needs start", tint: Nord.auroraYellow)
+                IPhoneSessionRow(name: "iPhone full remote", provider: "Codex", status: .running)
+                IPhoneSessionRow(name: "GitHub CI triage", provider: "Codex", status: .needsStart)
             }
             Section("Recent") {
-                IPhoneSessionRow(name: "Provider research", provider: "OpenCode", state: "Paused", tint: Nord.auroraPurple)
+                IPhoneSessionRow(name: "Provider research", provider: "OpenCode", status: .paused)
             }
         }
         .scrollContentBackground(.hidden)
@@ -2273,19 +2343,19 @@ private struct IPhoneProjectSessionsView: View {
 private struct IPhoneSessionRow: View {
     let name: String
     let provider: String
-    let state: String
-    let tint: Color
+    let status: IPhoneSessionStatus
 
     var body: some View {
         HStack {
             Image(systemName: "cpu")
-                .foregroundStyle(tint)
+                .foregroundStyle(status.tone.color)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(name).font(.subheadline.weight(.medium))
                 Text(provider).font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
-            Text(state).font(.caption.weight(.semibold)).foregroundStyle(tint)
+            KanameStatusBadge(status.presentation, density: .compact)
         }
     }
 }
@@ -2294,8 +2364,8 @@ private struct IPhoneWorktreeView: View {
     var body: some View {
         List {
             Section("Worktrees") {
-                IPhoneSessionRow(name: "main", provider: "clean · 0 changes", state: "Ready", tint: Nord.auroraGreen)
-                IPhoneSessionRow(name: "feature/iphone-full-remote", provider: "3 changed files", state: "Active", tint: Nord.frost1)
+                IPhoneSessionRow(name: "main", provider: "clean · 0 changes", status: .ready)
+                IPhoneSessionRow(name: "feature/iphone-full-remote", provider: "3 changed files", status: .active)
             }
             Section("Changed files") {
                 Text("IPhoneControlSurface.swift")
@@ -2319,14 +2389,27 @@ private struct IPhoneAgentsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 IPhoneFixtureBoundaryCard(title: "Agent control", detail: "Sessions expose status, context, and safe task entry. This fixture does not contact a provider.")
-                IPhoneProjectControlRow(title: "Codex", detail: "1 active coding session · tools available", icon: "cpu", tint: Nord.frost1, badge: "Ready")
-                IPhoneProjectControlRow(title: "OpenCode", detail: "1 paused research session", icon: "sparkles", tint: Nord.auroraPurple, badge: "Paused")
+                IPhoneProjectControlRow(
+                    title: "Codex",
+                    detail: "1 active coding session · tools available",
+                    icon: "cpu",
+                    tint: Nord.frost1,
+                    badge: .status(IPhoneDeliveryStatus.ready.presentation)
+                )
+                IPhoneProjectControlRow(
+                    title: "OpenCode",
+                    detail: "1 paused research session",
+                    icon: "sparkles",
+                    tint: Nord.auroraPurple,
+                    badge: .status(IPhoneDeliveryStatus.paused.presentation)
+                )
                 Button("Start a local agent task") {
                     notice = "Local agent-task draft created. No provider was contacted."
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(Nord.frost3)
                 .frame(maxWidth: .infinity)
+                .kanameMinimumInteractiveTarget()
                 if let notice { IPhoneFixtureNotice(text: notice) }
             }
             .padding(16)
@@ -2399,10 +2482,10 @@ private struct IPhoneAutomationsView: View {
     var body: some View {
         List {
             Section("Workflows") {
-                IPhoneSessionRow(name: "CI failure triage", provider: "Awaiting explicit start", state: "Manual", tint: Nord.auroraYellow)
-                IPhoneSessionRow(name: "Knowledge refresh", provider: "Writes proposed note", state: "Scheduled", tint: Nord.auroraGreen)
-                IPhoneSessionRow(name: "Calendar handoff", provider: "Approval-gated", state: "Protected", tint: Nord.auroraOrange)
-                IPhoneSessionRow(name: "Release stack", provider: "Checks then delivery", state: "Manual", tint: Nord.frost1)
+                IPhoneSessionRow(name: "CI failure triage", provider: "Awaiting explicit start", status: .manual)
+                IPhoneSessionRow(name: "Knowledge refresh", provider: "Writes proposed note", status: .scheduled)
+                IPhoneSessionRow(name: "Calendar handoff", provider: "Approval-gated", status: .protected)
+                IPhoneSessionRow(name: "Release stack", provider: "Checks then delivery", status: .manual)
             }
         }
         .scrollContentBackground(.hidden)
@@ -2416,11 +2499,11 @@ private struct IPhoneIntegrationsView: View {
     var body: some View {
         List {
             Section("Connected surfaces") {
-                IPhoneSessionRow(name: "GitHub", provider: "PRs, CI, stack", state: "Fixture", tint: Nord.frost1)
-                IPhoneSessionRow(name: "Obsidian", provider: "Project memory", state: "Fixture", tint: Nord.auroraPurple)
-                IPhoneSessionRow(name: "Calendar", provider: "Approval path", state: "Fixture", tint: Nord.auroraOrange)
-                IPhoneSessionRow(name: "Email", provider: "Draft and send", state: "Fixture", tint: Nord.auroraYellow)
-                IPhoneSessionRow(name: "Providers", provider: "Agent sessions", state: "Fixture", tint: Nord.auroraGreen)
+                IPhoneSessionRow(name: "GitHub", provider: "PRs, CI, stack", status: .fixture)
+                IPhoneSessionRow(name: "Obsidian", provider: "Project memory", status: .fixture)
+                IPhoneSessionRow(name: "Calendar", provider: "Approval path", status: .fixture)
+                IPhoneSessionRow(name: "Email", provider: "Draft and send", status: .fixture)
+                IPhoneSessionRow(name: "Providers", provider: "Agent sessions", status: .fixture)
             }
         }
         .scrollContentBackground(.hidden)
@@ -2449,8 +2532,8 @@ private struct IPhoneNotificationRoutesView: View {
     var body: some View {
         List {
             Section("Current rules") {
-                IPhoneSessionRow(name: "Approval required", provider: "Calendar decision", state: "Enabled", tint: Nord.auroraYellow)
-                IPhoneSessionRow(name: "CI failure", provider: "GitHub workflow", state: "Enabled", tint: Nord.auroraRed)
+                IPhoneSessionRow(name: "Approval required", provider: "Calendar decision", status: .enabled)
+                IPhoneSessionRow(name: "CI failure", provider: "GitHub workflow", status: .enabled)
             }
             Section("Calendar preview policy") {
                 Picker("Visible content", selection: $calendarPreviewLevelRaw) {
@@ -3488,17 +3571,96 @@ public struct IPhoneSyntheticScreenshotRoot: View {
     public init() {}
 
     public var body: some View {
+        let configuration = IPhoneDesignCaptureConfiguration.current
         VStack(spacing: 0) {
             KanameSyntheticDataBanner()
                 .fixedSize(horizontal: false, vertical: true)
-            IPhoneControlSurface.syntheticPreview()
+            captureContent(configuration)
         }
         .background(KanameColor.canvas)
         .preferredColorScheme(.dark)
-        .dynamicTypeSize(.large)
-        .environment(\.locale, Locale(identifier: "en_US"))
+        .dynamicTypeSize(configuration.dynamicTypeSize)
+        .environment(\.locale, configuration.locale)
+        .environment(\.kanameAccessibilityPreferences, configuration.accessibilityPreferences)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("kaname-ios-synthetic-preview")
+    }
+
+    @ViewBuilder
+    private func captureContent(_ configuration: IPhoneDesignCaptureConfiguration) -> some View {
+        switch configuration.route {
+        case .home:
+            IPhoneControlSurface.syntheticPreview()
+        case .projectGitHubStatuses:
+            NavigationStack {
+                IPhoneGitHubStackView(project: .kaname)
+            }
+            .tint(Nord.frost2)
+        }
+    }
+}
+
+private struct IPhoneDesignCaptureConfiguration {
+    enum Route {
+        case home
+        case projectGitHubStatuses
+    }
+
+    let route: Route
+    let dynamicTypeSize: DynamicTypeSize
+    let locale: Locale
+    let accessibilityPreferences: KanameAccessibilityPreferences
+
+    static var current: Self {
+        let environment = ProcessInfo.processInfo.environment
+        let identifier = environment["KANAME_DESIGN_SCENARIO_ID"] ?? "ios-home-synthetic"
+        let route: Route
+        switch identifier {
+        case "ios-home-synthetic":
+            route = .home
+        case "ios-project-github-statuses", "ios-project-github-statuses-large-text":
+            route = .projectGitHubStatuses
+        default:
+            preconditionFailure("Unsupported iOS design screenshot scenario: \(identifier)")
+        }
+
+        guard (environment["KANAME_DESIGN_APPEARANCE"] ?? "dark") == "dark" else {
+            preconditionFailure("iOS design screenshots currently support dark appearance only")
+        }
+        let textScale = environment["KANAME_DESIGN_TEXT_SCALE"] ?? "standard"
+        let dynamicTypeSize: DynamicTypeSize
+        switch textScale {
+        case "standard": dynamicTypeSize = .large
+        case "accessibility3": dynamicTypeSize = .accessibility3
+        default: preconditionFailure("Unsupported iOS design screenshot text scale: \(textScale)")
+        }
+
+        let differentiate = parseBoolean(
+            environment["KANAME_DESIGN_DIFFERENTIATE_WITHOUT_COLOR"] ?? "false",
+            name: "KANAME_DESIGN_DIFFERENTIATE_WITHOUT_COLOR"
+        )
+        let reduceMotion = parseBoolean(
+            environment["KANAME_DESIGN_REDUCE_MOTION"] ?? "false",
+            name: "KANAME_DESIGN_REDUCE_MOTION"
+        )
+        return Self(
+            route: route,
+            dynamicTypeSize: dynamicTypeSize,
+            locale: Locale(identifier: environment["KANAME_DESIGN_LOCALE"] ?? "en_US"),
+            accessibilityPreferences: KanameAccessibilityPreferences(
+                differentiateWithoutColor: differentiate,
+                reduceMotion: reduceMotion,
+                increasedContrast: false
+            )
+        )
+    }
+
+    private static func parseBoolean(_ value: String, name: String) -> Bool {
+        switch value {
+        case "true": true
+        case "false": false
+        default: preconditionFailure("\(name) must be true or false")
+        }
     }
 }
 

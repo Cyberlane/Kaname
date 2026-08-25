@@ -23,6 +23,6 @@ Do not repurpose an existing token to avoid a major change. Deprecate it, docume
 
 ## Adoption
 
-Initial adoption provides the shared SwiftUI package, catalog, scenario schema, Link adapters, token-conformance check, and compatibility alias for the existing Nord palette. Existing Desktop and iOS feature views are not silently mass-rewritten. Migrate them screen-by-screen, starting with duplicated status pills, approvals, callouts, empty states, and authority boundaries; qualify each migration against current interaction mechanics.
+Version 0.2.0 production-adopts the shared status language across Desktop, iOS project/GitHub status surfaces, the Desktop Link host, and all three standalone Link clients. Common Desktop panels, section headers, callouts, and empty states also delegate to shared roles. This remains a bounded migration rather than a silent product-wide rewrite: approvals, specialized diagrams, remaining primitive consumers, light appearance, and target-native accessibility qualification continue screen by screen.
 
 Figma may later mirror tokens and map reviewed components through Variables and Code Connect. It is a projection, not a competing source of truth. Storybook is not the primary catalog because Kaname's product surfaces are native rather than web components.

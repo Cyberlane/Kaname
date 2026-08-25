@@ -2,10 +2,10 @@
 
 ## Migration order
 
-1. Replace duplicated status pills with `KanameStatusBadge` and the shared status vocabulary.
-2. Replace approval and authority-boundary variants with shared components or platform-equivalent adapters.
-3. Normalize callouts, empty states, surfaces, section headers, and interactive hit areas.
-4. Migrate product patterns one source-backed screen at a time without changing interaction mechanics.
+1. **Completed in 0.2.0:** replace the duplicated Desktop/iOS status-pill families, workflow work-state pill, legacy attention badge, and raw iOS check/session status rows with `KanameStatusBadge`, `KanameMetadataChip`, and exhaustive product adapters.
+2. **In progress:** replace remaining approval and authority-boundary variants with shared components or platform-equivalent adapters.
+3. **In progress:** normalize callouts, empty states, surfaces, section headers, and interactive hit areas; common Desktop wrappers now delegate to shared roles.
+4. Migrate remaining product patterns one source-backed screen at a time without changing interaction mechanics.
 5. Retire the Nord compatibility alias only after no product feature imports primitive roles directly.
 
 ## Definition of done for a migrated screen
@@ -22,7 +22,7 @@
 
 | Surface | Dark | Light | High contrast | Large text | Reduce motion | Target-native |
 | --- | --- | --- | --- | --- | --- | --- |
-| Catalog | Required | Planned | Planned | Planned | Planned | macOS |
+| Catalog | Covered | Covered | Covered | Covered | Covered | macOS |
 | Desktop key workflows | Required | Planned | macOS setting | Required | Required | macOS |
 | iOS five hubs | Required | Planned | iOS settings | Required | Required | iOS Simulator/device |
 | Link macOS | Required | Planned | macOS setting | Required | Required | macOS |

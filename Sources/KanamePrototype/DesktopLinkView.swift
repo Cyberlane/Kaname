@@ -1,4 +1,6 @@
 import Foundation
+import KanameDesignSystem
+import KanameDesktopUI
 import KanameLinkHost
 import KanamePrototypeUI
 import SwiftUI
@@ -265,8 +267,9 @@ struct DesktopLinkView: View {
     @State private var invitationDraft: LinkInvitationDraft?
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
                 SurfaceHeader(
                     title: "Kaname Link",
                     detail: "Explicitly shared collaboration without trusted-device authority",
@@ -387,6 +390,7 @@ struct DesktopLinkView: View {
                         title: "Publication preview",
                         detail: "Exactly what approved collaborators can see"
                     )
+                    .id("desktop-link-publication-statuses")
                     if snapshot.publicationPreviews.isEmpty {
                         EmptyPanel(
                             symbol: "doc.text.magnifyingglass",
@@ -432,9 +436,15 @@ struct DesktopLinkView: View {
                         detail: "No external action occurs while the local gateway snapshot loads."
                     )
                 }
+                }
+                .padding(24)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(24)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .task {
+                guard CommandLine.arguments.contains("desktop-link-publication-statuses") else { return }
+                await _Concurrency.Task<Never, Never>.yield()
+                proxy.scrollTo("desktop-link-publication-statuses", anchor: .top)
+            }
         }
         .background(Nord.polarNight0)
         .sheet(item: $invitationDraft, onDismiss: model.dismissInvitation) { draft in
@@ -650,10 +660,9 @@ private struct LinkReplyComposer: View {
                 Label("Reply with shared text", systemImage: "paperplane")
                     .font(.headline)
                 Spacer()
-                LinkStatusPill(
-                    label: "Link only",
-                    symbol: "link",
-                    tint: Nord.frost1
+                KanameStatusBadge(
+                    KanameDesktopLinkStatusPresentation.linkOnly,
+                    density: .compact
                 )
             }
             Text("Only the text typed here is published. Kaname conversations, providers, tools, repositories, and files are never attached.")
@@ -722,11 +731,13 @@ private struct LinkGatewayOverview: View {
     let snapshot: KanameLinkGatewaySnapshot
 
     var body: some View {
+        let status = KanameDesktopLinkStatusPresentation.gateway(snapshot.gateway.lifecycle)
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top, spacing: 14) {
-                Image(systemName: snapshot.gateway.lifecycle.symbol)
+                Image(systemName: status.symbolName)
                     .font(.title2)
-                    .foregroundStyle(snapshot.gateway.lifecycle.tint)
+                    .foregroundStyle(status.tone.color)
+                    .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 5) {
                     Text("Link gateway")
                         .font(.headline)
@@ -736,10 +747,9 @@ private struct LinkGatewayOverview: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer()
-                LinkStatusPill(
-                    label: snapshot.gateway.lifecycle.label,
-                    symbol: snapshot.gateway.lifecycle.symbol,
-                    tint: snapshot.gateway.lifecycle.tint
+                KanameStatusBadge(
+                    status,
+                    density: .compact
                 )
             }
 
@@ -794,10 +804,9 @@ private struct LinkSpaceCard: View {
                     .font(.headline)
                 Spacer()
                 if space.externalInboxCount > 0 {
-                    LinkStatusPill(
-                        label: "\(space.externalInboxCount) external",
-                        symbol: "envelope.badge",
-                        tint: Nord.auroraYellow
+                    KanameStatusBadge(
+                        KanameDesktopLinkStatusPresentation.externalMessages(space.externalInboxCount),
+                        density: .compact
                     )
                 }
             }
@@ -835,10 +844,9 @@ private struct LinkPendingDeviceCard: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                LinkStatusPill(
-                    label: "External device",
-                    symbol: "person.crop.circle.badge.questionmark",
-                    tint: Nord.auroraYellow
+                KanameStatusBadge(
+                    KanameDesktopLinkStatusPresentation.externalDevice,
+                    density: .compact
                 )
             }
 
@@ -895,10 +903,9 @@ private struct LinkExternalMessageCard: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                LinkStatusPill(
-                    label: "External · untrusted",
-                    symbol: "exclamationmark.shield.fill",
-                    tint: Nord.auroraYellow
+                KanameStatusBadge(
+                    KanameDesktopLinkStatusPresentation.externalUntrusted,
+                    density: .compact
                 )
             }
             Text(verbatim: message.body)
@@ -933,10 +940,9 @@ private struct LinkPublicationPreviewCard: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                LinkStatusPill(
-                    label: preview.state.label,
-                    symbol: preview.state.symbol,
-                    tint: preview.state.tint
+                KanameStatusBadge(
+                    KanameDesktopLinkStatusPresentation.publication(preview.state),
+                    density: .compact
                 )
             }
 
@@ -972,10 +978,12 @@ private struct LinkReceiptRow: View {
     let isLast: Bool
 
     var body: some View {
+        let status = KanameDesktopLinkStatusPresentation.receipt(receipt.stage)
         HStack(alignment: .top, spacing: 13) {
             VStack(spacing: 0) {
-                Image(systemName: receipt.stage.symbol)
-                    .foregroundStyle(receipt.stage.tint)
+                Image(systemName: status.symbolName)
+                    .foregroundStyle(status.tone.color)
+                    .accessibilityHidden(true)
                 if !isLast {
                     Rectangle()
                         .fill(Nord.polarNight3)
@@ -987,9 +995,7 @@ private struct LinkReceiptRow: View {
                     Text(receipt.summary)
                         .font(.headline)
                     Spacer()
-                    Text(receipt.stage.label)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(receipt.stage.tint)
+                    KanameStatusBadge(status, density: .compact)
                 }
                 Text(receipt.spaceName)
                     .font(.caption)
@@ -1070,29 +1076,6 @@ private struct LinkRelativeTime: View {
     }
 }
 
-private struct LinkStatusPill: View {
-    @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
-    let label: String
-    let symbol: String
-    let tint: Color
-
-    var body: some View {
-        Label {
-            Text(label)
-        } icon: {
-            if differentiateWithoutColor {
-                Image(systemName: symbol)
-            }
-        }
-        .font(.caption2.weight(.bold))
-        .foregroundStyle(tint)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(tint.opacity(0.16), in: Capsule())
-        .accessibilityElement(children: .combine)
-    }
-}
-
 private struct LinkFailureBanner: View {
     let message: String
 
@@ -1111,94 +1094,5 @@ private struct LinkFailureBanner: View {
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Nord.auroraRed.opacity(0.09), in: RoundedRectangle(cornerRadius: 15))
-    }
-}
-
-private extension KanameLinkGatewayLifecycle {
-    var label: String {
-        switch self {
-        case .offline: "Offline"
-        case .connecting: "Connecting"
-        case .ready: "Ready"
-        case .degraded: "Degraded"
-        }
-    }
-
-    var symbol: String {
-        switch self {
-        case .offline: "bolt.slash.fill"
-        case .connecting: "arrow.triangle.2.circlepath"
-        case .ready: "checkmark.shield.fill"
-        case .degraded: "exclamationmark.triangle.fill"
-        }
-    }
-
-    var tint: Color {
-        switch self {
-        case .offline: Nord.polarNight3
-        case .connecting: Nord.frost1
-        case .ready: Nord.auroraGreen
-        case .degraded: Nord.auroraYellow
-        }
-    }
-}
-
-private extension KanameLinkPublicationState {
-    var label: String {
-        switch self {
-        case .preview: "Preview"
-        case .gatewayAccepted: "Gateway accepted"
-        case .withdrawn: "Withdrawn"
-        }
-    }
-
-    var symbol: String {
-        switch self {
-        case .preview: "eye.fill"
-        case .gatewayAccepted: "checkmark.seal.fill"
-        case .withdrawn: "nosign"
-        }
-    }
-
-    var tint: Color {
-        switch self {
-        case .preview: Nord.frost1
-        case .gatewayAccepted: Nord.auroraGreen
-        case .withdrawn: Nord.auroraYellow
-        }
-    }
-}
-
-private extension KanameLinkReceiptStage {
-    var label: String {
-        switch self {
-        case .savedLocally: "Saved locally"
-        case .gatewayAccepted: "Gateway accepted"
-        case .relayAccepted: "Relay accepted"
-        case .delivered: "Delivered"
-        case .opened: "Opened"
-        case .failed: "Failed"
-        }
-    }
-
-    var symbol: String {
-        switch self {
-        case .savedLocally: "internaldrive.fill"
-        case .gatewayAccepted: "checkmark.seal.fill"
-        case .relayAccepted: "network"
-        case .delivered: "checkmark.circle.fill"
-        case .opened: "eye.fill"
-        case .failed: "exclamationmark.triangle.fill"
-        }
-    }
-
-    var tint: Color {
-        switch self {
-        case .savedLocally: Nord.frost2
-        case .gatewayAccepted: Nord.frost1
-        case .relayAccepted: Nord.frost0
-        case .delivered, .opened: Nord.auroraGreen
-        case .failed: Nord.auroraRed
-        }
     }
 }

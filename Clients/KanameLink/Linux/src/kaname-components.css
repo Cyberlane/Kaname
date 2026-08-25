@@ -12,6 +12,23 @@ window {
 .online { color: @kaname_success; font-weight: 650; }
 .warning { color: @kaname_warning; font-weight: 650; }
 
+.status-badge {
+  border-radius: 999px;
+  padding: 2px 6px;
+  font-size: 12px;
+  font-weight: 650;
+}
+.status-icon { min-width: 14px; min-height: 14px; }
+.status-neutral { color: @kaname_textSecondary; background: alpha(@kaname_textSecondary, 0.14); }
+.status-informational { color: @kaname_accentStrong; background: alpha(@kaname_accentStrong, 0.14); }
+.status-active { color: @kaname_active; background: alpha(@kaname_active, 0.14); }
+.status-attention { color: @kaname_warning; background: alpha(@kaname_warning, 0.14); }
+.status-success { color: @kaname_success; background: alpha(@kaname_success, 0.14); }
+.status-warning { color: @kaname_warning; background: alpha(@kaname_warning, 0.14); }
+.status-danger { color: @kaname_danger; background: alpha(@kaname_danger, 0.14); }
+.status-blocked { color: @kaname_blocked; background: alpha(@kaname_blocked, 0.14); }
+.status-external { color: @kaname_external; background: alpha(@kaname_external, 0.14); }
+
 .space-card, .host-message, .own-message, .enrollment-panel {
   background: @kaname_raised;
   border: 1px solid @kaname_separator;

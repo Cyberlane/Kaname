@@ -86,7 +86,24 @@ final class KanameDesignSystemTests: XCTestCase {
         let productData = try Data(contentsOf: repositoryRoot
             .appendingPathComponent("Fixtures/design-system/product-scenarios.json"))
         let productManifest = try JSONDecoder().decode(ScenarioManifest.self, from: productData)
-        XCTAssertEqual(productManifest.scenarios.count, 3)
+        let expectedProductScenarioIDs: Set<String> = [
+            "desktop-github-statuses",
+            "desktop-home-statuses",
+            "desktop-home-statuses-large-text",
+            "desktop-link-host",
+            "desktop-link-publication-statuses",
+            "ios-home-synthetic",
+            "ios-project-github-statuses",
+            "ios-project-github-statuses-large-text",
+            "link-macos-synthetic",
+            "link-macos-synthetic-large-text",
+        ]
+        XCTAssertEqual(productManifest.scenarios.count, 10)
+        XCTAssertEqual(Set(productManifest.scenarios.map(\.id)), expectedProductScenarioIDs)
+        XCTAssertEqual(
+            Set(productManifest.scenarios.map(\.outputFile)).count,
+            productManifest.scenarios.count
+        )
         XCTAssertTrue(productManifest.scenarios.allSatisfy { $0.evidenceClass == .fixtureProjection })
     }
 }

@@ -7,9 +7,36 @@ on:
       - "Clients/KanameLink/**"
       - "Rust/KanameLinkCore/**"
       - "Sources/KanameLinkMac/**"
+      - "Sources/KanameDesignSystem/**"
+      - "Sources/KanameDesignCatalog/**"
+      - "Sources/KanameDesktopUI/**"
       - "Sources/KanameLinkHost/**"
       - "Sources/KanamePrototype/DesktopLinkView.swift"
+      - "Sources/KanamePrototype/DesktopDesignCaptureFixture.swift"
+      - "Sources/KanamePrototype/KanameDesktopWorkspace.swift"
+      - "Sources/KanamePrototype/KanamePrototypeApp.swift"
+      - "Sources/KanamePrototypeUI/**"
+      - "Tests/KanameDesignSystemTests/**"
+      - "Tests/KanameDesktopUITests/**"
+      - "Tests/KanamePrototypeUITests/**"
       - "proto-link/**"
+      - "DesignSystem/**"
+      - "Fixtures/design-system/**"
+      - "Fixtures/kaname-link/**"
+      - "Scripts/capture-kaname-link-macos-design-screenshot.sh"
+      - "Scripts/capture-kaname-link-macos-design-screenshots.sh"
+      - "Scripts/capture-kaname-design-catalog.sh"
+      - "Scripts/capture-kaname-desktop-design-screenshot.sh"
+      - "Scripts/capture-kaname-desktop-design-screenshots.sh"
+      - "Scripts/capture-kaname-ios-design-screenshot.sh"
+      - "Scripts/capture-kaname-ios-design-screenshots.sh"
+      - "Scripts/generate-kaname-design-tokens.py"
+      - "Scripts/kaname-design-scenario-output.py"
+      - "Scripts/kaname_design_screenshot_png.py"
+      - "Scripts/test-kaname-design-screenshot-receipts.py"
+      - "Scripts/verify-kaname-design-tokens.py"
+      - "Scripts/verify-kaname-design-screenshot-receipts.py"
+      - "Scripts/write-kaname-design-screenshot-receipt.py"
       - "Package.swift"
       - "Package.resolved"
       - ".github/workflows/kaname-link-build.yml"
@@ -41,7 +68,25 @@ jobs:
           cargo clippy --locked --manifest-path Rust/KanameLinkCore/Cargo.toml --all-targets -- -D warnings
           cargo test --locked --manifest-path Rust/KanameLinkCore/Cargo.toml
       - name: Test Swift Link boundaries
-        run: swift test --filter KanameLink
+        run: |
+          Scripts/generate-kaname-design-tokens.py --check
+          Scripts/verify-kaname-design-tokens.py
+          swift test --filter KanameDesignSystemTests
+          swift test --filter KanameSemanticStatusPublicAPITests
+          swift test --filter KanameDesktopStatusPresentationTests
+          swift test --filter IPhoneStatusPresentationTests
+          swift test --filter KanameLink
+          swift build --product KanameLink
+          swift run --skip-build KanameLink --verify-status-contract "$PWD/Fixtures/kaname-link/status-presentation-v1.json"
+          Scripts/test-kaname-design-screenshot-receipts.py
+          zsh -n Scripts/capture-kaname-design-catalog.sh Scripts/capture-kaname-desktop-design-screenshot.sh Scripts/capture-kaname-desktop-design-screenshots.sh Scripts/capture-kaname-ios-design-screenshot.sh Scripts/capture-kaname-ios-design-screenshots.sh Scripts/capture-kaname-link-macos-design-screenshot.sh Scripts/capture-kaname-link-macos-design-screenshots.sh
+      - name: Exercise deterministic Link capture contracts
+        env:
+          KANAME_TASK_BUILD_DIR: ${{ github.workspace }}/.build
+        run: |
+          Scripts/capture-kaname-link-macos-design-screenshots.sh "$RUNNER_TEMP/kaname-link-design-captures"
+          test "$(find "$RUNNER_TEMP/kaname-link-design-captures" -name '*.png' -type f | wc -l | tr -d ' ')" = "2"
+          test "$(find "$RUNNER_TEMP/kaname-link-design-captures" -name '*.receipt.json' -type f | wc -l | tr -d ' ')" = "2"
       - name: Build macOS app bundle
         run: Scripts/build-kaname-link-macos.sh
       - name: Inspect and digest bundle
@@ -83,6 +128,7 @@ jobs:
       - name: Restore and publish native WinUI shell
         shell: pwsh
         run: |
+          dotnet run --project Clients/KanameLink/Windows/StatusContractTest/KanameLink.StatusContractTest.csproj -c Release -- Fixtures/kaname-link/status-presentation-v1.json
           dotnet restore Clients/KanameLink/Windows/KanameLink.Windows.csproj -r win-x64
           dotnet publish Clients/KanameLink/Windows/KanameLink.Windows.csproj -c Release -r win-x64 --self-contained true --no-restore -o artifacts/windows-x64
           Copy-Item Rust/KanameLinkCore/target/release/kaname-link-client.exe artifacts/windows-x64/kaname-link-client.exe
@@ -116,7 +162,11 @@ jobs:
           cargo test --locked --manifest-path Rust/KanameLinkCore/Cargo.toml
           cargo build --locked --release --manifest-path Rust/KanameLinkCore/Cargo.toml --bins
       - name: Build native GTK shell
-        run: cargo build --locked --release --manifest-path Clients/KanameLink/Linux/Cargo.toml
+        run: |
+          cargo fmt --manifest-path Clients/KanameLink/Linux/Cargo.toml --check
+          cargo clippy --locked --manifest-path Clients/KanameLink/Linux/Cargo.toml --all-targets --all-features -- -D warnings
+          cargo test --locked --manifest-path Clients/KanameLink/Linux/Cargo.toml --all-features
+          cargo build --locked --release --manifest-path Clients/KanameLink/Linux/Cargo.toml
       - name: Assemble and digest portable bundle
         run: |
           mkdir -p artifacts/linux-x64

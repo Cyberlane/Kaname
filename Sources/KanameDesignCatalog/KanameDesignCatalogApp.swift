@@ -9,6 +9,22 @@ private func catalogArgument(_ name: String) -> String? {
     return CommandLine.arguments[index + 1]
 }
 
+private struct CatalogCaptureContractError: LocalizedError {
+    let message: String
+
+    var errorDescription: String? { message }
+}
+
+private func requiredCatalogArgument(_ name: String) throws -> String {
+    let arguments = CommandLine.arguments
+    let matches = arguments.indices.filter { arguments[$0] == name }
+    guard matches.count == 1,
+          arguments.indices.contains(matches[0] + 1) else {
+        throw CatalogCaptureContractError(message: "Snapshot capture requires exactly one \(name) value.")
+    }
+    return arguments[matches[0] + 1]
+}
+
 private struct CatalogCaptureConfiguration {
     let width: CGFloat
     let height: CGFloat
@@ -20,27 +36,69 @@ private struct CatalogCaptureConfiguration {
     let locale: Locale
     let activeWindow: Bool
 
-    static let commandLine: Self = {
-        let viewport = catalogArgument("--viewport") ?? "1280x860"
-        let dimensions = viewport.split(separator: "x", maxSplits: 1).compactMap { Double($0) }
-        let appearance = catalogArgument("--appearance") ?? "dark"
-        let textScale = catalogArgument("--text-scale") ?? "standard"
-        return Self(
-            width: dimensions.count == 2 ? CGFloat(dimensions[0]) : 1_280,
-            height: dimensions.count == 2 ? CGFloat(dimensions[1]) : 860,
-            colorScheme: appearance == "light" ? ColorScheme.light : ColorScheme.dark,
-            increasedContrast: appearance == "highContrast",
-            differentiateWithoutColor: boolArgument("--differentiate-without-color"),
-            reduceMotion: boolArgument("--reduce-motion"),
-            dynamicTypeSize: textScale == "accessibility3" ? DynamicTypeSize.accessibility3 : DynamicTypeSize.large,
-            locale: Locale(identifier: catalogArgument("--locale") ?? "en_US"),
-            activeWindow: boolArgument("--active-window", defaultValue: true)
-        )
-    }()
+    static let interactive = Self(
+        width: 1_280,
+        height: 860,
+        colorScheme: .dark,
+        increasedContrast: false,
+        differentiateWithoutColor: false,
+        reduceMotion: false,
+        dynamicTypeSize: .large,
+        locale: Locale(identifier: "en_US"),
+        activeWindow: true
+    )
 
-    private static func boolArgument(_ name: String, defaultValue: Bool = false) -> Bool {
-        guard let value = catalogArgument(name) else { return defaultValue }
-        return value == "true" || value == "1"
+    static func commandLine() throws -> Self {
+        let viewport = try requiredCatalogArgument("--viewport")
+        guard viewport == "1280x860" else {
+            throw CatalogCaptureContractError(message: "Unsupported catalog snapshot viewport: \(viewport)")
+        }
+        let appearance = try requiredCatalogArgument("--appearance")
+        let colorScheme: ColorScheme
+        let increasedContrast: Bool
+        switch appearance {
+        case "dark":
+            (colorScheme, increasedContrast) = (.dark, false)
+        case "light":
+            (colorScheme, increasedContrast) = (.light, false)
+        case "highContrast":
+            (colorScheme, increasedContrast) = (.dark, true)
+        default:
+            throw CatalogCaptureContractError(message: "Unsupported catalog snapshot appearance: \(appearance)")
+        }
+        let textScale = try requiredCatalogArgument("--text-scale")
+        let dynamicTypeSize: DynamicTypeSize
+        switch textScale {
+        case "standard": dynamicTypeSize = .large
+        case "accessibility3": dynamicTypeSize = .accessibility3
+        default:
+            throw CatalogCaptureContractError(message: "Unsupported catalog snapshot text scale: \(textScale)")
+        }
+        let localeIdentifier = try requiredCatalogArgument("--locale")
+        guard localeIdentifier == "en_US" else {
+            throw CatalogCaptureContractError(message: "Unsupported catalog snapshot locale: \(localeIdentifier)")
+        }
+        return Self(
+            width: 1_280,
+            height: 860,
+            colorScheme: colorScheme,
+            increasedContrast: increasedContrast,
+            differentiateWithoutColor: try boolArgument("--differentiate-without-color"),
+            reduceMotion: try boolArgument("--reduce-motion"),
+            dynamicTypeSize: dynamicTypeSize,
+            locale: Locale(identifier: localeIdentifier),
+            activeWindow: try boolArgument("--active-window")
+        )
+    }
+
+    private static func boolArgument(_ name: String) throws -> Bool {
+        let value = try requiredCatalogArgument(name)
+        switch value {
+        case "true": return true
+        case "false": return false
+        default:
+            throw CatalogCaptureContractError(message: "Unsupported catalog snapshot Boolean for \(name): \(value)")
+        }
     }
 }
 
@@ -92,16 +150,16 @@ private enum KanameDesignCatalogMain {
             try renderSnapshot(at: snapshotPath)
             Darwin.exit(EXIT_SUCCESS)
         } catch {
-            fputs("Kaname Design Catalog snapshot failed: \(error)\n", stderr)
+            fputs("Kaname Design Catalog snapshot failed: \(error.localizedDescription)\n", stderr)
             Darwin.exit(EXIT_FAILURE)
         }
     }
 
     @MainActor
     private static func renderSnapshot(at path: String) throws {
-        let configuration = CatalogCaptureConfiguration.commandLine
+        let configuration = try CatalogCaptureConfiguration.commandLine()
         let content = KanameDesignCatalogRoot(
-            initialPage: CatalogPage.commandLinePage,
+            initialPage: try CatalogPage.requiredCommandLinePage(),
             snapshotMode: true
         )
             .frame(width: configuration.width, height: configuration.height, alignment: .topLeading)
@@ -124,7 +182,7 @@ private enum KanameDesignCatalogMain {
 }
 
 private struct KanameDesignCatalogApp: App {
-    private let captureConfiguration = CatalogCaptureConfiguration.commandLine
+    private let captureConfiguration = CatalogCaptureConfiguration.interactive
 
     var body: some Scene {
         Window("Kaname Design Catalog", id: "catalog") {
@@ -194,6 +252,14 @@ private enum CatalogPage: String, CaseIterable, Identifiable {
         guard let index = arguments.firstIndex(of: "--page"),
               arguments.indices.contains(index + 1),
               let page = CatalogPage(rawValue: arguments[index + 1]) else { return .overview }
+        return page
+    }
+
+    static func requiredCommandLinePage() throws -> CatalogPage {
+        let value = try requiredCatalogArgument("--page")
+        guard let page = CatalogPage(rawValue: value) else {
+            throw CatalogCaptureContractError(message: "Unsupported catalog snapshot page: \(value)")
+        }
         return page
     }
 }

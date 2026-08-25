@@ -10,7 +10,9 @@ Components encode recurring Kaname semantics while preserving native controls an
 
 ## State and evidence
 
-- ``KanameStatusBadge`` combines a caller-reviewed label, symbol, and typed tone. It is not an action; the generic badge cannot enforce product vocabulary by itself.
+- ``KanameStatusPresentation`` binds a caller-reviewed label, typed tone, symbol, and accessibility label before rendering.
+- ``KanameStatusBadge`` always renders text plus a symbol, supports compact and regular ``KanameBadgeDensity``, and resolves native or deterministic increased-contrast preferences. It is not an action; product adapters remain responsible for vocabulary.
+- ``KanameMetadataChip`` renders neutral context such as changed-file counts, logs, and environment labels without presenting metadata as a status.
 - ``KanameCallout`` explains information, action, risk, failure, or an external boundary.
 - ``KanameEmptyState`` states what is absent and the next useful action; an empty collection is not an error by default.
 - ``KanameSyntheticDataBanner`` must remain visible in catalogs and screenshots that resemble product state.

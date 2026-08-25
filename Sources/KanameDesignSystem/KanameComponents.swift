@@ -26,31 +26,189 @@ public struct KanameSurface<Content: View>: View {
     }
 }
 
-public struct KanameStatusBadge: View {
-    private let label: String
-    private let tone: KanameStatusTone
+public struct KanameStatusPresentation: Equatable, Sendable {
+    public let label: String
+    public let tone: KanameStatusTone
+    public let symbolName: String
+    public let accessibilityLabel: String
 
-    public init(_ label: String, tone: KanameStatusTone) {
+    public init(
+        label: String,
+        tone: KanameStatusTone,
+        symbolName: String,
+        accessibilityLabel: String
+    ) {
         self.label = label
         self.tone = tone
+        self.symbolName = symbolName
+        self.accessibilityLabel = accessibilityLabel
+    }
+}
+
+public enum KanameBadgeDensity: String, CaseIterable, Codable, Sendable {
+    case compact
+    case regular
+}
+
+/// Resolves native and deterministic preview contrast preferences without
+/// consulting global state, so component behavior can be tested directly.
+public enum KanameContrastResolution: Equatable, Sendable {
+    case standard
+    case increased
+
+    public static func resolve(
+        nativeColorSchemeContrast: ColorSchemeContrast,
+        accessibilityPreferences: KanameAccessibilityPreferences
+    ) -> Self {
+        nativeColorSchemeContrast == .increased || accessibilityPreferences.increasedContrast
+            ? .increased
+            : .standard
+    }
+}
+
+private extension KanameBadgeDensity {
+    var font: Font {
+        switch self {
+        case .compact: .caption2.weight(.semibold)
+        case .regular: .caption.weight(.semibold)
+        }
+    }
+
+    var horizontalPadding: CGFloat {
+        switch self {
+        case .compact: KanameSpacing.xSmall
+        case .regular: KanameSpacing.small
+        }
+    }
+
+    var verticalPadding: CGFloat {
+        switch self {
+        case .compact: KanameSpacing.hairline
+        case .regular: KanameSpacing.xSmall
+        }
+    }
+}
+
+private extension KanameContrastResolution {
+    var fillOpacity: Double {
+        switch self {
+        case .standard: 0.14
+        case .increased: 0.24
+        }
+    }
+
+    var strokeOpacity: Double {
+        switch self {
+        case .standard: 0.42
+        case .increased: 0.82
+        }
+    }
+
+    var strokeWidth: CGFloat {
+        switch self {
+        case .standard: 1
+        case .increased: 2
+        }
+    }
+}
+
+public struct KanameStatusBadge: View {
+    private let presentation: KanameStatusPresentation
+    private let density: KanameBadgeDensity
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
+    @Environment(\.kanameAccessibilityPreferences) private var accessibilityPreferences
+
+    public init(
+        _ presentation: KanameStatusPresentation,
+        density: KanameBadgeDensity = .regular
+    ) {
+        self.presentation = presentation
+        self.density = density
+    }
+
+    public init(_ label: String, tone: KanameStatusTone) {
+        self.init(
+            KanameStatusPresentation(
+                label: label,
+                tone: tone,
+                symbolName: tone.symbolName,
+                accessibilityLabel: label
+            )
+        )
     }
 
     public var body: some View {
+        let contrast = KanameContrastResolution.resolve(
+            nativeColorSchemeContrast: colorSchemeContrast,
+            accessibilityPreferences: accessibilityPreferences
+        )
         HStack(spacing: KanameSpacing.xSmall) {
-            Image(systemName: tone.symbolName)
-                .foregroundStyle(tone.color)
+            Image(systemName: presentation.symbolName)
+                .foregroundStyle(presentation.tone.color)
                 .accessibilityHidden(true)
-            Text(label)
+            Text(presentation.label)
                 .foregroundStyle(KanameColor.textPrimary)
         }
-            .font(.caption.weight(.semibold))
-            .padding(.horizontal, KanameSpacing.small)
-            .padding(.vertical, KanameSpacing.xSmall)
-            .background(tone.color.opacity(0.14), in: Capsule())
+            .font(density.font)
+            .padding(.horizontal, density.horizontalPadding)
+            .padding(.vertical, density.verticalPadding)
+            .background(presentation.tone.color.opacity(contrast.fillOpacity), in: Capsule())
             .overlay {
-                Capsule().stroke(tone.color.opacity(0.42), lineWidth: 1)
+                Capsule().stroke(
+                    presentation.tone.color.opacity(contrast.strokeOpacity),
+                    lineWidth: contrast.strokeWidth
+                )
             }
-            .accessibilityElement(children: .combine)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(presentation.accessibilityLabel)
+    }
+}
+
+public struct KanameMetadataChip: View {
+    private let label: String
+    private let symbolName: String?
+    private let accessibilityLabel: String
+    private let density: KanameBadgeDensity
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
+    @Environment(\.kanameAccessibilityPreferences) private var accessibilityPreferences
+
+    public init(
+        _ label: String,
+        symbolName: String? = nil,
+        accessibilityLabel: String? = nil,
+        density: KanameBadgeDensity = .regular
+    ) {
+        self.label = label
+        self.symbolName = symbolName
+        self.accessibilityLabel = accessibilityLabel ?? label
+        self.density = density
+    }
+
+    public var body: some View {
+        let contrast = KanameContrastResolution.resolve(
+            nativeColorSchemeContrast: colorSchemeContrast,
+            accessibilityPreferences: accessibilityPreferences
+        )
+        HStack(spacing: KanameSpacing.xSmall) {
+            if let symbolName {
+                Image(systemName: symbolName)
+                    .accessibilityHidden(true)
+            }
+            Text(label)
+        }
+        .font(density.font)
+        .foregroundStyle(KanameColor.textSecondary)
+        .padding(.horizontal, density.horizontalPadding)
+        .padding(.vertical, density.verticalPadding)
+        .background(KanameColor.raised.opacity(contrast.fillOpacity), in: Capsule())
+        .overlay {
+            Capsule().stroke(
+                KanameColor.separator.opacity(contrast.strokeOpacity),
+                lineWidth: contrast.strokeWidth
+            )
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityLabel)
     }
 }
 
@@ -207,6 +365,32 @@ public enum KanameMessageParticipantRole: String, Codable, Sendable {
     var isLocalPrincipal: Bool {
         self == .user || self == .collaborator
     }
+
+    public var presentation: KanameStatusPresentation {
+        let label: String
+        let tone: KanameStatusTone
+        let accessibilityLabel: String
+        switch self {
+        case .user:
+            (label, tone, accessibilityLabel) = ("User", .informational, "Participant: User")
+        case .assistant:
+            (label, tone, accessibilityLabel) = ("Kaname assistant", .informational, "Participant: Kaname assistant")
+        case .host:
+            (label, tone, accessibilityLabel) = ("Host", .informational, "Participant: Host")
+        case .collaborator:
+            (label, tone, accessibilityLabel) = (
+                "External collaborator",
+                .external,
+                "Participant: External collaborator"
+            )
+        }
+        return KanameStatusPresentation(
+            label: label,
+            tone: tone,
+            symbolName: tone.symbolName,
+            accessibilityLabel: accessibilityLabel
+        )
+    }
 }
 
 public enum KanameReceiptState: String, Codable, Sendable {
@@ -251,24 +435,37 @@ public struct KanameMessageReceipt: Equatable, Sendable {
     }
 
     public var label: String { state.label }
+
+    public var presentation: KanameStatusPresentation {
+        KanameStatusPresentation(
+            label: state.label,
+            tone: state.tone,
+            symbolName: state.tone.symbolName,
+            accessibilityLabel: "Message status: \(state.label)"
+        )
+    }
 }
 
 public struct KanameMessageBubble: View {
     private let author: String
     private let bodyText: String
     private let role: KanameMessageParticipantRole
-    private let receipt: KanameMessageReceipt?
+    private let participantPresentation: KanameStatusPresentation
+    private let receiptPresentation: KanameStatusPresentation?
 
     public init(
         author: String,
         body: String,
         role: KanameMessageParticipantRole,
-        receipt: KanameMessageReceipt? = nil
+        participantPresentation: KanameStatusPresentation? = nil,
+        receipt: KanameMessageReceipt? = nil,
+        receiptPresentation: KanameStatusPresentation? = nil
     ) {
         self.author = author
         self.bodyText = body
         self.role = role
-        self.receipt = receipt
+        self.participantPresentation = participantPresentation ?? role.presentation
+        self.receiptPresentation = receipt.map { receiptPresentation ?? $0.presentation }
     }
 
     public var body: some View {
@@ -279,15 +476,19 @@ public struct KanameMessageBubble: View {
                 Text(role.marker)
                     .font(.caption2)
                     .foregroundStyle(KanameColor.textSecondary)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(participantPresentation.accessibilityLabel)
             }
             Text(bodyText)
                 .font(.body)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
-            if let receipt {
-                Label(receipt.label, systemImage: receipt.state.tone.symbolName)
+            if let receiptPresentation {
+                Label(receiptPresentation.label, systemImage: receiptPresentation.symbolName)
                     .font(.caption)
-                    .foregroundStyle(receipt.state.tone.color)
+                    .foregroundStyle(receiptPresentation.tone.color)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(receiptPresentation.accessibilityLabel)
             }
         }
         .padding(KanameSpacing.medium)
@@ -296,7 +497,7 @@ public struct KanameMessageBubble: View {
             role.isLocalPrincipal ? KanameColor.selected : KanameColor.raised,
             in: RoundedRectangle(cornerRadius: KanameRadius.card, style: .continuous)
         )
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
     }
 }
 

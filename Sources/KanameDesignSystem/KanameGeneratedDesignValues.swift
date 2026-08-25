@@ -5,7 +5,7 @@ import Foundation
 
 public enum KanameDesignSystemMetadata {
     public static let schemaVersion = 1
-    public static let version = "0.1.0"
+    public static let version = "0.2.0"
 }
 
 enum KanameDesignGeneratedHex {

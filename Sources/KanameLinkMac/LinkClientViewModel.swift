@@ -1,39 +1,19 @@
 import Foundation
 import SwiftUI
 
-enum LinkConnectionState: String, Codable, Sendable {
-    case hostOnline
-    case connecting
-    case hostOffline
-    case enrollmentRequired
-    case revoked
-
-    var label: String {
-        switch self {
-        case .hostOnline: "Host online"
-        case .connecting: "Connecting"
-        case .hostOffline: "Host offline"
-        case .enrollmentRequired: "Enrollment required"
-        case .revoked: "Access revoked"
-        }
-    }
-}
-
 struct LinkClientMessage: Codable, Identifiable, Sendable {
-    enum Author: String, Codable, Sendable { case collaborator, host }
-
     let id: String
-    let author: Author
+    let author: LinkParticipantRole
     let authorName: String
     let body: String
     let sentAtUnixMillis: Int64
-    let receipt: String
+    let receipt: LinkReceiptStatus
 }
 
 struct LinkClientDiscussion: Codable, Identifiable, Sendable {
     let id: String
     let title: String
-    let status: String
+    let status: LinkDiscussionStatus
     let actionLabel: String
     let messages: [LinkClientMessage]
 }
@@ -74,7 +54,7 @@ struct LinkClientSnapshot: Codable, Sendable {
                     LinkClientDiscussion(
                         id: "discussion-wfp-104",
                         title: "Monthly reporting correction",
-                        status: "Waiting for you",
+                        status: .actionRequired,
                         actionLabel: "Review version 2",
                         messages: [
                             LinkClientMessage(
@@ -83,7 +63,7 @@ struct LinkClientSnapshot: Codable, Sendable {
                                 authorName: "Kay",
                                 body: "The subscription total should exclude the cancelled account. Could you update the report?",
                                 sentAtUnixMillis: 1_776_989_820_000,
-                                receipt: "Received by host"
+                                receipt: .gatewayAccepted
                             ),
                             LinkClientMessage(
                                 id: "message-2",
@@ -91,14 +71,14 @@ struct LinkClientSnapshot: Codable, Sendable {
                                 authorName: "Justin",
                                 body: "Version 2 is ready. I corrected the synthetic account total and validated the spreadsheet structure.",
                                 sentAtUnixMillis: 1_776_990_540_000,
-                                receipt: "Published result"
+                                receipt: .published
                             ),
                         ]
                     ),
                     LinkClientDiscussion(
                         id: "discussion-onboarding",
                         title: "Pilot onboarding",
-                        status: "Delivered",
+                        status: .delivered,
                         actionLabel: "No action needed",
                         messages: []
                     ),
@@ -176,6 +156,7 @@ final class LinkClientViewModel {
               trimmed.utf8.count <= 16_384,
               let spaceID = selectedSpaceID,
               let discussionID = selectedDiscussionID,
+              snapshot.connection.capabilities.canQueueMessage,
               !isSyntheticPreview else { return }
         isWorking = true
         defer { isWorking = false }

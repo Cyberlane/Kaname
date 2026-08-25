@@ -8,11 +8,11 @@ Adopt the system screen-by-screen without changing established interaction mecha
 
 ## Order
 
-1. Consolidate duplicate status pills (`RecordStatusPill`, `ActionStatePill`, `ProductStatusPill`, `AttentionPill`, `IPhonePill`, and `LinkStatusPill`) into the shared status vocabulary or a native adapter.
+1. **Completed in 0.2.0:** the six named product pill families, `WorkflowStatePill`, and the legacy `AttentionBadge` were removed. Raw iOS check/session status rows now take typed states. These migrated families use exhaustive presentations; native Link clients parse status wire values once and fail closed for unknown authority states.
 2. Consolidate approval, request-changes, warning, external-authority, receipt, and outcome-uncertain treatments.
 3. Normalize section headers, surfaces, callouts, empty states, focus, and interactive hit areas.
-4. Migrate one representative Desktop screen and one real iOS screen; verify layout and interaction before expanding by category.
-5. Build native Link component libraries on Windows and Linux; do not infer component parity from token parity.
+4. Continue beyond the adopted Desktop common surfaces and iOS project/GitHub status screen, verifying layout and interaction before expanding each category.
+5. Qualify the implemented native Link adapters on Windows and Linux; do not infer runtime or assistive-technology parity from source conformance.
 
 ## Definition of done
 

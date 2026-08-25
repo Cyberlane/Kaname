@@ -1,4 +1,5 @@
 import AppKit
+import KanameDesignSystem
 import KanameDesktop
 import KanamePrototypeUI
 import SwiftUI
@@ -112,16 +113,8 @@ struct DesktopRecoveryCenter: View {
         .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: recovery.isShowingReset)
         .accessibilityElement(children: .contain)
         .onChange(of: recovery.message) { message in
-            guard let message,
-                  let window = NSApplication.shared.keyWindow ?? NSApplication.shared.mainWindow else { return }
-            NSAccessibility.post(
-                element: window,
-                notification: .announcementRequested,
-                userInfo: [
-                    .announcement: message,
-                    .priority: NSAccessibilityPriorityLevel.medium.rawValue,
-                ]
-            )
+            guard let message else { return }
+            KanameAccessibilityAnnouncement.post(message)
         }
     }
 
