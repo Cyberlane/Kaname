@@ -2,19 +2,28 @@ use kaname_core::{
     journal::{Journal, ReplayBasis},
     open_workflow_library, open_workflow_scoped_storage,
     v1::{
-        CancelWorkflowRun, CommandEnvelope, OpaqueTypedPayload, RequestWorkflowRun, SchemaVersion,
-        Scope, SignalWorkflowWait, WorkflowInputBinding, WorkflowRunTokenCreated,
-        WorkflowStorageValueMetadata, WorkflowValueReference, WorkflowWaitCorrelation,
+        BeginWorkflowConnectorObservationRequest, CancelWorkflowRun, CommandEnvelope,
+        EventEnvelope, EventProvenance, EvidenceRetentionClass, OpaqueTypedPayload,
+        RequestWorkflowRun, SchemaVersion, Scope, SettleWorkflowConnectorObservationRequest,
+        SignalWorkflowWait, WorkflowConnectorObservationIntent,
+        WorkflowConnectorObservationOutcome, WorkflowConnectorObservationReceipt,
+        WorkflowConnectorObservationRegistration, WorkflowConnectorObservationSettled,
+        WorkflowInputBinding, WorkflowRunTokenCreated, WorkflowStorageValueMetadata,
+        WorkflowValueReference, WorkflowWaitCorrelation,
     },
     workflow_capabilities::{
         DeterministicCapabilityPlan, DeterministicWorkflowCapabilityHost,
         WorkflowCapabilityArtifactHandle, WorkflowCapabilityDefinition, WorkflowCapabilityLog,
         WorkflowCapabilityValue,
     },
+    workflow_connector_observation::{
+        begin_workflow_connector_observation, settle_workflow_connector_observation,
+    },
     workflow_drafts::{CreateWorkflowDraft, SaveWorkflowDraft},
     workflow_executor::{
-        self, DurableRunOutcome, WorkflowExecutionError, WorkflowExecutionFault,
-        WorkflowStorageExecutionAuthority,
+        self, DurableRunOutcome, WorkflowEventTrigger, WorkflowExecutionError,
+        WorkflowExecutionFault, WorkflowScheduleTrigger, WorkflowStorageExecutionAuthority,
+        WorkflowTriggerAdmission, WorkflowTriggerRunBinding,
     },
     workflow_llm::{
         DeterministicLlmPlan, DeterministicWorkflowLlmProvider, WorkflowLlmProviderDefinition,
@@ -28,8 +37,10 @@ use kaname_core::{
     workflow_runtime::{
         WORKFLOW_CAPABILITY_ATTEMPT_STARTED_KIND, WORKFLOW_LLM_ATTEMPT_STARTED_KIND,
         WORKFLOW_RUN_CANCEL_KIND, WORKFLOW_RUN_CANCEL_TYPE, WORKFLOW_RUN_REQUEST_KIND,
-        WORKFLOW_RUN_REQUEST_TYPE, WORKFLOW_RUN_TOKEN_CREATED_KIND, WORKFLOW_WAIT_SIGNAL_KIND,
-        WORKFLOW_WAIT_SIGNAL_TYPE,
+        WORKFLOW_RUN_REQUEST_TYPE, WORKFLOW_RUN_TOKEN_CREATED_KIND,
+        WORKFLOW_RUN_TOKEN_CREATED_TYPE, WORKFLOW_WAIT_SIGNAL_KIND, WORKFLOW_WAIT_SIGNAL_TYPE,
+        workflow_connector_observation_intent_digest,
+        workflow_connector_observation_registration_digest,
     },
     workflow_storage::{
         WorkflowStorageAccessContext, WorkflowStorageNamespace, WorkflowStorageScopeKind,
@@ -5546,4 +5557,651 @@ fn artifact_workflow_source() -> Value {
         }
     });
     source
+}
+
+const EVENT_TRIGGER_WORKFLOW_ID: &str = "018f7900-0001-7000-8000-000000000001";
+const EVENT_TRIGGER_REVISION_ID: &str = "revision-event-trigger-001";
+const EVENT_TRIGGER_CONTRACT: &str = "dev.kaname.mail/message-received-v1";
+const SCHEDULE_TRIGGER_WORKFLOW_ID: &str = "018f7a00-0001-7000-8000-000000000001";
+const SCHEDULE_TRIGGER_REVISION_ID: &str = "revision-schedule-trigger-001";
+const OBSERVER_RUN_ID: &str = "run-mail-observer";
+const OBSERVER_TOKEN_ID: &str = "token-mail-observer";
+const OBSERVED_MESSAGE_ID: &str = "opaque-message-001";
+const DAY_MILLIS: i64 = 86_400_000;
+
+// Trigger identity is carried by the run request itself: `RequestWorkflowRun`
+// already declares `trigger_kind` and `trigger_event_id`, so no fixture here
+// smuggles trigger metadata through the input envelope, and the proto is
+// unchanged. `trigger_event_id` holds the derived occurrence identity that the
+// deduplication mode selected, not the raw provider identifier.
+#[test]
+fn event_trigger_entrypoint_runs_and_dedupes() {
+    let directory = tempdir().unwrap();
+    let (library, published) = published_event_trigger_library(directory.path(), "contract-key");
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+
+    let first = workflow_executor::execute_event_trigger(
+        &mut journal,
+        &library,
+        &event_trigger_binding(
+            &published,
+            json!({"messageId": "message-001"}),
+            1_786_220_200_000,
+        ),
+        &event_trigger("provider-event-001", "thread-42"),
+    )
+    .unwrap();
+    assert_eq!(first.admission, WorkflowTriggerAdmission::Admitted);
+    assert_eq!(first.trigger_kind, "event");
+    assert_eq!(
+        first.result.as_ref().unwrap().outcome,
+        DurableRunOutcome::Succeeded
+    );
+    let request = requested_run(first.command.as_ref().unwrap());
+    assert_eq!(request.trigger_kind, "event");
+    assert_eq!(request.trigger_event_id, first.trigger_event_id);
+    assert_eq!(request.run_id, first.run_id);
+    let settled_events = journal.event_page_after(0, 500).unwrap().high_water_mark;
+
+    // A second provider event carrying a different payload under the same
+    // contract key resolves to the same run and appends nothing.
+    let repeat = workflow_executor::execute_event_trigger(
+        &mut journal,
+        &library,
+        &event_trigger_binding(
+            &published,
+            json!({"messageId": "message-002"}),
+            1_786_220_300_000,
+        ),
+        &event_trigger("provider-event-002", "thread-42"),
+    )
+    .unwrap();
+    assert_eq!(repeat.admission, WorkflowTriggerAdmission::Duplicate);
+    assert_eq!(repeat.run_id, first.run_id);
+    assert_eq!(
+        repeat.result.as_ref().unwrap().outcome,
+        DurableRunOutcome::Succeeded
+    );
+    assert_eq!(
+        journal.event_page_after(0, 500).unwrap().high_water_mark,
+        settled_events
+    );
+
+    // Another contract key is a distinct occurrence and earns its own run.
+    let other = workflow_executor::execute_event_trigger(
+        &mut journal,
+        &library,
+        &event_trigger_binding(
+            &published,
+            json!({"messageId": "message-003"}),
+            1_786_220_400_000,
+        ),
+        &event_trigger("provider-event-003", "thread-43"),
+    )
+    .unwrap();
+    assert_eq!(other.admission, WorkflowTriggerAdmission::Admitted);
+    assert_ne!(other.run_id, first.run_id);
+    assert_ne!(other.trigger_event_id, first.trigger_event_id);
+
+    // Re-driving the deterministic command is the ordinary crash-recovery path
+    // and stays byte-exact.
+    let boundary = journal.event_page_after(0, 500).unwrap().high_water_mark;
+    let resumed =
+        workflow_executor::execute(&mut journal, &library, first.command.as_ref().unwrap())
+            .unwrap();
+    assert_eq!(resumed.outcome, DurableRunOutcome::Succeeded);
+    assert_eq!(
+        journal.event_page_after(0, 500).unwrap().high_water_mark,
+        boundary
+    );
+
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    projection.catch_up(&journal).unwrap();
+    assert_eq!(projection.row_count("runs").unwrap(), 2);
+
+    // `event-id` deduplication keys on the provider identity instead, so two
+    // events sharing a contract key remain two runs.
+    let directory = tempdir().unwrap();
+    let (library, published) = published_event_trigger_library(directory.path(), "event-id");
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    let admitted = workflow_executor::execute_event_trigger(
+        &mut journal,
+        &library,
+        &event_trigger_binding(
+            &published,
+            json!({"messageId": "message-001"}),
+            1_786_220_200_000,
+        ),
+        &event_trigger("provider-event-001", "thread-42"),
+    )
+    .unwrap();
+    assert_eq!(admitted.admission, WorkflowTriggerAdmission::Admitted);
+    let replayed = workflow_executor::execute_event_trigger(
+        &mut journal,
+        &library,
+        &event_trigger_binding(
+            &published,
+            json!({"messageId": "message-001"}),
+            1_786_220_250_000,
+        ),
+        &event_trigger("provider-event-001", "thread-42"),
+    )
+    .unwrap();
+    assert_eq!(replayed.admission, WorkflowTriggerAdmission::Duplicate);
+    assert_eq!(replayed.run_id, admitted.run_id);
+    let distinct = workflow_executor::execute_event_trigger(
+        &mut journal,
+        &library,
+        &event_trigger_binding(
+            &published,
+            json!({"messageId": "message-002"}),
+            1_786_220_260_000,
+        ),
+        &event_trigger("provider-event-002", "thread-42"),
+    )
+    .unwrap();
+    assert_eq!(distinct.admission, WorkflowTriggerAdmission::Admitted);
+    assert_ne!(distinct.run_id, admitted.run_id);
+
+    // The selected key must exist before anything is admitted.
+    assert!(matches!(
+        workflow_executor::execute_event_trigger(
+            &mut journal,
+            &library,
+            &event_trigger_binding(
+                &published,
+                json!({"messageId": "message-004"}),
+                1_786_220_270_000
+            ),
+            &event_trigger("", "thread-42"),
+        ),
+        Err(WorkflowExecutionError::InvalidCommand(
+            "event_trigger_key_required"
+        ))
+    ));
+}
+
+#[test]
+fn schedule_trigger_entrypoint_respects_misfire_policy() {
+    let due = 1_786_220_000_000_i64;
+    let directory = tempdir().unwrap();
+    let (library, published) = published_schedule_trigger_library(directory.path(), "skip");
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+
+    // Inside the grace window the occurrence is on time and simply fires.
+    let on_time = workflow_executor::execute_schedule_trigger(
+        &mut journal,
+        &library,
+        &schedule_trigger_binding(&published, due + 1_000),
+        &schedule_trigger(due, 5_000),
+    )
+    .unwrap();
+    assert_eq!(on_time.admission, WorkflowTriggerAdmission::Admitted);
+    assert_eq!(on_time.trigger_kind, "schedule");
+    assert_eq!(
+        on_time.result.as_ref().unwrap().outcome,
+        DurableRunOutcome::Succeeded
+    );
+
+    // A `skip` policy discards a misfired occurrence without admitting a
+    // command or appending a fact.
+    let boundary = journal.event_page_after(0, 500).unwrap().high_water_mark;
+    let skipped = workflow_executor::execute_schedule_trigger(
+        &mut journal,
+        &library,
+        &schedule_trigger_binding(&published, due + DAY_MILLIS + 60_000),
+        &schedule_trigger(due + DAY_MILLIS, 5_000),
+    )
+    .unwrap();
+    assert_eq!(skipped.admission, WorkflowTriggerAdmission::Misfired);
+    assert!(skipped.command.is_none());
+    assert!(skipped.result.is_none());
+    assert_eq!(
+        journal.event_page_after(0, 500).unwrap().high_water_mark,
+        boundary
+    );
+
+    // The same occurrence under `run-once` still runs, exactly once.
+    let directory = tempdir().unwrap();
+    let (library, published) = published_schedule_trigger_library(directory.path(), "run-once");
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    let fired = workflow_executor::execute_schedule_trigger(
+        &mut journal,
+        &library,
+        &schedule_trigger_binding(&published, due + DAY_MILLIS + 60_000),
+        &schedule_trigger(due + DAY_MILLIS, 5_000),
+    )
+    .unwrap();
+    assert_eq!(fired.admission, WorkflowTriggerAdmission::Admitted);
+    assert_eq!(
+        fired.result.as_ref().unwrap().outcome,
+        DurableRunOutcome::Succeeded
+    );
+
+    let settled_events = journal.event_page_after(0, 500).unwrap().high_water_mark;
+    let catch_up = workflow_executor::execute_schedule_trigger(
+        &mut journal,
+        &library,
+        &schedule_trigger_binding(&published, due + DAY_MILLIS + 900_000),
+        &schedule_trigger(due + DAY_MILLIS, 5_000),
+    )
+    .unwrap();
+    assert_eq!(catch_up.admission, WorkflowTriggerAdmission::Duplicate);
+    assert_eq!(catch_up.run_id, fired.run_id);
+    assert_eq!(
+        journal.event_page_after(0, 500).unwrap().high_water_mark,
+        settled_events
+    );
+
+    // A later instant of the same schedule key is a separate occurrence.
+    let next = workflow_executor::execute_schedule_trigger(
+        &mut journal,
+        &library,
+        &schedule_trigger_binding(&published, due + 2 * DAY_MILLIS),
+        &schedule_trigger(due + 2 * DAY_MILLIS, 5_000),
+    )
+    .unwrap();
+    assert_eq!(next.admission, WorkflowTriggerAdmission::Admitted);
+    assert_ne!(next.run_id, fired.run_id);
+
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    projection.catch_up(&journal).unwrap();
+    assert_eq!(projection.row_count("runs").unwrap(), 2);
+
+    // An event trigger cannot admit a schedule occurrence, or the reverse.
+    assert!(matches!(
+        workflow_executor::execute_event_trigger(
+            &mut journal,
+            &library,
+            &schedule_trigger_binding(&published, due),
+            &event_trigger("provider-event-001", "thread-42"),
+        ),
+        Err(WorkflowExecutionError::Unsupported(code)) if code == "event_trigger_entrypoint_required"
+    ));
+}
+
+// Observe-only scaffolding for a mail binding: a read-only connector
+// observation settles with evidence, and that evidence alone admits an event
+// trigger run. Nothing here contacts a provider or records an effect, so the
+// same shape holds for a Gmail binding once WFP-113 lands `effect.connector`.
+#[test]
+fn read_only_observation_admits_an_event_trigger_run_without_effects() {
+    let directory = tempdir().unwrap();
+    let (library, published) = published_event_trigger_library(directory.path(), "event-id");
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    append_observer_run_token(&mut journal);
+
+    let started = begin_workflow_connector_observation(
+        &mut journal,
+        &mut projection,
+        observation_begin_request("begin-mail-scan"),
+    )
+    .unwrap();
+    assert!(!started.duplicate);
+    let settled = settle_workflow_connector_observation(
+        &mut journal,
+        &mut projection,
+        observation_settle_request("settle-mail-scan"),
+    )
+    .unwrap();
+    assert_eq!(settled.status, "succeeded");
+    let observed = settled.settlement.unwrap();
+    assert_eq!(
+        observed.outcome,
+        WorkflowConnectorObservationOutcome::Succeeded as i32
+    );
+
+    let admitted = workflow_executor::execute_event_trigger(
+        &mut journal,
+        &library,
+        &event_trigger_binding(&published, json!({"messageId": OBSERVED_MESSAGE_ID}), 2_100),
+        &event_trigger(OBSERVED_MESSAGE_ID, ""),
+    )
+    .unwrap();
+    assert_eq!(admitted.admission, WorkflowTriggerAdmission::Admitted);
+    assert_eq!(
+        admitted.result.as_ref().unwrap().outcome,
+        DurableRunOutcome::Succeeded
+    );
+
+    // Re-observing the same mailbox page repeats the same read-only evidence
+    // and cannot start a second run.
+    let repeated = begin_workflow_connector_observation(
+        &mut journal,
+        &mut projection,
+        observation_begin_request("begin-mail-rescan"),
+    )
+    .unwrap();
+    assert!(repeated.duplicate);
+    let duplicate = workflow_executor::execute_event_trigger(
+        &mut journal,
+        &library,
+        &event_trigger_binding(&published, json!({"messageId": OBSERVED_MESSAGE_ID}), 2_200),
+        &event_trigger(OBSERVED_MESSAGE_ID, ""),
+    )
+    .unwrap();
+    assert_eq!(duplicate.admission, WorkflowTriggerAdmission::Duplicate);
+    assert_eq!(duplicate.run_id, admitted.run_id);
+
+    projection.catch_up(&journal).unwrap();
+    assert_eq!(projection.row_count("connector_observations").unwrap(), 1);
+    assert!(
+        journal
+            .event_page_after(0, 500)
+            .unwrap()
+            .events
+            .iter()
+            .all(|event| !event.kind.starts_with("workflow.effect."))
+    );
+}
+
+fn published_event_trigger_library(
+    application_support: &std::path::Path,
+    deduplication: &str,
+) -> (
+    kaname_core::workflow_library::WorkflowLibraryStore,
+    PublishedWorkflowRevision,
+) {
+    publish_control_library(
+        application_support,
+        EVENT_TRIGGER_WORKFLOW_ID,
+        EVENT_TRIGGER_REVISION_ID,
+        "dev.kaname.event-trigger-runtime",
+        event_trigger_workflow_source(deduplication),
+        json!({
+            "bundleVersion": 1,
+            "schemas": [{
+                "id": "dev.kaname.event-trigger/message-v1",
+                "schema": {
+                    "type": "object",
+                    "required": ["messageId"],
+                    "properties": {"messageId": {"type": "string"}}
+                }
+            }]
+        }),
+    )
+}
+
+fn published_schedule_trigger_library(
+    application_support: &std::path::Path,
+    misfire_policy: &str,
+) -> (
+    kaname_core::workflow_library::WorkflowLibraryStore,
+    PublishedWorkflowRevision,
+) {
+    publish_control_library(
+        application_support,
+        SCHEDULE_TRIGGER_WORKFLOW_ID,
+        SCHEDULE_TRIGGER_REVISION_ID,
+        "dev.kaname.schedule-trigger-runtime",
+        schedule_trigger_workflow_source(misfire_policy),
+        json!({
+            "bundleVersion": 1,
+            "schemas": [{
+                "id": "dev.kaname.schedule-trigger/tick-v1",
+                "schema": {
+                    "type": "object",
+                    "required": ["scheduledFor"],
+                    "properties": {"scheduledFor": {"type": "integer"}}
+                }
+            }]
+        }),
+    )
+}
+
+fn event_trigger_workflow_source(deduplication: &str) -> Value {
+    let ids = [
+        "018f7900-0002-7000-8000-000000000002",
+        "018f7900-0003-7000-8000-000000000003",
+        "018f7900-0004-7000-8000-000000000004",
+        "018f7900-0005-7000-8000-000000000005",
+    ];
+    control_graph_source(
+        EVENT_TRIGGER_WORKFLOW_ID,
+        "dev.kaname.event-trigger-runtime",
+        &ids,
+        vec![
+            (
+                "event",
+                "trigger.event",
+                json!({
+                    "eventContract": EVENT_TRIGGER_CONTRACT,
+                    "deduplication": deduplication
+                }),
+            ),
+            (
+                "validate",
+                "data.validate",
+                json!({"schemaRef": "dev.kaname.event-trigger/message-v1"}),
+            ),
+            ("complete", "terminal.complete", json!({})),
+            ("fail", "terminal.fail", json!({})),
+        ],
+        vec![
+            ((0, "success"), (1, "input")),
+            ((1, "success"), (2, "input")),
+            ((1, "error"), (3, "input")),
+        ],
+    )
+}
+
+fn schedule_trigger_workflow_source(misfire_policy: &str) -> Value {
+    let ids = [
+        "018f7a00-0002-7000-8000-000000000002",
+        "018f7a00-0003-7000-8000-000000000003",
+        "018f7a00-0004-7000-8000-000000000004",
+        "018f7a00-0005-7000-8000-000000000005",
+    ];
+    control_graph_source(
+        SCHEDULE_TRIGGER_WORKFLOW_ID,
+        "dev.kaname.schedule-trigger-runtime",
+        &ids,
+        vec![
+            (
+                "schedule",
+                "trigger.schedule",
+                json!({
+                    "scheduleKey": "daily-digest",
+                    "misfirePolicy": misfire_policy
+                }),
+            ),
+            (
+                "validate",
+                "data.validate",
+                json!({"schemaRef": "dev.kaname.schedule-trigger/tick-v1"}),
+            ),
+            ("complete", "terminal.complete", json!({})),
+            ("fail", "terminal.fail", json!({})),
+        ],
+        vec![
+            ((0, "success"), (1, "input")),
+            ((1, "success"), (2, "input")),
+            ((1, "error"), (3, "input")),
+        ],
+    )
+}
+
+fn event_trigger_binding(
+    published: &PublishedWorkflowRevision,
+    input: Value,
+    observed_at_unix_millis: i64,
+) -> WorkflowTriggerRunBinding {
+    trigger_binding(
+        EVENT_TRIGGER_WORKFLOW_ID,
+        EVENT_TRIGGER_REVISION_ID,
+        published,
+        input,
+        observed_at_unix_millis,
+    )
+}
+
+fn schedule_trigger_binding(
+    published: &PublishedWorkflowRevision,
+    observed_at_unix_millis: i64,
+) -> WorkflowTriggerRunBinding {
+    trigger_binding(
+        SCHEDULE_TRIGGER_WORKFLOW_ID,
+        SCHEDULE_TRIGGER_REVISION_ID,
+        published,
+        json!({"scheduledFor": observed_at_unix_millis}),
+        observed_at_unix_millis,
+    )
+}
+
+fn trigger_binding(
+    workflow_id: &str,
+    revision_id: &str,
+    published: &PublishedWorkflowRevision,
+    input: Value,
+    observed_at_unix_millis: i64,
+) -> WorkflowTriggerRunBinding {
+    WorkflowTriggerRunBinding {
+        workflow_id: workflow_id.into(),
+        revision_id: revision_id.into(),
+        package_digest: published.package_digest.clone(),
+        input: inline_value(&format!("value-trigger-{observed_at_unix_millis}"), input),
+        scope: Scope {
+            project_id: "project-kaname".into(),
+            workspace_id: "workspace-local".into(),
+            ..Default::default()
+        },
+        actor_id: "local-owner".into(),
+        observed_at_unix_millis,
+        ..Default::default()
+    }
+}
+
+fn event_trigger(event_id: &str, contract_key: &str) -> WorkflowEventTrigger {
+    WorkflowEventTrigger {
+        event_id: event_id.into(),
+        contract_key: contract_key.into(),
+    }
+}
+
+fn schedule_trigger(
+    scheduled_for_unix_millis: i64,
+    misfire_grace_millis: i64,
+) -> WorkflowScheduleTrigger {
+    WorkflowScheduleTrigger {
+        scheduled_for_unix_millis,
+        misfire_grace_millis,
+    }
+}
+
+fn requested_run(command: &CommandEnvelope) -> RequestWorkflowRun {
+    RequestWorkflowRun::decode(command.payload.as_ref().unwrap().value.as_slice()).unwrap()
+}
+
+fn append_observer_run_token(journal: &mut Journal) {
+    journal
+        .append_event(EventEnvelope {
+            schema_version: Some(SchemaVersion { major: 1, minor: 0 }),
+            event_id: "event-mail-observer-token".into(),
+            stream_id: format!("workflow-run:{OBSERVER_RUN_ID}"),
+            occurred_at_unix_millis: 1_000,
+            kind: WORKFLOW_RUN_TOKEN_CREATED_KIND.into(),
+            payload: Some(OpaqueTypedPayload {
+                type_url: WORKFLOW_RUN_TOKEN_CREATED_TYPE.into(),
+                content_type: "application/x-protobuf".into(),
+                value: WorkflowRunTokenCreated {
+                    run_id: OBSERVER_RUN_ID.into(),
+                    run_token_id: OBSERVER_TOKEN_ID.into(),
+                    request_command_id: "command-mail-observer".into(),
+                    workflow_id: "workflow-mail-observer".into(),
+                    revision_id: "revision-mail-observer".into(),
+                    package_digest: "a".repeat(64),
+                    retention_policy: None,
+                }
+                .encode_to_vec(),
+                payload_version: 1,
+            }),
+            provenance: Some(EventProvenance {
+                source_kind: "workflow-runtime".into(),
+                retention_class: EvidenceRetentionClass::None as i32,
+                ..Default::default()
+            }),
+            causation_id: "command-mail-observer".into(),
+            correlation_id: OBSERVER_RUN_ID.into(),
+            ..Default::default()
+        })
+        .unwrap();
+}
+
+fn observation_begin_request(request_id: &str) -> BeginWorkflowConnectorObservationRequest {
+    BeginWorkflowConnectorObservationRequest {
+        schema_version: Some(SchemaVersion { major: 1, minor: 0 }),
+        request_id: request_id.into(),
+        intent: Some(WorkflowConnectorObservationIntent {
+            run_id: OBSERVER_RUN_ID.into(),
+            run_token_id: OBSERVER_TOKEN_ID.into(),
+            observation_id: "observation-mail-inbox".into(),
+            connector_class: "kaname.mail".into(),
+            account_binding_id: "binding-mail-inbox".into(),
+            operation: "read.metadata".into(),
+            target_fingerprint: "7".repeat(64),
+            idempotency_key: "observation-mail-inbox".into(),
+            requested_fields: observation_fields(),
+            request: Some(inline_value(
+                "value-observation-request",
+                json!({"accountBinding": "binding-mail-inbox", "target": "opaque-mailbox"}),
+            )),
+        }),
+        registration: Some(observation_registration()),
+        started_at_unix_millis: 2_000,
+    }
+}
+
+fn observation_settle_request(request_id: &str) -> SettleWorkflowConnectorObservationRequest {
+    let output = inline_value(
+        "value-observation-output",
+        json!({"messages": [{"id": OBSERVED_MESSAGE_ID, "labels": ["INBOX"]}]}),
+    );
+    SettleWorkflowConnectorObservationRequest {
+        schema_version: Some(SchemaVersion { major: 1, minor: 0 }),
+        request_id: request_id.into(),
+        settlement: Some(WorkflowConnectorObservationSettled {
+            run_id: OBSERVER_RUN_ID.into(),
+            run_token_id: OBSERVER_TOKEN_ID.into(),
+            observation_id: "observation-mail-inbox".into(),
+            intent_digest: workflow_connector_observation_intent_digest(
+                observation_begin_request("digest").intent.as_ref().unwrap(),
+            ),
+            outcome: WorkflowConnectorObservationOutcome::Succeeded as i32,
+            output: Some(output.clone()),
+            error_code: String::new(),
+            error: None,
+            receipt: Some(WorkflowConnectorObservationReceipt {
+                receipt_id: "receipt-mail-inbox".into(),
+                evidence_digest: output.sha256.clone(),
+                observed_fields: observation_fields(),
+                item_count: 1,
+                result_byte_count: output.byte_count,
+            }),
+            elapsed_milliseconds: 20,
+            idempotency_key: "observation-mail-inbox".into(),
+        }),
+        settled_at_unix_millis: 2_020,
+    }
+}
+
+fn observation_registration() -> WorkflowConnectorObservationRegistration {
+    let mut registration = WorkflowConnectorObservationRegistration {
+        connector_class: "kaname.mail".into(),
+        account_binding_id: "binding-mail-inbox".into(),
+        binding_id: "binding-installation-mail-inbox".into(),
+        connector_version: "1.0.0".into(),
+        installation_digest: "8".repeat(64),
+        allowed_operations: vec!["read.metadata".into()],
+        allowed_fields: observation_fields(),
+        maximum_result_bytes: 32 * 1_024,
+        registration_digest: String::new(),
+    };
+    registration.registration_digest =
+        workflow_connector_observation_registration_digest(&registration);
+    registration
+}
+
+fn observation_fields() -> Vec<String> {
+    vec!["labels".into(), "metadata".into()]
 }

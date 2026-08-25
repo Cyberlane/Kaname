@@ -173,6 +173,71 @@ pub struct WorkflowStorageExecutionAuthority {
     pub case_id: Option<String>,
 }
 
+/// `trigger_kind` recorded on a run admitted from a `trigger.event` entrypoint.
+pub const EVENT_TRIGGER_KIND: &str = "event";
+/// `trigger_kind` recorded on a run admitted from a `trigger.schedule`
+/// entrypoint.
+pub const SCHEDULE_TRIGGER_KIND: &str = "schedule";
+
+/// The pinned revision, ownership, and payload a triggered run inherits. The
+/// trigger itself contributes only its deduplicated identity; this binding
+/// carries no provider, credential, network, or effect authority.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct WorkflowTriggerRunBinding {
+    pub workflow_id: String,
+    pub revision_id: String,
+    pub package_digest: String,
+    pub installation_id: String,
+    pub case_id: String,
+    pub input: v1::WorkflowValueReference,
+    pub scope: v1::Scope,
+    pub actor_id: String,
+    /// When the host observed the trigger. It becomes both the command
+    /// timestamp and the executor clock, so an admission is fully deterministic.
+    pub observed_at_unix_millis: i64,
+}
+
+/// One provider event offered to a `trigger.event` entrypoint. Only the field
+/// selected by the compiled `deduplication` mode is read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkflowEventTrigger {
+    pub event_id: String,
+    pub contract_key: String,
+}
+
+/// One occurrence offered to a `trigger.schedule` entrypoint. The occurrence has
+/// misfired once `observed_at_unix_millis` on the binding is later than
+/// `scheduled_for_unix_millis` by more than the grace window.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkflowScheduleTrigger {
+    pub scheduled_for_unix_millis: i64,
+    pub misfire_grace_millis: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowTriggerAdmission {
+    /// The occurrence created a new run token.
+    Admitted,
+    /// The occurrence resolved to a run token that already existed; nothing was
+    /// appended.
+    Duplicate,
+    /// A misfired schedule occurrence a `skip` policy discarded; nothing was
+    /// appended and no command was admitted.
+    Misfired,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkflowTriggerRunReceipt {
+    pub admission: WorkflowTriggerAdmission,
+    pub run_id: String,
+    pub trigger_kind: String,
+    pub trigger_event_id: String,
+    /// The deterministic run request. It is absent only for a misfired
+    /// occurrence, which never produces one.
+    pub command: Option<v1::CommandEnvelope>,
+    pub result: Option<WorkflowExecutionResult>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CompiledWorkflow {
@@ -945,6 +1010,229 @@ pub fn record_wait_signal(
     })
 }
 
+/// Admits one deduplicated `trigger.event` occurrence as a durable run.
+///
+/// The compiled trigger decides which identity deduplicates: `event-id` keys on
+/// the provider's own event identity, `contract-key` keys on a contract-scoped
+/// key so a stream of provider events collapses onto one run. The run, command,
+/// and idempotency identities all derive from that key, so a second admission of
+/// the same occurrence finds the existing run token and appends nothing.
+///
+/// The trigger carries identity only. It grants no provider, credential,
+/// network, or effect authority, and reads nothing from a live account.
+pub fn execute_event_trigger(
+    journal: &mut Journal,
+    library: &WorkflowLibraryStore,
+    binding: &WorkflowTriggerRunBinding,
+    trigger: &WorkflowEventTrigger,
+) -> Result<WorkflowTriggerRunReceipt> {
+    let compiled = load_trigger_revision(library, binding)?;
+    let entrypoint = compiled_node(&compiled, &compiled.entrypoints[0].node_id)?;
+    if entrypoint.node_type != "trigger.event" {
+        return Err(WorkflowExecutionError::Unsupported(
+            "event_trigger_entrypoint_required".into(),
+        ));
+    }
+    let config = event_trigger_config(entrypoint)?;
+    let key = match config.deduplication.as_str() {
+        "event-id" => trigger.event_id.as_str(),
+        _ => trigger.contract_key.as_str(),
+    };
+    if key.is_empty() {
+        return Err(WorkflowExecutionError::InvalidCommand(
+            "event_trigger_key_required",
+        ));
+    }
+    let occurrence = stable_id(
+        "event",
+        &[&config.event_contract, &config.deduplication, key],
+    );
+    admit_trigger_run(journal, library, binding, EVENT_TRIGGER_KIND, &occurrence)
+}
+
+/// Admits one `trigger.schedule` occurrence as a durable run, honouring the
+/// compiled misfire policy.
+///
+/// An occurrence has misfired once it is later than its grace window. `skip`
+/// drops it without touching the journal; `run-once` still admits it. Because
+/// the occurrence identity is derived from the schedule key and the scheduled
+/// instant, a repeated catch-up pass over the same missed occurrence resolves to
+/// the same run and appends nothing. The host remains responsible for advancing
+/// its own schedule cursor past a coalesced catch-up window.
+pub fn execute_schedule_trigger(
+    journal: &mut Journal,
+    library: &WorkflowLibraryStore,
+    binding: &WorkflowTriggerRunBinding,
+    trigger: &WorkflowScheduleTrigger,
+) -> Result<WorkflowTriggerRunReceipt> {
+    let compiled = load_trigger_revision(library, binding)?;
+    let entrypoint = compiled_node(&compiled, &compiled.entrypoints[0].node_id)?;
+    if entrypoint.node_type != "trigger.schedule" {
+        return Err(WorkflowExecutionError::Unsupported(
+            "schedule_trigger_entrypoint_required".into(),
+        ));
+    }
+    let config = schedule_trigger_config(entrypoint)?;
+    if trigger.scheduled_for_unix_millis < 0 || trigger.misfire_grace_millis < 0 {
+        return Err(WorkflowExecutionError::InvalidCommand(
+            "schedule_trigger_window_required",
+        ));
+    }
+    let occurrence = stable_id(
+        "schedule",
+        &[
+            &config.schedule_key,
+            &config.misfire_policy,
+            &trigger.scheduled_for_unix_millis.to_string(),
+        ],
+    );
+    let lateness = binding
+        .observed_at_unix_millis
+        .saturating_sub(trigger.scheduled_for_unix_millis);
+    if lateness > trigger.misfire_grace_millis && config.misfire_policy == "skip" {
+        return Ok(WorkflowTriggerRunReceipt {
+            admission: WorkflowTriggerAdmission::Misfired,
+            run_id: trigger_run_id(binding, &occurrence),
+            trigger_kind: SCHEDULE_TRIGGER_KIND.into(),
+            trigger_event_id: occurrence,
+            command: None,
+            result: None,
+        });
+    }
+    admit_trigger_run(
+        journal,
+        library,
+        binding,
+        SCHEDULE_TRIGGER_KIND,
+        &occurrence,
+    )
+}
+
+fn admit_trigger_run(
+    journal: &mut Journal,
+    library: &WorkflowLibraryStore,
+    binding: &WorkflowTriggerRunBinding,
+    trigger_kind: &str,
+    occurrence: &str,
+) -> Result<WorkflowTriggerRunReceipt> {
+    let run_id = trigger_run_id(binding, occurrence);
+    let command = trigger_run_command(binding, trigger_kind, occurrence, &run_id);
+    let state = recorded_run(journal, &run_id)?;
+    if let Some(token) = state.token.as_ref() {
+        let outcome = match state.settled.as_ref() {
+            Some(settled) => durable_outcome(settled.outcome)?,
+            None => DurableRunOutcome::Running,
+        };
+        return Ok(WorkflowTriggerRunReceipt {
+            admission: WorkflowTriggerAdmission::Duplicate,
+            run_id: run_id.clone(),
+            trigger_kind: trigger_kind.into(),
+            trigger_event_id: occurrence.into(),
+            command: Some(command),
+            result: Some(WorkflowExecutionResult {
+                run_id,
+                run_token_id: token.run_token_id.clone(),
+                outcome,
+                event_count: state.events.len(),
+                next_attempt_at_unix_millis: None,
+            }),
+        });
+    }
+    let mut capabilities = UnavailableWorkflowCapabilityHost;
+    let mut llm = UnavailableWorkflowLlmProvider;
+    let result = execute_internal(
+        journal,
+        library,
+        None,
+        None,
+        &mut capabilities,
+        &mut llm,
+        &command,
+        binding.observed_at_unix_millis,
+        None,
+        0,
+        None,
+    )?;
+    Ok(WorkflowTriggerRunReceipt {
+        admission: WorkflowTriggerAdmission::Admitted,
+        run_id,
+        trigger_kind: trigger_kind.into(),
+        trigger_event_id: occurrence.into(),
+        command: Some(command),
+        result: Some(result),
+    })
+}
+
+fn trigger_run_id(binding: &WorkflowTriggerRunBinding, occurrence: &str) -> String {
+    stable_id(
+        "run",
+        &[&binding.workflow_id, &binding.revision_id, occurrence],
+    )
+}
+
+fn trigger_run_command(
+    binding: &WorkflowTriggerRunBinding,
+    trigger_kind: &str,
+    occurrence: &str,
+    run_id: &str,
+) -> v1::CommandEnvelope {
+    let request = v1::RequestWorkflowRun {
+        run_id: run_id.into(),
+        workflow_id: binding.workflow_id.clone(),
+        revision_id: binding.revision_id.clone(),
+        package_digest: binding.package_digest.clone(),
+        trigger_kind: trigger_kind.into(),
+        trigger_event_id: occurrence.into(),
+        inputs: vec![v1::WorkflowInputBinding {
+            port_id: "input".into(),
+            value: Some(binding.input.clone()),
+        }],
+        installation_id: binding.installation_id.clone(),
+        case_id: binding.case_id.clone(),
+        episode_id: String::new(),
+        episode_kind: String::new(),
+        prior_episode_id: String::new(),
+    };
+    v1::CommandEnvelope {
+        schema_version: Some(v1::SchemaVersion { major: 1, minor: 0 }),
+        command_id: stable_id("command", &[run_id, occurrence]),
+        idempotency_key: stable_id("idempotency", &[run_id, occurrence]),
+        kind: workflow_runtime::WORKFLOW_RUN_REQUEST_KIND.into(),
+        payload: Some(v1::OpaqueTypedPayload {
+            type_url: workflow_runtime::WORKFLOW_RUN_REQUEST_TYPE.into(),
+            content_type: "application/x-protobuf".into(),
+            value: request.encode_to_vec(),
+            payload_version: 1,
+        }),
+        scope: Some(binding.scope.clone()),
+        actor_id: binding.actor_id.clone(),
+        expected_revision: 0,
+        submitted_at_unix_millis: binding.observed_at_unix_millis,
+    }
+}
+
+fn load_trigger_revision(
+    library: &WorkflowLibraryStore,
+    binding: &WorkflowTriggerRunBinding,
+) -> Result<CompiledWorkflow> {
+    let revision = library.load_workflow_revision(&binding.revision_id, "active")?;
+    if revision.summary.workflow_id != binding.workflow_id
+        || revision.summary.package_digest != binding.package_digest
+    {
+        return Err(WorkflowExecutionError::Integrity(
+            "revision_pin_mismatch".into(),
+        ));
+    }
+    let compiled: CompiledWorkflow = serde_json::from_slice(&revision.compiled_source)
+        .map_err(|_| WorkflowExecutionError::Integrity("compiled_contract".into()))?;
+    if compiled.entrypoints.len() != 1 {
+        return Err(WorkflowExecutionError::Unsupported(
+            "compiled_subset".into(),
+        ));
+    }
+    Ok(compiled)
+}
+
 fn load_execution_package(
     library: &WorkflowLibraryStore,
     request: &v1::RequestWorkflowRun,
@@ -1029,6 +1317,12 @@ fn load_execution_package(
         }
     }
     for node in &compiled.nodes {
+        if node.node_type == "trigger.event" {
+            event_trigger_config(node)?;
+        }
+        if node.node_type == "trigger.schedule" {
+            schedule_trigger_config(node)?;
+        }
         if node.node_type == "data.validate" {
             let schema_ref = node
                 .config
@@ -1219,6 +1513,7 @@ fn load_execution_package(
             ));
         }
     }
+    validate_trigger_identity(&compiled, request)?;
     if request.inputs.len() != 1
         || request.inputs[0].port_id != "input"
         || request.inputs[0]
@@ -1656,10 +1951,10 @@ fn validate_compiled_subset(compiled: &CompiledWorkflow) -> Result<()> {
     }
     if nodes
         .get(entrypoint.node_id.as_str())
-        .is_none_or(|node| node.node_type != "trigger.manual")
+        .is_none_or(|node| !is_executable_trigger(node.node_type.as_str()))
     {
         return Err(WorkflowExecutionError::Unsupported(
-            "manual_entrypoint_required".into(),
+            "trigger_entrypoint_required".into(),
         ));
     }
     for node in &compiled.nodes {
@@ -1671,6 +1966,8 @@ fn validate_compiled_subset(compiled: &CompiledWorkflow) -> Result<()> {
             || !matches!(
                 node.node_type.as_str(),
                 "trigger.manual"
+                    | "trigger.event"
+                    | "trigger.schedule"
                     | "data.map"
                     | "data.validate"
                     | "data.case-context"
@@ -1716,6 +2013,64 @@ fn validate_compiled_subset(compiled: &CompiledWorkflow) -> Result<()> {
                 "edge_mapping_not_executable".into(),
             ));
         }
+    }
+    Ok(())
+}
+
+fn is_executable_trigger(node_type: &str) -> bool {
+    matches!(
+        node_type,
+        "trigger.manual" | "trigger.event" | "trigger.schedule"
+    )
+}
+
+fn event_trigger_config(node: &CompiledNode) -> Result<EventTriggerConfig> {
+    let config: EventTriggerConfig = serde_json::from_value(node.config.clone())
+        .map_err(|_| WorkflowExecutionError::Integrity("event_trigger_config".into()))?;
+    if config.event_contract.is_empty()
+        || config.event_contract.len() > 240
+        || !matches!(config.deduplication.as_str(), "event-id" | "contract-key")
+        || !config.correlation.is_empty()
+    {
+        return Err(WorkflowExecutionError::Unsupported(
+            "event_trigger_contract".into(),
+        ));
+    }
+    Ok(config)
+}
+
+fn schedule_trigger_config(node: &CompiledNode) -> Result<ScheduleTriggerConfig> {
+    let config: ScheduleTriggerConfig = serde_json::from_value(node.config.clone())
+        .map_err(|_| WorkflowExecutionError::Integrity("schedule_trigger_config".into()))?;
+    if config.schedule_key.is_empty()
+        || config.schedule_key.len() > 64
+        || !matches!(config.misfire_policy.as_str(), "skip" | "run-once")
+    {
+        return Err(WorkflowExecutionError::Unsupported(
+            "schedule_trigger_contract".into(),
+        ));
+    }
+    Ok(config)
+}
+
+/// A `trigger.manual` entrypoint keeps whatever kind the host recorded, because
+/// a native mail or calendar signal may still start a manual graph. An event or
+/// schedule entrypoint must instead carry its own admitted trigger identity so
+/// replay can attribute the run to exactly one deduplicated occurrence.
+fn validate_trigger_identity(
+    compiled: &CompiledWorkflow,
+    request: &v1::RequestWorkflowRun,
+) -> Result<()> {
+    let entrypoint = compiled_node(compiled, &compiled.entrypoints[0].node_id)?;
+    let required = match entrypoint.node_type.as_str() {
+        "trigger.event" => EVENT_TRIGGER_KIND,
+        "trigger.schedule" => SCHEDULE_TRIGGER_KIND,
+        _ => return Ok(()),
+    };
+    if request.trigger_kind != required || request.trigger_event_id.is_empty() {
+        return Err(WorkflowExecutionError::InvalidCommand(
+            "trigger_identity_required",
+        ));
     }
     Ok(())
 }
@@ -6573,7 +6928,9 @@ fn execute_node(
     job_run_id: &str,
 ) -> Result<NodeExecution> {
     match node.node_type.as_str() {
-        "trigger.manual" => Ok(success_output("success", input.clone())),
+        "trigger.manual" | "trigger.event" | "trigger.schedule" => {
+            Ok(success_output("success", input.clone()))
+        }
         "data.case-context" => {
             let context = episode
                 .and_then(|episode| episode.compiled_context.clone())
@@ -6974,6 +7331,22 @@ struct RetryBackoffConfig {
     maximum_seconds: f64,
     #[serde(default = "default_retry_jitter")]
     jitter: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EventTriggerConfig {
+    event_contract: String,
+    deduplication: String,
+    #[serde(default)]
+    correlation: Vec<StorageValueSelector>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ScheduleTriggerConfig {
+    schedule_key: String,
+    misfire_policy: String,
 }
 
 #[derive(Debug, Deserialize)]

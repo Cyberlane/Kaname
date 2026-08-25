@@ -408,6 +408,28 @@ fn execution_availability(node: &Node) -> &'static str {
         {
             "executable"
         }
+        // Trigger correlation binds an event to an already running case, which
+        // this slice does not admit; only uncorrelated event triggers execute.
+        "trigger.event"
+            if string_field(&node.config, "eventContract")
+                .is_some_and(|contract| !contract.is_empty() && contract.len() <= 240)
+                && matches!(
+                    string_field(&node.config, "deduplication"),
+                    Some("event-id" | "contract-key")
+                )
+                && array_field(&node.config, "correlation").is_none_or(Vec::is_empty) =>
+        {
+            "executable"
+        }
+        "trigger.schedule"
+            if string_field(&node.config, "scheduleKey").is_some_and(|key| !key.is_empty())
+                && matches!(
+                    string_field(&node.config, "misfirePolicy"),
+                    Some("skip" | "run-once")
+                ) =>
+        {
+            "executable"
+        }
         "data.validate" | "data.case-context" => "executable",
         "data.map"
             if node
