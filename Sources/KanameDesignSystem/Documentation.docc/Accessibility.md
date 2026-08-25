@@ -23,4 +23,6 @@ Every release-significant screen needs checks for dark appearance, target-native
 
 Screenshots are visual evidence, not accessibility proof. Each automated scenario records viewport, appearance, text scale, motion preference, color-differentiation preference, locale, active-window state, expected accessibility labels, and privacy class. Semantic inspection and target-native assistive-technology checks remain required.
 
+On macOS, use ``View/kanameSemanticFont(_:)`` with the capture environment's ``KanameSyntheticTextScale``. SwiftUI's Dynamic Type environment does not resize macOS text, so `accessibility3` is an explicit deterministic simulation while `standard` preserves the production font. Otherwise matching standard and enlarged captures must render different PNG bytes. This is layout-stress evidence only, not proof of a native user setting or assistive-technology behavior.
+
 For Apple-platform guidance, use the current platform documentation for SwiftUI environment values, Human Interface Guidelines, and XCTest screenshots. WinUI and GTK qualification must run on their target operating systems.

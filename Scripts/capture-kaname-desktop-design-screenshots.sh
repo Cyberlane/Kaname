@@ -59,6 +59,14 @@ do
       "$scenario_id" "$output_directory/$output_file"
   current_receipt="$pending_receipt"
   pending_receipt=""
+  if [[ "$scenario_id" == "desktop-home-statuses-large-text" ]]; then
+    Scripts/assert-kaname-design-capture-pair-diff.sh \
+      "$manifest_path" \
+      "$output_directory" \
+      desktop-home-statuses \
+      desktop-home-statuses-large-text \
+      "Desktop standard and accessibility3 captures are byte-identical; synthetic large-text rendering failed."
+  fi
 done
 
 print "Captured five synthetic-public Kaname Desktop screenshots in $output_directory"

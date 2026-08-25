@@ -58,7 +58,6 @@ private enum KanameLinkMacMain {
         let content = LinkClientRootView(syntheticPreview: true, snapshotMode: true)
             .preferredColorScheme(.dark)
             .environment(\.colorScheme, .dark)
-            .dynamicTypeSize(configuration.dynamicTypeSize)
             .environment(\.locale, configuration.locale)
             .environment(\.kanameAccessibilityPreferences, configuration.accessibilityPreferences)
             .frame(width: 1_180, height: 760, alignment: .topLeading)
@@ -76,7 +75,6 @@ private enum KanameLinkMacMain {
 }
 
 private struct LinkDesignCaptureConfiguration {
-    let dynamicTypeSize: DynamicTypeSize
     let locale: Locale
     let accessibilityPreferences: KanameAccessibilityPreferences
 
@@ -90,12 +88,9 @@ private struct LinkDesignCaptureConfiguration {
             preconditionFailure("Kaname Link design screenshots currently support dark appearance only")
         }
 
-        let textScale = environment["KANAME_DESIGN_TEXT_SCALE"] ?? "standard"
-        let dynamicTypeSize: DynamicTypeSize
-        switch textScale {
-        case "standard": dynamicTypeSize = .large
-        case "accessibility3": dynamicTypeSize = .accessibility3
-        default: preconditionFailure("Unsupported Kaname Link design screenshot text scale: \(textScale)")
+        let textScaleValue = environment["KANAME_DESIGN_TEXT_SCALE"] ?? "standard"
+        guard let syntheticTextScale = KanameSyntheticTextScale(rawValue: textScaleValue) else {
+            preconditionFailure("Unsupported Kaname Link design screenshot text scale: \(textScaleValue)")
         }
 
         let differentiate = parseBoolean(
@@ -107,12 +102,12 @@ private struct LinkDesignCaptureConfiguration {
             name: "KANAME_DESIGN_REDUCE_MOTION"
         )
         return Self(
-            dynamicTypeSize: dynamicTypeSize,
             locale: Locale(identifier: environment["KANAME_DESIGN_LOCALE"] ?? "en_US"),
             accessibilityPreferences: KanameAccessibilityPreferences(
                 differentiateWithoutColor: differentiate,
                 reduceMotion: reduceMotion,
-                increasedContrast: false
+                increasedContrast: false,
+                syntheticTextScale: syntheticTextScale
             )
         )
     }
@@ -135,7 +130,7 @@ private struct KanameLinkSpaceIdentity: View {
             ? LinkHostVerificationState.verified
             : LinkHostVerificationState.approvalPending
         VStack(alignment: .leading, spacing: KanameSpacing.xSmall) {
-            Text(name).fontWeight(.semibold)
+            Text(name).kanameSemanticFont(.body.weight(.semibold))
             KanameStatusBadge(verification.presentation, density: .compact)
         }
     }
@@ -153,6 +148,7 @@ private struct KanameLinkInteractiveApp: App {
 }
 
 private struct LinkClientRootView: View {
+    @Environment(\.kanameAccessibilityPreferences) private var accessibilityPreferences
     @State private var model: LinkClientViewModel
     private let snapshotMode: Bool
 
@@ -181,6 +177,7 @@ private struct LinkClientRootView: View {
             }
         }
         .background(KanameColor.canvas)
+        .kanameSemanticFont(.body)
         .task { await model.load() }
         .onChange(of: model.snapshot.connection) { previous, current in
             guard previous != current else { return }
@@ -197,17 +194,21 @@ private struct LinkClientRootView: View {
         .background(KanameColor.separator)
     }
 
+    private var usesSyntheticLargeText: Bool {
+        accessibilityPreferences.syntheticTextScale == .accessibility3
+    }
+
     private var snapshotSidebar: some View {
         VStack(alignment: .leading, spacing: KanameSpacing.large) {
             VStack(alignment: .leading, spacing: KanameSpacing.xSmall) {
                 Label("Kaname Link", systemImage: "link.circle.fill")
-                    .font(.title2.bold())
+                    .kanameSemanticFont(.title2.bold())
                 Text("External collaboration")
                     .foregroundStyle(KanameColor.textSecondary)
             }
             connectionCard
             Text("LINK SPACES")
-                .font(.caption.weight(.bold))
+                .kanameSemanticFont(.caption.weight(.bold))
                 .foregroundStyle(KanameColor.textSecondary)
             ForEach(model.snapshot.spaces) { space in
                 KanameSurface(padding: KanameSpacing.medium) {
@@ -224,25 +225,33 @@ private struct LinkClientRootView: View {
             .accessibilityLabel("Trust boundary: Restricted collaborator")
         }
         .padding(KanameSpacing.large)
-        .frame(width: 260)
+        .frame(width: usesSyntheticLargeText ? 300 : 260)
         .background(KanameColor.sidebar)
     }
 
     private var snapshotDiscussionList: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text(model.selectedSpace?.name ?? "Discussions")
-                .font(.title2.bold())
+                .kanameSemanticFont(.title2.bold())
                 .padding(KanameSpacing.large)
             Rectangle().fill(KanameColor.separator).frame(height: 1)
             ForEach(model.selectedSpace?.discussions ?? []) { discussion in
                 VStack(alignment: .leading, spacing: KanameSpacing.small) {
-                    Text(discussion.title).fontWeight(.semibold)
-                    HStack {
-                        KanameStatusBadge(discussion.status.presentation, density: .compact)
-                        Spacer()
-                        Text(discussion.actionLabel)
-                            .font(.caption)
-                            .foregroundStyle(KanameColor.textSecondary)
+                    Text(discussion.title).kanameSemanticFont(.body.weight(.semibold))
+                    ViewThatFits(in: .horizontal) {
+                        HStack {
+                            KanameStatusBadge(discussion.status.presentation, density: .compact)
+                            Spacer()
+                            Text(discussion.actionLabel)
+                                .kanameSemanticFont(.caption)
+                                .foregroundStyle(KanameColor.textSecondary)
+                        }
+                        VStack(alignment: .leading, spacing: KanameSpacing.xSmall) {
+                            KanameStatusBadge(discussion.status.presentation, density: .compact)
+                            Text(discussion.actionLabel)
+                                .kanameSemanticFont(.caption)
+                                .foregroundStyle(KanameColor.textSecondary)
+                        }
                     }
                 }
                 .padding(KanameSpacing.large)
@@ -251,7 +260,7 @@ private struct LinkClientRootView: View {
             }
             Spacer()
         }
-        .frame(width: 320)
+        .frame(width: usesSyntheticLargeText ? 360 : 320)
         .background(KanameColor.surface)
     }
 
@@ -259,21 +268,16 @@ private struct LinkClientRootView: View {
     private var snapshotDiscussionDetail: some View {
         if let discussion = model.selectedDiscussion {
             VStack(spacing: 0) {
-                HStack {
-                    VStack(alignment: .leading, spacing: KanameSpacing.xSmall) {
-                        Text(discussion.title).font(.title2.bold())
-                        KanameStatusBadge(discussion.status.presentation, density: .compact)
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .top) {
+                        snapshotDiscussionIdentity(discussion)
+                        Spacer()
+                        responseActionsPendingBadge
                     }
-                    Spacer()
-                    KanameStatusBadge(
-                        KanameStatusPresentation(
-                            label: "Response actions pending",
-                            tone: .neutral,
-                            symbolName: KanameStatusTone.neutral.symbolName,
-                            accessibilityLabel: "Action status: Response actions pending"
-                        ),
-                        density: .compact
-                    )
+                    VStack(alignment: .leading, spacing: KanameSpacing.small) {
+                        snapshotDiscussionIdentity(discussion)
+                        responseActionsPendingBadge
+                    }
                 }
                 .padding(KanameSpacing.large)
                 Rectangle().fill(KanameColor.separator).frame(height: 1)
@@ -281,15 +285,23 @@ private struct LinkClientRootView: View {
                     ForEach(discussion.messages) { message in
                         messageBubble(message)
                     }
-                    Spacer()
+                    Spacer(minLength: 0)
                 }
                 .padding(KanameSpacing.xLarge)
-                HStack {
-                    Text("Synthetic preview · messaging disabled")
-                        .foregroundStyle(KanameColor.textTertiary)
-                    Spacer()
-                    KanameStatusBadge("Send disabled", tone: .neutral)
+                ViewThatFits(in: .horizontal) {
+                    HStack {
+                        Text("Synthetic preview · messaging disabled")
+                            .foregroundStyle(KanameColor.textTertiary)
+                        Spacer()
+                        KanameStatusBadge("Send disabled", tone: .neutral)
+                    }
+                    VStack(alignment: .leading, spacing: KanameSpacing.small) {
+                        Text("Synthetic preview · messaging disabled")
+                            .foregroundStyle(KanameColor.textTertiary)
+                        KanameStatusBadge("Send disabled", tone: .neutral)
+                    }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(KanameSpacing.large)
                 .background(KanameColor.sidebar)
             }
@@ -305,17 +317,36 @@ private struct LinkClientRootView: View {
         }
     }
 
+    private func snapshotDiscussionIdentity(_ discussion: LinkClientDiscussion) -> some View {
+        VStack(alignment: .leading, spacing: KanameSpacing.xSmall) {
+            Text(discussion.title).kanameSemanticFont(.title2.bold())
+            KanameStatusBadge(discussion.status.presentation, density: .compact)
+        }
+    }
+
+    private var responseActionsPendingBadge: some View {
+        KanameStatusBadge(
+            KanameStatusPresentation(
+                label: "Response actions pending",
+                tone: .neutral,
+                symbolName: KanameStatusTone.neutral.symbolName,
+                accessibilityLabel: "Action status: Response actions pending"
+            ),
+            density: .compact
+        )
+    }
+
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 4) {
                 Label("Kaname Link", systemImage: "link.circle.fill")
-                    .font(.title2.bold())
+                    .kanameSemanticFont(.title2.bold())
                 Text("External collaboration")
                     .foregroundStyle(.secondary)
             }
             connectionCard
             Text("LINK SPACES")
-                .font(.caption.weight(.bold))
+                .kanameSemanticFont(.caption.weight(.bold))
                 .foregroundStyle(.secondary)
             List(selection: $model.selectedSpaceID) {
                 ForEach(model.snapshot.spaces) { space in
@@ -345,7 +376,7 @@ private struct LinkClientRootView: View {
             VStack(alignment: .leading, spacing: 2) {
                 KanameStatusBadge(model.snapshot.connection.presentation, density: .compact)
                 if let space = model.selectedSpace {
-                    Text(space.hostName).font(.caption).foregroundStyle(.secondary)
+                    Text(space.hostName).kanameSemanticFont(.caption).foregroundStyle(.secondary)
                 }
             }
             Spacer()
@@ -358,18 +389,18 @@ private struct LinkClientRootView: View {
     private var discussionList: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text(model.selectedSpace?.name ?? "Discussions")
-                .font(.title2.bold())
+                .kanameSemanticFont(.title2.bold())
                 .padding(20)
             Divider()
             List(selection: $model.selectedDiscussionID) {
                 ForEach(model.selectedSpace?.discussions ?? []) { discussion in
                     VStack(alignment: .leading, spacing: 7) {
-                        Text(discussion.title).fontWeight(.semibold)
+                        Text(discussion.title).kanameSemanticFont(.body.weight(.semibold))
                         HStack {
                             KanameStatusBadge(discussion.status.presentation, density: .compact)
                             Spacer()
                             Text(discussion.actionLabel)
-                                .font(.caption)
+                                .kanameSemanticFont(.caption)
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -389,7 +420,7 @@ private struct LinkClientRootView: View {
             VStack(spacing: 0) {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(discussion.title).font(.title2.bold())
+                        Text(discussion.title).kanameSemanticFont(.title2.bold())
                         KanameStatusBadge(discussion.status.presentation, density: .compact)
                     }
                     Spacer()
@@ -413,7 +444,7 @@ private struct LinkClientRootView: View {
                 }
                 if let notice = model.notice {
                     Label(notice, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption)
+                        .kanameSemanticFont(.caption)
                         .foregroundStyle(KanameColor.warning)
                         .padding(.horizontal, 20)
                         .padding(.top, 8)
@@ -433,16 +464,16 @@ private struct LinkClientRootView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 Label("Connect to a Kaname host", systemImage: "person.badge.key.fill")
-                    .font(.title2.bold())
+                    .kanameSemanticFont(.title2.bold())
                 Text("Paste the complete invitation created by the host. It is single-use, expires, and grants access only to the named Link space.")
                     .foregroundStyle(.secondary)
                 GroupBox {
                     VStack(alignment: .leading, spacing: 12) {
                         Label("Treat the invitation like a password", systemImage: "exclamationmark.shield.fill")
-                            .font(.headline)
+                            .kanameSemanticFont(.headline)
                             .foregroundStyle(KanameColor.warning)
                         Text("Do not place it in screenshots, notes, logs, tickets, or chat. Confirm the host and space through a separate channel before requesting approval.")
-                            .font(.subheadline)
+                            .kanameSemanticFont(.subheadline)
                             .foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -450,17 +481,17 @@ private struct LinkClientRootView: View {
                 TextField("Your display name", text: $model.enrollmentDisplayName)
                     .textFieldStyle(.roundedBorder)
                 Text("Invitation JSON")
-                    .font(.caption.weight(.semibold))
+                    .kanameSemanticFont(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 TextEditor(text: $model.invitationJSON)
-                    .font(.system(.body, design: .monospaced))
+                    .kanameSemanticFont(.system(.body, design: .monospaced))
                     .frame(minHeight: 180)
                     .padding(8)
                     .background(KanameColor.raised, in: RoundedRectangle(cornerRadius: KanameRadius.control, style: .continuous))
                     .accessibilityLabel("Kaname Link invitation")
                 if let notice = model.notice {
                     Label(notice, systemImage: "info.circle.fill")
-                        .font(.subheadline)
+                        .kanameSemanticFont(.subheadline)
                         .foregroundStyle(KanameColor.warning)
                 }
                 HStack {
@@ -504,7 +535,7 @@ private struct LinkClientRootView: View {
                 KanameSurface(padding: KanameSpacing.medium) {
                     VStack(alignment: .leading, spacing: KanameSpacing.small) {
                         KanameStatusBadge(message.author.presentation, density: .compact)
-                        Text(message.authorName).font(.caption.weight(.bold))
+                        Text(message.authorName).kanameSemanticFont(.caption.weight(.bold))
                         Text(message.body)
                             .textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
@@ -533,7 +564,7 @@ private struct LinkClientRootView: View {
                 Task { await model.sendDraft() }
             } label: {
                 Image(systemName: "arrow.up.circle.fill")
-                    .font(.title2)
+                    .kanameSemanticFont(.title2)
             }
             .buttonStyle(.plain)
             .disabled(model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty

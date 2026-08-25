@@ -702,7 +702,8 @@ struct KanameDesktopWorkspace: View {
             KanameAccessibilityPreferences(
                 differentiateWithoutColor: designCapture?.scenario.differentiatesWithoutColor ?? differentiateWithoutColor,
                 reduceMotion: designCapture?.reduceMotion ?? reduceMotion,
-                increasedContrast: false
+                increasedContrast: false,
+                syntheticTextScale: usesQALargeText ? .accessibility3 : .standard
             )
         )
     }
@@ -2295,6 +2296,7 @@ private struct KanameIdentityRow: View {
 }
 
 private struct DesktopHomeView: View {
+    @Environment(\.kanameAccessibilityPreferences) private var accessibilityPreferences
     @ObservedObject var model: DesktopAppModel
     let searchText: String
     let openThread: (String) -> Void
@@ -2310,32 +2312,12 @@ private struct DesktopHomeView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                HStack(alignment: .top, spacing: 18) {
-                    VStack(alignment: .leading, spacing: 7) {
-                        KanameMetadataChip(
-                            "Desktop dogfood · local-first",
-                            symbolName: "desktopcomputer",
-                            accessibilityLabel: "Environment: Desktop dogfood, local-first"
-                        )
-                        Text("Command centre")
-                            .font(.largeTitle.weight(.bold))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.82)
-                        Text("Your local work, attention, evidence, and device health in one place.")
-                            .font(.body)
-                            .foregroundStyle(.secondary)
-                    }
-                    .layoutPriority(1)
-                    Spacer()
-                    VStack(alignment: .trailing, spacing: 10) {
-                        Button("New conversation", systemImage: "square.and.pencil", action: startConversation)
-                            .buttonStyle(.borderedProminent)
-                        DesktopAuthorityCard(remote: model.snapshot.remote)
-                            .frame(width: 286)
-                    }
-                }
+                hero
 
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 190), spacing: 12)], spacing: 12) {
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: usesSyntheticLargeText ? 260 : 190), spacing: 12)],
+                    spacing: 12
+                ) {
                     MetricCard(
                         title: "Needs you",
                         value: "\(attentionThreads.count)",
@@ -2392,56 +2374,127 @@ private struct DesktopHomeView: View {
                         detail: "Running and queued work remains visible below."
                     )
                 } else {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 300), spacing: 12)], spacing: 12) {
+                    LazyVGrid(
+                        columns: [GridItem(.adaptive(minimum: usesSyntheticLargeText ? 380 : 300), spacing: 12)],
+                        spacing: 12
+                    ) {
                         ForEach(attentionThreads) { thread in
                             ThreadCard(thread: thread) { openThread(thread.id) }
                         }
                     }
                 }
 
-                HStack(alignment: .top, spacing: 16) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        SectionHeading(title: "Recent work", detail: "Durable local threads, newest first.")
-                        ForEach(model.threads(matching: searchText).prefix(5)) { thread in
-                            ThreadRow(thread: thread) { openThread(thread.id) }
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-
-                    VStack(alignment: .leading, spacing: 12) {
-                        SectionHeading(title: "Start or continue", detail: "Domain-specific local workspaces.")
-                        QuickActionCard(
-                            title: "Coding",
-                            detail: "Inspect providers, use an isolated worktree, and review evidence before acceptance.",
-                            symbol: DesktopDestination.liveCodex.symbol,
-                            tint: Nord.frost1
-                        ) { openDestination(.liveCodex) }
-                        QuickActionCard(
-                            title: "Research",
-                            detail: "Start from a question and explicit source boundary.",
-                            symbol: DesktopDestination.research.symbol,
-                            tint: Nord.frost0
-                        ) { openDestination(.research) }
-                        QuickActionCard(
-                            title: "Calendar",
-                            detail: "Draft a source-aware event proposal without changing a calendar.",
-                            symbol: DesktopDestination.calendar.symbol,
-                            tint: Nord.auroraPurple
-                        ) { openDestination(.calendar) }
-                        QuickActionCard(
-                            title: "Automations",
-                            detail: "Define a disabled schedule with safe missed-run policy.",
-                            symbol: DesktopDestination.automations.symbol,
-                            tint: Nord.auroraYellow
-                        ) { openDestination(.automations) }
-                    }
-                    .frame(width: 360, alignment: .topLeading)
-                }
+                primaryColumns
             }
             .padding(22)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Nord.polarNight0)
+        .kanameSemanticFont(.body)
+    }
+
+    private var usesSyntheticLargeText: Bool {
+        accessibilityPreferences.syntheticTextScale == .accessibility3
+    }
+
+    @ViewBuilder
+    private var hero: some View {
+        if usesSyntheticLargeText {
+            VStack(alignment: .leading, spacing: 18) {
+                heroIntroduction
+                heroActions.frame(maxWidth: .infinity, alignment: .leading)
+            }
+        } else {
+            HStack(alignment: .top, spacing: 18) {
+                heroIntroduction
+                Spacer()
+                heroActions
+            }
+        }
+    }
+
+    private var heroIntroduction: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            KanameMetadataChip(
+                "Desktop dogfood · local-first",
+                symbolName: "desktopcomputer",
+                accessibilityLabel: "Environment: Desktop dogfood, local-first"
+            )
+            Text("Command centre")
+                .kanameSemanticFont(.largeTitle.weight(.bold))
+                .lineLimit(usesSyntheticLargeText ? 2 : 1)
+                .minimumScaleFactor(usesSyntheticLargeText ? 1 : 0.82)
+            Text("Your local work, attention, evidence, and device health in one place.")
+                .kanameSemanticFont(.body)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .layoutPriority(1)
+    }
+
+    private var heroActions: some View {
+        VStack(alignment: usesSyntheticLargeText ? .leading : .trailing, spacing: 10) {
+            Button("New conversation", systemImage: "square.and.pencil", action: startConversation)
+                .buttonStyle(.borderedProminent)
+            DesktopAuthorityCard(remote: model.snapshot.remote)
+                .frame(width: usesSyntheticLargeText ? nil : 286)
+        }
+    }
+
+    @ViewBuilder
+    private var primaryColumns: some View {
+        if usesSyntheticLargeText {
+            VStack(alignment: .leading, spacing: 18) {
+                recentWork
+                quickActions
+            }
+        } else {
+            HStack(alignment: .top, spacing: 16) {
+                recentWork
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                quickActions
+                    .frame(width: 360, alignment: .topLeading)
+            }
+        }
+    }
+
+    private var recentWork: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SectionHeading(title: "Recent work", detail: "Durable local threads, newest first.")
+            ForEach(model.threads(matching: searchText).prefix(5)) { thread in
+                ThreadRow(thread: thread) { openThread(thread.id) }
+            }
+        }
+    }
+
+    private var quickActions: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SectionHeading(title: "Start or continue", detail: "Domain-specific local workspaces.")
+            QuickActionCard(
+                title: "Coding",
+                detail: "Inspect providers, use an isolated worktree, and review evidence before acceptance.",
+                symbol: DesktopDestination.liveCodex.symbol,
+                tint: Nord.frost1
+            ) { openDestination(.liveCodex) }
+            QuickActionCard(
+                title: "Research",
+                detail: "Start from a question and explicit source boundary.",
+                symbol: DesktopDestination.research.symbol,
+                tint: Nord.frost0
+            ) { openDestination(.research) }
+            QuickActionCard(
+                title: "Calendar",
+                detail: "Draft a source-aware event proposal without changing a calendar.",
+                symbol: DesktopDestination.calendar.symbol,
+                tint: Nord.auroraPurple
+            ) { openDestination(.calendar) }
+            QuickActionCard(
+                title: "Automations",
+                detail: "Define a disabled schedule with safe missed-run policy.",
+                symbol: DesktopDestination.automations.symbol,
+                tint: Nord.auroraYellow
+            ) { openDestination(.automations) }
+        }
     }
 }
 
@@ -14630,10 +14683,10 @@ private struct DesktopAuthorityCard: View {
         VStack(alignment: .leading, spacing: 9) {
             HStack {
                 Label("Local authority", systemImage: "desktopcomputer")
-                    .font(.headline)
+                    .kanameSemanticFont(.headline)
                 Spacer()
                 Text("Ready")
-                    .font(.caption.weight(.bold))
+                    .kanameSemanticFont(.caption.weight(.bold))
                     .foregroundStyle(Nord.auroraGreen)
             }
             InspectorStatus(label: "Workspace", value: "Durable local state", tint: Nord.auroraGreen)
@@ -14659,12 +14712,12 @@ private struct MetricCard: View {
                     .foregroundStyle(tint)
                 Spacer()
                 Text(value)
-                    .font(.title2.weight(.bold))
+                    .kanameSemanticFont(.title2.weight(.bold))
             }
             Text(title)
-                .font(.headline)
+                .kanameSemanticFont(.headline)
             Text(detail)
-                .font(.caption)
+                .kanameSemanticFont(.caption)
                 .foregroundStyle(.secondary)
         }
         .padding(KanameSpacing.large)
@@ -14706,11 +14759,11 @@ private struct ThreadCard: View {
                         .foregroundStyle(.secondary)
                 }
                 Text(thread.title)
-                    .font(.headline)
+                    .kanameSemanticFont(.headline)
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
                 Text(thread.summary)
-                    .font(.subheadline)
+                    .kanameSemanticFont(.subheadline)
                     .foregroundStyle(.secondary)
                     .lineLimit(3)
                     .multilineTextAlignment(.leading)
@@ -14720,7 +14773,7 @@ private struct ThreadCard: View {
                     Spacer()
                     RelativeTime(unixMillis: thread.updatedAtUnixMillis)
                 }
-                .font(.caption)
+                .kanameSemanticFont(.caption)
                 .foregroundStyle(.secondary)
             }
             .padding(16)
@@ -14747,14 +14800,14 @@ private struct ThreadRow: View {
                 VStack(alignment: .leading, spacing: 3) {
                     HStack {
                         Text(thread.title)
-                            .font(.headline)
+                            .kanameSemanticFont(.headline)
                             .lineLimit(1)
                         if thread.unread {
                             Circle().fill(Nord.frost1).frame(width: 7, height: 7)
                         }
                     }
                     Text(thread.summary)
-                        .font(.caption)
+                        .kanameSemanticFont(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
@@ -14764,7 +14817,7 @@ private struct ThreadRow: View {
                     density: .compact
                 )
                 Image(systemName: "chevron.right")
-                    .font(.caption.weight(.semibold))
+                    .kanameSemanticFont(.caption.weight(.semibold))
                     .foregroundStyle(.tertiary)
             }
             .padding(13)
@@ -14919,13 +14972,13 @@ private struct QuickActionCard: View {
         Button(action: action) {
             HStack(alignment: .top, spacing: 12) {
                 Image(systemName: symbol)
-                    .font(.title2)
+                    .kanameSemanticFont(.title2)
                     .foregroundStyle(tint)
                     .frame(width: 34)
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(title).font(.headline)
+                    Text(title).kanameSemanticFont(.headline)
                     Text(detail)
-                        .font(.caption)
+                        .kanameSemanticFont(.caption)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.leading)
                 }
@@ -15702,7 +15755,7 @@ private struct InspectorStatus: View {
             Spacer()
             Text(value).foregroundStyle(.secondary)
         }
-        .font(.caption)
+        .kanameSemanticFont(.caption)
     }
 }
 

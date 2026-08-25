@@ -2192,6 +2192,7 @@ private struct IPhoneCheckRow: View {
 }
 
 private struct IPhoneGitHubStackView: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let project: IPhoneProject
     @State private var notice: String?
 
@@ -2202,6 +2203,9 @@ private struct IPhoneGitHubStackView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                if dynamicTypeSize.isAccessibilitySize {
+                    IPhoneGitHubStatusSummary(project: project)
+                }
                 IPhoneFixtureBoundaryCard(
                     title: "\(project.name) GitHub delivery",
                     detail: "This scope belongs only to \(project.name). A real remote will load live links, run detail, logs, and safe agent handoff from its selected repository."
@@ -2247,6 +2251,51 @@ private struct IPhoneGitHubStackView: View {
     }
 }
 
+private struct IPhoneGitHubStatusSummary: View {
+    let project: IPhoneProject
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("GitHub status summary", systemImage: "checklist")
+                .font(.headline)
+                .foregroundStyle(Nord.snowStorm0)
+            VStack(spacing: 0) {
+                IPhoneGitHubStatusSummaryRow(
+                    label: "Pull request #18",
+                    status: IPhoneDeliveryStatus.presentation(for: project.deliveryState)
+                )
+                Divider().overlay(Nord.polarNight3)
+                IPhoneGitHubStatusSummaryRow(
+                    label: "Baseline checks",
+                    status: IPhoneCheckStatus.presentation(for: project.checks)
+                )
+                Divider().overlay(Nord.polarNight3)
+                IPhoneGitHubStatusSummaryRow(
+                    label: "CI retry",
+                    status: project.ciRetryStatus.presentation
+                )
+            }
+            .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+        }
+    }
+}
+
+private struct IPhoneGitHubStatusSummaryRow: View {
+    let label: String
+    let status: KanameStatusPresentation
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(label)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Nord.snowStorm0.opacity(0.72))
+            KanameStatusBadge(status, density: .compact)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+    }
+}
+
 private struct IPhonePullRequestCard: View {
     let number: String
     let title: String
@@ -2282,7 +2331,7 @@ private struct IPhoneCIFailureCard: View {
     var body: some View {
         let isHealthy = IPhoneCIStatus(rawValue: project.ciStatus) == .healthy
         let ci = IPhoneCIStatus.presentation(for: project.ciStatus)
-        let retry = isHealthy ? IPhoneRetryStatus.noRetryNeeded : .retryNeedsApproval
+        let retry = project.ciRetryStatus
         VStack(alignment: .leading, spacing: 9) {
             HStack {
                 Label("Build and test", systemImage: ci.symbolName)
@@ -2319,6 +2368,12 @@ private struct IPhoneCIFailureCard: View {
         }
         .padding(14)
         .background(ci.tone.color.opacity(0.11), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+}
+
+private extension IPhoneProject {
+    var ciRetryStatus: IPhoneRetryStatus {
+        IPhoneCIStatus(rawValue: ciStatus) == .healthy ? .noRetryNeeded : .retryNeedsApproval
     }
 }
 

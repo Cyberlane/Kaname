@@ -31,6 +31,8 @@
 
 Screenshots must declare source revision, scenario, viewport, appearance, privacy class, capture method, and whether the displayed state is production-backed, fixture-backed, or a catalog projection.
 
+The macOS `accessibility3` capture axis is a deterministic Kaname semantic-font simulation; the standard axis retains production defaults. Matching standard/enlarged scenarios must keep every other renderer axis equal and produce different PNG bytes. This visual stress check does not replace native preference, VoiceOver, Narrator, Orca, or target-screen qualification.
+
 ## Release governance
 
 - Patch changes preserve role meaning and component behavior.

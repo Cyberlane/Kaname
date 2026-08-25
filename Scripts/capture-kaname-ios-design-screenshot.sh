@@ -61,7 +61,7 @@ expected_scenarios = {
         "fixture": "iphone-status-synthetic-kaname-project",
         "viewport": "iPhone 15",
         "appearance": "dark",
-        "differentiateWithoutColor": False,
+        "differentiateWithoutColor": True,
         "reduceMotion": False,
         "textScale": "accessibility3",
         "activeWindow": True,

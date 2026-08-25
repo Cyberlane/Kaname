@@ -152,7 +152,12 @@ def verify_scenarios(document: dict[str, Any], failures: list[str]) -> None:
             )
         require(scenario["platform"] == "macOS", f"catalog scenario {identifier} must describe its actual macOS renderer", failures)
         require(scenario["fixture"] == "design-system.catalog", f"scenario {identifier} uses an unapproved fixture", failures)
-        require(scenario["viewport"] == "1280x860", f"scenario {identifier} differs from the qualified catalog viewport", failures)
+        expected_viewport = "1280x1120" if identifier == "catalog-accessibility" else "1280x860"
+        require(
+            scenario["viewport"] == expected_viewport,
+            f"scenario {identifier} differs from its qualified catalog viewport {expected_viewport}",
+            failures,
+        )
         require(scenario["appearance"] in {"dark", "light", "highContrast"}, f"scenario {identifier} has invalid appearance", failures)
         require(scenario["privacyClass"] == "synthetic-public", f"scenario {identifier} is not synthetic-public", failures)
         require(

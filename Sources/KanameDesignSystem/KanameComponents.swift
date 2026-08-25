@@ -149,7 +149,7 @@ public struct KanameStatusBadge: View {
             Text(presentation.label)
                 .foregroundStyle(KanameColor.textPrimary)
         }
-            .font(density.font)
+            .kanameSemanticFont(density.font)
             .padding(.horizontal, density.horizontalPadding)
             .padding(.vertical, density.verticalPadding)
             .background(presentation.tone.color.opacity(contrast.fillOpacity), in: Capsule())
@@ -196,7 +196,7 @@ public struct KanameMetadataChip: View {
             }
             Text(label)
         }
-        .font(density.font)
+        .kanameSemanticFont(density.font)
         .foregroundStyle(KanameColor.textSecondary)
         .padding(.horizontal, density.horizontalPadding)
         .padding(.vertical, density.verticalPadding)
@@ -230,10 +230,10 @@ public struct KanameSectionHeader<Trailing: View>: View {
     public var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: KanameSpacing.medium) {
             VStack(alignment: .leading, spacing: KanameSpacing.xSmall) {
-                Text(title).font(KanameTypography.sectionTitle)
+                Text(title).kanameSemanticFont(KanameTypography.sectionTitle)
                 if let detail {
                     Text(detail)
-                        .font(KanameTypography.supporting)
+                        .kanameSemanticFont(KanameTypography.supporting)
                         .foregroundStyle(KanameColor.textSecondary)
                 }
             }
@@ -264,12 +264,12 @@ public struct KanameCallout: View {
         HStack(alignment: .top, spacing: KanameSpacing.medium) {
             Image(systemName: tone.symbolName)
                 .foregroundStyle(tone.color)
-                .font(.title3)
+                .kanameSemanticFont(.title3)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: KanameSpacing.xSmall) {
-                Text(title).font(.subheadline.weight(.semibold))
+                Text(title).kanameSemanticFont(.subheadline.weight(.semibold))
                 Text(message)
-                    .font(.caption)
+                    .kanameSemanticFont(.caption)
                     .foregroundStyle(KanameColor.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -299,11 +299,11 @@ public struct KanameEmptyState: View {
     public var body: some View {
         VStack(spacing: KanameSpacing.medium) {
             Image(systemName: symbolName)
-                .font(.system(size: 30, weight: .medium))
+                .kanameSemanticFont(.system(size: 30, weight: .medium))
                 .foregroundStyle(KanameColor.textTertiary)
-            Text(title).font(.headline)
+            Text(title).kanameSemanticFont(.headline)
             Text(message)
-                .font(.subheadline)
+                .kanameSemanticFont(.subheadline)
                 .foregroundStyle(KanameColor.textSecondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 360)
@@ -321,7 +321,7 @@ public struct KanameSyntheticDataBanner: View {
             "Synthetic preview · no private account, repository, message, or collaborator data",
             systemImage: "sparkles.rectangle.stack.fill"
         )
-        .font(.caption.weight(.semibold))
+        .kanameSemanticFont(.caption.weight(.semibold))
         .foregroundStyle(KanameColor.textPrimary)
         .frame(maxWidth: .infinity)
         .padding(.vertical, KanameSpacing.small)
@@ -471,21 +471,21 @@ public struct KanameMessageBubble: View {
     public var body: some View {
         VStack(alignment: .leading, spacing: KanameSpacing.small) {
             HStack {
-                Text(author).font(.caption.weight(.bold))
+                Text(author).kanameSemanticFont(.caption.weight(.bold))
                 Spacer()
                 Text(role.marker)
-                    .font(.caption2)
+                    .kanameSemanticFont(.caption2)
                     .foregroundStyle(KanameColor.textSecondary)
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel(participantPresentation.accessibilityLabel)
             }
             Text(bodyText)
-                .font(.body)
+                .kanameSemanticFont(.body)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
             if let receiptPresentation {
                 Label(receiptPresentation.label, systemImage: receiptPresentation.symbolName)
-                    .font(.caption)
+                    .kanameSemanticFont(.caption)
                     .foregroundStyle(receiptPresentation.tone.color)
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel(receiptPresentation.accessibilityLabel)
@@ -569,12 +569,12 @@ public struct KanameApprovalCard: View {
             VStack(alignment: .leading, spacing: KanameSpacing.medium) {
                 HStack(alignment: .top) {
                     Label(title, systemImage: "checkmark.shield.fill")
-                        .font(.headline)
+                        .kanameSemanticFont(.headline)
                     Spacer()
                     KanameStatusBadge(state.label, tone: state.tone)
                 }
                 Text(impact)
-                    .font(.subheadline)
+                    .kanameSemanticFont(.subheadline)
                     .foregroundStyle(KanameColor.textSecondary)
                 KanameCallout("Authority boundary", message: boundary, tone: .warning)
                 HStack {
@@ -609,13 +609,13 @@ public struct KanameMetricCard: View {
         KanameSurface {
             VStack(alignment: .leading, spacing: KanameSpacing.small) {
                 Text(label.uppercased())
-                    .font(.caption2.weight(.bold))
+                    .kanameSemanticFont(.caption2.weight(.bold))
                     .foregroundStyle(KanameColor.textSecondary)
                 Text(value)
-                    .font(.title2.weight(.bold))
+                    .kanameSemanticFont(.title2.weight(.bold))
                     .foregroundStyle(tone.color)
                 Text(detail)
-                    .font(.caption)
+                    .kanameSemanticFont(.caption)
                     .foregroundStyle(KanameColor.textSecondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)

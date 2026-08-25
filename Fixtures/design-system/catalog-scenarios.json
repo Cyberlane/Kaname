@@ -117,14 +117,14 @@
       "platform": "macOS",
       "surface": "catalog.accessibility",
       "fixture": "design-system.catalog",
-      "viewport": "1280x860",
+      "viewport": "1280x1120",
       "appearance": "highContrast",
       "differentiateWithoutColor": true,
       "reduceMotion": true,
       "textScale": "accessibility3",
       "activeWindow": true,
       "locale": "en_US",
-      "expectedAccessibilityLabels": ["Differentiate without color", "Touch targets", "Privacy"],
+      "expectedAccessibilityLabels": ["Differentiate without color", "Touch targets", "Privacy", "Non-color state proof", "Queued", "External"],
       "privacyClass": "synthetic-public",
       "evidenceClass": "scaffolded-gap"
     }

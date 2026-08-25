@@ -18,6 +18,8 @@ SCRIPT_DIRECTORY = Path(__file__).resolve().parent
 WRITER = SCRIPT_DIRECTORY / "write-kaname-design-screenshot-receipt.py"
 VERIFIER = SCRIPT_DIRECTORY / "verify-kaname-design-screenshot-receipts.py"
 PNG_HELPER = SCRIPT_DIRECTORY / "kaname_design_screenshot_png.py"
+PAIR_ASSERTION = SCRIPT_DIRECTORY / "assert-kaname-design-capture-pair-diff.sh"
+SCENARIO_OUTPUT_HELPER = SCRIPT_DIRECTORY / "kaname-design-scenario-output.py"
 SNAPSHOT_ALGORITHM = "sha256-git-delta-path-mode-content-v1"
 
 
@@ -44,6 +46,8 @@ class DesignScreenshotReceiptTests(unittest.TestCase):
         shutil.copy2(WRITER, self.repository / "Scripts" / WRITER.name)
         shutil.copy2(VERIFIER, self.repository / "Scripts" / VERIFIER.name)
         shutil.copy2(PNG_HELPER, self.repository / "Scripts" / PNG_HELPER.name)
+        shutil.copy2(PAIR_ASSERTION, self.repository / "Scripts" / PAIR_ASSERTION.name)
+        shutil.copy2(SCENARIO_OUTPUT_HELPER, self.repository / "Scripts" / SCENARIO_OUTPUT_HELPER.name)
         self.tokens = self.repository / "DesignSystem" / "kaname.tokens.json"
         self.tokens.write_text('{"metadata":{"version":"0.1.0"}}\n', encoding="utf-8")
         self.source = self.repository / "source.txt"
@@ -74,15 +78,27 @@ class DesignScreenshotReceiptTests(unittest.TestCase):
         output_file: str,
         surface: str = "ios.test",
         evidence_class: str = "fixture-projection",
+        **overrides: object,
     ) -> dict[str, object]:
-        return {
+        scenario: dict[str, object] = {
             "id": identifier,
+            "captureVariant": "receipt-test",
             "surface": surface,
             "outputFile": output_file,
             "privacyClass": "synthetic-public",
             "evidenceClass": evidence_class,
             "fixture": "receipt-test.synthetic",
+            "platform": "iOS",
+            "viewport": "receipt-test",
+            "appearance": "dark",
+            "differentiateWithoutColor": False,
+            "reduceMotion": False,
+            "textScale": "standard",
+            "activeWindow": True,
+            "locale": "en_US",
         }
+        scenario.update(overrides)
+        return scenario
 
     @staticmethod
     def write_json(path: Path, value: object) -> None:
@@ -152,6 +168,35 @@ class DesignScreenshotReceiptTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, f"command unexpectedly passed:\n{result.stdout}")
         self.assertIn(message, result.stdout + result.stderr)
 
+    def test_capture_pair_assertion_rejects_identical_bytes(self) -> None:
+        standard = self.scenario("pair-standard", "pair-standard.png")
+        scaled = self.scenario(
+            "pair-accessibility3",
+            "pair-accessibility3.png",
+            textScale="accessibility3",
+        )
+        self.write_manifest(self.product_manifest, [standard, scaled])
+        standard_image = self.evidence / "pair-standard.png"
+        scaled_image = self.evidence / "pair-accessibility3.png"
+        standard_image.write_bytes(png(2, 2))
+        scaled_image.write_bytes(standard_image.read_bytes())
+        command = [
+            "zsh",
+            str(self.repository / "Scripts" / PAIR_ASSERTION.name),
+            str(self.product_manifest),
+            str(self.evidence),
+            "pair-standard",
+            "pair-accessibility3",
+            "synthetic pair remained identical",
+        ]
+
+        result = subprocess.run(command, cwd=self.repository, check=False, capture_output=True, text=True)
+        self.assert_rejected(result, "synthetic pair remained identical")
+
+        scaled_image.write_bytes(png(2, 2, channel=65))
+        result = subprocess.run(command, cwd=self.repository, check=False, capture_output=True, text=True)
+        self.assert_succeeded(result)
+
     def test_schema_two_round_trip_binds_png_bytes_dimensions_and_hash(self) -> None:
         scenario = self.scenario("ios-round-trip", "ios-round-trip.png")
         self.write_manifest(self.catalog_manifest, [scenario])
@@ -215,6 +260,88 @@ class DesignScreenshotReceiptTests(unittest.TestCase):
         self.write_json(receipt_path, receipt)
         self.assert_rejected(self.verify(), "working snapshot algorithm is unsupported")
 
+    def test_text_scale_variants_require_distinct_rendered_bytes(self) -> None:
+        standard = self.scenario(
+            "link-macos-synthetic",
+            "link-standard.png",
+            surface="link.macos.discussion",
+            platform="macOS",
+        )
+        accessibility = self.scenario(
+            "link-macos-synthetic-large-text",
+            "link-accessibility3.png",
+            surface="link.macos.discussion",
+            platform="macOS",
+            textScale="accessibility3",
+        )
+        self.write_manifest(self.catalog_manifest, [])
+        self.write_manifest(self.product_manifest, [standard, accessibility])
+        standard_image = self.evidence / "link-standard.png"
+        accessibility_image = self.evidence / "link-accessibility3.png"
+        identical_pixels = png(2, 2)
+        standard_image.write_bytes(identical_pixels)
+        accessibility_image.write_bytes(identical_pixels)
+        self.assert_succeeded(self.write_receipt(self.product_manifest, "link-macos-synthetic", standard_image))
+        self.assert_succeeded(self.write_receipt(self.product_manifest, "link-macos-synthetic-large-text", accessibility_image))
+
+        self.assert_rejected(
+            self.verify(),
+            "text-scale variants are byte-identical: link-macos-synthetic and link-macos-synthetic-large-text",
+        )
+
+        accessibility_image.write_bytes(png(2, 2, channel=65))
+        self.assert_succeeded(self.write_receipt(self.product_manifest, "link-macos-synthetic-large-text", accessibility_image))
+        self.assert_succeeded(self.verify())
+
+    def test_text_scale_variants_reject_renderer_axis_drift(self) -> None:
+        standard = self.scenario(
+            "link-macos-synthetic",
+            "link-standard.png",
+            surface="link.macos.discussion",
+            platform="macOS",
+        )
+        accessibility = self.scenario(
+            "link-macos-synthetic-large-text",
+            "link-accessibility3.png",
+            surface="link.macos.discussion",
+            platform="macOS",
+            viewport="drifted-viewport",
+            textScale="accessibility3",
+        )
+        self.write_manifest(self.catalog_manifest, [])
+        self.write_manifest(self.product_manifest, [standard, accessibility])
+        standard_image = self.evidence / "link-standard.png"
+        accessibility_image = self.evidence / "link-accessibility3.png"
+        standard_image.write_bytes(png(2, 2))
+        accessibility_image.write_bytes(png(2, 2, channel=65))
+        self.assert_succeeded(self.write_receipt(self.product_manifest, "link-macos-synthetic", standard_image))
+        self.assert_succeeded(self.write_receipt(self.product_manifest, "link-macos-synthetic-large-text", accessibility_image))
+
+        self.assert_rejected(
+            self.verify(),
+            "text-scale variant axis drift: link-macos-synthetic and "
+            "link-macos-synthetic-large-text differ on viewport",
+        )
+
+    def test_text_scale_variants_require_named_counterpart(self) -> None:
+        standard = self.scenario(
+            "link-macos-synthetic",
+            "link-standard.png",
+            surface="link.macos.discussion",
+            platform="macOS",
+        )
+        self.write_manifest(self.catalog_manifest, [])
+        self.write_manifest(self.product_manifest, [standard])
+        standard_image = self.evidence / "link-standard.png"
+        standard_image.write_bytes(png(2, 2))
+        self.assert_succeeded(self.write_receipt(self.product_manifest, "link-macos-synthetic", standard_image))
+
+        self.assert_rejected(
+            self.verify(),
+            "missing text-scale variant: link-macos-synthetic and "
+            "link-macos-synthetic-large-text must both be present",
+        )
+
     def test_complete_batch_requires_exactly_seventeen_pairs(self) -> None:
         catalog_evidence_classes = [
             "implemented",
@@ -234,12 +361,34 @@ class DesignScreenshotReceiptTests(unittest.TestCase):
             )
             for index, evidence_class in enumerate(catalog_evidence_classes)
         ]
-        product = [self.scenario(f"product-{index}", f"product-{index}.png") for index in range(10)]
+        text_scale_pairs = [
+            ("desktop-home-statuses", "desktop-home-statuses-large-text"),
+            ("ios-project-github-statuses", "ios-project-github-statuses-large-text"),
+            ("link-macos-synthetic", "link-macos-synthetic-large-text"),
+        ]
+        product = [
+            scenario
+            for standard_identifier, accessibility_identifier in text_scale_pairs
+            for scenario in (
+                self.scenario(standard_identifier, f"{standard_identifier}.png"),
+                self.scenario(
+                    accessibility_identifier,
+                    f"{accessibility_identifier}.png",
+                    textScale="accessibility3",
+                ),
+            )
+        ]
+        product.extend(
+            self.scenario(f"product-{index}", f"product-{index}.png")
+            for index in range(4)
+        )
         self.write_manifest(self.catalog_manifest, catalog)
         self.write_manifest(self.product_manifest, product)
         for scenario, manifest in [*((item, self.catalog_manifest) for item in catalog), *((item, self.product_manifest) for item in product)]:
             image = self.evidence / str(scenario["outputFile"])
-            image.write_bytes(png(1, 1))
+            image.write_bytes(
+                png(1, 1, channel=65 if scenario.get("textScale") == "accessibility3" else 64)
+            )
             self.assert_succeeded(self.write_receipt(manifest, str(scenario["id"]), image))
 
         result = self.verify(complete=True)

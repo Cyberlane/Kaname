@@ -76,7 +76,7 @@ expected_scenarios = {
         "fixture": "desktop-status-synthetic-fixture",
         "viewport": "1520x940",
         "appearance": "dark",
-        "differentiateWithoutColor": False,
+        "differentiateWithoutColor": True,
         "reduceMotion": False,
         "textScale": "accessibility3",
         "activeWindow": True,

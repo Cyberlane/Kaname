@@ -24,6 +24,7 @@ export KANAME_TASK_BUILD_DIR="$(pwd -P)/.build"
 Scripts/generate-kaname-design-tokens.py --check
 Scripts/verify-kaname-design-tokens.py
 swift test --scratch-path "$KANAME_TASK_BUILD_DIR" --filter KanameDesignSystemTests
+python3 Scripts/test-kaname-design-screenshot-receipts.py
 Scripts/capture-kaname-design-catalog.sh /absolute/output-directory
 Scripts/capture-kaname-desktop-design-screenshots.sh /absolute/output-directory
 Scripts/capture-kaname-ios-design-screenshots.sh /absolute/output-directory
@@ -37,6 +38,7 @@ Scripts/verify-kaname-design-screenshot-receipts.py \
 
 The catalog and capture fixtures are synthetic-public and initialize no account, provider, repository, collaborator, credential, or network state.
 Run the complete batch only from final clean `main`, and write it to an external or ignored directory so evidence files cannot enter their own working-source digest.
+On macOS, `accessibility3` capture scenarios use Kaname's explicit semantic-font simulation because SwiftUI's native Dynamic Type environment does not resize macOS text. Standard scenarios retain production font defaults. The simulation is deterministic layout-stress evidence, not proof of a native user preference or assistive-technology qualification.
 
 ## Adoption status
 

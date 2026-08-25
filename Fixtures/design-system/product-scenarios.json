@@ -83,7 +83,7 @@
       "fixture": "desktop-status-synthetic-fixture",
       "viewport": "1520x940",
       "appearance": "dark",
-      "differentiateWithoutColor": false,
+      "differentiateWithoutColor": true,
       "reduceMotion": false,
       "textScale": "accessibility3",
       "activeWindow": true,
@@ -155,7 +155,7 @@
       "fixture": "iphone-status-synthetic-kaname-project",
       "viewport": "iPhone 15",
       "appearance": "dark",
-      "differentiateWithoutColor": false,
+      "differentiateWithoutColor": true,
       "reduceMotion": false,
       "textScale": "accessibility3",
       "activeWindow": true,
@@ -178,7 +178,7 @@
       "textScale": "accessibility3",
       "activeWindow": true,
       "locale": "en_US",
-      "expectedAccessibilityLabels": ["Connection status: Host online", "Host verification: Verified", "Discussion status: Waiting for you. Action required.", "Action status: Response actions pending", "Participant: External collaborator", "Message status: Received by host", "Participant: Host", "Message status: Published by host", "Trust boundary: Restricted collaborator"],
+      "expectedAccessibilityLabels": ["Kaname Link", "Connection status: Host online", "Host verification: Verified", "Discussion status: Waiting for you. Action required.", "Action status: Response actions pending", "Participant: External collaborator", "Message status: Received by host", "Participant: Host", "Message status: Published by host", "Trust boundary: Restricted collaborator"],
       "privacyClass": "synthetic-public",
       "evidenceClass": "fixture-projection"
     }

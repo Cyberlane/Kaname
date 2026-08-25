@@ -63,6 +63,7 @@ expected_scenarios = {
         "activeWindow": True,
         "locale": "en_US",
         "expectedAccessibilityLabels": [
+            "Kaname Link",
             "Connection status: Host online",
             "Host verification: Verified",
             "Discussion status: Waiting for you. Action required.",

@@ -678,6 +678,7 @@ private struct LinkReplyComposer: View {
 
             TextEditor(text: $replyBody)
                 .font(.body)
+                .scrollContentBackground(.hidden)
                 .frame(minHeight: 84)
                 .padding(8)
                 .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 10))

@@ -33,6 +33,7 @@ private struct CatalogCaptureConfiguration {
     let differentiateWithoutColor: Bool
     let reduceMotion: Bool
     let dynamicTypeSize: DynamicTypeSize
+    let syntheticTextScale: KanameSyntheticTextScale
     let locale: Locale
     let activeWindow: Bool
 
@@ -44,13 +45,20 @@ private struct CatalogCaptureConfiguration {
         differentiateWithoutColor: false,
         reduceMotion: false,
         dynamicTypeSize: .large,
+        syntheticTextScale: .standard,
         locale: Locale(identifier: "en_US"),
         activeWindow: true
     )
 
     static func commandLine() throws -> Self {
         let viewport = try requiredCatalogArgument("--viewport")
-        guard viewport == "1280x860" else {
+        let snapshotSize: (width: CGFloat, height: CGFloat)
+        switch viewport {
+        case "1280x860":
+            snapshotSize = (1_280, 860)
+        case "1280x1120":
+            snapshotSize = (1_280, 1_120)
+        default:
             throw CatalogCaptureContractError(message: "Unsupported catalog snapshot viewport: \(viewport)")
         }
         let appearance = try requiredCatalogArgument("--appearance")
@@ -68,24 +76,36 @@ private struct CatalogCaptureConfiguration {
         }
         let textScale = try requiredCatalogArgument("--text-scale")
         let dynamicTypeSize: DynamicTypeSize
+        let syntheticTextScale: KanameSyntheticTextScale
         switch textScale {
-        case "standard": dynamicTypeSize = .large
-        case "accessibility3": dynamicTypeSize = .accessibility3
+        case "standard":
+            dynamicTypeSize = .large
+            syntheticTextScale = .standard
+        case "accessibility3":
+            dynamicTypeSize = .accessibility3
+            syntheticTextScale = .accessibility3
         default:
             throw CatalogCaptureContractError(message: "Unsupported catalog snapshot text scale: \(textScale)")
+        }
+        let expectedViewport = textScale == "accessibility3" ? "1280x1120" : "1280x860"
+        guard viewport == expectedViewport else {
+            throw CatalogCaptureContractError(
+                message: "Catalog snapshot text scale \(textScale) requires viewport \(expectedViewport)."
+            )
         }
         let localeIdentifier = try requiredCatalogArgument("--locale")
         guard localeIdentifier == "en_US" else {
             throw CatalogCaptureContractError(message: "Unsupported catalog snapshot locale: \(localeIdentifier)")
         }
         return Self(
-            width: 1_280,
-            height: 860,
+            width: snapshotSize.width,
+            height: snapshotSize.height,
             colorScheme: colorScheme,
             increasedContrast: increasedContrast,
             differentiateWithoutColor: try boolArgument("--differentiate-without-color"),
             reduceMotion: try boolArgument("--reduce-motion"),
             dynamicTypeSize: dynamicTypeSize,
+            syntheticTextScale: syntheticTextScale,
             locale: Locale(identifier: localeIdentifier),
             activeWindow: try boolArgument("--active-window")
         )
@@ -111,7 +131,8 @@ private extension View {
                 KanameAccessibilityPreferences(
                     differentiateWithoutColor: configuration.differentiateWithoutColor,
                     reduceMotion: configuration.reduceMotion,
-                    increasedContrast: configuration.increasedContrast
+                    increasedContrast: configuration.increasedContrast,
+                    syntheticTextScale: configuration.syntheticTextScale
                 )
             )
             .environment(\.dynamicTypeSize, configuration.dynamicTypeSize)
@@ -126,9 +147,9 @@ private struct CatalogTitleDetail: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: KanameSpacing.xSmall) {
-            Text(title).font(.headline)
+            Text(title).kanameSemanticFont(.headline)
             Text(detail)
-                .font(.subheadline)
+                .kanameSemanticFont(.subheadline)
                 .foregroundStyle(KanameColor.textSecondary)
         }
     }
@@ -281,10 +302,10 @@ private struct KanameDesignCatalogRoot: View {
                 VStack(alignment: .leading, spacing: KanameSpacing.large) {
                     VStack(alignment: .leading, spacing: KanameSpacing.xSmall) {
                         Label("Kaname", systemImage: "point.3.connected.trianglepath.dotted")
-                            .font(.title2.bold())
+                            .kanameSemanticFont(.title2.bold())
                             .foregroundStyle(KanameColor.textPrimary)
                         Text("Design System \(KanameDesignSystemMetadata.version)")
-                            .font(.caption)
+                            .kanameSemanticFont(.caption)
                             .foregroundStyle(KanameColor.textSecondary)
                     }
                     .padding(.horizontal, KanameSpacing.large)
@@ -309,6 +330,7 @@ private struct KanameDesignCatalogRoot: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .kanameSemanticFont(.body)
         .foregroundStyle(KanameColor.textPrimary)
         .background(KanameColor.canvas)
         .tint(KanameColor.accent)
@@ -351,6 +373,7 @@ private struct KanameDesignCatalogRoot: View {
 }
 
 private struct CatalogPageView: View {
+    @Environment(\.kanameAccessibilityPreferences) private var accessibilityPreferences
     let page: CatalogPage
     let snapshotMode: Bool
 
@@ -367,17 +390,7 @@ private struct CatalogPageView: View {
 
     private var pageStack: some View {
         VStack(alignment: .leading, spacing: KanameSpacing.xxLarge) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: KanameSpacing.xSmall) {
-                    Text(page.title).font(KanameTypography.display)
-                    Text(subtitle)
-                        .font(KanameTypography.supporting)
-                        .foregroundStyle(KanameColor.textSecondary)
-                }
-                Spacer()
-                KanameStatusBadge(page.evidenceLabel, tone: page.evidenceTone)
-                KanameStatusBadge("Synthetic-public", tone: .external)
-            }
+            pageHeader
 
             pageContent
             Spacer(minLength: 0)
@@ -385,6 +398,39 @@ private struct CatalogPageView: View {
         .padding(KanameSpacing.xxxLarge)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(KanameColor.canvas)
+    }
+
+    @ViewBuilder
+    private var pageHeader: some View {
+        if accessibilityPreferences.syntheticTextScale == .accessibility3 {
+            VStack(alignment: .leading, spacing: KanameSpacing.medium) {
+                pageIdentity
+                evidenceBadges
+            }
+        } else {
+            HStack(alignment: .firstTextBaseline) {
+                pageIdentity
+                Spacer()
+                evidenceBadges
+            }
+        }
+    }
+
+    private var pageIdentity: some View {
+        VStack(alignment: .leading, spacing: KanameSpacing.xSmall) {
+            Text(page.title).kanameSemanticFont(KanameTypography.display)
+            Text(subtitle)
+                .kanameSemanticFont(KanameTypography.supporting)
+                .foregroundStyle(KanameColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var evidenceBadges: some View {
+        HStack {
+            KanameStatusBadge(page.evidenceLabel, tone: page.evidenceTone)
+            KanameStatusBadge("Synthetic-public", tone: .external)
+        }
     }
 
     private var subtitle: String {
@@ -447,7 +493,7 @@ private struct CatalogOverview: View {
                 KanameSurface {
                     HStack(alignment: .top, spacing: KanameSpacing.medium) {
                         Image(systemName: item.2)
-                            .font(.title2)
+                            .kanameSemanticFont(.title2)
                             .foregroundStyle(KanameColor.accent)
                             .frame(width: 30)
                         CatalogTitleDetail(title: item.0, detail: item.1)
@@ -459,7 +505,7 @@ private struct CatalogOverview: View {
 
         KanameSectionHeader("Product surfaces", detail: "Shared semantics; platform-native structure and density")
         HStack(spacing: KanameSpacing.large) {
-            KanameMetricCard("Desktop", value: "16", detail: "Link-branch destinations", tone: .informational)
+            KanameMetricCard("Desktop", value: "16", detail: "Local-main destinations", tone: .informational)
             KanameMetricCard("iOS", value: "5", detail: "Persistent hubs", tone: .active)
             KanameMetricCard("Link", value: "4", detail: "Host + native client families", tone: .external)
             KanameMetricCard("Privacy", value: "100%", detail: "Synthetic catalog data", tone: .success)
@@ -499,8 +545,8 @@ private struct CatalogFoundations: View {
                             RoundedRectangle(cornerRadius: KanameRadius.control, style: .continuous)
                                 .stroke(KanameColor.separator, lineWidth: 1)
                         }
-                    Text(item.0).font(.caption.weight(.semibold))
-                    Text(item.2).font(KanameTypography.technical).foregroundStyle(KanameColor.textSecondary)
+                    Text(item.0).kanameSemanticFont(.caption.weight(.semibold))
+                    Text(item.2).kanameSemanticFont(KanameTypography.technical).foregroundStyle(KanameColor.textSecondary)
                 }
             }
         }
@@ -509,12 +555,12 @@ private struct CatalogFoundations: View {
             KanameSurface {
                 VStack(alignment: .leading, spacing: KanameSpacing.medium) {
                     KanameSectionHeader("Typography")
-                    Text("Display title").font(KanameTypography.display)
-                    Text("Screen title").font(KanameTypography.screenTitle)
-                    Text("Section title").font(KanameTypography.sectionTitle)
-                    Text("Readable body copy explains the current state.").font(KanameTypography.body)
-                    Text("Metadata · 12:42 JST").font(KanameTypography.metadata).foregroundStyle(KanameColor.textSecondary)
-                    Text("receipt: localStored").font(KanameTypography.technical).foregroundStyle(KanameColor.accent)
+                    Text("Display title").kanameSemanticFont(KanameTypography.display)
+                    Text("Screen title").kanameSemanticFont(KanameTypography.screenTitle)
+                    Text("Section title").kanameSemanticFont(KanameTypography.sectionTitle)
+                    Text("Readable body copy explains the current state.").kanameSemanticFont(KanameTypography.body)
+                    Text("Metadata · 12:42 JST").kanameSemanticFont(KanameTypography.metadata).foregroundStyle(KanameColor.textSecondary)
+                    Text("receipt: localStored").kanameSemanticFont(KanameTypography.technical).foregroundStyle(KanameColor.accent)
                 }
             }
             .frame(maxWidth: .infinity)
@@ -524,7 +570,7 @@ private struct CatalogFoundations: View {
                     KanameSectionHeader("Spacing and radius")
                     ForEach([2, 4, 8, 12, 16, 20, 24, 32, 40], id: \.self) { value in
                         HStack {
-                            Text("\(value)").font(KanameTypography.technical).frame(width: 28, alignment: .trailing)
+                            Text("\(value)").kanameSemanticFont(KanameTypography.technical).frame(width: 28, alignment: .trailing)
                             RoundedRectangle(cornerRadius: 2).fill(KanameColor.accent).frame(width: CGFloat(value * 3), height: 6)
                         }
                     }
@@ -542,7 +588,7 @@ private struct CatalogFoundations: View {
     private func radiusSample(_ name: String, _ radius: CGFloat) -> some View {
         VStack {
             RoundedRectangle(cornerRadius: radius).fill(KanameColor.selected).frame(width: 74, height: 46)
-            Text(name).font(.caption2)
+            Text(name).kanameSemanticFont(.caption2)
         }
     }
 }
@@ -604,15 +650,15 @@ private struct CatalogDesktop: View {
 
     private var desktopSidebar: some View {
         VStack(alignment: .leading, spacing: KanameSpacing.small) {
-            Label("Kaname", systemImage: "point.3.connected.trianglepath.dotted").font(.headline).padding(.bottom, 8)
+            Label("Kaname", systemImage: "point.3.connected.trianglepath.dotted").kanameSemanticFont(.headline).padding(.bottom, 8)
             ForEach(["Home", "Threads", "Inbox", "Projects", "Research", "Obsidian", "Email", "Calendar", "Automations", "GitHub", "Coding", "Kaname Link"], id: \.self) { item in
                 HStack {
                     Image(systemName: item == "Threads" ? "bubble.left.and.bubble.right.fill" : "circle.grid.2x2")
                     Text(item)
                     Spacer()
-                    if item == "Inbox" { Text("3").font(.caption2).padding(4).background(KanameColor.warning.opacity(0.2), in: Capsule()) }
+                    if item == "Inbox" { Text("3").kanameSemanticFont(.caption2).padding(4).background(KanameColor.warning.opacity(0.2), in: Capsule()) }
                 }
-                .font(.caption)
+                .kanameSemanticFont(.caption)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 6)
                 .background(item == "Threads" ? KanameColor.selected : Color.clear, in: RoundedRectangle(cornerRadius: 7))
@@ -635,8 +681,8 @@ private struct CatalogDesktop: View {
             Divider()
             ForEach([("Design system", "Needs review"), ("Release qualification", "Running"), ("Mail triage", "Completed")], id: \.0) { item in
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(item.0).font(.subheadline.weight(.semibold))
-                    Text(item.1).font(.caption).foregroundStyle(item.1 == "Needs review" ? KanameColor.warning : KanameColor.textSecondary)
+                    Text(item.0).kanameSemanticFont(.subheadline.weight(.semibold))
+                    Text(item.1).kanameSemanticFont(.caption).foregroundStyle(item.1 == "Needs review" ? KanameColor.warning : KanameColor.textSecondary)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(14)
@@ -653,8 +699,8 @@ private struct CatalogDesktop: View {
         VStack(spacing: 0) {
             HStack {
                 VStack(alignment: .leading) {
-                    Text("Design system").font(.headline)
-                    Text("Discuss → Plan → Approve → Implement").font(.caption).foregroundStyle(KanameColor.textSecondary)
+                    Text("Design system").kanameSemanticFont(.headline)
+                    Text("Discuss → Plan → Approve → Implement").kanameSemanticFont(.caption).foregroundStyle(KanameColor.textSecondary)
                 }
                 Spacer()
                 KanameStatusBadge("Plan ready", tone: .attention)
@@ -702,15 +748,17 @@ private struct CatalogDesktop: View {
         VStack(alignment: .leading, spacing: KanameSpacing.large) {
             KanameSectionHeader("Context")
             KanameStatusBadge("Synthetic fixture", tone: .external)
-            Label("Task worktree", systemImage: "arrow.triangle.branch")
-            Text("kaname/task/design-system-atlas").font(KanameTypography.technical).foregroundStyle(KanameColor.textSecondary)
+            Label("Clean local main", systemImage: "checkmark.seal.fill")
+            Text("Synthetic-public product projection")
+                .kanameSemanticFont(KanameTypography.technical)
+                .foregroundStyle(KanameColor.textSecondary)
             Divider()
             KanameSectionHeader("Evidence")
             Label("Source mapped", systemImage: "checkmark.circle.fill").foregroundStyle(KanameColor.success)
-            Label("Tests pending", systemImage: "clock.fill").foregroundStyle(KanameColor.warning)
+            Label("Recorded checks passed", systemImage: "checkmark.circle.fill").foregroundStyle(KanameColor.success)
             Spacer()
         }
-        .font(.caption)
+        .kanameSemanticFont(.caption)
         .padding(KanameSpacing.large)
         .frame(width: 150)
         .background(KanameColor.surface)
@@ -722,7 +770,7 @@ private struct CatalogIOS: View {
         HStack(alignment: .top, spacing: KanameSpacing.xxxLarge) {
             VStack(spacing: 0) {
                 HStack {
-                    Text("9:41").font(.caption.bold())
+                    Text("9:41").kanameSemanticFont(.caption.bold())
                     Spacer()
                     Image(systemName: "wifi")
                     Image(systemName: "battery.100percent")
@@ -730,7 +778,7 @@ private struct CatalogIOS: View {
                 .padding(.horizontal, 18)
                 .padding(.top, 10)
                 VStack(alignment: .leading, spacing: KanameSpacing.large) {
-                    Text("Home").font(.system(size: 27, weight: .bold, design: .rounded))
+                    Text("Home").kanameSemanticFont(.system(size: 27, weight: .bold, design: .rounded))
                     KanameCallout("Mac reachable", message: "Commands remain approval-bound on the host.", tone: .success)
                     HStack {
                         KanameMetricCard("Attention", value: "3", detail: "Items", tone: .attention)
@@ -773,8 +821,8 @@ private struct CatalogIOS: View {
             HStack {
                 Image(systemName: tone.symbolName).foregroundStyle(tone.color)
                 VStack(alignment: .leading) {
-                    Text(title).font(.subheadline.weight(.semibold))
-                    Text(detail).font(.caption).foregroundStyle(KanameColor.textSecondary)
+                    Text(title).kanameSemanticFont(.subheadline.weight(.semibold))
+                    Text(detail).kanameSemanticFont(.caption).foregroundStyle(KanameColor.textSecondary)
                 }
                 Spacer()
                 Image(systemName: "chevron.right").foregroundStyle(KanameColor.textTertiary)
@@ -785,7 +833,7 @@ private struct CatalogIOS: View {
     private func mobileTab(_ label: String, _ symbol: String, _ selected: Bool) -> some View {
         VStack(spacing: 3) {
             Image(systemName: symbol)
-            Text(label).font(.system(size: 9, weight: .medium))
+            Text(label).kanameSemanticFont(.system(size: 9, weight: .medium))
         }
         .foregroundStyle(selected ? KanameColor.accent : KanameColor.textSecondary)
         .frame(maxWidth: .infinity)
@@ -801,14 +849,14 @@ private struct CatalogLink: View {
 
         HStack(spacing: 1) {
             VStack(alignment: .leading, spacing: KanameSpacing.large) {
-                Label("Kaname Link", systemImage: "link.circle.fill").font(.title2.bold())
+                Label("Kaname Link", systemImage: "link.circle.fill").kanameSemanticFont(.title2.bold())
                 Text("External collaboration").foregroundStyle(KanameColor.textSecondary)
                 KanameStatusBadge("Verified host", tone: .success)
-                Text("LINK SPACES").font(.caption.bold()).foregroundStyle(KanameColor.textSecondary)
+                Text("LINK SPACES").kanameSemanticFont(.caption.bold()).foregroundStyle(KanameColor.textSecondary)
                 KanameSurface(padding: 12) {
                     VStack(alignment: .leading) {
-                        Text("Product review").font(.subheadline.weight(.semibold))
-                        Text("Host-verified").font(.caption).foregroundStyle(KanameColor.success)
+                        Text("Product review").kanameSemanticFont(.subheadline.weight(.semibold))
+                        Text("Host-verified").kanameSemanticFont(.caption).foregroundStyle(KanameColor.success)
                     }
                 }
                 Spacer()
@@ -819,7 +867,7 @@ private struct CatalogLink: View {
             .background(KanameColor.sidebar)
 
             VStack(alignment: .leading, spacing: 0) {
-                Text("Product review").font(.title2.bold()).padding(20)
+                Text("Product review").kanameSemanticFont(.title2.bold()).padding(20)
                 Divider()
                 VStack(alignment: .leading, spacing: 7) {
                     Text("Design system proposal").fontWeight(.semibold)
@@ -835,8 +883,8 @@ private struct CatalogLink: View {
             VStack(spacing: 0) {
                 HStack {
                     VStack(alignment: .leading) {
-                        Text("Design system proposal").font(.title2.bold())
-                        Text("Deliberately shared by the host").font(.caption).foregroundStyle(KanameColor.textSecondary)
+                        Text("Design system proposal").kanameSemanticFont(.title2.bold())
+                        Text("Deliberately shared by the host").kanameSemanticFont(.caption).foregroundStyle(KanameColor.textSecondary)
                     }
                     Spacer()
                     KanameStatusBadge("Response actions pending", tone: .neutral)
@@ -881,7 +929,7 @@ private struct CatalogLink: View {
 private struct CatalogAccessibility: View {
     private let checks = [
         ("Differentiate without color", "Shared status badges combine stable labels and symbols with color.", "eye.trianglebadge.exclamationmark", "Implemented baseline", KanameStatusTone.success),
-        ("Increased contrast", "Windows resources exist; Apple and GTK behavior still needs implementation and proof.", "circle.lefthalf.filled", "Qualification pending", KanameStatusTone.warning),
+        ("Increased contrast", "Shared Apple contrast resolution is implemented; native screen and GTK qualification remain pending.", "circle.lefthalf.filled", "Screen proof pending", KanameStatusTone.warning),
         ("Reduced motion", "Motion guidance exists; product-level Reduce Motion adoption remains pending.", "figure.walk.motion", "Adoption pending", KanameStatusTone.warning),
         ("Dynamic Type", "Shared components use semantic styles; complete screen reflow is not yet qualified.", "textformat.size.larger", "Qualification pending", KanameStatusTone.warning),
         ("Keyboard and focus", "Native controls preserve a baseline; traversal and Escape need screen-level review.", "keyboard", "Manual proof pending", KanameStatusTone.attention),
@@ -896,7 +944,7 @@ private struct CatalogAccessibility: View {
                 KanameSurface {
                     HStack(alignment: .top, spacing: KanameSpacing.medium) {
                         Image(systemName: check.2)
-                            .font(.title2)
+                            .kanameSemanticFont(.title2)
                             .foregroundStyle(KanameColor.accent)
                             .frame(width: 32)
                             .accessibilityHidden(true)

@@ -17,7 +17,7 @@ Do not:
 
 ## Typography
 
-Use system fonts and Dynamic Type-compatible styles. `display` is reserved for catalog or hero hierarchy; product screens normally start with `screenTitle`. Use `technical` for identifiers, receipts, hashes, command names, and other machine-shaped text—not for long prose.
+Use system fonts and Dynamic Type-compatible styles through ``View/kanameSemanticFont(_:)``. `display` is reserved for catalog or hero hierarchy; product screens normally start with `screenTitle`. Use `technical` for identifiers, receipts, hashes, command names, and other machine-shaped text—not for long prose. The modifier preserves ordinary production fonts by default and applies ``KanameSyntheticTextScale`` only to deterministic macOS capture fixtures.
 
 ## Spacing and shape
 
