@@ -4280,8 +4280,7 @@ fn mapped_edge_and_data_map_derive_deterministic_values() {
         .find(|emission| emission.node_id == MAPPING_MAP_ID && emission.port_id == "success")
         .unwrap();
     let map_value: Value =
-        serde_json::from_slice(&map_success.value.as_ref().unwrap().inline_canonical_json)
-            .unwrap();
+        serde_json::from_slice(&map_success.value.as_ref().unwrap().inline_canonical_json).unwrap();
     assert_eq!(map_value, json!("Invoice S-42 totals 12 via edge"));
 
     let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
@@ -4319,10 +4318,14 @@ fn edge_mapping_failure_routes_to_the_target_error_port() {
         .unwrap();
     assert_eq!(map_attempt.error_code, "mapping.pointer-unresolved");
     let error_value: Value =
-        serde_json::from_slice(&map_attempt.error.as_ref().unwrap().inline_canonical_json)
-            .unwrap();
+        serde_json::from_slice(&map_attempt.error.as_ref().unwrap().inline_canonical_json).unwrap();
     assert_eq!(error_value["code"], "mapping.pointer-unresolved");
-    assert!(error_value["context"].as_str().unwrap().starts_with("edge:"));
+    assert!(
+        error_value["context"]
+            .as_str()
+            .unwrap()
+            .starts_with("edge:")
+    );
     assert!(
         settled
             .iter()
@@ -4359,8 +4362,7 @@ fn data_map_evaluation_failure_routes_to_its_error_port() {
         .unwrap();
     assert_eq!(map_attempt.error_code, "mapping.null-value");
     let error_value: Value =
-        serde_json::from_slice(&map_attempt.error.as_ref().unwrap().inline_canonical_json)
-            .unwrap();
+        serde_json::from_slice(&map_attempt.error.as_ref().unwrap().inline_canonical_json).unwrap();
     assert_eq!(error_value["context"], "mapping");
 }
 
@@ -4500,3 +4502,1048 @@ fn published_mapping_library(
     )
 }
 
+const DECISION_WORKFLOW_ID: &str = "018f7200-0001-7000-8000-000000000001";
+const DECISION_REVISION_ID: &str = "revision-decision-001";
+const DECISION_NODE_ID: &str = "018f7200-0003-7000-8000-000000000003";
+const CANCEL_WORKFLOW_ID: &str = "018f7300-0001-7000-8000-000000000001";
+const CANCEL_REVISION_ID: &str = "revision-cancel-001";
+const MATCH_ALL_WORKFLOW_ID: &str = "018f7400-0001-7000-8000-000000000001";
+const MATCH_ALL_REVISION_ID: &str = "revision-match-all-001";
+const MATCH_ALL_NODE_ID: &str = "018f7400-0003-7000-8000-000000000003";
+const MATCH_ALL_SMALL_CASE_ID: &str = "018f7400-0011-7000-8000-000000000011";
+const MATCH_ALL_LARGE_CASE_ID: &str = "018f7400-0012-7000-8000-000000000012";
+const NAMED_JOIN_WORKFLOW_ID: &str = "018f7500-0001-7000-8000-000000000001";
+const NAMED_JOIN_REVISION_ID: &str = "revision-named-join-001";
+const NAMED_JOIN_LEFT_BRANCH_ID: &str = "018f7500-0011-7000-8000-000000000011";
+const NAMED_JOIN_RIGHT_BRANCH_ID: &str = "018f7500-0012-7000-8000-000000000012";
+const REVIEW_WORKFLOW_ID: &str = "018f7600-0001-7000-8000-000000000001";
+const REVIEW_REVISION_ID: &str = "revision-review-001";
+const REVIEW_AUTHORITY_POLICY: &str = "mail-send";
+const RECONCILE_WORKFLOW_ID: &str = "018f7700-0001-7000-8000-000000000001";
+const RECONCILE_REVISION_ID: &str = "revision-reconcile-001";
+const RECONCILE_NODE_ID: &str = "018f7700-0004-7000-8000-000000000004";
+const ARTIFACT_WORKFLOW_ID: &str = "018f7800-0001-7000-8000-000000000001";
+const ARTIFACT_REVISION_ID: &str = "revision-artifact-001";
+const ARTIFACT_NODE_ID: &str = "018f7800-0003-7000-8000-000000000003";
+
+#[test]
+fn decision_routes_matched_and_not_matched() {
+    for (run_id, amount, expected_port) in [
+        ("run-decision-matched-001", 42, "matched"),
+        ("run-decision-other-001", 4, "not-matched"),
+    ] {
+        let directory = tempdir().unwrap();
+        let (library, published) = published_decision_library(directory.path());
+        let command = control_run_command(
+            run_id,
+            &published,
+            DECISION_WORKFLOW_ID,
+            DECISION_REVISION_ID,
+            json!({"amount": amount}),
+        );
+        let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+        assert_eq!(
+            workflow_executor::execute(&mut journal, &library, &command)
+                .unwrap()
+                .outcome,
+            DurableRunOutcome::Succeeded
+        );
+        assert_eq!(
+            emitted_ports(&journal, run_id, DECISION_NODE_ID),
+            [expected_port]
+        );
+    }
+}
+
+#[test]
+fn terminal_cancel_cancels_run() {
+    let directory = tempdir().unwrap();
+    let (library, published) = published_cancel_library(directory.path());
+    let run_id = "run-terminal-cancel-001";
+    let command = control_run_command(
+        run_id,
+        &published,
+        CANCEL_WORKFLOW_ID,
+        CANCEL_REVISION_ID,
+        json!({"reason": "owner-abandoned"}),
+    );
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    assert_eq!(
+        workflow_executor::execute(&mut journal, &library, &command)
+            .unwrap()
+            .outcome,
+        DurableRunOutcome::Cancelled
+    );
+    let settled = run_events(&journal, run_id)
+        .into_iter()
+        .find_map(|event| match event {
+            kaname_core::workflow_runtime::WorkflowRuntimeEvent::RunSettled(payload) => {
+                Some(payload)
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(settled.error_code, "owner-abandoned");
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    projection.catch_up(&journal).unwrap();
+    let run = projection
+        .inspect_runs(None, Some(run_id), 1)
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(run.execution_tokens.len(), 1);
+    assert_eq!(run.execution_tokens[0].outcome, "cancelled");
+    assert!(
+        run.attempts
+            .iter()
+            .any(|attempt| attempt.outcome == "cancelled")
+    );
+}
+
+#[test]
+fn match_all_emits_multiple_case_ports() {
+    let directory = tempdir().unwrap();
+    let (library, published) = published_match_all_library(directory.path());
+    let run_id = "run-match-all-001";
+    let command = control_run_command(
+        run_id,
+        &published,
+        MATCH_ALL_WORKFLOW_ID,
+        MATCH_ALL_REVISION_ID,
+        json!({"amount": 42}),
+    );
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    assert_eq!(
+        workflow_executor::execute(&mut journal, &library, &command)
+            .unwrap()
+            .outcome,
+        DurableRunOutcome::Succeeded
+    );
+    assert_eq!(
+        emitted_ports(&journal, run_id, MATCH_ALL_NODE_ID),
+        [
+            format!("case-{MATCH_ALL_SMALL_CASE_ID}"),
+            format!("case-{MATCH_ALL_LARGE_CASE_ID}")
+        ]
+    );
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    projection.catch_up(&journal).unwrap();
+    let run = projection
+        .inspect_runs(None, Some(run_id), 1)
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(run.execution_tokens.len(), 3);
+    assert_eq!(
+        run.execution_tokens
+            .iter()
+            .filter(|token| token.fork_node_id == MATCH_ALL_NODE_ID)
+            .count(),
+        2
+    );
+    assert_eq!(
+        run.execution_tokens
+            .iter()
+            .filter(|token| token.outcome == "completed")
+            .count(),
+        2
+    );
+    assert!(run.joins.is_empty());
+}
+
+#[test]
+fn join_named_requires_configured_branches() {
+    for (run_id, required_branch, expected) in [
+        (
+            "run-join-named-left-001",
+            NAMED_JOIN_LEFT_BRANCH_ID,
+            DurableRunOutcome::Succeeded,
+        ),
+        (
+            "run-join-named-right-001",
+            NAMED_JOIN_RIGHT_BRANCH_ID,
+            DurableRunOutcome::Failed,
+        ),
+    ] {
+        let directory = tempdir().unwrap();
+        let (library, published) = published_named_join_library(directory.path(), required_branch);
+        let command = control_run_command(
+            run_id,
+            &published,
+            NAMED_JOIN_WORKFLOW_ID,
+            NAMED_JOIN_REVISION_ID,
+            json!({"value": "synthetic"}),
+        );
+        let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+        assert_eq!(
+            workflow_executor::execute(&mut journal, &library, &command)
+                .unwrap()
+                .outcome,
+            expected,
+            "{required_branch}"
+        );
+        let join = run_events(&journal, run_id)
+            .into_iter()
+            .find_map(|event| match event {
+                kaname_core::workflow_runtime::WorkflowRuntimeEvent::JoinEvaluated(payload) => {
+                    Some(payload)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(join.policy, "named");
+        assert_eq!(join.threshold, 1);
+        assert_eq!(join.expected_execution_token_ids.len(), 2);
+        if expected == DurableRunOutcome::Succeeded {
+            assert_eq!(
+                join.decision,
+                kaname_core::v1::WorkflowJoinDecision::Succeeded as i32
+            );
+            assert_eq!(join.arrived_execution_token_ids.len(), 1);
+        } else {
+            assert_eq!(
+                join.decision,
+                kaname_core::v1::WorkflowJoinDecision::Failed as i32
+            );
+            assert_eq!(join.error_code, "join.named-unreachable");
+        }
+    }
+}
+
+#[test]
+fn human_review_approves_rejects_expires_and_detects_stale() {
+    let proposal_digest = canonical_digest(&json!({"amount": 42}));
+    for (run_id, signal, expected_outcome, expected_code) in [
+        (
+            "run-review-approve-001",
+            Some(json!({"decision": "approve", "proposalDigest": proposal_digest.clone()})),
+            DurableRunOutcome::Succeeded,
+            "",
+        ),
+        (
+            "run-review-reject-001",
+            Some(json!({"decision": "reject", "proposalDigest": proposal_digest.clone()})),
+            DurableRunOutcome::Failed,
+            "review.rejected",
+        ),
+        (
+            "run-review-stale-001",
+            Some(json!({"decision": "approve", "proposalDigest": "0".repeat(64)})),
+            DurableRunOutcome::Failed,
+            "review.stale",
+        ),
+        (
+            "run-review-expired-001",
+            None,
+            DurableRunOutcome::Failed,
+            "review.expired",
+        ),
+    ] {
+        let directory = tempdir().unwrap();
+        let (library, published) = published_review_library(directory.path());
+        let command = control_run_command(
+            run_id,
+            &published,
+            REVIEW_WORKFLOW_ID,
+            REVIEW_REVISION_ID,
+            json!({"amount": 42, "subject": "Invoice"}),
+        );
+        let started_at = command.submitted_at_unix_millis;
+        let deadline = started_at + 5_000;
+        let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+        let waiting =
+            workflow_executor::execute_at_unix_millis(&mut journal, &library, &command, started_at)
+                .unwrap();
+        assert_eq!(waiting.outcome, DurableRunOutcome::Waiting, "{run_id}");
+        assert_eq!(waiting.next_attempt_at_unix_millis, Some(deadline));
+
+        let resolved_at = match signal {
+            Some(value) => {
+                workflow_executor::record_wait_signal(
+                    &mut journal,
+                    &review_signal_command(
+                        run_id,
+                        &format!("signal-{run_id}"),
+                        &proposal_digest,
+                        value,
+                        started_at + 100,
+                    ),
+                )
+                .unwrap();
+                started_at + 200
+            }
+            None => deadline,
+        };
+        assert_eq!(
+            workflow_executor::execute_at_unix_millis(
+                &mut journal,
+                &library,
+                &command,
+                resolved_at
+            )
+            .unwrap()
+            .outcome,
+            expected_outcome,
+            "{run_id}"
+        );
+        let settled = run_events(&journal, run_id)
+            .into_iter()
+            .find_map(|event| match event {
+                kaname_core::workflow_runtime::WorkflowRuntimeEvent::RunSettled(payload) => {
+                    Some(payload)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(settled.error_code, expected_code, "{run_id}");
+        let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+        projection.catch_up(&journal).unwrap();
+        let run = projection
+            .inspect_runs(None, Some(run_id), 1)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(run.waits.len(), 1);
+        assert_eq!(run.waits[0].kind, "event");
+        assert_eq!(
+            run.waits[0].decision,
+            if expected_code == "review.expired" {
+                "expired"
+            } else {
+                "resumed"
+            }
+        );
+    }
+}
+
+#[test]
+fn reconcile_applied_not_applied_and_exhausted_still_unknown() {
+    for (run_id, status, checks, expected_outcome, expected_code) in [
+        (
+            "run-reconcile-applied-001",
+            "reconciled_applied",
+            0,
+            DurableRunOutcome::Succeeded,
+            "",
+        ),
+        (
+            "run-reconcile-not-applied-001",
+            "reconciled_not_applied",
+            0,
+            DurableRunOutcome::Failed,
+            "reconcile.not-applied",
+        ),
+        (
+            "run-reconcile-still-unknown-001",
+            "outcome_unknown",
+            0,
+            DurableRunOutcome::Cancelled,
+            "reconcile.still-unknown",
+        ),
+        (
+            "run-reconcile-exhausted-001",
+            "outcome_unknown",
+            2,
+            DurableRunOutcome::Failed,
+            "reconcile.exhausted",
+        ),
+    ] {
+        let directory = tempdir().unwrap();
+        let (library, published) = published_reconcile_library(directory.path(), status, checks);
+        let command = control_run_command(
+            run_id,
+            &published,
+            RECONCILE_WORKFLOW_ID,
+            RECONCILE_REVISION_ID,
+            json!({"amount": 42}),
+        );
+        let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+        assert_eq!(
+            workflow_executor::execute(&mut journal, &library, &command)
+                .unwrap()
+                .outcome,
+            expected_outcome,
+            "{run_id}"
+        );
+        let settled = run_events(&journal, run_id)
+            .into_iter()
+            .find_map(|event| match event {
+                kaname_core::workflow_runtime::WorkflowRuntimeEvent::RunSettled(payload) => {
+                    Some(payload)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(settled.error_code, expected_code, "{run_id}");
+        let reconciled = emitted_values(&journal, run_id, RECONCILE_NODE_ID);
+        assert_eq!(reconciled.len(), 1);
+        assert_eq!(reconciled[0].0, expected_reconcile_port(status, checks));
+        assert_eq!(reconciled[0].1["effectId"], "effect-001");
+        if status == "outcome_unknown" && checks == 0 {
+            assert_eq!(reconciled[0].1["checks"], 1);
+        }
+    }
+}
+
+fn expected_reconcile_port(status: &str, checks: u64) -> &'static str {
+    match (status, checks) {
+        ("reconciled_applied", _) => "success",
+        ("outcome_unknown", 0) => "still-unknown",
+        _ => "failure",
+    }
+}
+
+#[test]
+fn register_artifact_persists_role_and_media_type() {
+    let directory = tempdir().unwrap();
+    let (library, published) = published_artifact_library(directory.path());
+    let mut storage = test_scoped_storage(directory.path());
+    let run_id = "run-artifact-001";
+    let command = artifact_run_command(
+        run_id,
+        &published,
+        json!({"mediaType": "text/plain", "text": "Receipt 42"}),
+    );
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    assert_eq!(
+        workflow_executor::execute_with_storage(
+            &mut journal,
+            &library,
+            &mut storage,
+            &artifact_authority(),
+            &command,
+        )
+        .unwrap()
+        .outcome,
+        DurableRunOutcome::Succeeded
+    );
+    let registered = emitted_references(&journal, run_id, ARTIFACT_NODE_ID);
+    assert_eq!(registered.len(), 1);
+    assert_eq!(registered[0].0, "success");
+    assert_eq!(registered[0].1.content_type, "text/plain");
+    let metadata = registered[0].1.storage.as_ref().unwrap();
+    assert_eq!(metadata.result, "written");
+    assert_eq!(metadata.scope, "job");
+    assert_eq!(metadata.logical_key, "receipt");
+    assert_eq!(metadata.revision, 1);
+
+    let handles = storage
+        .list_current(
+            &artifact_access(run_id),
+            &WorkflowStorageNamespace {
+                kind: WorkflowStorageScopeKind::Job,
+                owner_id: run_id.into(),
+                installation_id: Some("installation-artifact-001".into()),
+            },
+            None,
+            10,
+        )
+        .unwrap();
+    assert_eq!(handles.len(), 1);
+    assert_eq!(handles[0].logical_key, "receipt");
+    assert_eq!(handles[0].media_type, "text/plain");
+
+    let mut stored = Vec::new();
+    storage
+        .copy_value(
+            &artifact_access(run_id),
+            &handles[0].handle_id,
+            handles[0].byte_count,
+            &mut stored,
+        )
+        .unwrap();
+    let stored: Value = serde_json::from_slice(&stored).unwrap();
+    assert_eq!(stored["role"], "receipt");
+    assert_eq!(stored["mediaType"], "text/plain");
+    assert_eq!(stored["text"], "Receipt 42");
+    assert_eq!(
+        stored["contentSha256"],
+        hex::encode(Sha256::digest(b"Receipt 42"))
+    );
+
+    let mut rejected_journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    let rejected_command = artifact_run_command(
+        "run-artifact-rejected-001",
+        &published,
+        json!({"mediaType": "image/png", "bytesBase64": "UmVjZWlwdA=="}),
+    );
+    assert_eq!(
+        workflow_executor::execute_with_storage(
+            &mut rejected_journal,
+            &library,
+            &mut storage,
+            &artifact_authority(),
+            &rejected_command,
+        )
+        .unwrap()
+        .outcome,
+        DurableRunOutcome::Failed
+    );
+    let rejected = emitted_values(
+        &rejected_journal,
+        "run-artifact-rejected-001",
+        ARTIFACT_NODE_ID,
+    );
+    assert_eq!(rejected[0].0, "error");
+    assert_eq!(rejected[0].1["code"], "artifact.media-type-rejected");
+}
+
+fn emitted_ports(journal: &Journal, run_id: &str, node_id: &str) -> Vec<String> {
+    emitted_values(journal, run_id, node_id)
+        .into_iter()
+        .map(|(port_id, _)| port_id)
+        .collect()
+}
+
+fn emitted_references(
+    journal: &Journal,
+    run_id: &str,
+    node_id: &str,
+) -> Vec<(String, WorkflowValueReference)> {
+    run_events(journal, run_id)
+        .into_iter()
+        .filter_map(|event| match event {
+            kaname_core::workflow_runtime::WorkflowRuntimeEvent::PortEmitted(payload)
+                if payload.node_id == node_id =>
+            {
+                Some((payload.port_id.clone(), payload.value.clone()?))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn artifact_access(run_id: &str) -> WorkflowStorageAccessContext {
+    WorkflowStorageAccessContext {
+        run_id: Some(run_id.into()),
+        case_id: None,
+        installation_id: "installation-artifact-001".into(),
+        account_binding_ids: Default::default(),
+    }
+}
+
+fn emitted_values(journal: &Journal, run_id: &str, node_id: &str) -> Vec<(String, Value)> {
+    run_events(journal, run_id)
+        .into_iter()
+        .filter_map(|event| match event {
+            kaname_core::workflow_runtime::WorkflowRuntimeEvent::PortEmitted(payload)
+                if payload.node_id == node_id =>
+            {
+                let value = payload.value.as_ref()?;
+                Some((
+                    payload.port_id.clone(),
+                    serde_json::from_slice(&value.inline_canonical_json).unwrap_or(Value::Null),
+                ))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn canonical_digest(value: &Value) -> String {
+    hex::encode(Sha256::digest(
+        serde_json_canonicalizer::to_vec(value).unwrap(),
+    ))
+}
+
+fn review_signal_command(
+    run_id: &str,
+    signal_id: &str,
+    proposal_digest: &str,
+    value: Value,
+    submitted_at_unix_millis: i64,
+) -> CommandEnvelope {
+    command(
+        &format!("command-{signal_id}"),
+        &format!("idempotency-{signal_id}"),
+        WORKFLOW_WAIT_SIGNAL_KIND,
+        WORKFLOW_WAIT_SIGNAL_TYPE,
+        SignalWorkflowWait {
+            run_id: run_id.into(),
+            signal_id: signal_id.into(),
+            kind: "event".into(),
+            owner_kind: "workflow".into(),
+            owner_id: REVIEW_WORKFLOW_ID.into(),
+            correlation: vec![
+                WorkflowWaitCorrelation {
+                    key: "review:/authorityPolicy".into(),
+                    sha256: canonical_digest(&json!(REVIEW_AUTHORITY_POLICY)),
+                },
+                WorkflowWaitCorrelation {
+                    key: "review:/proposalDigest".into(),
+                    sha256: canonical_digest(&json!(proposal_digest)),
+                },
+            ],
+            value: Some(inline_value(&format!("value-{signal_id}"), value)),
+        },
+        submitted_at_unix_millis,
+    )
+}
+
+fn artifact_run_command(
+    run_id: &str,
+    published: &PublishedWorkflowRevision,
+    input: Value,
+) -> CommandEnvelope {
+    let mut envelope = control_run_command(
+        run_id,
+        published,
+        ARTIFACT_WORKFLOW_ID,
+        ARTIFACT_REVISION_ID,
+        input,
+    );
+    let mut request =
+        RequestWorkflowRun::decode(envelope.payload.as_ref().unwrap().value.as_slice()).unwrap();
+    request.installation_id = "installation-artifact-001".into();
+    envelope.payload.as_mut().unwrap().value = request.encode_to_vec();
+    envelope
+}
+
+fn artifact_authority() -> WorkflowStorageExecutionAuthority {
+    WorkflowStorageExecutionAuthority {
+        installation_id: "installation-artifact-001".into(),
+        case_id: None,
+    }
+}
+
+fn published_decision_library(
+    application_support: &std::path::Path,
+) -> (
+    kaname_core::workflow_library::WorkflowLibraryStore,
+    PublishedWorkflowRevision,
+) {
+    publish_control_library(
+        application_support,
+        DECISION_WORKFLOW_ID,
+        DECISION_REVISION_ID,
+        "dev.kaname.decision-runtime",
+        decision_workflow_source(),
+        json!({"bundleVersion": 1, "schemas": []}),
+    )
+}
+
+fn decision_workflow_source() -> Value {
+    let ids = [
+        "018f7200-0002-7000-8000-000000000002",
+        DECISION_NODE_ID,
+        "018f7200-0004-7000-8000-000000000004",
+        "018f7200-0005-7000-8000-000000000005",
+        "018f7200-0006-7000-8000-000000000006",
+    ];
+    control_graph_source(
+        DECISION_WORKFLOW_ID,
+        "dev.kaname.decision-runtime",
+        &ids,
+        vec![
+            ("manual", "trigger.manual", json!({})),
+            (
+                "decide",
+                "control.decision",
+                json!({
+                    "when": {"compare": {
+                        "left": {"root": "input", "pointer": "/amount"},
+                        "operator": "greaterThan",
+                        "right": {"literal": {"type": "number", "value": 10}}
+                    }}
+                }),
+            ),
+            ("complete-matched", "terminal.complete", json!({})),
+            ("complete-other", "terminal.complete", json!({})),
+            ("fail", "terminal.fail", json!({})),
+        ],
+        vec![
+            ((0, "success"), (1, "input")),
+            ((1, "matched"), (2, "input")),
+            ((1, "not-matched"), (3, "input")),
+            ((1, "error"), (4, "input")),
+        ],
+    )
+}
+
+fn published_cancel_library(
+    application_support: &std::path::Path,
+) -> (
+    kaname_core::workflow_library::WorkflowLibraryStore,
+    PublishedWorkflowRevision,
+) {
+    publish_control_library(
+        application_support,
+        CANCEL_WORKFLOW_ID,
+        CANCEL_REVISION_ID,
+        "dev.kaname.cancel-runtime",
+        cancel_workflow_source(),
+        json!({"bundleVersion": 1, "schemas": []}),
+    )
+}
+
+fn cancel_workflow_source() -> Value {
+    let ids = [
+        "018f7300-0002-7000-8000-000000000002",
+        "018f7300-0003-7000-8000-000000000003",
+    ];
+    control_graph_source(
+        CANCEL_WORKFLOW_ID,
+        "dev.kaname.cancel-runtime",
+        &ids,
+        vec![
+            ("manual", "trigger.manual", json!({})),
+            (
+                "cancel",
+                "terminal.cancel",
+                json!({"reason": {"select": {"root": "input", "pointer": "/reason"}}}),
+            ),
+        ],
+        vec![((0, "success"), (1, "input"))],
+    )
+}
+
+fn published_match_all_library(
+    application_support: &std::path::Path,
+) -> (
+    kaname_core::workflow_library::WorkflowLibraryStore,
+    PublishedWorkflowRevision,
+) {
+    publish_control_library(
+        application_support,
+        MATCH_ALL_WORKFLOW_ID,
+        MATCH_ALL_REVISION_ID,
+        "dev.kaname.match-all-runtime",
+        match_all_workflow_source(),
+        json!({"bundleVersion": 1, "schemas": []}),
+    )
+}
+
+fn match_all_workflow_source() -> Value {
+    let ids = [
+        "018f7400-0002-7000-8000-000000000002",
+        MATCH_ALL_NODE_ID,
+        "018f7400-0004-7000-8000-000000000004",
+        "018f7400-0005-7000-8000-000000000005",
+        "018f7400-0006-7000-8000-000000000006",
+    ];
+    let small_port = format!("case-{MATCH_ALL_SMALL_CASE_ID}");
+    let large_port = format!("case-{MATCH_ALL_LARGE_CASE_ID}");
+    control_graph_source(
+        MATCH_ALL_WORKFLOW_ID,
+        "dev.kaname.match-all-runtime",
+        &ids,
+        vec![
+            ("manual", "trigger.manual", json!({})),
+            (
+                "classify",
+                "control.match",
+                json!({
+                    "value": {"root": "input", "pointer": ""},
+                    "hitPolicy": "all",
+                    "cases": [
+                        {
+                            "id": MATCH_ALL_SMALL_CASE_ID,
+                            "key": "positive",
+                            "label": "Positive",
+                            "when": {"compare": {
+                                "left": {"root": "value", "pointer": "/amount"},
+                                "operator": "greaterThan",
+                                "right": {"literal": {"type": "number", "value": 0}}
+                            }}
+                        },
+                        {
+                            "id": MATCH_ALL_LARGE_CASE_ID,
+                            "key": "large",
+                            "label": "Large",
+                            "when": {"compare": {
+                                "left": {"root": "value", "pointer": "/amount"},
+                                "operator": "greaterThan",
+                                "right": {"literal": {"type": "number", "value": 10}}
+                            }}
+                        }
+                    ]
+                }),
+            ),
+            ("complete-positive", "terminal.complete", json!({})),
+            ("complete-large", "terminal.complete", json!({})),
+            ("fail", "terminal.fail", json!({})),
+        ],
+        vec![
+            ((0, "success"), (1, "input")),
+            ((1, &small_port), (2, "input")),
+            ((1, &large_port), (3, "input")),
+            ((1, "error"), (4, "input")),
+        ],
+    )
+}
+
+fn published_named_join_library(
+    application_support: &std::path::Path,
+    required_branch: &str,
+) -> (
+    kaname_core::workflow_library::WorkflowLibraryStore,
+    PublishedWorkflowRevision,
+) {
+    publish_control_library(
+        application_support,
+        NAMED_JOIN_WORKFLOW_ID,
+        NAMED_JOIN_REVISION_ID,
+        "dev.kaname.named-join-runtime",
+        named_join_workflow_source(required_branch),
+        json!({
+            "bundleVersion": 1,
+            "schemas": [
+                {"id": "dev.kaname.named-join/pass-v1", "schema": {"type": "object"}},
+                {"id": "dev.kaname.named-join/right-v1", "schema": {
+                    "type": "object", "required": ["right"]
+                }}
+            ]
+        }),
+    )
+}
+
+fn named_join_workflow_source(required_branch: &str) -> Value {
+    let ids = [
+        "018f7500-0002-7000-8000-000000000002",
+        "018f7500-0003-7000-8000-000000000003",
+        "018f7500-0004-7000-8000-000000000004",
+        "018f7500-0005-7000-8000-000000000005",
+        "018f7500-0006-7000-8000-000000000006",
+        "018f7500-0007-7000-8000-000000000007",
+        "018f7500-0008-7000-8000-000000000008",
+        "018f7500-0009-7000-8000-000000000009",
+        "018f7500-0010-7000-8000-000000000010",
+    ];
+    let left_port = format!("case-{NAMED_JOIN_LEFT_BRANCH_ID}");
+    let right_port = format!("case-{NAMED_JOIN_RIGHT_BRANCH_ID}");
+    control_graph_source(
+        NAMED_JOIN_WORKFLOW_ID,
+        "dev.kaname.named-join-runtime",
+        &ids,
+        vec![
+            ("manual", "trigger.manual", json!({})),
+            (
+                "fork",
+                "control.parallel",
+                json!({"branches": [
+                    {"id": NAMED_JOIN_LEFT_BRANCH_ID, "key": "left", "label": "Left"},
+                    {"id": NAMED_JOIN_RIGHT_BRANCH_ID, "key": "right", "label": "Right"}
+                ]}),
+            ),
+            (
+                "left",
+                "data.validate",
+                json!({"schemaRef": "dev.kaname.named-join/pass-v1"}),
+            ),
+            (
+                "right",
+                "data.validate",
+                json!({"schemaRef": "dev.kaname.named-join/right-v1"}),
+            ),
+            (
+                "join",
+                "control.join",
+                json!({
+                    "policy": "named",
+                    "requiredBranches": [required_branch],
+                    "cancelRemaining": true
+                }),
+            ),
+            ("complete", "terminal.complete", json!({})),
+            ("fail-left", "terminal.fail", json!({})),
+            ("fail-right", "terminal.fail", json!({})),
+            ("fail-join", "terminal.fail", json!({})),
+        ],
+        vec![
+            ((0, "success"), (1, "input")),
+            ((1, &left_port), (2, "input")),
+            ((1, &right_port), (3, "input")),
+            ((2, "success"), (4, "branches")),
+            ((2, "error"), (6, "input")),
+            ((3, "success"), (4, "branches")),
+            ((3, "error"), (7, "input")),
+            ((4, "success"), (5, "input")),
+            ((4, "error"), (8, "input")),
+        ],
+    )
+}
+
+fn published_review_library(
+    application_support: &std::path::Path,
+) -> (
+    kaname_core::workflow_library::WorkflowLibraryStore,
+    PublishedWorkflowRevision,
+) {
+    publish_control_library(
+        application_support,
+        REVIEW_WORKFLOW_ID,
+        REVIEW_REVISION_ID,
+        "dev.kaname.review-runtime",
+        review_workflow_source(),
+        json!({"bundleVersion": 1, "schemas": []}),
+    )
+}
+
+fn review_workflow_source() -> Value {
+    let ids = [
+        "018f7600-0002-7000-8000-000000000002",
+        "018f7600-0003-7000-8000-000000000003",
+        "018f7600-0004-7000-8000-000000000004",
+        "018f7600-0005-7000-8000-000000000005",
+    ];
+    control_graph_source(
+        REVIEW_WORKFLOW_ID,
+        "dev.kaname.review-runtime",
+        &ids,
+        vec![
+            ("manual", "trigger.manual", json!({})),
+            (
+                "review",
+                "control.human-review",
+                json!({
+                    "proposal": {"object": {
+                        "amount": {"select": {"root": "input", "pointer": "/amount"}}
+                    }},
+                    "authorityPolicy": REVIEW_AUTHORITY_POLICY,
+                    "expirySeconds": 5,
+                    "staleCheck": "digest"
+                }),
+            ),
+            ("complete", "terminal.complete", json!({})),
+            ("fail", "terminal.fail", json!({})),
+        ],
+        vec![
+            ((0, "success"), (1, "input")),
+            ((1, "success"), (2, "input")),
+            ((1, "error"), (3, "input")),
+        ],
+    )
+}
+
+fn published_reconcile_library(
+    application_support: &std::path::Path,
+    status: &str,
+    checks: u64,
+) -> (
+    kaname_core::workflow_library::WorkflowLibraryStore,
+    PublishedWorkflowRevision,
+) {
+    publish_control_library(
+        application_support,
+        RECONCILE_WORKFLOW_ID,
+        RECONCILE_REVISION_ID,
+        "dev.kaname.reconcile-runtime",
+        reconcile_workflow_source(status, checks),
+        json!({
+            "bundleVersion": 1,
+            "schemas": [{
+                "id": "dev.kaname.reconcile/always-fails-v1",
+                "schema": {
+                    "type": "object",
+                    "required": ["required"],
+                    "properties": {"required": {"const": true}}
+                }
+            }]
+        }),
+    )
+}
+
+fn reconcile_workflow_source(status: &str, checks: u64) -> Value {
+    let ids = [
+        "018f7700-0002-7000-8000-000000000002",
+        "018f7700-0003-7000-8000-000000000003",
+        RECONCILE_NODE_ID,
+        "018f7700-0005-7000-8000-000000000005",
+        "018f7700-0006-7000-8000-000000000006",
+        "018f7700-0007-7000-8000-000000000007",
+        "018f7700-0008-7000-8000-000000000008",
+    ];
+    let mut source = control_graph_source(
+        RECONCILE_WORKFLOW_ID,
+        "dev.kaname.reconcile-runtime",
+        &ids,
+        vec![
+            ("manual", "trigger.manual", json!({})),
+            (
+                "validate",
+                "data.validate",
+                json!({"schemaRef": "dev.kaname.reconcile/always-fails-v1"}),
+            ),
+            (
+                "reconcile",
+                "control.reconcile",
+                json!({
+                    "effect": {"root": "input", "pointer": "/effectId"},
+                    "maximumChecks": 2
+                }),
+            ),
+            ("complete-validated", "terminal.complete", json!({})),
+            ("complete-reconciled", "terminal.complete", json!({})),
+            ("fail", "terminal.fail", json!({})),
+            ("cancel", "terminal.cancel", json!({})),
+        ],
+        vec![
+            ((0, "success"), (1, "input")),
+            ((1, "success"), (3, "input")),
+            ((1, "error"), (2, "unknown")),
+            ((2, "success"), (4, "input")),
+            ((2, "failure"), (5, "input")),
+            ((2, "still-unknown"), (6, "input")),
+        ],
+    );
+    source["graph"]["edges"][2]["mapping"] = json!({"object": {
+        "code": {"select": {"root": "input", "pointer": "/code"}},
+        "effectId": {"literal": {"type": "string", "value": "effect-001"}},
+        "status": {"literal": {"type": "string", "value": status}},
+        "checks": {"literal": {"type": "number", "value": checks}}
+    }});
+    source
+}
+
+fn published_artifact_library(
+    application_support: &std::path::Path,
+) -> (
+    kaname_core::workflow_library::WorkflowLibraryStore,
+    PublishedWorkflowRevision,
+) {
+    publish_control_library(
+        application_support,
+        ARTIFACT_WORKFLOW_ID,
+        ARTIFACT_REVISION_ID,
+        "dev.kaname.artifact-runtime",
+        artifact_workflow_source(),
+        json!({"bundleVersion": 1, "schemas": []}),
+    )
+}
+
+fn artifact_workflow_source() -> Value {
+    let ids = [
+        "018f7800-0002-7000-8000-000000000002",
+        ARTIFACT_NODE_ID,
+        "018f7800-0004-7000-8000-000000000004",
+        "018f7800-0005-7000-8000-000000000005",
+    ];
+    let mut source = control_graph_source(
+        ARTIFACT_WORKFLOW_ID,
+        "dev.kaname.artifact-runtime",
+        &ids,
+        vec![
+            ("manual", "trigger.manual", json!({})),
+            (
+                "register",
+                "data.register-artifact",
+                json!({"role": "receipt", "mediaTypes": ["text/plain", "application/pdf"]}),
+            ),
+            ("complete", "terminal.complete", json!({})),
+            ("fail", "terminal.fail", json!({})),
+        ],
+        vec![
+            ((0, "success"), (1, "input")),
+            ((1, "success"), (2, "input")),
+            ((1, "error"), (3, "input")),
+        ],
+    );
+    source["storage"] = json!({
+        "receipt": {
+            "key": "receipt", "scope": "job", "kind": "file",
+            "schemaRef": "dev.kaname.artifact/receipt-v1",
+            "maximumBytes": 65536, "classification": "private"
+        }
+    });
+    source
+}
