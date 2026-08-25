@@ -507,7 +507,8 @@ fn execution_availability(node: &Node) -> &'static str {
         "control.decision" if node.config.get("when").is_some_and(Value::is_object) => "executable",
         "control.reconcile"
             if value_reference_field(&node.config, "effect").is_some()
-                && integer_field(&node.config, "maximumChecks").is_some_and(|checks| checks > 0) =>
+                && integer_field(&node.config, "maximumChecks")
+                    .is_some_and(|checks| checks > 0) =>
         {
             "executable"
         }
@@ -517,7 +518,8 @@ fn execution_availability(node: &Node) -> &'static str {
                 .get("proposal")
                 .is_some_and(crate::workflow_expression::executable_mapping)
                 && string_field(&node.config, "authorityPolicy").is_some()
-                && integer_field(&node.config, "expirySeconds").is_some_and(|seconds| seconds > 0)
+                && integer_field(&node.config, "expirySeconds")
+                    .is_some_and(|seconds| seconds > 0)
                 && matches!(
                     string_field(&node.config, "staleCheck"),
                     Some("revision" | "digest")

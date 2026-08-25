@@ -19,13 +19,13 @@ use crate::{
         WorkflowCapabilityDefinition, WorkflowCapabilityHost, WorkflowCapabilityHostResult,
         WorkflowCapabilityInvocation, WorkflowCapabilityLog, WorkflowCapabilityValue,
     },
+    workflow_expression::{self, ExpressionRoots},
     workflow_library::{WorkflowLibraryError, WorkflowLibraryStore},
     workflow_llm::{
         UnavailableWorkflowLlmProvider, WorkflowLlmInvocation, WorkflowLlmProvider,
         WorkflowLlmProviderDefinition, WorkflowLlmProviderResult, WorkflowLlmProviderToolResult,
         WorkflowLlmProviderTrace,
     },
-    workflow_expression::{self, ExpressionRoots},
     workflow_match::{self, EvaluationOutcome, MatchConfig, MatchRoots, TraceOutcome},
     workflow_retention::WorkflowRunRetentionPolicy,
     workflow_runtime::{self, WorkflowRuntimeCommand, WorkflowRuntimeEvent},
@@ -1085,7 +1085,9 @@ fn load_execution_package(
         }
         if node.node_type == "data.register-artifact" {
             let config: RegisterArtifactConfig = serde_json::from_value(node.config.clone())
-                .map_err(|_| WorkflowExecutionError::Integrity("register_artifact_config".into()))?;
+                .map_err(|_| {
+                    WorkflowExecutionError::Integrity("register_artifact_config".into())
+                })?;
             if config.role.is_empty()
                 || config.media_types.is_empty()
                 || config.media_types.len() > 32
@@ -1107,7 +1109,9 @@ fn load_execution_package(
                 .as_ref()
                 .is_some_and(|reason| !workflow_expression::executable_mapping(reason))
             {
-                return Err(WorkflowExecutionError::Unsupported("cancel_contract".into()));
+                return Err(WorkflowExecutionError::Unsupported(
+                    "cancel_contract".into(),
+                ));
             }
         }
         if node.node_type == "control.parallel" {
@@ -2478,10 +2482,7 @@ fn apply_mapping(
     value: &v1::WorkflowValueReference,
     mapped_value_id: &str,
 ) -> Result<
-    std::result::Result<
-        v1::WorkflowValueReference,
-        workflow_expression::ExpressionEvaluationError,
-    >,
+    std::result::Result<v1::WorkflowValueReference, workflow_expression::ExpressionEvaluationError>,
 > {
     if mapping == &json!({"whole": true}) {
         return Ok(Ok(value.clone()));
@@ -2556,7 +2557,12 @@ fn mapped_node_inputs<'a>(
                     &value,
                     &stable_id(
                         "value",
-                        &[&request.run_id, &payload.edge_id, &payload.emission_id, "mapped"],
+                        &[
+                            &request.run_id,
+                            &payload.edge_id,
+                            &payload.emission_id,
+                            "mapped",
+                        ],
                     ),
                 )? {
                     Ok(mapped) => mapped,
@@ -2579,8 +2585,10 @@ fn mapped_node_inputs<'a>(
     if let Some(mapping) = node_config_mapping(node)
         && mapping != &json!({"whole": true})
         && let Some((_, input)) = inputs.last()
-        && let Err(error) =
-            workflow_expression::evaluate(mapping, &ExpressionRoots::with_input(inline_json(input)?))
+        && let Err(error) = workflow_expression::evaluate(
+            mapping,
+            &ExpressionRoots::with_input(inline_json(input)?),
+        )
     {
         let failure = mapping_failure_value(request, &node.id, "config", &error)?;
         return Ok((inputs, Some((error.code, failure))));
@@ -3744,7 +3752,12 @@ fn human_review_controller_event_sequence(
         &input,
         &stable_id(
             "value",
-            &[&request.run_id, &node.id, &attempt.started.attempt_id, "proposal"],
+            &[
+                &request.run_id,
+                &node.id,
+                &attempt.started.attempt_id,
+                "proposal",
+            ],
         ),
     )?
     .map_err(|_| WorkflowExecutionError::Integrity("review_proposal_mapping".into()))?;
@@ -3918,7 +3931,7 @@ fn human_review_controller_event_sequence(
         v1::WorkflowWaitDecision::Expired,
         String::new(),
         Some(output),
-        "review.expired".into(),
+        "wait.expired".into(),
         &recorded.subscribed_event_id,
     )])
 }
@@ -3996,12 +4009,7 @@ fn review_outcome(
             "signalledProposalDigest": signalled_digest
         }),
     )?;
-    Ok((
-        "error",
-        v1::WorkflowAttemptOutcome::Failed,
-        code,
-        value,
-    ))
+    Ok(("error", v1::WorkflowAttemptOutcome::Failed, code, value))
 }
 
 fn classify_retry_decision(
@@ -4244,7 +4252,11 @@ fn pending_subflow_event_sequence(
             &edge_input,
             &stable_id(
                 "value",
-                &[&request.run_id, &attempt.started.attempt_id, "subflow-input"],
+                &[
+                    &request.run_id,
+                    &attempt.started.attempt_id,
+                    "subflow-input",
+                ],
             ),
         )?
         .map_err(|_| WorkflowExecutionError::Integrity("subflow_input_mapping".into()))?;
@@ -4666,7 +4678,11 @@ fn pending_capability_event_sequence(
         &edge_input,
         &stable_id(
             "value",
-            &[&request.run_id, &attempt.started.attempt_id, "capability-input"],
+            &[
+                &request.run_id,
+                &attempt.started.attempt_id,
+                "capability-input",
+            ],
         ),
     )?
     .map_err(|_| WorkflowExecutionError::Integrity("capability_input_mapping".into()))?;
@@ -6574,7 +6590,10 @@ fn execute_node(
             match apply_mapping(
                 mapping,
                 input,
-                &stable_id("value", &[&request.run_id, &node.id, attempt_id, "map-output"]),
+                &stable_id(
+                    "value",
+                    &[&request.run_id, &node.id, attempt_id, "map-output"],
+                ),
             )? {
                 Ok(value) => Ok(success_output("success", value)),
                 Err(error) => {
@@ -7080,11 +7099,7 @@ fn execute_reconcile_node(
     };
     if effect_id.is_empty() {
         let value = summary("reconcile.effect-missing", checks)?;
-        return Ok(failure_output(
-            "failure",
-            "reconcile.effect-missing",
-            value,
-        ));
+        return Ok(failure_output("failure", "reconcile.effect-missing", value));
     }
     match status {
         "reconciled_applied" => Ok(success_output(
@@ -7161,6 +7176,16 @@ fn execute_register_artifact_node(
         return Ok(failure_output("error", code, value));
     }
     let content = content.unwrap();
+    let mut stored = artifact;
+    let envelope = stored
+        .as_object_mut()
+        .ok_or_else(|| WorkflowExecutionError::Integrity("artifact_envelope".into()))?;
+    envelope.insert("role".into(), json!(config.role));
+    envelope.insert("byteCount".into(), json!(content.len()));
+    envelope.insert(
+        "contentSha256".into(),
+        json!(hex::encode(Sha256::digest(&content))),
+    );
     let declaration = storage_declaration(package, "job", &config.role)?;
     let (access, namespace) = storage_access(request, "job", job_run_id)?;
     storage.ensure_namespace_capacity(
@@ -7186,25 +7211,19 @@ fn execute_register_artifact_node(
         classification: declaration.classification.clone(),
         purpose: "artifact".into(),
         value: WorkflowStorageValueInput::InlineCanonicalJson {
-            bytes: canonical_json_bytes(&artifact)?,
+            bytes: canonical_json_bytes(&stored)?,
         },
         created_by_attempt_id: attempt_id.into(),
         created_at_unix_millis: occurred_at_unix_millis,
     })?;
-    let mut value = value_from_json(
-        &stable_id("value", &[&request.run_id, &node.id, "artifact"]),
-        &json!({
-            "role": config.role,
-            "mediaType": media_type,
-            "handleId": receipt.handle.handle_id,
-            "versionId": receipt.handle.version_id,
-            "revision": receipt.handle.revision,
-            "byteCount": content.len(),
-            "contentSha256": hex::encode(Sha256::digest(&content))
-        }),
-    )?;
-    value.storage = Some(storage_metadata(&receipt.handle, "registered"));
-    Ok(success_output("success", value))
+    Ok(success_output(
+        "success",
+        storage_handle_value(
+            &stable_id("value", &[&request.run_id, &node.id, "artifact"]),
+            &receipt.handle,
+            "written",
+        ),
+    ))
 }
 
 /// Fixture artifacts arrive inline as UTF-8 text or Base64 content.
@@ -8608,28 +8627,23 @@ fn completed_run_outcome(state: &RecordedRun) -> Result<CompletedRunOutcome> {
                         v1::WorkflowExecutionTokenOutcome::try_from(settled.outcome),
                         Ok(v1::WorkflowExecutionTokenOutcome::Completed)
                             | Ok(v1::WorkflowExecutionTokenOutcome::Failed)
-                    ) || (settled.outcome
-                        == v1::WorkflowExecutionTokenOutcome::Cancelled as i32
+                    ) || (settled.outcome == v1::WorkflowExecutionTokenOutcome::Cancelled as i32
                         && !settled.terminal_node_id.is_empty())
                 })
         })
         .collect::<Vec<_>>();
     terminal.sort_by_key(|token| token.created_store_position);
     let outcome_of = |token: &&RecordedExecutionToken| {
-        token
-            .settled
-            .as_ref()
-            .map_or(0, |settled| settled.outcome)
+        token.settled.as_ref().map_or(0, |settled| settled.outcome)
     };
     let selected = terminal
         .iter()
         .rev()
         .find(|token| outcome_of(token) == v1::WorkflowExecutionTokenOutcome::Failed as i32)
         .or_else(|| {
-            terminal
-                .iter()
-                .rev()
-                .find(|token| outcome_of(token) == v1::WorkflowExecutionTokenOutcome::Cancelled as i32)
+            terminal.iter().rev().find(|token| {
+                outcome_of(token) == v1::WorkflowExecutionTokenOutcome::Cancelled as i32
+            })
         })
         .copied()
         .or_else(|| terminal.last().copied())
