@@ -1330,10 +1330,18 @@ public extension DesktopAppModel {
                 state: .ready
             ))
         }
-        for unsupported in [DesktopWorkflowTriggerKind.schedule, .calendar]
-            where definition.triggerKinds.contains(unsupported) {
+        if definition.triggerKinds.contains(.schedule) {
             checks.append(.init(
-                id: "trigger:\(unsupported.rawValue)", title: "\(unsupported.label) trigger",
+                id: "trigger:schedule",
+                title: "Schedule trigger",
+                detail: "The durable executor admits trigger.schedule with skip/run-once misfire policy. Candidate host dispatch and scheduler cursor wiring are still required before unattended production runs.",
+                state: .attention
+            ))
+        }
+        if definition.triggerKinds.contains(.calendar) {
+            checks.append(.init(
+                id: "trigger:calendar",
+                title: "Calendar trigger",
                 detail: "This trigger is declared by the package but is not connected to the production workflow dispatcher.",
                 state: .blocked
             ))
@@ -1367,6 +1375,36 @@ public extension DesktopAppModel {
             id: "recovery",
             title: "Crash-safe execution",
             detail: "Durable leases recover interrupted idempotent work and stop non-idempotent work for review.",
+            state: .ready
+        ))
+        let migration = snapshot.operations.workflows.migrationAssessments
+            .first(where: { $0.workflowID == workflowID })
+        let kimakiState: DesktopWorkflowMigrationReadinessState
+        let kimakiDetail: String
+        switch migration?.stage {
+        case .legacyRetired?:
+            kimakiState = .ready
+            kimakiDetail = "Migration stage is legacy retired. Confirm the Kimaki path for this flow stayed idle for one business cycle before discarding rollback."
+        case .standingAuthority?:
+            kimakiState = .attention
+            kimakiDetail = "Standing authority is active. Keep the Kimaki LaunchAgent and Discord path available until legacyRetired."
+        case .none:
+            kimakiState = .attention
+            kimakiDetail = "No migration assessment yet. Keep Kimaki as the production control plane until observe→shadow→approved-effect completes on Candidate. See Docs/WorkflowCandidateEnablement.md."
+        default:
+            kimakiState = .attention
+            kimakiDetail = "Migration stage is \(migration?.stage.label ?? "unknown"). Keep Kimaki as rollback until legacyRetired. See Docs/WorkflowCandidateEnablement.md."
+        }
+        checks.append(.init(
+            id: "kimaki-rollback",
+            title: "Kimaki rollback retained",
+            detail: kimakiDetail,
+            state: kimakiState
+        ))
+        checks.append(.init(
+            id: "durable-v2",
+            title: "Durable Workflow v2 executability",
+            detail: "control.human-review, trigger.event/schedule, effect.connector, and compute hosts are executable on the Rust path when configs are valid. Automations Run history reads the durable projection.",
             state: .ready
         ))
         return DesktopWorkflowMigrationReadinessReport(workflowID: workflowID, checks: checks)

@@ -121,7 +121,10 @@ public struct DesktopWorkflowNodeRegistry: Sendable {
         return resolved
     }
 
-    public static func builtInSchemaOnlyV1() throws -> Self {
+    /// Built-in v1 registry aligned with the Rust durable executor allowlist.
+    /// Individual graphs still need valid node configs before the compiler
+    /// marks a concrete revision executable.
+    public static func builtInV1() throws -> Self {
         let configurationDefinitions = [
             "trigger.manual": "manual", "trigger.event": "event", "trigger.schedule": "schedule",
             "data.map": "map", "data.validate": "validate", "data.case-context": "empty",
@@ -140,13 +143,19 @@ public struct DesktopWorkflowNodeRegistry: Sendable {
                 type: type,
                 typeVersion: 1,
                 configurationSchemaRef: "node-config.schema.json#/$defs/\(definition)",
-                availability: .schemaOnly,
+                availability: .executable,
                 staticPorts: profile.staticPorts,
                 dynamicPortRule: profile.dynamicRule,
                 migrations: []
             )
         }
         return try Self(registrations: records)
+    }
+
+    /// Historical alias; prefer ``builtInV1()``. Kept so older call sites and
+    /// tests that still name the schema-only era continue to compile.
+    public static func builtInSchemaOnlyV1() throws -> Self {
+        try builtInV1()
     }
 
     private struct PortProfile {

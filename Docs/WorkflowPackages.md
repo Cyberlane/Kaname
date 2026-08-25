@@ -143,4 +143,6 @@ Structured model steps accept a generic provider request and schema. Kaname curr
 
 Keep proprietary prompts, matching rules, schemas, private knowledge, paths, and adapters outside this repository. Migrate an existing workflow through observe-only, shadow, draft-only, approved-effect, and finally narrowly scoped standing-authority stages. The package boundary lets Kaname provide the generic infrastructure while private installations remain opinionated.
 
+The Candidate enablement checklist for gmail-assistant (WFP-115) and SimplyKay (WFP-116), including the Kimaki rollback rule, lives in [WorkflowCandidateEnablement](WorkflowCandidateEnablement.md). Do not retire a Kimaki path until that checklist's comfort bar is met on Candidate.
+
 Use a private installation export to move or preserve one configured workflow. Use Kaname's whole-app backup for disaster recovery of one coherent generation; these formats are not interchangeable.

@@ -14,10 +14,13 @@ struct DesktopWorkflowNodeRegistryTests {
         #expect(registry.registrations.count == 26)
         #expect(Set(registry.registrations.map(\.type)) == schemaTypes)
         #expect(registry.registrations.allSatisfy {
-            $0.typeVersion == 1 && $0.availability == .schemaOnly
+            $0.typeVersion == 1 && $0.availability == .executable
                 && $0.configurationSchemaRef.hasPrefix("node-config.schema.json#/$defs/")
                 && $0.migrations.isEmpty
         })
+        let builtIn = try DesktopWorkflowNodeRegistry.builtInV1()
+        #expect(builtIn.registrations.map(\.type) == registry.registrations.map(\.type))
+        #expect(builtIn.registrations.allSatisfy { $0.availability == .executable })
         #expect(throws: DesktopWorkflowNodeRegistryError.self) {
             _ = try registry.registration(type: "control.match", version: 2)
         }
