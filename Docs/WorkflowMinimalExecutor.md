@@ -97,3 +97,53 @@ Nothing here grants provider, account, credential, connector, or effect
 authority. Scoped storage, capabilities, and models reach the executor only
 through a host the caller supplies explicitly, and a trigger contributes an
 identity and a payload, never an authority.
+
+## Injectable capability and model hosts
+
+`compute.capability` and `compute.llm` reach the outside world only through a
+host passed to `execute_with_capabilities`, `execute_with_llm`, or
+`execute_with_storage_capabilities_and_llm`. Each family ships three
+implementations, and the executor treats all three identically because
+availability is decided by registration rather than by the host's kind:
+
+- the unavailable host registers nothing, so a graph that needs it is rejected
+  before a run token exists;
+- the deterministic host replays a registered plan, which is how fixtures prove
+  journal receipts without a live model or a real sandbox; and
+- the process host forwards an already compiled invocation to an external
+  command named by `KANAME_WORKFLOW_LLM_COMMAND` or
+  `KANAME_WORKFLOW_CAPABILITY_COMMAND`. An absent variable, or a command that
+  cannot describe itself, leaves the host indistinguishable from the unavailable
+  one.
+
+A process host speaks one bounded canonical JSON request on standard input and
+reads one bounded JSON response from standard output. It is started with a
+cleared environment and a discarded standard error, and a child that outlives
+its registered deadline is killed, so no credential, endpoint, or host path
+crosses the boundary in either direction. `command describe` runs once at
+construction; `command invoke` runs at most once per invocation identity,
+because the stable invocation ID is the idempotency key that replay reuses.
+
+A described capability registers only when its package digest is a lowercase
+64-character SHA-256, and only when that digest appears in
+`KANAME_WORKFLOW_CAPABILITY_PACKAGE_DIGESTS` if that allowlist is set. A wrong
+or unpinned build therefore cannot claim a trusted capability identity. Every
+response, from any host, still crosses the executor's redaction, schema,
+trace-bound, and tool-budget checks before it becomes durable evidence.
+
+## Agent-grade prompt context
+
+A `compute.llm` node inherits the artifact references reachable from the inputs
+admitted on this attempt and from its case episode. Each one enters the prompt
+as an `attachments` context group entry carrying the opaque storage handle, the
+content type, the content digest, and the byte count — never a host path and
+never the artifact bytes. A prompt can therefore name an artifact that a model
+may fetch through a declared tool, while the journal records only the digest.
+
+`maximumToolCalls` bounds one attempt's tool loop. It is optional, so a revision
+published before the field existed keeps executing against the global runtime
+bound of 128. When present it must be between 1 and 128 and the node must
+declare at least one tool, or the graph is rejected as
+`llm_execution_contract` before an attempt starts. A trace that reports more
+tool calls than the node's recorded budget settles the attempt as
+`llm.tool-call-budget-exceeded` and admits no output.

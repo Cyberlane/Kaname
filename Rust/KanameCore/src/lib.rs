@@ -21,6 +21,7 @@ pub mod workflow_effect_authority;
 pub mod workflow_effect_connector;
 pub mod workflow_executor;
 pub mod workflow_expression;
+pub(crate) mod workflow_host_process;
 pub mod workflow_import;
 pub mod workflow_library;
 pub mod workflow_llm;

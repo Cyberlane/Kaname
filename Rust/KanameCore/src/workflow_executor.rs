@@ -376,10 +376,24 @@ struct LlmConfig {
     temperature_milli: u32,
     maximum_context_bytes: u64,
     maximum_output_tokens: u32,
+    /// The per-attempt tool-call budget. An absent budget falls back to the
+    /// global runtime bound, so a revision published before the field existed
+    /// keeps executing unchanged.
+    #[serde(default)]
+    maximum_tool_calls: Option<u32>,
 }
 
 fn default_job_conversation_scope() -> String {
     "job".into()
+}
+
+/// The admitted per-attempt tool-call budget for one `compute.llm` node.
+fn llm_tool_call_budget(config: &LlmConfig) -> usize {
+    config
+        .maximum_tool_calls
+        .map_or(MAXIMUM_LLM_TOOL_CALLS, |budget| {
+            (budget as usize).min(MAXIMUM_LLM_TOOL_CALLS)
+        })
 }
 
 struct ExecutionPackage {
@@ -1719,6 +1733,10 @@ fn validate_llm_provider(
             || !matches!(config.conversation_scope.as_str(), "job" | "case")
             || !workflow_expression::executable_mapping(&config.prompt)
             || config.instructions.is_empty()
+            || config
+                .maximum_tool_calls
+                .is_some_and(|budget| budget == 0 || budget as usize > MAXIMUM_LLM_TOOL_CALLS)
+            || (config.tools.is_empty() && config.maximum_tool_calls.is_some())
         {
             return Err(WorkflowExecutionError::Unsupported(
                 "llm_execution_contract".into(),
@@ -5727,12 +5745,17 @@ fn pending_llm_event_sequence(
         .get(&config.output_schema_ref)
         .ok_or_else(|| WorkflowExecutionError::Unsupported("llm_output_schema_missing".into()))?;
     let tool_definitions = validated_llm_tool_definitions(package, &config, &definition)?;
+    let admitted_inputs = inputs
+        .iter()
+        .map(|(_, value)| value.clone())
+        .collect::<Vec<_>>();
     let compiled = compile_llm_context(
         request,
         state.episode.as_ref(),
         attempt,
         node,
         &input,
+        &admitted_inputs,
         &config,
         &definition,
         output_schema,
@@ -5811,6 +5834,7 @@ fn pending_llm_event_sequence(
         recorded,
         output_schema,
         &definition,
+        llm_tool_call_budget(&config),
         result,
     )?]))
 }
@@ -5867,6 +5891,7 @@ fn compile_llm_context(
     attempt: &RecordedAttempt,
     node: &CompiledNode,
     input: &v1::WorkflowValueReference,
+    admitted_inputs: &[v1::WorkflowValueReference],
     config: &LlmConfig,
     definition: &WorkflowLlmProviderDefinition,
     output_schema: &Value,
@@ -5894,6 +5919,7 @@ fn compile_llm_context(
         json!({
             "policy": "Use only the recorded workflow context. Do not reveal hidden reasoning or request credentials, host paths, or undeclared external effects.",
             "outputSchemaDigest": schema_digest(output_schema)?,
+            "maximumToolCalls": llm_tool_call_budget(config),
         }),
         Vec::new(),
         &mut reasons,
@@ -5966,7 +5992,7 @@ fn compile_llm_context(
         }
     }
 
-    let attachments = llm_attachment_handles(input, episode);
+    let attachments = llm_attachment_handles(admitted_inputs, episode);
     if !attachments.is_empty() {
         let attachment_summary = attachments
             .iter()
@@ -5975,6 +6001,7 @@ fn compile_llm_context(
                     "handleId": attachment.handle_id,
                     "role": attachment.role,
                     "valueId": attachment.value.as_ref().map(|value| value.value_id.clone()).unwrap_or_default(),
+                    "contentType": attachment.value.as_ref().map(|value| value.content_type.clone()).unwrap_or_default(),
                     "sha256": attachment.value.as_ref().map(|value| value.sha256.clone()).unwrap_or_default(),
                     "byteCount": attachment.value.as_ref().map(|value| value.byte_count).unwrap_or_default(),
                 })
@@ -6214,11 +6241,18 @@ fn sanitize_llm_label(value: &str) -> String {
     }
 }
 
+/// Collects the artifact references reachable from this attempt's admitted
+/// inputs and its case episode. Each handle keeps its opaque identity and its
+/// content digest, so a prompt can name an artifact without the model, the
+/// provider, or the journal ever seeing a host path or the artifact bytes.
 fn llm_attachment_handles(
-    input: &v1::WorkflowValueReference,
+    admitted_inputs: &[v1::WorkflowValueReference],
     episode: Option<&v1::WorkflowCaseEpisodeStarted>,
 ) -> Vec<v1::WorkflowCapabilityArtifactHandle> {
-    let mut values = artifact_handles_from_value(input, "current-input");
+    let mut values = admitted_inputs
+        .iter()
+        .flat_map(|input| artifact_handles_from_value(input, "current-input"))
+        .collect::<Vec<_>>();
     if let Some(episode) = episode {
         for binding in &episode.inputs {
             if let Some(value) = binding.value.as_ref() {
@@ -6305,12 +6339,14 @@ fn canonical_sha256(value: &Value) -> Result<String> {
         .map_err(|_| WorkflowExecutionError::Encoding("llm_context"))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn llm_provider_result_event(
     request: &v1::RequestWorkflowRun,
     run_token_id: &str,
     recorded: &RecordedLlmAttempt,
     output_schema: &Value,
     definition: &WorkflowLlmProviderDefinition,
+    tool_call_budget: usize,
     result: WorkflowLlmProviderResult,
 ) -> Result<v1::EventEnvelope> {
     let invocation_id = recorded.started.invocation_id.as_str();
@@ -6322,6 +6358,19 @@ fn llm_provider_result_event(
             provider_run_reference,
             trace,
         } if elapsed_milliseconds <= definition.timeout_milliseconds => {
+            if trace.tool_calls.len() > tool_call_budget {
+                return llm_failure_result_event(
+                    request,
+                    run_token_id,
+                    recorded,
+                    v1::WorkflowLlmAttemptOutcome::MalformedResult,
+                    "llm.tool-call-budget-exceeded",
+                    "The model made more tool calls than this node's recorded budget allows.",
+                    elapsed_milliseconds,
+                    receipt_id,
+                    AdmittedLlmTrace::default(),
+                );
+            }
             if llm_value_contains_private_marker(&output) {
                 return llm_failure_result_event(
                     request,
@@ -6339,6 +6388,7 @@ fn llm_provider_result_event(
                 request,
                 recorded,
                 definition,
+                tool_call_budget,
                 &receipt_id,
                 &provider_run_reference,
                 trace,
@@ -6462,8 +6512,16 @@ fn llm_provider_result_event(
             &summary,
             elapsed_milliseconds,
             receipt_id.clone(),
-            admit_llm_trace(request, recorded, definition, &receipt_id, "", trace)
-                .unwrap_or_default(),
+            admit_llm_trace(
+                request,
+                recorded,
+                definition,
+                tool_call_budget,
+                &receipt_id,
+                "",
+                trace,
+            )
+            .unwrap_or_default(),
         ),
         WorkflowLlmProviderResult::Crashed {
             summary,
@@ -6479,21 +6537,31 @@ fn llm_provider_result_event(
             &summary,
             elapsed_milliseconds,
             receipt_id.clone(),
-            admit_llm_trace(request, recorded, definition, &receipt_id, "", trace)
-                .unwrap_or_default(),
+            admit_llm_trace(
+                request,
+                recorded,
+                definition,
+                tool_call_budget,
+                &receipt_id,
+                "",
+                trace,
+            )
+            .unwrap_or_default(),
         ),
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn admit_llm_trace(
     request: &v1::RequestWorkflowRun,
     recorded: &RecordedLlmAttempt,
     definition: &WorkflowLlmProviderDefinition,
+    tool_call_budget: usize,
     receipt_id: &str,
     provider_run_reference: &str,
     trace: WorkflowLlmProviderTrace,
 ) -> Result<AdmittedLlmTrace> {
-    if trace.tool_calls.len() > MAXIMUM_LLM_TOOL_CALLS
+    if trace.tool_calls.len() > tool_call_budget.min(MAXIMUM_LLM_TOOL_CALLS)
         || trace.response_messages.len() > MAXIMUM_LLM_RESPONSE_MESSAGES
         || llm_value_contains_private_marker(&trace.receipt_metadata)
     {
