@@ -1,4 +1,5 @@
 import KanameDesktop
+import KanameLocalCore
 import KanameProtocol
 import KanamePrototypeUI
 import KanameWorkflowHost
@@ -131,7 +132,7 @@ struct AutomationWorkflowProductView: View {
                 case .builder:
                     builderPage
                 case .runs:
-                    AutomationLiveRunsView(model: model, selectedWorkflowID: selectedWorkflowID)
+                    AutomationLiveRunsView()
                 case .components:
                     AutomationComponentsView(
                         model: model,
@@ -278,177 +279,40 @@ struct AutomationWorkflowProductView: View {
     }
 }
 
+/// Run history reads the durable Rust workflow projection and nothing else. The
+/// in-memory desktop snapshot is a design-time preview of workflow structure,
+/// not run evidence, so it is deliberately not offered as a second timeline
+/// here: a run either has durable evidence or its absence is stated outright.
 private struct AutomationLiveRunsView: View {
-    @ObservedObject var model: DesktopAppModel
-    let selectedWorkflowID: String?
-    @State private var selectedRunID: String?
-    @State private var search = ""
-
-    private var runs: [DesktopWorkflowRunRecord] {
-        let revisionsByID = Dictionary(uniqueKeysWithValues: model.snapshot.operations.workflows.revisions.map { ($0.id, $0) })
-        return model.snapshot.operations.workflows.runs
-            .filter { run in
-                let workflowMatches = selectedWorkflowID == nil
-                    || revisionsByID[run.workflowRevisionID]?.workflowID == selectedWorkflowID
-                let searchMatches = search.isEmpty
-                    || run.id.localizedCaseInsensitiveContains(search)
-                    || (revisionsByID[run.workflowRevisionID]?.workflowID.localizedCaseInsensitiveContains(search) ?? false)
-                return workflowMatches && searchMatches
-            }
-            .sorted { ($0.startedAtUnixMillis ?? 0, $0.id) > ($1.startedAtUnixMillis ?? 0, $1.id) }
-    }
-
-    private var selectedRun: DesktopWorkflowRunRecord? {
-        runs.first { $0.id == selectedRunID } ?? runs.first
-    }
+    private let runner = LocalCoreRunner.bundled()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack {
+            HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Run history").font(.title3.weight(.bold))
-                    Text("Every run stays pinned to its exact workflow revision and durable evidence.")
+                    Text("Every run below is replayed from the durable Rust projection and stays pinned to the exact workflow revision it ran.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
-                TextField("Search runs", text: $search)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 240)
+                Label("Durable projection", systemImage: "cylinder.split.1x2")
+                    .font(.caption).foregroundStyle(.secondary)
                 Label("Read-only evidence", systemImage: "lock.fill")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
-            if runs.isEmpty {
-                EmptyPanel(
-                    symbol: "clock.arrow.circlepath",
-                    title: selectedWorkflowID == nil ? "No workflow runs" : "No runs for this workflow",
-                    detail: "Runs will appear here with their exact graph, attempts, transitions, artifacts, and reconciliation evidence."
-                )
+            if let runner {
+                ScrollView { DesktopDurableWorkflowRunsView(runner: runner) }
             } else {
-                HSplitView {
-                    runList.frame(minWidth: 250, idealWidth: 300, maxWidth: 360)
-                    runDetail.frame(minWidth: 650, maxWidth: .infinity)
-                }
+                EmptyPanel(
+                    symbol: "externaldrive.badge.questionmark",
+                    title: "Durable run history unavailable",
+                    detail: "The local core service that owns the durable workflow projection is not reachable, so no run evidence can be read. Nothing is shown in its place, because the design-time workflow snapshot is not a record of what ran."
+                )
             }
         }
         .padding(20)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .onAppear { if selectedRunID == nil { selectedRunID = runs.first?.id } }
-        .onChange(of: runs.map(\.id)) { ids in
-            if selectedRunID == nil || !ids.contains(selectedRunID ?? "") { selectedRunID = ids.first }
-        }
-    }
-
-    private var runList: some View {
-        List(runs, selection: $selectedRunID) { run in
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text(workflowName(for: run)).font(.subheadline.weight(.semibold)).lineLimit(1)
-                    Spacer()
-                    Text(run.state.label).font(.caption2.weight(.bold)).foregroundStyle(runTint(run.state))
-                }
-                Text("\(run.id) · v\(revision(for: run)?.version ?? "Unknown")")
-                    .font(.system(.caption2, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1)
-                Text(run.startedAtUnixMillis.map(Self.dateLabel) ?? "Not started")
-                    .font(.caption2).foregroundStyle(.secondary)
-            }
-            .tag(run.id)
-            .padding(.vertical, 4)
-        }
-        .listStyle(.inset)
-    }
-
-    @ViewBuilder
-    private var runDetail: some View {
-        if let run = selectedRun, let revision = revision(for: run) {
-            let attempts = model.snapshot.operations.workflows.stepAttempts.filter { $0.runID == run.id }
-            let transitions = model.snapshot.operations.workflows.transitionRecords.filter { $0.runID == run.id }
-            let graph = AutomationCanvasGraph.live(revision: revision).withExecution(
-                run: run, attempts: attempts, transitions: transitions
-            )
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(workflowName(for: run)).font(.headline)
-                            Text("Run \(run.id) · immutable revision \(revision.version)")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Label(run.state.label, systemImage: runSymbol(run.state))
-                            .foregroundStyle(runTint(run.state))
-                    }
-                    HStack(spacing: 14) {
-                        Label("Graph", systemImage: "point.3.connected.trianglepath.dotted")
-                        Label("\(attempts.count) attempts", systemImage: "list.number")
-                        Label("\(transitions.count) checkpoints", systemImage: "arrow.left.arrow.right")
-                        Label("Trace \(run.traceID)", systemImage: "waveform.path.ecg")
-                    }
-                    .font(.caption).foregroundStyle(.secondary)
-                    AutomationRunGraph(graph: graph, active: run.state == .running || run.state == .waiting)
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Node evidence").font(.headline)
-                        if attempts.isEmpty {
-                            Text("No node attempt has been recorded for this run.")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                        ForEach(attempts) { attempt in
-                            HStack(alignment: .top, spacing: 10) {
-                                Image(systemName: runSymbol(attempt.state)).foregroundStyle(runTint(attempt.state))
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text("\(attempt.stepID) · attempt \(attempt.attempt)").font(.caption.weight(.semibold))
-                                    Text("Input \(attempt.inputDigest.prefix(12)) · Output \(attempt.outputDigest?.prefix(12) ?? "pending")")
-                                        .font(.system(.caption2, design: .monospaced)).foregroundStyle(.secondary)
-                                    if let error = attempt.errorSummary { Text(error).font(.caption2).foregroundStyle(Nord.auroraRed) }
-                                }
-                                Spacer()
-                                Text(attempt.state.label).font(.caption2).foregroundStyle(runTint(attempt.state))
-                            }
-                            .padding(10)
-                            .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 10))
-                        }
-                    }
-                }
-                .padding(2)
-            }
-        }
-    }
-
-    private func revision(for run: DesktopWorkflowRunRecord) -> DesktopWorkflowRevisionRecord? {
-        model.snapshot.operations.workflows.revisions.first { $0.id == run.workflowRevisionID }
-    }
-
-    private func workflowName(for run: DesktopWorkflowRunRecord) -> String {
-        guard let workflowID = revision(for: run)?.workflowID else { return "Unknown workflow" }
-        return model.workflowDefinitions.first { $0.id == workflowID }?.name ?? workflowID
-    }
-
-    private static func dateLabel(_ milliseconds: Int64) -> String {
-        Date(timeIntervalSince1970: Double(milliseconds) / 1_000).formatted(date: .abbreviated, time: .shortened)
-    }
-}
-
-private struct AutomationRunGraph: View {
-    let graph: AutomationCanvasGraph
-    let active: Bool
-    @State private var selectedStepID: String
-    @State private var selectedEdgeID: String?
-
-    init(graph: AutomationCanvasGraph, active: Bool) {
-        self.graph = graph
-        self.active = active
-        _selectedStepID = State(initialValue: graph.defaultSelectedID)
-    }
-
-    var body: some View {
-        AutomationNodeCanvas(
-            graph: graph,
-            selectedStepID: $selectedStepID,
-            isSimulating: active,
-            viewportPreset: .readable,
-            selectedEdgeID: $selectedEdgeID
-        )
-        .frame(minHeight: 360)
     }
 }
 
@@ -848,27 +712,6 @@ private func readinessTint(_ state: DesktopWorkflowMigrationReadinessState) -> C
     case .ready: Nord.auroraGreen
     case .attention: Nord.auroraYellow
     case .blocked: Nord.auroraRed
-    }
-}
-
-private func runSymbol(_ state: DesktopWorkflowRunState) -> String {
-    switch state {
-    case .queued: "clock"
-    case .running: "arrow.triangle.2.circlepath"
-    case .waiting: "pause.circle.fill"
-    case .completed: "checkmark.circle.fill"
-    case .failed: "xmark.octagon.fill"
-    case .cancelled: "slash.circle"
-    }
-}
-
-private func runTint(_ state: DesktopWorkflowRunState) -> Color {
-    switch state {
-    case .queued, .cancelled: .secondary
-    case .running: Nord.frost1
-    case .waiting: Nord.auroraYellow
-    case .completed: Nord.auroraGreen
-    case .failed: Nord.auroraRed
     }
 }
 
@@ -3294,46 +3137,6 @@ private struct AutomationCanvasGraph {
         return result
     }
 
-    func withExecution(
-        run: DesktopWorkflowRunRecord,
-        attempts: [DesktopWorkflowStepAttemptRecord],
-        transitions: [DesktopWorkflowTransitionRecord]
-    ) -> Self {
-        let latestAttempt = Dictionary(grouping: attempts, by: \.stepID).compactMapValues { records in
-            records.max { ($0.attempt, $0.startedAtUnixMillis) < ($1.attempt, $1.startedAtUnixMillis) }
-        }
-        let activeEdges = Set(transitions.compactMap { transition -> String? in
-            guard let target = transition.toStepID else { return nil }
-            return "\(transition.fromStepID)-\(target)-\(transition.outcome.rawValue)"
-        })
-        let executionSteps = steps.map { step -> AutomationCanvasStep in
-            let state: AutomationPreviewState
-            if let attempt = latestAttempt[step.id] {
-                switch attempt.state {
-                case .completed: state = .complete
-                case .running: state = .running
-                case .waiting, .queued: state = .waiting
-                case .failed, .cancelled: state = .blocked
-                }
-            } else if run.currentStepID == step.id {
-                state = run.state == .failed ? .blocked : run.state == .waiting ? .waiting : .running
-            } else {
-                state = .planned
-            }
-            return AutomationCanvasStep(
-                id: step.id, title: step.title, subtitle: step.subtitle, symbol: step.symbol,
-                kind: step.kind, x: step.x, y: step.y, state: state,
-                input: step.input, output: step.output, authority: step.authority
-            )
-        }
-        let executionEdges = edges.map { edge in
-            AutomationCanvasEdge(
-                edge.sourceID, edge.targetID, label: edge.label, kind: edge.kind,
-                active: activeEdges.contains(edge.id)
-            )
-        }
-        return Self(defaultSelectedID: run.currentStepID ?? defaultSelectedID, groups: groups, steps: executionSteps, edges: executionEdges)
-    }
 }
 
 private extension DesktopWorkflowStepKind {
