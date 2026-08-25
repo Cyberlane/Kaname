@@ -46,9 +46,10 @@ declares the whole contract:
 
 Dropping any one of these leaves the node describable but `schema-only`, so the
 executor can never reach a connector for a node that did not declare how it
-would be reconciled. `idempotency: none` is likewise not executable: the
-executor re-offers a dispatch after an interruption, which is only safe when the
-provider deduplicates by key.
+would be reconciled. Those two idempotency values are also the only ones the
+configuration schema admits, and for the same reason: the executor re-offers a
+dispatch after an interruption, which is safe only when the provider
+deduplicates by key.
 
 The node's ports come from the compiler: `input`, `success`, and `error`. There
 is no separate still-unknown port. An unknown outcome leaves on `error` carrying
