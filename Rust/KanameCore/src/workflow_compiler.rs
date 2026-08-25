@@ -487,7 +487,7 @@ fn execution_availability(node: &Node) -> &'static str {
         "control.match"
             if matches!(
                 node.config.get("hitPolicy").and_then(Value::as_str),
-                Some("first" | "unique")
+                Some("first" | "unique" | "all")
             ) =>
         {
             "executable"
@@ -499,8 +499,46 @@ fn execution_availability(node: &Node) -> &'static str {
         "control.join"
             if matches!(
                 node.config.get("policy").and_then(Value::as_str),
-                Some("all" | "any" | "quorum")
+                Some("all" | "any" | "quorum" | "named")
             ) =>
+        {
+            "executable"
+        }
+        "control.decision" if node.config.get("when").is_some_and(Value::is_object) => "executable",
+        "control.reconcile"
+            if value_reference_field(&node.config, "effect").is_some()
+                && integer_field(&node.config, "maximumChecks").is_some_and(|checks| checks > 0) =>
+        {
+            "executable"
+        }
+        "control.human-review"
+            if node
+                .config
+                .get("proposal")
+                .is_some_and(crate::workflow_expression::executable_mapping)
+                && string_field(&node.config, "authorityPolicy").is_some()
+                && integer_field(&node.config, "expirySeconds").is_some_and(|seconds| seconds > 0)
+                && matches!(
+                    string_field(&node.config, "staleCheck"),
+                    Some("revision" | "digest")
+                ) =>
+        {
+            "executable"
+        }
+        "data.register-artifact"
+            if string_field(&node.config, "role").is_some()
+                && array_field(&node.config, "mediaTypes").is_some_and(|types| {
+                    !types.is_empty() && types.iter().all(|media_type| media_type.is_string())
+                }) =>
+        {
+            "executable"
+        }
+        "terminal.cancel"
+            if node.config.as_object().is_some_and(Map::is_empty)
+                || node
+                    .config
+                    .get("reason")
+                    .is_some_and(crate::workflow_expression::executable_mapping) =>
         {
             "executable"
         }
@@ -579,7 +617,7 @@ fn compile_graph(
     validate_terminals(graph, &reachable, &outgoing, diagnostics);
     validate_required_ports(graph, &incoming, &outgoing, &port_sets, diagnostics);
     validate_fan_out(graph, &outgoing, &port_sets, diagnostics);
-    validate_joins(graph, &incoming, diagnostics);
+    validate_joins(graph, &incoming, &outgoing, diagnostics);
     validate_iteration_and_retry(graph, &incoming, &outgoing, diagnostics);
     validate_cycles(graph, &reachable, diagnostics);
     validate_storage(workflow, diagnostics);
@@ -839,6 +877,7 @@ fn validate_fan_out(
 fn validate_joins(
     graph: &Graph,
     incoming: &BTreeMap<&str, Vec<(usize, &Edge)>>,
+    outgoing: &BTreeMap<&str, Vec<(usize, &Edge)>>,
     diagnostics: &mut Vec<CompilerDiagnostic>,
 ) {
     for (index, node) in graph.nodes.iter().enumerate() {
@@ -870,7 +909,63 @@ fn validate_joins(
                 ));
             }
         }
+        if string_field(&node.config, "policy") == Some("named") {
+            let required = array_field(&node.config, "requiredBranches")
+                .map(|branches| {
+                    branches
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let unique = required.iter().copied().collect::<BTreeSet<_>>();
+            let connected = connected_branch_ids(graph, outgoing, node.id.as_str());
+            if required.is_empty()
+                || unique.len() != required.len()
+                || required.len() > branch_count
+                || !unique.iter().all(|branch| connected.contains(branch))
+            {
+                diagnostics.push(CompilerDiagnostic::new(
+                    "graph.join.named-branches-invalid",
+                    "workflow.json",
+                    format!("/graph/nodes/{index}/config/requiredBranches"),
+                    "A named join must require a unique non-empty subset of the branch identities that reach it.",
+                ));
+            }
+        }
     }
+}
+
+/// The parallel branch identities whose branch bodies reach `join_node_id`.
+fn connected_branch_ids<'a>(
+    graph: &'a Graph,
+    outgoing: &BTreeMap<&'a str, Vec<(usize, &'a Edge)>>,
+    join_node_id: &str,
+) -> BTreeSet<&'a str> {
+    let mut branches = BTreeSet::new();
+    for node in graph
+        .nodes
+        .iter()
+        .filter(|node| node.node_type == "control.parallel")
+    {
+        for branch in array_field(&node.config, "branches")
+            .into_iter()
+            .flatten()
+            .filter_map(|branch| branch.get("id").and_then(Value::as_str))
+        {
+            let entries = outgoing
+                .get(node.id.as_str())
+                .into_iter()
+                .flatten()
+                .filter(|(_, edge)| edge.from.port_id == format!("case-{branch}"))
+                .map(|(_, edge)| edge.to.node_id.as_str())
+                .collect::<BTreeSet<_>>();
+            if reachable_nodes(&entries, outgoing).contains(join_node_id) {
+                branches.insert(branch);
+            }
+        }
+    }
+    branches
 }
 
 fn validate_iteration_and_retry(
@@ -1699,6 +1794,15 @@ fn integer_field(value: &Value, field: &str) -> Option<u64> {
 
 fn array_field<'a>(value: &'a Value, field: &str) -> Option<&'a Vec<Value>> {
     value.as_object()?.get(field)?.as_array()
+}
+
+/// A `{"root": ..., "pointer": ...}` selector the executor can resolve against
+/// the node input.
+fn value_reference_field<'a>(value: &'a Value, field: &str) -> Option<&'a Map<String, Value>> {
+    let reference = object_field(value, field)?;
+    let root = reference.get("root")?.as_str()?;
+    reference.get("pointer")?.as_str()?;
+    (root == "input").then_some(reference)
 }
 
 fn object_field<'a>(value: &'a Value, field: &str) -> Option<&'a Map<String, Value>> {

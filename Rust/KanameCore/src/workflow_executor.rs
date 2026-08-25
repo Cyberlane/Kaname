@@ -59,6 +59,8 @@ const MAXIMUM_LLM_TOOLS: usize = 64;
 const MAXIMUM_LLM_TOOL_CALLS: usize = 128;
 const MAXIMUM_LLM_RESPONSE_MESSAGES: usize = 128;
 const MAXIMUM_LLM_TRACE_VALUE_BYTES: usize = 24 * 1024;
+const DEFAULT_CANCEL_REASON_CODE: &str = "cancel.requested";
+const REVIEW_WAIT_KIND: &str = "event";
 
 #[derive(Default)]
 struct AdmittedLlmTrace {
@@ -1047,12 +1049,65 @@ fn load_execution_package(
             }
         }
         if node.node_type == "control.match" {
-            let config: MatchConfig = serde_json::from_value(node.config.clone())
+            let _: MatchConfig = serde_json::from_value(node.config.clone())
                 .map_err(|_| WorkflowExecutionError::Integrity("match_config".into()))?;
-            if config.hit_policy == workflow_match::HitPolicy::All {
+        }
+        if node.node_type == "control.decision" {
+            let config: DecisionConfig = serde_json::from_value(node.config.clone())
+                .map_err(|_| WorkflowExecutionError::Integrity("decision_config".into()))?;
+            decision_match_config(&config)?;
+        }
+        if node.node_type == "control.reconcile" {
+            let config: ReconcileConfig = serde_json::from_value(node.config.clone())
+                .map_err(|_| WorkflowExecutionError::Integrity("reconcile_config".into()))?;
+            if config.effect.root != "input"
+                || config.maximum_checks == 0
+                || config.maximum_checks > 100
+            {
                 return Err(WorkflowExecutionError::Unsupported(
-                    "match_all_not_in_minimal_executor".into(),
+                    "reconcile_contract".into(),
                 ));
+            }
+        }
+        if node.node_type == "control.human-review" {
+            let config: HumanReviewConfig = serde_json::from_value(node.config.clone())
+                .map_err(|_| WorkflowExecutionError::Integrity("human_review_config".into()))?;
+            if !workflow_expression::executable_mapping(&config.proposal)
+                || config.authority_policy.is_empty()
+                || config.expiry_seconds == 0
+                || config.expiry_seconds > 2_592_000
+                || !matches!(config.stale_check.as_str(), "revision" | "digest")
+            {
+                return Err(WorkflowExecutionError::Unsupported(
+                    "human_review_contract".into(),
+                ));
+            }
+        }
+        if node.node_type == "data.register-artifact" {
+            let config: RegisterArtifactConfig = serde_json::from_value(node.config.clone())
+                .map_err(|_| WorkflowExecutionError::Integrity("register_artifact_config".into()))?;
+            if config.role.is_empty()
+                || config.media_types.is_empty()
+                || config.media_types.len() > 32
+                || config
+                    .media_types
+                    .iter()
+                    .any(|media_type| media_type.is_empty() || media_type.len() > 255)
+            {
+                return Err(WorkflowExecutionError::Unsupported(
+                    "register_artifact_contract".into(),
+                ));
+            }
+        }
+        if node.node_type == "terminal.cancel" {
+            let config: CancelConfig = serde_json::from_value(node.config.clone())
+                .map_err(|_| WorkflowExecutionError::Integrity("cancel_config".into()))?;
+            if config
+                .reason
+                .as_ref()
+                .is_some_and(|reason| !workflow_expression::executable_mapping(reason))
+            {
+                return Err(WorkflowExecutionError::Unsupported("cancel_contract".into()));
             }
         }
         if node.node_type == "control.parallel" {
@@ -1068,9 +1123,18 @@ fn load_execution_package(
         if node.node_type == "control.join" {
             let config: JoinConfig = serde_json::from_value(node.config.clone())
                 .map_err(|_| WorkflowExecutionError::Integrity("join_config".into()))?;
-            if !matches!(config.policy.as_str(), "all" | "any" | "quorum")
-                || !config.required_branches.is_empty()
+            let named_branches = config
+                .required_branches
+                .iter()
+                .collect::<BTreeSet<_>>()
+                .len();
+            if !matches!(config.policy.as_str(), "all" | "any" | "quorum" | "named")
+                || (config.policy != "named" && !config.required_branches.is_empty())
                 || (config.policy == "quorum" && config.quorum.is_none())
+                || (config.policy == "named"
+                    && (config.required_branches.is_empty()
+                        || config.required_branches.len() > 64
+                        || named_branches != config.required_branches.len()))
             {
                 return Err(WorkflowExecutionError::Unsupported(
                     "join_policy_not_executable".into(),
@@ -1606,12 +1670,16 @@ fn validate_compiled_subset(compiled: &CompiledWorkflow) -> Result<()> {
                     | "data.map"
                     | "data.validate"
                     | "data.case-context"
+                    | "data.register-artifact"
                     | "control.match"
+                    | "control.decision"
                     | "control.parallel"
                     | "control.join"
                     | "control.for-each"
                     | "control.retry"
                     | "control.wait"
+                    | "control.reconcile"
+                    | "control.human-review"
                     | "control.subflow"
                     | "storage.read"
                     | "storage.write"
@@ -1620,6 +1688,7 @@ fn validate_compiled_subset(compiled: &CompiledWorkflow) -> Result<()> {
                     | "compute.llm"
                     | "terminal.complete"
                     | "terminal.fail"
+                    | "terminal.cancel"
             )
         {
             return Err(WorkflowExecutionError::Unsupported(format!(
@@ -2450,6 +2519,7 @@ fn node_config_mapping(node: &CompiledNode) -> Option<&Value> {
     let field = match node.node_type.as_str() {
         "compute.capability" | "control.subflow" => "input",
         "compute.llm" => "prompt",
+        "control.human-review" => "proposal",
         _ => return None,
     };
     node.config.get(field)
@@ -2629,6 +2699,19 @@ fn node_event_sequence(
             now_unix_millis,
         );
     }
+    if mapping_failure.is_none() && node.node_type == "control.human-review" {
+        return human_review_controller_event_sequence(
+            package,
+            command,
+            request,
+            token_id,
+            state,
+            attempt,
+            node,
+            &inputs,
+            now_unix_millis,
+        );
+    }
     let execution = if let Some((code, value)) = mapping_failure {
         failure_output("error", &code, value)
     } else if node.node_type == "compute.capability" {
@@ -2700,12 +2783,57 @@ fn node_event_sequence(
     }
 
     let mut emission_ids = Vec::new();
+    let match_fan_out = node.node_type == "control.match" && execution.outputs.len() > 1;
     for (port_id, value) in execution.outputs {
         let emission_id = stable_id(
             "emission",
             &[&request.run_id, &attempt.started.attempt_id, &port_id],
         );
-        let edge_execution_token_id = if node.node_type == "control.parallel" {
+        let edge_execution_token_id = if match_fan_out {
+            let branch_id = port_id
+                .strip_prefix("case-")
+                .ok_or_else(|| WorkflowExecutionError::Integrity("match_case_port".into()))?
+                .to_owned();
+            let child_token_id = stable_id(
+                "execution-token",
+                &[&request.run_id, execution_token_id, &node.id, &branch_id],
+            );
+            let token_event_id = stable_id(
+                "event",
+                &[
+                    &request.run_id,
+                    "execution-token",
+                    &child_token_id,
+                    "created",
+                ],
+            );
+            events.push(runtime_event(
+                command.submitted_at_unix_millis,
+                &token_event_id,
+                workflow_runtime::WORKFLOW_EXECUTION_TOKEN_CREATED_KIND,
+                workflow_runtime::WORKFLOW_EXECUTION_TOKEN_CREATED_TYPE,
+                v1::WorkflowExecutionTokenCreated {
+                    run_id: request.run_id.clone(),
+                    run_token_id: token_id.to_owned(),
+                    execution_token_id: child_token_id.clone(),
+                    parent_execution_token_id: execution_token_id.to_owned(),
+                    fork_node_id: node.id.clone(),
+                    branch_id,
+                    branch_port_id: port_id.clone(),
+                    join_node_id: String::new(),
+                    source_emission_id: emission_id.clone(),
+                    iteration_node_id: String::new(),
+                    iteration_index: 0,
+                    iteration_count: 0,
+                    resume_node_id: String::new(),
+                    resume_reason: String::new(),
+                },
+                &causation_id,
+                &request.run_id,
+            ));
+            causation_id = token_event_id;
+            child_token_id
+        } else if node.node_type == "control.parallel" {
             let config: ParallelConfig = serde_json::from_value(node.config.clone())
                 .map_err(|_| WorkflowExecutionError::Integrity("parallel_config".into()))?;
             let branch = config
@@ -3586,6 +3714,296 @@ fn wait_resolved_event(
     )
 }
 
+/// Human review is a wait whose correlation pins the authority policy and the
+/// exact proposal an approver saw, so a late or re-proposed decision cannot
+/// resume the run silently.
+#[allow(clippy::too_many_arguments)]
+fn human_review_controller_event_sequence(
+    package: &ExecutionPackage,
+    command: &v1::CommandEnvelope,
+    request: &v1::RequestWorkflowRun,
+    run_token_id: &str,
+    state: &RecordedRun,
+    attempt: &RecordedAttempt,
+    node: &CompiledNode,
+    inputs: &[(
+        Option<&v1::WorkflowEdgeCheckpointed>,
+        v1::WorkflowValueReference,
+    )],
+    now_unix_millis: i64,
+) -> Result<Vec<v1::EventEnvelope>> {
+    let config: HumanReviewConfig = serde_json::from_value(node.config.clone())
+        .map_err(|_| WorkflowExecutionError::Integrity("human_review_config".into()))?;
+    let input = inputs
+        .last()
+        .ok_or_else(|| WorkflowExecutionError::Lifecycle("review_input_missing".into()))?
+        .1
+        .clone();
+    let proposal = apply_mapping(
+        &config.proposal,
+        &input,
+        &stable_id(
+            "value",
+            &[&request.run_id, &node.id, &attempt.started.attempt_id, "proposal"],
+        ),
+    )?
+    .map_err(|_| WorkflowExecutionError::Integrity("review_proposal_mapping".into()))?;
+    let proposal_digest = canonical_sha256(&inline_json(&proposal)?)?;
+    let correlation = review_correlation(&config, &proposal_digest)?;
+    let (owner_kind, owner_id) = wait_owner(request);
+    let subscription_id = stable_id(
+        "review",
+        &[&request.run_id, &node.id, &attempt.started.attempt_id],
+    );
+    let Some(recorded) = state.waits.get(&subscription_id) else {
+        let expiry_millis = config
+            .expiry_seconds
+            .checked_mul(1_000)
+            .and_then(|value| i64::try_from(value).ok())
+            .and_then(|value| attempt.started_at_unix_millis.checked_add(value))
+            .ok_or_else(|| WorkflowExecutionError::Integrity("review_deadline_overflow".into()))?;
+        return Ok(vec![runtime_event(
+            command.submitted_at_unix_millis,
+            &stable_id(
+                "event",
+                &[&request.run_id, "wait-subscribed", &subscription_id],
+            ),
+            workflow_runtime::WORKFLOW_WAIT_SUBSCRIBED_KIND,
+            workflow_runtime::WORKFLOW_WAIT_SUBSCRIBED_TYPE,
+            v1::WorkflowWaitSubscribed {
+                run_id: request.run_id.clone(),
+                run_token_id: run_token_id.to_owned(),
+                subscription_id,
+                wait_node_id: node.id.clone(),
+                execution_token_id: attempt.started.execution_token_id.clone(),
+                controller_attempt_id: attempt.started.attempt_id.clone(),
+                workflow_id: request.workflow_id.clone(),
+                revision_id: request.revision_id.clone(),
+                package_digest: request.package_digest.clone(),
+                kind: REVIEW_WAIT_KIND.into(),
+                owner_kind,
+                owner_id,
+                correlation,
+                input_value_id: proposal.value_id,
+                input_sha256: proposal.sha256,
+                expires_at_unix_millis: expiry_millis,
+            },
+            &attempt.started_event_id,
+            &request.run_id,
+        )]);
+    };
+    if recorded.subscribed.run_token_id != run_token_id
+        || recorded.subscribed.wait_node_id != node.id
+        || recorded.subscribed.execution_token_id != attempt.started.execution_token_id
+        || recorded.subscribed.controller_attempt_id != attempt.started.attempt_id
+        || recorded.subscribed.workflow_id != request.workflow_id
+        || recorded.subscribed.revision_id != request.revision_id
+        || recorded.subscribed.package_digest != request.package_digest
+        || recorded.subscribed.kind != REVIEW_WAIT_KIND
+        || recorded.subscribed.owner_kind != owner_kind
+        || recorded.subscribed.owner_id != owner_id
+        || recorded.subscribed.correlation != correlation
+        || recorded.subscribed.input_value_id != proposal.value_id
+        || recorded.subscribed.input_sha256 != proposal.sha256
+    {
+        return Err(WorkflowExecutionError::Integrity("review_pin_drift".into()));
+    }
+    if let Some(resolved) = recorded.resolved.as_ref() {
+        let resolved_event_id = recorded
+            .resolved_event_id
+            .as_deref()
+            .ok_or_else(|| WorkflowExecutionError::Integrity("review_event_id".into()))?;
+        let decision = v1::WorkflowWaitDecision::try_from(resolved.decision)
+            .map_err(|_| WorkflowExecutionError::Integrity("review_decision".into()))?;
+        let (port_id, outcome, error_code, value) = match decision {
+            v1::WorkflowWaitDecision::Resumed => review_outcome(
+                request,
+                node,
+                &config,
+                &proposal,
+                &proposal_digest,
+                resolved
+                    .output
+                    .as_ref()
+                    .ok_or_else(|| WorkflowExecutionError::Integrity("review_output".into()))?,
+            )?,
+            v1::WorkflowWaitDecision::Expired => (
+                "error",
+                v1::WorkflowAttemptOutcome::Failed,
+                "review.expired",
+                value_from_json(
+                    &stable_id("value", &[&request.run_id, &node.id, "review-expired"]),
+                    &json!({
+                        "code": "review.expired",
+                        "authorityPolicy": config.authority_policy,
+                        "proposalDigest": proposal_digest,
+                        "expiredAtUnixMillis": recorded.subscribed.expires_at_unix_millis
+                    }),
+                )?,
+            ),
+            v1::WorkflowWaitDecision::Cancelled => {
+                return Err(WorkflowExecutionError::Lifecycle(
+                    "cancelled_wait_without_run_cancellation".into(),
+                ));
+            }
+            v1::WorkflowWaitDecision::Unspecified => {
+                return Err(WorkflowExecutionError::Integrity("review_decision".into()));
+            }
+        };
+        return controller_settled_events(
+            &package.compiled,
+            command,
+            request,
+            run_token_id,
+            attempt,
+            node,
+            port_id,
+            value,
+            outcome,
+            error_code.into(),
+            resolved_event_id,
+        );
+    }
+
+    let consumed = state
+        .waits
+        .values()
+        .filter_map(|wait| wait.resolved.as_ref())
+        .map(|resolved| resolved.signal_id.as_str())
+        .filter(|signal_id| !signal_id.is_empty())
+        .collect::<BTreeSet<_>>();
+    let matching_signal = state
+        .wait_signals
+        .values()
+        .filter(|signal| {
+            !consumed.contains(signal.payload.signal_id.as_str())
+                && signal.payload.kind == recorded.subscribed.kind
+                && signal.payload.owner_kind == recorded.subscribed.owner_kind
+                && signal.payload.owner_id == recorded.subscribed.owner_id
+                && signal.payload.correlation == recorded.subscribed.correlation
+                && signal.occurred_at_unix_millis <= recorded.subscribed.expires_at_unix_millis
+        })
+        .min_by_key(|signal| signal.store_position);
+    if let Some(signal) = matching_signal {
+        return Ok(vec![wait_resolved_event(
+            signal.occurred_at_unix_millis,
+            request,
+            run_token_id,
+            recorded,
+            v1::WorkflowWaitDecision::Resumed,
+            signal.payload.signal_id.clone(),
+            signal.payload.value.clone(),
+            String::new(),
+            &signal.event_id,
+        )]);
+    }
+    if now_unix_millis < recorded.subscribed.expires_at_unix_millis {
+        return Err(WorkflowExecutionError::WaitingUntil(
+            recorded.subscribed.expires_at_unix_millis,
+        ));
+    }
+    let output = value_from_json(
+        &stable_id("value", &[&request.run_id, &subscription_id, "expired"]),
+        &json!({
+            "kind": REVIEW_WAIT_KIND,
+            "expiredAtUnixMillis": recorded.subscribed.expires_at_unix_millis,
+            "subscriptionId": subscription_id,
+        }),
+    )?;
+    Ok(vec![wait_resolved_event(
+        recorded.subscribed.expires_at_unix_millis,
+        request,
+        run_token_id,
+        recorded,
+        v1::WorkflowWaitDecision::Expired,
+        String::new(),
+        Some(output),
+        "review.expired".into(),
+        &recorded.subscribed_event_id,
+    )])
+}
+
+fn review_correlation(
+    config: &HumanReviewConfig,
+    proposal_digest: &str,
+) -> Result<Vec<v1::WorkflowWaitCorrelation>> {
+    let mut correlation = [
+        (
+            "review:/authorityPolicy",
+            json!(config.authority_policy.clone()),
+        ),
+        ("review:/proposalDigest", json!(proposal_digest)),
+    ]
+    .into_iter()
+    .map(|(key, value)| {
+        Ok(v1::WorkflowWaitCorrelation {
+            key: key.into(),
+            sha256: canonical_sha256(&value)?,
+        })
+    })
+    .collect::<Result<Vec<_>>>()?;
+    correlation.sort_by(|left, right| left.key.cmp(&right.key));
+    Ok(correlation)
+}
+
+/// Maps an approver's signal onto the review ports. A stale proposal digest
+/// beats the decision itself: a decision made against a superseded proposal
+/// never approves.
+fn review_outcome(
+    request: &v1::RequestWorkflowRun,
+    node: &CompiledNode,
+    config: &HumanReviewConfig,
+    proposal: &v1::WorkflowValueReference,
+    proposal_digest: &str,
+    signal: &v1::WorkflowValueReference,
+) -> Result<(
+    &'static str,
+    v1::WorkflowAttemptOutcome,
+    &'static str,
+    v1::WorkflowValueReference,
+)> {
+    let signal = inline_json(signal)?;
+    let decision = signal
+        .get("decision")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let signalled_digest = signal.get("proposalDigest").and_then(Value::as_str);
+    let stale = config.stale_check == "digest"
+        && signalled_digest.is_some_and(|digest| digest != proposal_digest);
+    let code = if stale {
+        "review.stale"
+    } else {
+        match decision {
+            "approve" => {
+                return Ok((
+                    "success",
+                    v1::WorkflowAttemptOutcome::Succeeded,
+                    "",
+                    proposal.clone(),
+                ));
+            }
+            "reject" => "review.rejected",
+            _ => "review.decision-invalid",
+        }
+    };
+    let value = value_from_json(
+        &stable_id("value", &[&request.run_id, &node.id, code]),
+        &json!({
+            "code": code,
+            "decision": decision,
+            "authorityPolicy": config.authority_policy,
+            "proposalDigest": proposal_digest,
+            "signalledProposalDigest": signalled_digest
+        }),
+    )?;
+    Ok((
+        "error",
+        v1::WorkflowAttemptOutcome::Failed,
+        code,
+        value,
+    ))
+}
+
 fn classify_retry_decision(
     error: &Value,
     error_code: &str,
@@ -3646,6 +4064,35 @@ fn controller_output_events(
     value: v1::WorkflowValueReference,
     causation_id: &str,
 ) -> Result<Vec<v1::EventEnvelope>> {
+    controller_settled_events(
+        compiled,
+        command,
+        request,
+        run_token_id,
+        attempt,
+        node,
+        port_id,
+        value,
+        v1::WorkflowAttemptOutcome::Succeeded,
+        String::new(),
+        causation_id,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn controller_settled_events(
+    compiled: &CompiledWorkflow,
+    command: &v1::CommandEnvelope,
+    request: &v1::RequestWorkflowRun,
+    run_token_id: &str,
+    attempt: &RecordedAttempt,
+    node: &CompiledNode,
+    port_id: &str,
+    value: v1::WorkflowValueReference,
+    outcome: v1::WorkflowAttemptOutcome,
+    error_code: String,
+    causation_id: &str,
+) -> Result<Vec<v1::EventEnvelope>> {
     let edge = single_outgoing_edge(compiled, node, port_id)?;
     let emission_id = stable_id(
         "emission",
@@ -3677,6 +4124,7 @@ fn controller_output_events(
             &attempt.started.attempt_id,
         ],
     );
+    let settled_error = (outcome == v1::WorkflowAttemptOutcome::Failed).then(|| value.clone());
     Ok(vec![
         runtime_event(
             command.submitted_at_unix_millis,
@@ -3725,9 +4173,9 @@ fn controller_output_events(
                 attempt_id: attempt.started.attempt_id.clone(),
                 node_id: node.id.clone(),
                 attempt_number: attempt.started.attempt_number,
-                outcome: v1::WorkflowAttemptOutcome::Succeeded as i32,
-                error_code: String::new(),
-                error: None,
+                outcome: outcome as i32,
+                error: settled_error,
+                error_code,
                 emission_ids: vec![emission_id],
                 execution_token_id: attempt.started.execution_token_id.clone(),
             },
@@ -6180,18 +6628,18 @@ fn execute_node(
                 .collect::<Vec<_>>();
             let mut emitted_port_ids = evaluation.emitted_port_ids.clone();
             let (outputs, outcome, error_code, error) = match evaluation.outcome {
-                EvaluationOutcome::Matched if emitted_port_ids.len() == 1 => (
-                    vec![(emitted_port_ids[0].clone(), input.clone())],
+                EvaluationOutcome::Matched if !emitted_port_ids.is_empty() => (
+                    emitted_port_ids
+                        .iter()
+                        .map(|port_id| (port_id.clone(), input.clone()))
+                        .collect(),
                     v1::WorkflowAttemptOutcome::Succeeded,
                     String::new(),
                     None,
                 ),
-                EvaluationOutcome::Matched => {
-                    return Err(WorkflowExecutionError::Unsupported(
-                        "match_fanout_not_minimal".into(),
-                    ));
-                }
-                EvaluationOutcome::NotMatched | EvaluationOutcome::EvaluationError => {
+                EvaluationOutcome::Matched
+                | EvaluationOutcome::NotMatched
+                | EvaluationOutcome::EvaluationError => {
                     emitted_port_ids = vec!["error".into()];
                     let evaluation_error = evaluation.error.as_ref();
                     let code = evaluation_error
@@ -6242,6 +6690,53 @@ fn execute_node(
                 error: None,
             })
         }
+        "control.decision" => {
+            let config: DecisionConfig = serde_json::from_value(node.config.clone())
+                .map_err(|_| WorkflowExecutionError::Integrity("decision_config".into()))?;
+            let evaluation = workflow_match::evaluate(
+                &decision_match_config(&config)?,
+                &MatchRoots::with_input(inline_json(input)?),
+            );
+            match evaluation.outcome {
+                EvaluationOutcome::Matched
+                    if evaluation.selected_case_ids.first().map(String::as_str)
+                        == Some(DECISION_MATCHED_CASE_ID) =>
+                {
+                    Ok(success_output("matched", input.clone()))
+                }
+                EvaluationOutcome::Matched => Ok(success_output("not-matched", input.clone())),
+                EvaluationOutcome::NotMatched | EvaluationOutcome::EvaluationError => {
+                    let evaluation_error = evaluation.error.as_ref();
+                    let code = evaluation_error
+                        .map(|error| error.code.clone())
+                        .unwrap_or_else(|| "decision.no-route".into());
+                    let value = value_from_json(
+                        &stable_id("value", &[&request.run_id, &node.id, "decision-error"]),
+                        &json!({
+                            "code": code,
+                            "expressionId": evaluation_error.map(|error| error.expression_id.as_str()),
+                            "message": evaluation_error
+                                .map(|error| error.message.as_str())
+                                .unwrap_or("The Decision condition did not resolve.")
+                        }),
+                    )?;
+                    Ok(failure_output("error", &code, value))
+                }
+            }
+        }
+        "control.reconcile" => execute_reconcile_node(request, node, input),
+        "data.register-artifact" => execute_register_artifact_node(
+            package,
+            storage.ok_or_else(|| {
+                WorkflowExecutionError::Unsupported("storage_service_required".into())
+            })?,
+            request,
+            node,
+            attempt_id,
+            occurred_at_unix_millis,
+            input,
+            job_run_id,
+        ),
         "storage.read" | "storage.write" | "storage.promote" => execute_storage_node(
             package,
             storage.ok_or_else(|| {
@@ -6269,6 +6764,26 @@ fn execute_node(
                 outcome: v1::WorkflowAttemptOutcome::Failed,
                 error_code: code,
                 error: Some(input.clone()),
+            })
+        }
+        "terminal.cancel" => {
+            let config: CancelConfig = serde_json::from_value(node.config.clone())
+                .map_err(|_| WorkflowExecutionError::Integrity("cancel_config".into()))?;
+            let reason = match config.reason.as_ref() {
+                Some(mapping) => apply_mapping(
+                    mapping,
+                    input,
+                    &stable_id("value", &[&request.run_id, &node.id, "cancel-reason"]),
+                )?
+                .unwrap_or_else(|_| input.clone()),
+                None => input.clone(),
+            };
+            Ok(NodeExecution {
+                match_trace: None,
+                outputs: Vec::new(),
+                outcome: v1::WorkflowAttemptOutcome::Cancelled,
+                error_code: cancellation_reason_code(&reason)?,
+                error: Some(reason),
             })
         }
         _ => Err(WorkflowExecutionError::Unsupported(format!(
@@ -6450,6 +6965,66 @@ struct WaitConfig {
     expiry_seconds: u64,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DecisionConfig {
+    when: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReconcileConfig {
+    effect: StorageValueSelector,
+    maximum_checks: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HumanReviewConfig {
+    proposal: Value,
+    authority_policy: String,
+    expiry_seconds: u64,
+    stale_check: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RegisterArtifactConfig {
+    role: String,
+    media_types: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CancelConfig {
+    #[serde(default)]
+    reason: Option<Value>,
+}
+
+const DECISION_MATCHED_CASE_ID: &str = "decision-matched";
+const DECISION_OTHERWISE_CASE_ID: &str = "decision-not-matched";
+
+/// A Decision is a two-way Match over the whole node input, so it reuses the
+/// audited Match condition evaluator rather than a second condition engine.
+fn decision_match_config(config: &DecisionConfig) -> Result<MatchConfig> {
+    serde_json::from_value(json!({
+        "value": {"root": "input", "pointer": ""},
+        "hitPolicy": "first",
+        "cases": [{
+            "id": DECISION_MATCHED_CASE_ID,
+            "key": "matched",
+            "label": "Matched",
+            "when": config.when.clone()
+        }],
+        "otherwise": {
+            "id": DECISION_OTHERWISE_CASE_ID,
+            "key": "not-matched",
+            "label": "Not matched"
+        }
+    }))
+    .map_err(|_| WorkflowExecutionError::Integrity("decision_condition".into()))
+}
+
 fn default_retry_jitter() -> String {
     "none".into()
 }
@@ -6468,6 +7043,203 @@ const fn default_storage_list_limit() -> u32 {
 
 const fn default_true() -> bool {
     true
+}
+
+/// Reconcile settles an unknown effect outcome from the envelope the caller
+/// already journaled. The executor has no live effect connector in this slice,
+/// so it advances the bounded check counter instead of probing a provider.
+fn execute_reconcile_node(
+    request: &v1::RequestWorkflowRun,
+    node: &CompiledNode,
+    input: &v1::WorkflowValueReference,
+) -> Result<NodeExecution> {
+    let config: ReconcileConfig = serde_json::from_value(node.config.clone())
+        .map_err(|_| WorkflowExecutionError::Integrity("reconcile_config".into()))?;
+    let unknown = inline_json(input)?;
+    let effect_id = unknown
+        .pointer(&config.effect.pointer)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let status = unknown
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let checks = unknown.get("checks").and_then(Value::as_u64).unwrap_or(0) as u32;
+    let summary = |code: &str, checks: u32| -> Result<v1::WorkflowValueReference> {
+        value_from_json(
+            &stable_id("value", &[&request.run_id, &node.id, code]),
+            &json!({
+                "code": code,
+                "effectId": effect_id,
+                "status": status,
+                "checks": checks,
+                "maximumChecks": config.maximum_checks
+            }),
+        )
+    };
+    if effect_id.is_empty() {
+        let value = summary("reconcile.effect-missing", checks)?;
+        return Ok(failure_output(
+            "failure",
+            "reconcile.effect-missing",
+            value,
+        ));
+    }
+    match status {
+        "reconciled_applied" => Ok(success_output(
+            "success",
+            summary("reconcile.applied", checks)?,
+        )),
+        "reconciled_not_applied" => Ok(failure_output(
+            "failure",
+            "reconcile.not-applied",
+            summary("reconcile.not-applied", checks)?,
+        )),
+        "outcome_unknown" if checks < config.maximum_checks => Ok(NodeExecution {
+            match_trace: None,
+            outputs: vec![(
+                "still-unknown".into(),
+                summary("reconcile.still-unknown", checks + 1)?,
+            )],
+            outcome: v1::WorkflowAttemptOutcome::Succeeded,
+            error_code: String::new(),
+            error: None,
+        }),
+        "outcome_unknown" => Ok(failure_output(
+            "failure",
+            "reconcile.exhausted",
+            summary("reconcile.exhausted", checks)?,
+        )),
+        _ => Ok(failure_output(
+            "failure",
+            "reconcile.status-invalid",
+            summary("reconcile.status-invalid", checks)?,
+        )),
+    }
+}
+
+/// Registers an inline artifact envelope in the job storage namespace declared
+/// under the node's role, so the artifact keeps a durable handle and digest.
+#[allow(clippy::too_many_arguments)]
+fn execute_register_artifact_node(
+    package: &ExecutionPackage,
+    storage: &mut WorkflowScopedStorage,
+    request: &v1::RequestWorkflowRun,
+    node: &CompiledNode,
+    attempt_id: &str,
+    occurred_at_unix_millis: i64,
+    input: &v1::WorkflowValueReference,
+    job_run_id: &str,
+) -> Result<NodeExecution> {
+    let config: RegisterArtifactConfig = serde_json::from_value(node.config.clone())
+        .map_err(|_| WorkflowExecutionError::Integrity("register_artifact_config".into()))?;
+    let artifact = inline_json(input)?;
+    let media_type = artifact
+        .get("mediaType")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let content = artifact_content_bytes(&artifact);
+    let rejection = if media_type.is_empty() || content.is_none() {
+        Some("artifact.malformed")
+    } else if !config.media_types.contains(&media_type) {
+        Some("artifact.media-type-rejected")
+    } else {
+        None
+    };
+    if let Some(code) = rejection {
+        let value = value_from_json(
+            &stable_id("value", &[&request.run_id, &node.id, "artifact-error"]),
+            &json!({
+                "code": code,
+                "role": config.role,
+                "mediaType": media_type,
+                "acceptedMediaTypes": config.media_types
+            }),
+        )?;
+        return Ok(failure_output("error", code, value));
+    }
+    let content = content.unwrap();
+    let declaration = storage_declaration(package, "job", &config.role)?;
+    let (access, namespace) = storage_access(request, "job", job_run_id)?;
+    storage.ensure_namespace_capacity(
+        namespace.clone(),
+        storage_quota(package, "job")?,
+        occurred_at_unix_millis,
+    )?;
+    let version_id = stable_id("storage-version", &[&request.run_id, &node.id, "artifact"]);
+    let receipt = storage.write_value(WorkflowStorageWriteRequest {
+        command_id: stable_id("storage-command", &[&request.run_id, &node.id, "artifact"]),
+        access,
+        namespace: namespace.clone(),
+        entry_id: stable_id(
+            "storage-entry",
+            &[&namespace.owner_id, "job", &declaration.key],
+        ),
+        version_id,
+        reference_id: None,
+        logical_key: declaration.key.clone(),
+        expected_revision: 0,
+        schema_ref: Some(declaration.schema_ref.clone()),
+        media_type: media_type.clone(),
+        classification: declaration.classification.clone(),
+        purpose: "artifact".into(),
+        value: WorkflowStorageValueInput::InlineCanonicalJson {
+            bytes: canonical_json_bytes(&artifact)?,
+        },
+        created_by_attempt_id: attempt_id.into(),
+        created_at_unix_millis: occurred_at_unix_millis,
+    })?;
+    let mut value = value_from_json(
+        &stable_id("value", &[&request.run_id, &node.id, "artifact"]),
+        &json!({
+            "role": config.role,
+            "mediaType": media_type,
+            "handleId": receipt.handle.handle_id,
+            "versionId": receipt.handle.version_id,
+            "revision": receipt.handle.revision,
+            "byteCount": content.len(),
+            "contentSha256": hex::encode(Sha256::digest(&content))
+        }),
+    )?;
+    value.storage = Some(storage_metadata(&receipt.handle, "registered"));
+    Ok(success_output("success", value))
+}
+
+/// Fixture artifacts arrive inline as UTF-8 text or Base64 content.
+fn artifact_content_bytes(artifact: &Value) -> Option<Vec<u8>> {
+    if let Some(text) = artifact.get("text").and_then(Value::as_str) {
+        return Some(text.as_bytes().to_vec());
+    }
+    decode_base64(artifact.get("bytesBase64").and_then(Value::as_str)?)
+}
+
+fn decode_base64(encoded: &str) -> Option<Vec<u8>> {
+    let symbols = encoded.trim_end_matches('=');
+    if !encoded.len().is_multiple_of(4) || encoded.len() - symbols.len() > 2 {
+        return None;
+    }
+    let mut bits = 0_u32;
+    let mut width = 0_u32;
+    let mut decoded = Vec::with_capacity(symbols.len() / 4 * 3);
+    for symbol in symbols.bytes() {
+        let value = match symbol {
+            b'A'..=b'Z' => symbol - b'A',
+            b'a'..=b'z' => symbol - b'a' + 26,
+            b'0'..=b'9' => symbol - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        };
+        bits = (bits << 6) | u32::from(value);
+        width += 6;
+        if width >= 8 {
+            width -= 8;
+            decoded.push(((bits >> width) & 0xff) as u8);
+        }
+    }
+    ((bits & ((1 << width) - 1)) == 0).then_some(decoded)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7115,6 +7887,20 @@ fn pending_execution_token_settlement(
                     None,
                     Vec::new(),
                 ),
+                "control.match"
+                    if attempt
+                        .settled
+                        .as_ref()
+                        .is_some_and(|settled| settled.emission_ids.len() > 1) =>
+                {
+                    (
+                        v1::WorkflowExecutionTokenOutcome::Forked,
+                        String::new(),
+                        String::new(),
+                        None,
+                        Vec::new(),
+                    )
+                }
                 "terminal.complete" => {
                     let inputs =
                         node_inputs(request, state, &node.id, &token.created.execution_token_id)?;
@@ -7133,6 +7919,16 @@ fn pending_execution_token_settlement(
                     let settled = attempt.settled.as_ref().unwrap();
                     (
                         v1::WorkflowExecutionTokenOutcome::Failed,
+                        node.id.clone(),
+                        settled.error_code.clone(),
+                        settled.error.clone(),
+                        Vec::new(),
+                    )
+                }
+                "terminal.cancel" => {
+                    let settled = attempt.settled.as_ref().unwrap();
+                    (
+                        v1::WorkflowExecutionTokenOutcome::Cancelled,
                         node.id.clone(),
                         settled.error_code.clone(),
                         settled.error.clone(),
@@ -7689,6 +8485,7 @@ fn pending_join_lifecycle_event(
             "quorum" => config
                 .quorum
                 .ok_or_else(|| WorkflowExecutionError::Integrity("join_quorum".into()))?,
+            "named" => config.required_branches.len() as u32,
             _ => {
                 return Err(WorkflowExecutionError::Unsupported(
                     "join_policy_not_executable".into(),
@@ -7696,9 +8493,38 @@ fn pending_join_lifecycle_event(
             }
         };
         let threshold_usize = threshold as usize;
-        let decision = if arrived.len() >= threshold_usize {
+        // A named join waits for the exact branch identities it lists, so it
+        // counts branch arrivals rather than any arrival.
+        let (satisfied, reachable) = if config.policy == "named" {
+            let branch_of = |token_id: &String| {
+                state
+                    .execution_tokens
+                    .get(token_id)
+                    .map(|token| token.created.branch_id.clone())
+                    .unwrap_or_default()
+            };
+            let arrived_branches = arrived.iter().map(branch_of).collect::<BTreeSet<_>>();
+            let pending_branches = pending.iter().map(branch_of).collect::<BTreeSet<_>>();
+            (
+                config
+                    .required_branches
+                    .iter()
+                    .filter(|branch| arrived_branches.contains(*branch))
+                    .count(),
+                config
+                    .required_branches
+                    .iter()
+                    .filter(|branch| {
+                        arrived_branches.contains(*branch) || pending_branches.contains(*branch)
+                    })
+                    .count(),
+            )
+        } else {
+            (arrived.len(), arrived.len() + pending.len())
+        };
+        let decision = if satisfied >= threshold_usize {
             Some(v1::WorkflowJoinDecision::Succeeded)
-        } else if arrived.len() + pending.len() < threshold_usize {
+        } else if reachable < threshold_usize {
             Some(v1::WorkflowJoinDecision::Failed)
         } else {
             None
@@ -7782,18 +8608,28 @@ fn completed_run_outcome(state: &RecordedRun) -> Result<CompletedRunOutcome> {
                         v1::WorkflowExecutionTokenOutcome::try_from(settled.outcome),
                         Ok(v1::WorkflowExecutionTokenOutcome::Completed)
                             | Ok(v1::WorkflowExecutionTokenOutcome::Failed)
-                    )
+                    ) || (settled.outcome
+                        == v1::WorkflowExecutionTokenOutcome::Cancelled as i32
+                        && !settled.terminal_node_id.is_empty())
                 })
         })
         .collect::<Vec<_>>();
     terminal.sort_by_key(|token| token.created_store_position);
+    let outcome_of = |token: &&RecordedExecutionToken| {
+        token
+            .settled
+            .as_ref()
+            .map_or(0, |settled| settled.outcome)
+    };
     let selected = terminal
         .iter()
         .rev()
-        .find(|token| {
-            token.settled.as_ref().is_some_and(|settled| {
-                settled.outcome == v1::WorkflowExecutionTokenOutcome::Failed as i32
-            })
+        .find(|token| outcome_of(token) == v1::WorkflowExecutionTokenOutcome::Failed as i32)
+        .or_else(|| {
+            terminal
+                .iter()
+                .rev()
+                .find(|token| outcome_of(token) == v1::WorkflowExecutionTokenOutcome::Cancelled as i32)
         })
         .copied()
         .or_else(|| terminal.last().copied())
@@ -7803,7 +8639,15 @@ fn completed_run_outcome(state: &RecordedRun) -> Result<CompletedRunOutcome> {
         .settled_event_id
         .clone()
         .ok_or_else(|| WorkflowExecutionError::Lifecycle("token_settle_event_missing".into()))?;
-    if settled.outcome == v1::WorkflowExecutionTokenOutcome::Failed as i32 {
+    if settled.outcome == v1::WorkflowExecutionTokenOutcome::Cancelled as i32 {
+        Ok(CompletedRunOutcome {
+            outcome: v1::WorkflowRunOutcome::Cancelled,
+            error_code: settled.error_code.clone(),
+            error: settled.error.clone(),
+            final_emission_ids: Vec::new(),
+            causation_id: event_id,
+        })
+    } else if settled.outcome == v1::WorkflowExecutionTokenOutcome::Failed as i32 {
         Ok(CompletedRunOutcome {
             outcome: v1::WorkflowRunOutcome::Failed,
             error_code: settled.error_code.clone(),
@@ -8601,6 +9445,19 @@ fn error_code(value: &v1::WorkflowValueReference) -> Result<String> {
         .filter(|code| !code.is_empty())
         .map(str::to_owned)
         .ok_or_else(|| WorkflowExecutionError::Integrity("error_code_missing".into()))
+}
+
+/// Cancel carries an operator-facing reason rather than a failure, so a plain
+/// string, a `{"code": ...}` envelope, and an unmapped input all settle.
+fn cancellation_reason_code(value: &v1::WorkflowValueReference) -> Result<String> {
+    let reason = inline_json(value)?;
+    let code = reason
+        .as_str()
+        .or_else(|| reason.get("code").and_then(Value::as_str))
+        .or_else(|| reason.get("reason").and_then(Value::as_str))
+        .filter(|code| !code.is_empty())
+        .unwrap_or(DEFAULT_CANCEL_REASON_CODE);
+    Ok(code.to_owned())
 }
 
 #[allow(clippy::too_many_arguments)]
