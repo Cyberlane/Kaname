@@ -1,0 +1,4 @@
+{
+  "name": "Kaname",
+  "install": "./Scripts/cloud-agent-install.sh"
+}
