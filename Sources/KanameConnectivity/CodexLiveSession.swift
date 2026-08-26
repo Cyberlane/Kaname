@@ -89,9 +89,11 @@ public struct CodexLiveSessionConfiguration: Sendable {
 /// defaults while ordinary conversations provide every value explicitly.
 public struct CodexCodingRequest: Sendable {
     public static let maximumPromptBytes = 32 * 1024
+    public static let maximumOutputSchemaBytes = 16 * 1024
 
     public let prompt: String
     public let imagePaths: [String]
+    public let outputJSONSchema: String?
     public let model: String
     public let reasoningEffort: String
     public let sandbox: CodexSandboxPolicy
@@ -103,6 +105,7 @@ public struct CodexCodingRequest: Sendable {
     public init(
         prompt: String,
         imagePaths: [String] = [],
+        outputJSONSchema: String? = nil,
         model: String = "gpt-5.6-terra",
         reasoningEffort: String = "xhigh",
         sandbox: CodexSandboxPolicy = .readOnly,
@@ -113,6 +116,7 @@ public struct CodexCodingRequest: Sendable {
     ) {
         self.prompt = prompt
         self.imagePaths = imagePaths
+        self.outputJSONSchema = outputJSONSchema
         (self.model, self.reasoningEffort, self.sandbox) = (model, reasoningEffort, sandbox)
         self.networkAccess = sandbox == .dangerFullAccess ? true : networkAccess
         self.approvalPolicy = approvalPolicy
@@ -691,7 +695,7 @@ public actor CodexLiveSession {
             input.append(["type": "text", "text": request.prompt])
         }
         input.append(contentsOf: request.imagePaths.map { ["type": "localImage", "path": $0] })
-        return [
+        var parameters: [String: Any] = [
             "threadId": threadID,
             "input": input,
             "model": request.model,
@@ -703,6 +707,10 @@ public actor CodexLiveSession {
                 networkAccess: request.networkAccess
             ),
         ]
+        if let outputSchema = outputSchemaObject(from: request.outputJSONSchema) {
+            parameters["outputSchema"] = outputSchema
+        }
+        return parameters
     }
 
     private static func validate(_ request: CodexCodingRequest) throws {
@@ -713,12 +721,27 @@ public actor CodexLiveSession {
         else {
             throw CodexLiveSessionError.invalidRequest("a bounded prompt or up to eight local images is required")
         }
+        if let outputJSONSchema = request.outputJSONSchema {
+            guard outputJSONSchema.lengthOfBytes(using: .utf8) <= CodexCodingRequest.maximumOutputSchemaBytes,
+                  outputSchemaObject(from: outputJSONSchema) != nil else {
+                throw CodexLiveSessionError.invalidRequest("output JSON schema must be a bounded JSON object")
+            }
+        }
         let identifierPattern = "^[A-Za-z0-9._-]{1,128}$"
         guard request.model.range(of: identifierPattern, options: .regularExpression) != nil,
               request.reasoningEffort.range(of: identifierPattern, options: .regularExpression) != nil
         else {
             throw CodexLiveSessionError.invalidRequest("model and reasoning effort must be bounded identifiers")
         }
+    }
+
+    private static func outputSchemaObject(from schema: String?) -> [String: Any]? {
+        guard let schema,
+              let data = schema.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return object
     }
 
     private func validateAuthorization(

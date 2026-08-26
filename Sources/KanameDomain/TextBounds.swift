@@ -6,4 +6,11 @@ public enum KanameTextBounds {
         while result.utf8.count > maximumBytes { result.removeLast() }
         return result
     }
+
+    public static func utf8Suffix(_ value: String, maximumBytes: Int) -> String {
+        String(
+            utf8Prefix(String(value.reversed()), maximumBytes: maximumBytes)
+                .reversed()
+        )
+    }
 }

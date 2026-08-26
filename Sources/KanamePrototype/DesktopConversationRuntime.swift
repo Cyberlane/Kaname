@@ -14,9 +14,32 @@ final class DesktopConversationRuntime: ObservableObject {
         let batchItem: DesktopProviderEventBatchItem?
     }
 
+    private enum TitleApplication {
+        case initial
+        case regeneration(expectedTitle: String, expectedSource: DesktopConversationTitleSource)
+    }
+
+    private enum TitleGenerationError: Error, LocalizedError {
+        case malformedResponse
+        case providerStopped
+        case unsafeProviderActivity
+        case responseTooLarge
+
+        var errorDescription: String? {
+            switch self {
+            case .malformedResponse: "The title model did not return the required structured title."
+            case .providerStopped: "The title model stopped before returning a title."
+            case .unsafeProviderActivity: "The title model attempted activity outside the title-only boundary."
+            case .responseTooLarge: "The title model returned an unexpectedly large response."
+            }
+        }
+    }
+
     @Published private(set) var activeThreadIDs: Set<String> = []
     @Published private(set) var codingWorkflowBusyThreadIDs: Set<String> = []
     @Published private(set) var codingWorkflowErrors: [String: String] = [:]
+    @Published private(set) var titleGenerationThreadIDs: Set<String> = []
+    @Published private(set) var titleGenerationErrors: [String: String] = [:]
 
     private let model: DesktopAppModel
     private let environment: KanameDesktopEnvironment
@@ -25,6 +48,7 @@ final class DesktopConversationRuntime: ObservableObject {
     private var pollingTask: _Concurrency.Task<Void, Never>?
     private var orphanChecks: [String: Int] = [:]
     private var titleTasks: [String: _Concurrency.Task<Void, Never>] = [:]
+    private var titleGenerationRegistry = DesktopConversationTitleGenerationRegistry()
     private var eventIndex: DesktopConversationEventCursorIndex
     private var performanceStore = DesktopConversationPerformanceStore()
     private var providerByRunID: [String: String]
@@ -189,6 +213,39 @@ final class DesktopConversationRuntime: ObservableObject {
 
     func isRunning(threadID: String) -> Bool {
         activeThreadIDs.contains(threadID)
+    }
+
+    func isGeneratingTitle(threadID: String) -> Bool {
+        titleGenerationRegistry.isGenerating(threadID: threadID)
+    }
+
+    func canRegenerateTitle(threadID: String) -> Bool {
+        guard !isGeneratingTitle(threadID: threadID),
+              let thread = model.thread(id: threadID) else { return false }
+        return thread.messages.contains { $0.role == .user }
+    }
+
+    @discardableResult
+    func regenerateTitle(threadID: String) -> Bool {
+        guard canRegenerateTitle(threadID: threadID),
+              let thread = model.thread(id: threadID),
+              let request = DesktopConversationTitleGeneration.request(
+                  messages: thread.messages,
+                  mode: .regeneration(previousTitle: thread.title)
+              ),
+              let workspace = model.workspaceURL(threadID: threadID) ?? (try? prepareStandaloneWorkspace()) else {
+            titleGenerationErrors[threadID] = "Kaname could not prepare a safe title-generation workspace."
+            return false
+        }
+        return beginTitleGeneration(
+            threadID: threadID,
+            request: request,
+            workspace: workspace,
+            application: .regeneration(
+                expectedTitle: thread.title,
+                expectedSource: thread.titleSource
+            )
+        )
     }
 
     func codingStage(threadID: String) -> DesktopCodingWorkflowStage {
@@ -1072,49 +1129,82 @@ final class DesktopConversationRuntime: ObservableObject {
     }
 
     private func scheduleTitleIfNeeded(threadID: String) {
-        guard titleTasks[threadID] == nil,
-              let thread = model.thread(id: threadID),
+        guard let thread = model.thread(id: threadID),
               thread.titleSource == .provisional,
-              let firstMessage = thread.messages.first(where: { $0.role == .user })?.body,
+              let request = DesktopConversationTitleGeneration.request(
+                  messages: thread.messages,
+                  mode: .initial
+              ),
               let workspace = model.workspaceURL(threadID: threadID) ?? (try? prepareStandaloneWorkspace()) else { return }
-        titleTasks[threadID] = _Concurrency.Task { [weak self] in
-            guard let self else { return }
-            defer { titleTasks.removeValue(forKey: threadID) }
-            do {
-                let title = try await generateTitle(provider: thread.provider, firstMessage: firstMessage, workspace: workspace)
-                if !model.applyProviderGeneratedTitle(threadID: threadID, title: title) {
-                    model.markProviderTitleFallback(threadID: threadID)
-                }
-            } catch {
-                model.markProviderTitleFallback(threadID: threadID)
-            }
-        }
+        _ = beginTitleGeneration(
+            threadID: threadID,
+            request: request,
+            workspace: workspace,
+            application: .initial
+        )
     }
 
-    private func generateTitle(provider: String, firstMessage: String, workspace: URL) async throws -> String {
-        let prompt = "Create a concise conversation title of at most 8 words. Return only the title, without quotes or punctuation decoration.\n\nFirst user message:\n\(firstMessage)"
-        if let driver = NativeConversationDriver(providerName: provider) {
-            let session = NativeProviderConversationSession()
-            let events = await session.events(for: NativeConversationRequest(
-                driver: driver,
-                prompt: prompt,
-                workspace: workspace,
-                model: nil,
-                reasoningEffort: "low",
-                runtimeMode: .approvalRequired,
-                networkAccess: false,
-                resumableSessionID: nil
-            ))
-            var title = ""
-            for await event in events {
-                if event.kind == .messageDelta, let text = event.text { title += text }
-                if event.kind == .providerCompleted { return title }
-                if event.kind == .runFailed || event.kind == .runInterrupted {
-                    throw NSError(domain: "KanameTitle", code: 1)
+    @discardableResult
+    private func beginTitleGeneration(
+        threadID: String,
+        request: DesktopConversationTitleGenerationRequest,
+        workspace: URL,
+        application: TitleApplication
+    ) -> Bool {
+        guard let token = titleGenerationRegistry.begin(threadID: threadID) else { return false }
+        titleGenerationThreadIDs.insert(threadID)
+        titleGenerationErrors.removeValue(forKey: threadID)
+        titleTasks[threadID] = _Concurrency.Task { [weak self] in
+            guard let self else { return }
+            defer { finishTitleGeneration(threadID: threadID, token: token) }
+            do {
+                let title = try await generateTitle(
+                    request: request,
+                    threadID: threadID,
+                    workspace: workspace
+                )
+                try _Concurrency.Task.checkCancellation()
+                guard titleGenerationRegistry.owns(threadID: threadID, token: token) else { return }
+                let applied = switch application {
+                case .initial:
+                    model.applyProviderGeneratedTitle(threadID: threadID, title: title)
+                case let .regeneration(expectedTitle, expectedSource):
+                    model.applyProviderRegeneratedTitle(
+                        threadID: threadID,
+                        title: title,
+                        expectedTitle: expectedTitle,
+                        expectedSource: expectedSource
+                    )
+                }
+                if !applied, case .initial = application {
+                    model.markProviderTitleFallback(threadID: threadID)
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                guard titleGenerationRegistry.owns(threadID: threadID, token: token) else { return }
+                switch application {
+                case .initial:
+                    model.markProviderTitleFallback(threadID: threadID)
+                case .regeneration:
+                    titleGenerationErrors[threadID] = error.localizedDescription
                 }
             }
-            throw NSError(domain: "KanameTitle", code: 2)
         }
+        return true
+    }
+
+    private func finishTitleGeneration(threadID: String, token: UUID) {
+        guard titleGenerationRegistry.finish(threadID: threadID, token: token) else { return }
+        titleTasks.removeValue(forKey: threadID)
+        titleGenerationThreadIDs.remove(threadID)
+    }
+
+    private func generateTitle(
+        request: DesktopConversationTitleGenerationRequest,
+        threadID: String,
+        workspace: URL
+    ) async throws -> String {
         let instance = ProviderInstance(
             id: ProviderInstanceID(rawValue: "codexLocalTitle")!,
             driver: .codex,
@@ -1123,32 +1213,77 @@ final class DesktopConversationRuntime: ObservableObject {
         let session = CodexLiveSession(configuration: .init(instance: instance, workspaceURL: workspace))
         let stream = await session.events()
         let collector = _Concurrency.Task<String, Error> {
-            var title = ""
+            var response = ""
             for await event in stream {
-                if event.kind == .messageDelta, let text = event.text { title += text }
-                if event.kind == .providerCompleted { return title }
-                if event.kind == .runFailed || event.kind == .runInterrupted {
-                    throw NSError(domain: "KanameTitle", code: 1)
+                try _Concurrency.Task.checkCancellation()
+                switch event.kind {
+                case .messageDelta:
+                    if let text = event.text {
+                        response += text
+                        guard response.utf8.count <= 4_096 else {
+                            throw TitleGenerationError.responseTooLarge
+                        }
+                    }
+                case .providerCompleted:
+                    return response
+                case .toolActivity, .diffUpdated, .approvalRequested, .approvalAccepted,
+                     .approvalRejected, .questionRequested, .questionAnswered:
+                    try? await session.interrupt()
+                    throw TitleGenerationError.unsafeProviderActivity
+                case .runFailed, .runInterrupted:
+                    throw TitleGenerationError.providerStopped
+                case .sessionStarted, .runStarted, .itemStarted, .itemCompleted,
+                     .planUpdated, .nativeProviderEvent:
+                    break
                 }
             }
-            throw NSError(domain: "KanameTitle", code: 2)
+            throw TitleGenerationError.providerStopped
         }
         do {
-            _ = try await session.start(
-                CodexCodingRequest(
-                    prompt: prompt,
-                    model: "gpt-5.6-terra",
-                    reasoningEffort: "low",
-                    sandbox: .readOnly
+            let response = try await withTaskCancellationHandler {
+                _ = try await session.start(
+                    CodexCodingRequest(
+                        prompt: request.prompt,
+                        imagePaths: titleAttachmentPaths(
+                            threadID: threadID,
+                            attachments: request.attachments
+                        ),
+                        outputJSONSchema: DesktopConversationTitleGeneration.responseJSONSchema,
+                        model: "gpt-5.6-luna",
+                        reasoningEffort: "low",
+                        sandbox: .readOnly,
+                        networkAccess: false,
+                        approvalPolicy: .never,
+                        runtimeAuthority: .workflowApprovalRequired
+                    )
                 )
-            )
-            let title = try await collector.value
+                return try await collector.value
+            } onCancel: {
+                collector.cancel()
+                _Concurrency.Task {
+                    try? await session.interrupt()
+                    await session.close()
+                }
+            }
             await session.close()
+            guard let title = DesktopConversationTitleGeneration.decodedTitle(from: response) else {
+                throw TitleGenerationError.malformedResponse
+            }
             return title
         } catch {
             collector.cancel()
             await session.close()
             throw error
+        }
+    }
+
+    private func titleAttachmentPaths(
+        threadID: String,
+        attachments: [ConversationImageAttachment]
+    ) -> [String] {
+        let store = KanameConversationAttachmentStore(rootDirectory: serviceStore.rootDirectory)
+        return attachments.compactMap { attachment in
+            try? store.attachmentURL(threadID: threadID, attachment: attachment).path
         }
     }
 

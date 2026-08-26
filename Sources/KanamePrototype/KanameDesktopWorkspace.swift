@@ -2857,6 +2857,9 @@ private struct DesktopThreadConversation: View {
         .onChange(of: runtime.codingStage(threadID: thread.id)) { _, stage in
             announceWorkflowAttentionIfNeeded(stage)
         }
+        .onChange(of: runtime.titleGenerationErrors[thread.id]) { _, error in
+            if let error { KanameAccessibilityAnnouncement.post(error) }
+        }
     }
 
     private var threadHeader: some View {
@@ -2931,6 +2934,19 @@ private struct DesktopThreadConversation: View {
 
     private var conversationActionsMenu: some View {
         Menu {
+            Button {
+                if runtime.regenerateTitle(threadID: thread.id) {
+                    KanameAccessibilityAnnouncement.post("Regenerating conversation title")
+                }
+            } label: {
+                Label(
+                    runtime.isGeneratingTitle(threadID: thread.id)
+                        ? "Regenerating title…"
+                        : "Regenerate title",
+                    systemImage: "arrow.clockwise"
+                )
+            }
+            .disabled(!runtime.canRegenerateTitle(threadID: thread.id))
             Button("Rename conversation", systemImage: "pencil") {
                 captureSheetFocus()
                 renamedTitle = thread.title

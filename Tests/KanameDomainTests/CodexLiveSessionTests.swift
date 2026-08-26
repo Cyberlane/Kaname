@@ -31,6 +31,31 @@ struct CodexLiveSessionTests {
     }
 
     @Test
+    func turnForwardsStructuredOutputSchema() throws {
+        let configuration = CodexLiveSessionConfiguration(
+            instance: codexInstance(),
+            workspaceURL: URL(fileURLWithPath: "/private/tmp/kaname-structured-output")
+        )
+        let request = CodexCodingRequest(
+            prompt: "Return a title.",
+            outputJSONSchema: #"{"type":"object","properties":{"title":{"type":"string"}},"required":["title"]}"#
+        )
+
+        let parameters = CodexLiveSession.turnStartParameters(
+            configuration: configuration,
+            request: request,
+            threadID: "thread-structured-output"
+        )
+        let schema = try #require(parameters["outputSchema"] as? [String: Any])
+        let properties = try #require(schema["properties"] as? [String: Any])
+        let title = try #require(properties["title"] as? [String: Any])
+
+        #expect(schema["type"] as? String == "object")
+        #expect(schema["required"] as? [String] == ["title"])
+        #expect(title["type"] as? String == "string")
+    }
+
+    @Test
     func structuredPlanUpdatePreservesEveryVisibleStepAndStatus() throws {
         let event = try notification(
             method: "turn/plan/updated",
