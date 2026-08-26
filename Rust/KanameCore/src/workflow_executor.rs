@@ -19,13 +19,21 @@ use crate::{
         WorkflowCapabilityDefinition, WorkflowCapabilityHost, WorkflowCapabilityHostResult,
         WorkflowCapabilityInvocation, WorkflowCapabilityLog, WorkflowCapabilityValue,
     },
+    workflow_effect_authority::stable_effect_id,
+    workflow_effect_connector::{
+        UnavailableWorkflowEffectHost, WorkflowEffectConnectorRequest, WorkflowEffectHost,
+        dispatch_result_payload, reconciliation_result_payload, registration_matches,
+    },
+    workflow_expression::{self, ExpressionRoots},
     workflow_library::{WorkflowLibraryError, WorkflowLibraryStore},
     workflow_llm::{
         UnavailableWorkflowLlmProvider, WorkflowLlmInvocation, WorkflowLlmProvider,
         WorkflowLlmProviderDefinition, WorkflowLlmProviderResult, WorkflowLlmProviderToolResult,
         WorkflowLlmProviderTrace,
     },
-    workflow_expression::{self, ExpressionRoots},
+    workflow_mail_effect::{
+        WorkflowMailEffectClass, WorkflowMailEffectRequest, mail_effect_proposal,
+    },
     workflow_match::{self, EvaluationOutcome, MatchConfig, MatchRoots, TraceOutcome},
     workflow_retention::WorkflowRunRetentionPolicy,
     workflow_runtime::{self, WorkflowRuntimeCommand, WorkflowRuntimeEvent},
@@ -59,6 +67,15 @@ const MAXIMUM_LLM_TOOLS: usize = 64;
 const MAXIMUM_LLM_TOOL_CALLS: usize = 128;
 const MAXIMUM_LLM_RESPONSE_MESSAGES: usize = 128;
 const MAXIMUM_LLM_TRACE_VALUE_BYTES: usize = 24 * 1024;
+const DEFAULT_CANCEL_REASON_CODE: &str = "cancel.requested";
+const REVIEW_WAIT_KIND: &str = "event";
+/// How long an `effect.connector` proposal stays approvable and dispatchable.
+const EFFECT_AUTHORITY_WINDOW_MILLISECONDS: i64 = 900_000;
+/// The read-only reconciliation checks one attempt may perform before it hands
+/// the still-unknown outcome to the graph.
+const MAXIMUM_EFFECT_RECONCILIATION_CHECKS: usize = 3;
+/// How long a started dispatch may stay unsettled before its deadline passes.
+const EFFECT_DISPATCH_TIMEOUT_MILLISECONDS: i64 = 60_000;
 
 #[derive(Default)]
 struct AdmittedLlmTrace {
@@ -169,6 +186,71 @@ pub struct WorkflowWaitSignalReceipt {
 pub struct WorkflowStorageExecutionAuthority {
     pub installation_id: String,
     pub case_id: Option<String>,
+}
+
+/// `trigger_kind` recorded on a run admitted from a `trigger.event` entrypoint.
+pub const EVENT_TRIGGER_KIND: &str = "event";
+/// `trigger_kind` recorded on a run admitted from a `trigger.schedule`
+/// entrypoint.
+pub const SCHEDULE_TRIGGER_KIND: &str = "schedule";
+
+/// The pinned revision, ownership, and payload a triggered run inherits. The
+/// trigger itself contributes only its deduplicated identity; this binding
+/// carries no provider, credential, network, or effect authority.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct WorkflowTriggerRunBinding {
+    pub workflow_id: String,
+    pub revision_id: String,
+    pub package_digest: String,
+    pub installation_id: String,
+    pub case_id: String,
+    pub input: v1::WorkflowValueReference,
+    pub scope: v1::Scope,
+    pub actor_id: String,
+    /// When the host observed the trigger. It becomes both the command
+    /// timestamp and the executor clock, so an admission is fully deterministic.
+    pub observed_at_unix_millis: i64,
+}
+
+/// One provider event offered to a `trigger.event` entrypoint. Only the field
+/// selected by the compiled `deduplication` mode is read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkflowEventTrigger {
+    pub event_id: String,
+    pub contract_key: String,
+}
+
+/// One occurrence offered to a `trigger.schedule` entrypoint. The occurrence has
+/// misfired once `observed_at_unix_millis` on the binding is later than
+/// `scheduled_for_unix_millis` by more than the grace window.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkflowScheduleTrigger {
+    pub scheduled_for_unix_millis: i64,
+    pub misfire_grace_millis: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowTriggerAdmission {
+    /// The occurrence created a new run token.
+    Admitted,
+    /// The occurrence resolved to a run token that already existed; nothing was
+    /// appended.
+    Duplicate,
+    /// A misfired schedule occurrence a `skip` policy discarded; nothing was
+    /// appended and no command was admitted.
+    Misfired,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkflowTriggerRunReceipt {
+    pub admission: WorkflowTriggerAdmission,
+    pub run_id: String,
+    pub trigger_kind: String,
+    pub trigger_event_id: String,
+    /// The deterministic run request. It is absent only for a misfired
+    /// occurrence, which never produces one.
+    pub command: Option<v1::CommandEnvelope>,
+    pub result: Option<WorkflowExecutionResult>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -309,10 +391,60 @@ struct LlmConfig {
     temperature_milli: u32,
     maximum_context_bytes: u64,
     maximum_output_tokens: u32,
+    /// The per-attempt tool-call budget. An absent budget falls back to the
+    /// global runtime bound, so a revision published before the field existed
+    /// keeps executing unchanged.
+    #[serde(default)]
+    maximum_tool_calls: Option<u32>,
+}
+
+/// One `effect.connector` node. The action names the mail effect kind, and the
+/// two contract fields are the exact preview and reconciliation contracts the
+/// journaled evidence pins.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ConnectorEffectConfig {
+    connector_class: String,
+    action: String,
+    input: Value,
+    preview_contract: String,
+    reconciliation_contract: String,
+    idempotency: String,
+}
+
+/// One compiled authority policy. The compiled artifact carries policies at the
+/// top level without the per-node references the definition declares, so the
+/// executor can only check that every declared policy is an authority policy it
+/// can honour: it always demands a recorded owner resolution before dispatch.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompiledAuthorityPolicy {
+    key: String,
+    #[serde(rename = "type")]
+    policy_type: String,
+    type_version: u32,
+    config: CompiledAuthorityPolicyConfig,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompiledAuthorityPolicyConfig {
+    authority_class: String,
+    approval: String,
+    reversible: bool,
 }
 
 fn default_job_conversation_scope() -> String {
     "job".into()
+}
+
+/// The admitted per-attempt tool-call budget for one `compute.llm` node.
+fn llm_tool_call_budget(config: &LlmConfig) -> usize {
+    config
+        .maximum_tool_calls
+        .map_or(MAXIMUM_LLM_TOOL_CALLS, |budget| {
+            (budget as usize).min(MAXIMUM_LLM_TOOL_CALLS)
+        })
 }
 
 struct ExecutionPackage {
@@ -336,6 +468,7 @@ struct RecordedRun {
     attempts: Vec<RecordedAttempt>,
     capability_attempts: BTreeMap<String, RecordedCapabilityAttempt>,
     llm_attempts: BTreeMap<String, RecordedLlmAttempt>,
+    effects: BTreeMap<String, RecordedEffect>,
     emissions: BTreeMap<String, RecordedEmission>,
     edges: Vec<RecordedEdge>,
     cancellation: Option<v1::WorkflowRunCancellationRequested>,
@@ -418,6 +551,55 @@ struct RecordedEmission {
     payload: v1::WorkflowPortEmitted,
 }
 
+/// The journaled facts of one durable effect. Every phase carries the time it
+/// was recorded, so a later phase can derive its own occurrence from durable
+/// evidence instead of a wall clock and stay identical across replay.
+struct RecordedEffect {
+    proposed_event_id: String,
+    proposed: v1::WorkflowEffectProposed,
+    authorized_event_id: Option<String>,
+    authorized: Option<v1::WorkflowEffectAuthorized>,
+    dispatch_started_event_id: Option<String>,
+    dispatch_started: Option<v1::WorkflowEffectDispatchStarted>,
+    dispatch_started_at_unix_millis: i64,
+    dispatch_settled_event_id: Option<String>,
+    dispatch_settled: Option<v1::WorkflowEffectDispatchSettled>,
+    dispatch_settled_at_unix_millis: i64,
+    reconciliations: Vec<RecordedEffectReconciliation>,
+}
+
+struct RecordedEffectReconciliation {
+    event_id: String,
+    occurred_at_unix_millis: i64,
+    payload: v1::WorkflowEffectReconciled,
+}
+
+impl RecordedEffect {
+    fn latest_reconciliation(&self) -> Option<&RecordedEffectReconciliation> {
+        self.reconciliations.last()
+    }
+
+    /// The event a further effect fact is caused by.
+    fn latest_event_id(&self) -> &str {
+        self.reconciliations
+            .last()
+            .map(|reconciliation| reconciliation.event_id.as_str())
+            .or(self.dispatch_settled_event_id.as_deref())
+            .or(self.dispatch_started_event_id.as_deref())
+            .or(self.authorized_event_id.as_deref())
+            .unwrap_or(&self.proposed_event_id)
+    }
+
+    /// The latest durable moment in this effect's history, which is the base a
+    /// new reconciliation measures its own elapsed time from.
+    fn latest_occurred_at_unix_millis(&self) -> i64 {
+        self.reconciliations
+            .last()
+            .map(|reconciliation| reconciliation.occurred_at_unix_millis)
+            .unwrap_or(self.dispatch_settled_at_unix_millis)
+    }
+}
+
 struct RecordedEdge {
     event_id: String,
     store_position: u64,
@@ -463,6 +645,7 @@ pub fn execute(
 ) -> Result<WorkflowExecutionResult> {
     let mut capabilities = UnavailableWorkflowCapabilityHost;
     let mut llm = UnavailableWorkflowLlmProvider;
+    let mut effects = UnavailableWorkflowEffectHost;
     execute_internal(
         journal,
         library,
@@ -470,6 +653,7 @@ pub fn execute(
         None,
         &mut capabilities,
         &mut llm,
+        &mut effects,
         command,
         current_unix_millis(),
         None,
@@ -486,6 +670,7 @@ pub fn execute_at_unix_millis(
 ) -> Result<WorkflowExecutionResult> {
     let mut capabilities = UnavailableWorkflowCapabilityHost;
     let mut llm = UnavailableWorkflowLlmProvider;
+    let mut effects = UnavailableWorkflowEffectHost;
     execute_internal(
         journal,
         library,
@@ -493,6 +678,7 @@ pub fn execute_at_unix_millis(
         None,
         &mut capabilities,
         &mut llm,
+        &mut effects,
         command,
         now_unix_millis,
         None,
@@ -510,6 +696,7 @@ pub fn execute_with_storage(
 ) -> Result<WorkflowExecutionResult> {
     let mut capabilities = UnavailableWorkflowCapabilityHost;
     let mut llm = UnavailableWorkflowLlmProvider;
+    let mut effects = UnavailableWorkflowEffectHost;
     execute_internal(
         journal,
         library,
@@ -517,6 +704,7 @@ pub fn execute_with_storage(
         Some(authority),
         &mut capabilities,
         &mut llm,
+        &mut effects,
         command,
         current_unix_millis(),
         None,
@@ -532,6 +720,7 @@ pub fn execute_with_capabilities(
     command: &v1::CommandEnvelope,
 ) -> Result<WorkflowExecutionResult> {
     let mut llm = UnavailableWorkflowLlmProvider;
+    let mut effects = UnavailableWorkflowEffectHost;
     execute_internal(
         journal,
         library,
@@ -539,6 +728,7 @@ pub fn execute_with_capabilities(
         None,
         capabilities,
         &mut llm,
+        &mut effects,
         command,
         current_unix_millis(),
         None,
@@ -556,6 +746,7 @@ pub fn execute_with_storage_and_capabilities(
     command: &v1::CommandEnvelope,
 ) -> Result<WorkflowExecutionResult> {
     let mut llm = UnavailableWorkflowLlmProvider;
+    let mut effects = UnavailableWorkflowEffectHost;
     execute_internal(
         journal,
         library,
@@ -563,6 +754,7 @@ pub fn execute_with_storage_and_capabilities(
         Some(authority),
         capabilities,
         &mut llm,
+        &mut effects,
         command,
         current_unix_millis(),
         None,
@@ -578,6 +770,7 @@ pub fn execute_with_llm(
     command: &v1::CommandEnvelope,
 ) -> Result<WorkflowExecutionResult> {
     let mut capabilities = UnavailableWorkflowCapabilityHost;
+    let mut effects = UnavailableWorkflowEffectHost;
     execute_internal(
         journal,
         library,
@@ -585,8 +778,37 @@ pub fn execute_with_llm(
         None,
         &mut capabilities,
         llm,
+        &mut effects,
         command,
         current_unix_millis(),
+        None,
+        0,
+        None,
+    )
+}
+
+/// Runs a revision whose `effect.connector` nodes dispatch through `effects`.
+/// The host owns the connector registration and the local approval authority;
+/// the executor only journals what the host returns.
+pub fn execute_with_effects(
+    journal: &mut Journal,
+    library: &WorkflowLibraryStore,
+    effects: &mut dyn WorkflowEffectHost,
+    command: &v1::CommandEnvelope,
+    now_unix_millis: i64,
+) -> Result<WorkflowExecutionResult> {
+    let mut capabilities = UnavailableWorkflowCapabilityHost;
+    let mut llm = UnavailableWorkflowLlmProvider;
+    execute_internal(
+        journal,
+        library,
+        None,
+        None,
+        &mut capabilities,
+        &mut llm,
+        effects,
+        command,
+        now_unix_millis,
         None,
         0,
         None,
@@ -602,6 +824,7 @@ pub fn execute_with_storage_capabilities_and_llm(
     llm: &mut dyn WorkflowLlmProvider,
     command: &v1::CommandEnvelope,
 ) -> Result<WorkflowExecutionResult> {
+    let mut effects = UnavailableWorkflowEffectHost;
     execute_internal(
         journal,
         library,
@@ -609,6 +832,7 @@ pub fn execute_with_storage_capabilities_and_llm(
         Some(authority),
         capabilities,
         llm,
+        &mut effects,
         command,
         current_unix_millis(),
         None,
@@ -626,6 +850,7 @@ pub fn execute_with_fault_for_test(
 ) -> Result<WorkflowExecutionResult> {
     let mut capabilities = UnavailableWorkflowCapabilityHost;
     let mut llm = UnavailableWorkflowLlmProvider;
+    let mut effects = UnavailableWorkflowEffectHost;
     execute_internal(
         journal,
         library,
@@ -633,6 +858,7 @@ pub fn execute_with_fault_for_test(
         None,
         &mut capabilities,
         &mut llm,
+        &mut effects,
         command,
         current_unix_millis(),
         Some(fault),
@@ -652,6 +878,7 @@ pub fn execute_with_storage_fault_for_test(
 ) -> Result<WorkflowExecutionResult> {
     let mut capabilities = UnavailableWorkflowCapabilityHost;
     let mut llm = UnavailableWorkflowLlmProvider;
+    let mut effects = UnavailableWorkflowEffectHost;
     execute_internal(
         journal,
         library,
@@ -659,6 +886,7 @@ pub fn execute_with_storage_fault_for_test(
         Some(authority),
         &mut capabilities,
         &mut llm,
+        &mut effects,
         command,
         current_unix_millis(),
         Some(fault),
@@ -676,6 +904,7 @@ pub fn execute_with_capabilities_fault_for_test(
     fault: WorkflowExecutionFault,
 ) -> Result<WorkflowExecutionResult> {
     let mut llm = UnavailableWorkflowLlmProvider;
+    let mut effects = UnavailableWorkflowEffectHost;
     execute_internal(
         journal,
         library,
@@ -683,6 +912,7 @@ pub fn execute_with_capabilities_fault_for_test(
         None,
         capabilities,
         &mut llm,
+        &mut effects,
         command,
         current_unix_millis(),
         Some(fault),
@@ -700,6 +930,7 @@ pub fn execute_with_llm_fault_for_test(
     fault: WorkflowExecutionFault,
 ) -> Result<WorkflowExecutionResult> {
     let mut capabilities = UnavailableWorkflowCapabilityHost;
+    let mut effects = UnavailableWorkflowEffectHost;
     execute_internal(
         journal,
         library,
@@ -707,8 +938,36 @@ pub fn execute_with_llm_fault_for_test(
         None,
         &mut capabilities,
         llm,
+        &mut effects,
         command,
         current_unix_millis(),
+        Some(fault),
+        0,
+        None,
+    )
+}
+
+#[doc(hidden)]
+pub fn execute_with_effects_fault_for_test(
+    journal: &mut Journal,
+    library: &WorkflowLibraryStore,
+    effects: &mut dyn WorkflowEffectHost,
+    command: &v1::CommandEnvelope,
+    now_unix_millis: i64,
+    fault: WorkflowExecutionFault,
+) -> Result<WorkflowExecutionResult> {
+    let mut capabilities = UnavailableWorkflowCapabilityHost;
+    let mut llm = UnavailableWorkflowLlmProvider;
+    execute_internal(
+        journal,
+        library,
+        None,
+        None,
+        &mut capabilities,
+        &mut llm,
+        effects,
+        command,
+        now_unix_millis,
         Some(fault),
         0,
         None,
@@ -723,6 +982,7 @@ fn execute_internal(
     authority: Option<&WorkflowStorageExecutionAuthority>,
     capabilities: &mut dyn WorkflowCapabilityHost,
     llm: &mut dyn WorkflowLlmProvider,
+    effects: &mut dyn WorkflowEffectHost,
     command: &v1::CommandEnvelope,
     now_unix_millis: i64,
     fault: Option<WorkflowExecutionFault>,
@@ -786,6 +1046,7 @@ fn execute_internal(
             authority,
             capabilities,
             llm,
+            effects,
             command,
             &request,
             &token_id,
@@ -943,6 +1204,231 @@ pub fn record_wait_signal(
     })
 }
 
+/// Admits one deduplicated `trigger.event` occurrence as a durable run.
+///
+/// The compiled trigger decides which identity deduplicates: `event-id` keys on
+/// the provider's own event identity, `contract-key` keys on a contract-scoped
+/// key so a stream of provider events collapses onto one run. The run, command,
+/// and idempotency identities all derive from that key, so a second admission of
+/// the same occurrence finds the existing run token and appends nothing.
+///
+/// The trigger carries identity only. It grants no provider, credential,
+/// network, or effect authority, and reads nothing from a live account.
+pub fn execute_event_trigger(
+    journal: &mut Journal,
+    library: &WorkflowLibraryStore,
+    binding: &WorkflowTriggerRunBinding,
+    trigger: &WorkflowEventTrigger,
+) -> Result<WorkflowTriggerRunReceipt> {
+    let compiled = load_trigger_revision(library, binding)?;
+    let entrypoint = compiled_node(&compiled, &compiled.entrypoints[0].node_id)?;
+    if entrypoint.node_type != "trigger.event" {
+        return Err(WorkflowExecutionError::Unsupported(
+            "event_trigger_entrypoint_required".into(),
+        ));
+    }
+    let config = event_trigger_config(entrypoint)?;
+    let key = match config.deduplication.as_str() {
+        "event-id" => trigger.event_id.as_str(),
+        _ => trigger.contract_key.as_str(),
+    };
+    if key.is_empty() {
+        return Err(WorkflowExecutionError::InvalidCommand(
+            "event_trigger_key_required",
+        ));
+    }
+    let occurrence = stable_id(
+        "event",
+        &[&config.event_contract, &config.deduplication, key],
+    );
+    admit_trigger_run(journal, library, binding, EVENT_TRIGGER_KIND, &occurrence)
+}
+
+/// Admits one `trigger.schedule` occurrence as a durable run, honouring the
+/// compiled misfire policy.
+///
+/// An occurrence has misfired once it is later than its grace window. `skip`
+/// drops it without touching the journal; `run-once` still admits it. Because
+/// the occurrence identity is derived from the schedule key and the scheduled
+/// instant, a repeated catch-up pass over the same missed occurrence resolves to
+/// the same run and appends nothing. The host remains responsible for advancing
+/// its own schedule cursor past a coalesced catch-up window.
+pub fn execute_schedule_trigger(
+    journal: &mut Journal,
+    library: &WorkflowLibraryStore,
+    binding: &WorkflowTriggerRunBinding,
+    trigger: &WorkflowScheduleTrigger,
+) -> Result<WorkflowTriggerRunReceipt> {
+    let compiled = load_trigger_revision(library, binding)?;
+    let entrypoint = compiled_node(&compiled, &compiled.entrypoints[0].node_id)?;
+    if entrypoint.node_type != "trigger.schedule" {
+        return Err(WorkflowExecutionError::Unsupported(
+            "schedule_trigger_entrypoint_required".into(),
+        ));
+    }
+    let config = schedule_trigger_config(entrypoint)?;
+    if trigger.scheduled_for_unix_millis < 0 || trigger.misfire_grace_millis < 0 {
+        return Err(WorkflowExecutionError::InvalidCommand(
+            "schedule_trigger_window_required",
+        ));
+    }
+    let occurrence = stable_id(
+        "schedule",
+        &[
+            &config.schedule_key,
+            &config.misfire_policy,
+            &trigger.scheduled_for_unix_millis.to_string(),
+        ],
+    );
+    let lateness = binding
+        .observed_at_unix_millis
+        .saturating_sub(trigger.scheduled_for_unix_millis);
+    if lateness > trigger.misfire_grace_millis && config.misfire_policy == "skip" {
+        return Ok(WorkflowTriggerRunReceipt {
+            admission: WorkflowTriggerAdmission::Misfired,
+            run_id: trigger_run_id(binding, &occurrence),
+            trigger_kind: SCHEDULE_TRIGGER_KIND.into(),
+            trigger_event_id: occurrence,
+            command: None,
+            result: None,
+        });
+    }
+    admit_trigger_run(
+        journal,
+        library,
+        binding,
+        SCHEDULE_TRIGGER_KIND,
+        &occurrence,
+    )
+}
+
+fn admit_trigger_run(
+    journal: &mut Journal,
+    library: &WorkflowLibraryStore,
+    binding: &WorkflowTriggerRunBinding,
+    trigger_kind: &str,
+    occurrence: &str,
+) -> Result<WorkflowTriggerRunReceipt> {
+    let run_id = trigger_run_id(binding, occurrence);
+    let command = trigger_run_command(binding, trigger_kind, occurrence, &run_id);
+    let state = recorded_run(journal, &run_id)?;
+    if let Some(token) = state.token.as_ref() {
+        let outcome = match state.settled.as_ref() {
+            Some(settled) => durable_outcome(settled.outcome)?,
+            None => DurableRunOutcome::Running,
+        };
+        return Ok(WorkflowTriggerRunReceipt {
+            admission: WorkflowTriggerAdmission::Duplicate,
+            run_id: run_id.clone(),
+            trigger_kind: trigger_kind.into(),
+            trigger_event_id: occurrence.into(),
+            command: Some(command),
+            result: Some(WorkflowExecutionResult {
+                run_id,
+                run_token_id: token.run_token_id.clone(),
+                outcome,
+                event_count: state.events.len(),
+                next_attempt_at_unix_millis: None,
+            }),
+        });
+    }
+    let mut capabilities = UnavailableWorkflowCapabilityHost;
+    let mut llm = UnavailableWorkflowLlmProvider;
+    let mut effects = UnavailableWorkflowEffectHost;
+    let result = execute_internal(
+        journal,
+        library,
+        None,
+        None,
+        &mut capabilities,
+        &mut llm,
+        &mut effects,
+        &command,
+        binding.observed_at_unix_millis,
+        None,
+        0,
+        None,
+    )?;
+    Ok(WorkflowTriggerRunReceipt {
+        admission: WorkflowTriggerAdmission::Admitted,
+        run_id,
+        trigger_kind: trigger_kind.into(),
+        trigger_event_id: occurrence.into(),
+        command: Some(command),
+        result: Some(result),
+    })
+}
+
+fn trigger_run_id(binding: &WorkflowTriggerRunBinding, occurrence: &str) -> String {
+    stable_id(
+        "run",
+        &[&binding.workflow_id, &binding.revision_id, occurrence],
+    )
+}
+
+fn trigger_run_command(
+    binding: &WorkflowTriggerRunBinding,
+    trigger_kind: &str,
+    occurrence: &str,
+    run_id: &str,
+) -> v1::CommandEnvelope {
+    let request = v1::RequestWorkflowRun {
+        run_id: run_id.into(),
+        workflow_id: binding.workflow_id.clone(),
+        revision_id: binding.revision_id.clone(),
+        package_digest: binding.package_digest.clone(),
+        trigger_kind: trigger_kind.into(),
+        trigger_event_id: occurrence.into(),
+        inputs: vec![v1::WorkflowInputBinding {
+            port_id: "input".into(),
+            value: Some(binding.input.clone()),
+        }],
+        installation_id: binding.installation_id.clone(),
+        case_id: binding.case_id.clone(),
+        episode_id: String::new(),
+        episode_kind: String::new(),
+        prior_episode_id: String::new(),
+    };
+    v1::CommandEnvelope {
+        schema_version: Some(v1::SchemaVersion { major: 1, minor: 0 }),
+        command_id: stable_id("command", &[run_id, occurrence]),
+        idempotency_key: stable_id("idempotency", &[run_id, occurrence]),
+        kind: workflow_runtime::WORKFLOW_RUN_REQUEST_KIND.into(),
+        payload: Some(v1::OpaqueTypedPayload {
+            type_url: workflow_runtime::WORKFLOW_RUN_REQUEST_TYPE.into(),
+            content_type: "application/x-protobuf".into(),
+            value: request.encode_to_vec(),
+            payload_version: 1,
+        }),
+        scope: Some(binding.scope.clone()),
+        actor_id: binding.actor_id.clone(),
+        expected_revision: 0,
+        submitted_at_unix_millis: binding.observed_at_unix_millis,
+    }
+}
+
+fn load_trigger_revision(
+    library: &WorkflowLibraryStore,
+    binding: &WorkflowTriggerRunBinding,
+) -> Result<CompiledWorkflow> {
+    let revision = library.load_workflow_revision(&binding.revision_id, "active")?;
+    if revision.summary.workflow_id != binding.workflow_id
+        || revision.summary.package_digest != binding.package_digest
+    {
+        return Err(WorkflowExecutionError::Integrity(
+            "revision_pin_mismatch".into(),
+        ));
+    }
+    let compiled: CompiledWorkflow = serde_json::from_slice(&revision.compiled_source)
+        .map_err(|_| WorkflowExecutionError::Integrity("compiled_contract".into()))?;
+    if compiled.entrypoints.len() != 1 {
+        return Err(WorkflowExecutionError::Unsupported(
+            "compiled_subset".into(),
+        ));
+    }
+    Ok(compiled)
+}
+
 fn load_execution_package(
     library: &WorkflowLibraryStore,
     request: &v1::RequestWorkflowRun,
@@ -966,7 +1452,6 @@ fn load_execution_package(
         || compiled.workflow_id != request.workflow_id
         || compiled.entrypoints.len() != 1
         || !compiled.resources.is_empty()
-        || !compiled.policies.is_empty()
         || compiled.definition_digest.is_empty()
         || compiled.layout_digest.is_empty()
         || compiled.schema_bundle_digest.is_empty()
@@ -991,6 +1476,7 @@ fn load_execution_package(
         ));
     }
     validate_compiled_subset(&compiled)?;
+    validate_compiled_policies(&compiled)?;
     let (requires_storage, requires_case) =
         compiled_storage_requirements(library, &compiled, &mut BTreeSet::new(), 0)?;
     if requires_storage && request.installation_id.is_empty() {
@@ -1000,6 +1486,16 @@ fn load_execution_package(
     }
     if requires_case && request.case_id.is_empty() {
         return Err(WorkflowExecutionError::InvalidCommand("case_id_required"));
+    }
+    if compiled
+        .nodes
+        .iter()
+        .any(|node| node.node_type == "effect.connector")
+        && request.installation_id.is_empty()
+    {
+        return Err(WorkflowExecutionError::InvalidCommand(
+            "installation_id_required",
+        ));
     }
     if compiled
         .nodes
@@ -1027,6 +1523,12 @@ fn load_execution_package(
         }
     }
     for node in &compiled.nodes {
+        if node.node_type == "trigger.event" {
+            event_trigger_config(node)?;
+        }
+        if node.node_type == "trigger.schedule" {
+            schedule_trigger_config(node)?;
+        }
         if node.node_type == "data.validate" {
             let schema_ref = node
                 .config
@@ -1047,11 +1549,68 @@ fn load_execution_package(
             }
         }
         if node.node_type == "control.match" {
-            let config: MatchConfig = serde_json::from_value(node.config.clone())
+            let _: MatchConfig = serde_json::from_value(node.config.clone())
                 .map_err(|_| WorkflowExecutionError::Integrity("match_config".into()))?;
-            if config.hit_policy == workflow_match::HitPolicy::All {
+        }
+        if node.node_type == "control.decision" {
+            let config: DecisionConfig = serde_json::from_value(node.config.clone())
+                .map_err(|_| WorkflowExecutionError::Integrity("decision_config".into()))?;
+            decision_match_config(&config)?;
+        }
+        if node.node_type == "control.reconcile" {
+            let config: ReconcileConfig = serde_json::from_value(node.config.clone())
+                .map_err(|_| WorkflowExecutionError::Integrity("reconcile_config".into()))?;
+            if config.effect.root != "input"
+                || config.maximum_checks == 0
+                || config.maximum_checks > 100
+            {
                 return Err(WorkflowExecutionError::Unsupported(
-                    "match_all_not_in_minimal_executor".into(),
+                    "reconcile_contract".into(),
+                ));
+            }
+        }
+        if node.node_type == "control.human-review" {
+            let config: HumanReviewConfig = serde_json::from_value(node.config.clone())
+                .map_err(|_| WorkflowExecutionError::Integrity("human_review_config".into()))?;
+            if !workflow_expression::executable_mapping(&config.proposal)
+                || config.authority_policy.is_empty()
+                || config.expiry_seconds == 0
+                || config.expiry_seconds > 2_592_000
+                || !matches!(config.stale_check.as_str(), "revision" | "digest")
+            {
+                return Err(WorkflowExecutionError::Unsupported(
+                    "human_review_contract".into(),
+                ));
+            }
+        }
+        if node.node_type == "data.register-artifact" {
+            let config: RegisterArtifactConfig = serde_json::from_value(node.config.clone())
+                .map_err(|_| {
+                    WorkflowExecutionError::Integrity("register_artifact_config".into())
+                })?;
+            if config.role.is_empty()
+                || config.media_types.is_empty()
+                || config.media_types.len() > 32
+                || config
+                    .media_types
+                    .iter()
+                    .any(|media_type| media_type.is_empty() || media_type.len() > 255)
+            {
+                return Err(WorkflowExecutionError::Unsupported(
+                    "register_artifact_contract".into(),
+                ));
+            }
+        }
+        if node.node_type == "terminal.cancel" {
+            let config: CancelConfig = serde_json::from_value(node.config.clone())
+                .map_err(|_| WorkflowExecutionError::Integrity("cancel_config".into()))?;
+            if config
+                .reason
+                .as_ref()
+                .is_some_and(|reason| !workflow_expression::executable_mapping(reason))
+            {
+                return Err(WorkflowExecutionError::Unsupported(
+                    "cancel_contract".into(),
                 ));
             }
         }
@@ -1068,9 +1627,18 @@ fn load_execution_package(
         if node.node_type == "control.join" {
             let config: JoinConfig = serde_json::from_value(node.config.clone())
                 .map_err(|_| WorkflowExecutionError::Integrity("join_config".into()))?;
-            if !matches!(config.policy.as_str(), "all" | "any" | "quorum")
-                || !config.required_branches.is_empty()
+            let named_branches = config
+                .required_branches
+                .iter()
+                .collect::<BTreeSet<_>>()
+                .len();
+            if !matches!(config.policy.as_str(), "all" | "any" | "quorum" | "named")
+                || (config.policy != "named" && !config.required_branches.is_empty())
                 || (config.policy == "quorum" && config.quorum.is_none())
+                || (config.policy == "named"
+                    && (config.required_branches.is_empty()
+                        || config.required_branches.len() > 64
+                        || named_branches != config.required_branches.len()))
             {
                 return Err(WorkflowExecutionError::Unsupported(
                     "join_policy_not_executable".into(),
@@ -1130,6 +1698,9 @@ fn load_execution_package(
         if node.node_type == "control.subflow" {
             resolve_subflow_revision(library, &compiled, node)?;
         }
+        if node.node_type == "effect.connector" {
+            validate_compiled_connector_effect(&compiled, node)?;
+        }
     }
     for (key, declaration) in &compiled.storage {
         if key != &declaration.key
@@ -1151,6 +1722,7 @@ fn load_execution_package(
             ));
         }
     }
+    validate_trigger_identity(&compiled, request)?;
     if request.inputs.len() != 1
         || request.inputs[0].port_id != "input"
         || request.inputs[0]
@@ -1356,6 +1928,10 @@ fn validate_llm_provider(
             || !matches!(config.conversation_scope.as_str(), "job" | "case")
             || !workflow_expression::executable_mapping(&config.prompt)
             || config.instructions.is_empty()
+            || config
+                .maximum_tool_calls
+                .is_some_and(|budget| budget == 0 || budget as usize > MAXIMUM_LLM_TOOL_CALLS)
+            || (config.tools.is_empty() && config.maximum_tool_calls.is_some())
         {
             return Err(WorkflowExecutionError::Unsupported(
                 "llm_execution_contract".into(),
@@ -1565,6 +2141,75 @@ fn compiled_storage_requirements(
     Ok((requires_storage, requires_case))
 }
 
+/// Admits the policies a compiled revision may carry. Only authority policies
+/// that require an owner decision are executable here, because the effect path
+/// records an approval grant for every dispatch and cannot honour a policy that
+/// waives one.
+fn validate_compiled_policies(compiled: &CompiledWorkflow) -> Result<()> {
+    if compiled.policies.len() > 256 {
+        return Err(WorkflowExecutionError::Unsupported(
+            "compiled_policy_count".into(),
+        ));
+    }
+    for (key, policy) in &compiled.policies {
+        let policy: CompiledAuthorityPolicy = serde_json::from_value(policy.clone())
+            .map_err(|_| WorkflowExecutionError::Unsupported("policy_not_executable".into()))?;
+        if &policy.key != key
+            || policy.policy_type != "authority"
+            || policy.type_version != 1
+            || policy.config.authority_class.is_empty()
+            || policy.config.authority_class.len() > 128
+            || !matches!(
+                policy.config.approval.as_str(),
+                "always" | "standing-grant-eligible"
+            )
+            // A standing grant pre-approves later effects, so it may only cover
+            // an authority class the owner can undo.
+            || (policy.config.approval == "standing-grant-eligible" && !policy.config.reversible)
+        {
+            return Err(WorkflowExecutionError::Unsupported(
+                "policy_not_executable".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The exact connector package this executable slice admits, and the durable
+/// connector class its intents carry.
+const MAIL_CONNECTOR_PACKAGE_ID: &str = "dev.kaname.mail";
+
+fn validate_compiled_connector_effect(
+    compiled: &CompiledWorkflow,
+    node: &CompiledNode,
+) -> Result<()> {
+    let config: ConnectorEffectConfig = serde_json::from_value(node.config.clone())
+        .map_err(|_| WorkflowExecutionError::Integrity("connector_effect_config".into()))?;
+    if config.connector_class != MAIL_CONNECTOR_PACKAGE_ID
+        || WorkflowMailEffectClass::from_action(&config.action).is_none()
+        || !workflow_expression::executable_mapping(&config.input)
+        || config.preview_contract.is_empty()
+        || config.preview_contract.len() > 240
+        || config.reconciliation_contract.is_empty()
+        || config.reconciliation_contract.len() > 240
+        || !matches!(config.idempotency.as_str(), "required" | "reconcile-only")
+    {
+        return Err(WorkflowExecutionError::Unsupported(
+            "connector_effect_contract".into(),
+        ));
+    }
+    if !compiled
+        .dependencies
+        .iter()
+        .any(|dependency| dependency.kind == "connector" && dependency.id == config.connector_class)
+    {
+        return Err(WorkflowExecutionError::Integrity(
+            "connector_effect_dependency".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_compiled_subset(compiled: &CompiledWorkflow) -> Result<()> {
     compiled
         .retention
@@ -1588,10 +2233,10 @@ fn validate_compiled_subset(compiled: &CompiledWorkflow) -> Result<()> {
     }
     if nodes
         .get(entrypoint.node_id.as_str())
-        .is_none_or(|node| node.node_type != "trigger.manual")
+        .is_none_or(|node| !is_executable_trigger(node.node_type.as_str()))
     {
         return Err(WorkflowExecutionError::Unsupported(
-            "manual_entrypoint_required".into(),
+            "trigger_entrypoint_required".into(),
         ));
     }
     for node in &compiled.nodes {
@@ -1603,23 +2248,31 @@ fn validate_compiled_subset(compiled: &CompiledWorkflow) -> Result<()> {
             || !matches!(
                 node.node_type.as_str(),
                 "trigger.manual"
+                    | "trigger.event"
+                    | "trigger.schedule"
                     | "data.map"
                     | "data.validate"
                     | "data.case-context"
+                    | "data.register-artifact"
                     | "control.match"
+                    | "control.decision"
                     | "control.parallel"
                     | "control.join"
                     | "control.for-each"
                     | "control.retry"
                     | "control.wait"
+                    | "control.reconcile"
+                    | "control.human-review"
                     | "control.subflow"
                     | "storage.read"
                     | "storage.write"
                     | "storage.promote"
                     | "compute.capability"
                     | "compute.llm"
+                    | "effect.connector"
                     | "terminal.complete"
                     | "terminal.fail"
+                    | "terminal.cancel"
             )
         {
             return Err(WorkflowExecutionError::Unsupported(format!(
@@ -1643,6 +2296,64 @@ fn validate_compiled_subset(compiled: &CompiledWorkflow) -> Result<()> {
                 "edge_mapping_not_executable".into(),
             ));
         }
+    }
+    Ok(())
+}
+
+fn is_executable_trigger(node_type: &str) -> bool {
+    matches!(
+        node_type,
+        "trigger.manual" | "trigger.event" | "trigger.schedule"
+    )
+}
+
+fn event_trigger_config(node: &CompiledNode) -> Result<EventTriggerConfig> {
+    let config: EventTriggerConfig = serde_json::from_value(node.config.clone())
+        .map_err(|_| WorkflowExecutionError::Integrity("event_trigger_config".into()))?;
+    if config.event_contract.is_empty()
+        || config.event_contract.len() > 240
+        || !matches!(config.deduplication.as_str(), "event-id" | "contract-key")
+        || !config.correlation.is_empty()
+    {
+        return Err(WorkflowExecutionError::Unsupported(
+            "event_trigger_contract".into(),
+        ));
+    }
+    Ok(config)
+}
+
+fn schedule_trigger_config(node: &CompiledNode) -> Result<ScheduleTriggerConfig> {
+    let config: ScheduleTriggerConfig = serde_json::from_value(node.config.clone())
+        .map_err(|_| WorkflowExecutionError::Integrity("schedule_trigger_config".into()))?;
+    if config.schedule_key.is_empty()
+        || config.schedule_key.len() > 64
+        || !matches!(config.misfire_policy.as_str(), "skip" | "run-once")
+    {
+        return Err(WorkflowExecutionError::Unsupported(
+            "schedule_trigger_contract".into(),
+        ));
+    }
+    Ok(config)
+}
+
+/// A `trigger.manual` entrypoint keeps whatever kind the host recorded, because
+/// a native mail or calendar signal may still start a manual graph. An event or
+/// schedule entrypoint must instead carry its own admitted trigger identity so
+/// replay can attribute the run to exactly one deduplicated occurrence.
+fn validate_trigger_identity(
+    compiled: &CompiledWorkflow,
+    request: &v1::RequestWorkflowRun,
+) -> Result<()> {
+    let entrypoint = compiled_node(compiled, &compiled.entrypoints[0].node_id)?;
+    let required = match entrypoint.node_type.as_str() {
+        "trigger.event" => EVENT_TRIGGER_KIND,
+        "trigger.schedule" => SCHEDULE_TRIGGER_KIND,
+        _ => return Ok(()),
+    };
+    if request.trigger_kind != required || request.trigger_event_id.is_empty() {
+        return Err(WorkflowExecutionError::InvalidCommand(
+            "trigger_identity_required",
+        ));
     }
     Ok(())
 }
@@ -2060,6 +2771,7 @@ fn next_events(
     authority: Option<&WorkflowStorageExecutionAuthority>,
     capabilities: &mut dyn WorkflowCapabilityHost,
     llm: &mut dyn WorkflowLlmProvider,
+    effects: &mut dyn WorkflowEffectHost,
     command: &v1::CommandEnvelope,
     request: &v1::RequestWorkflowRun,
     token_id: &str,
@@ -2158,6 +2870,7 @@ fn next_events(
                     authority,
                     capabilities,
                     llm,
+                    effects,
                     command,
                     request,
                     recorded,
@@ -2313,6 +3026,7 @@ fn next_events(
             authority,
             capabilities,
             llm,
+            effects,
             command,
             request,
             token_id,
@@ -2409,10 +3123,7 @@ fn apply_mapping(
     value: &v1::WorkflowValueReference,
     mapped_value_id: &str,
 ) -> Result<
-    std::result::Result<
-        v1::WorkflowValueReference,
-        workflow_expression::ExpressionEvaluationError,
-    >,
+    std::result::Result<v1::WorkflowValueReference, workflow_expression::ExpressionEvaluationError>,
 > {
     if mapping == &json!({"whole": true}) {
         return Ok(Ok(value.clone()));
@@ -2448,8 +3159,9 @@ fn mapping_failure_value(
 /// before the node runs, if the node type declares one.
 fn node_config_mapping(node: &CompiledNode) -> Option<&Value> {
     let field = match node.node_type.as_str() {
-        "compute.capability" | "control.subflow" => "input",
+        "compute.capability" | "control.subflow" | "effect.connector" => "input",
         "compute.llm" => "prompt",
+        "control.human-review" => "proposal",
         _ => return None,
     };
     node.config.get(field)
@@ -2486,7 +3198,12 @@ fn mapped_node_inputs<'a>(
                     &value,
                     &stable_id(
                         "value",
-                        &[&request.run_id, &payload.edge_id, &payload.emission_id, "mapped"],
+                        &[
+                            &request.run_id,
+                            &payload.edge_id,
+                            &payload.emission_id,
+                            "mapped",
+                        ],
                     ),
                 )? {
                     Ok(mapped) => mapped,
@@ -2509,8 +3226,10 @@ fn mapped_node_inputs<'a>(
     if let Some(mapping) = node_config_mapping(node)
         && mapping != &json!({"whole": true})
         && let Some((_, input)) = inputs.last()
-        && let Err(error) =
-            workflow_expression::evaluate(mapping, &ExpressionRoots::with_input(inline_json(input)?))
+        && let Err(error) = workflow_expression::evaluate(
+            mapping,
+            &ExpressionRoots::with_input(inline_json(input)?),
+        )
     {
         let failure = mapping_failure_value(request, &node.id, "config", &error)?;
         return Ok((inputs, Some((error.code, failure))));
@@ -2518,6 +3237,7 @@ fn mapped_node_inputs<'a>(
     Ok((inputs, None))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn node_event_sequence(
     journal: &mut Journal,
     library: &WorkflowLibraryStore,
@@ -2526,6 +3246,7 @@ fn node_event_sequence(
     authority: Option<&WorkflowStorageExecutionAuthority>,
     capabilities: &mut dyn WorkflowCapabilityHost,
     llm: &mut dyn WorkflowLlmProvider,
+    effects: &mut dyn WorkflowEffectHost,
     command: &v1::CommandEnvelope,
     request: &v1::RequestWorkflowRun,
     token_id: &str,
@@ -2553,6 +3274,7 @@ fn node_event_sequence(
             authority,
             capabilities,
             llm,
+            effects,
             command,
             request,
             token_id,
@@ -2587,6 +3309,14 @@ fn node_event_sequence(
         && node.node_type == "compute.llm"
         && let Some(events) = pending_llm_event_sequence(
             package, llm, request, token_id, state, attempt, node, &inputs,
+        )?
+    {
+        return Ok(events);
+    }
+    if mapping_failure.is_none()
+        && node.node_type == "effect.connector"
+        && let Some(events) = pending_effect_event_sequence(
+            effects, request, token_id, state, attempt, node, &inputs,
         )?
     {
         return Ok(events);
@@ -2629,12 +3359,27 @@ fn node_event_sequence(
             now_unix_millis,
         );
     }
+    if mapping_failure.is_none() && node.node_type == "control.human-review" {
+        return human_review_controller_event_sequence(
+            package,
+            command,
+            request,
+            token_id,
+            state,
+            attempt,
+            node,
+            &inputs,
+            now_unix_millis,
+        );
+    }
     let execution = if let Some((code, value)) = mapping_failure {
         failure_output("error", &code, value)
     } else if node.node_type == "compute.capability" {
         execute_settled_capability_node(request, state, attempt, node)?
     } else if node.node_type == "compute.llm" {
         execute_settled_llm_node(request, state, attempt, node)?
+    } else if node.node_type == "effect.connector" {
+        execute_settled_effect_node(request, state, attempt, node, &inputs)?
     } else if node.node_type == "control.subflow" {
         execute_settled_subflow_node(request, state, attempt, node)?
     } else if node.node_type == "control.join" {
@@ -2700,12 +3445,57 @@ fn node_event_sequence(
     }
 
     let mut emission_ids = Vec::new();
+    let match_fan_out = node.node_type == "control.match" && execution.outputs.len() > 1;
     for (port_id, value) in execution.outputs {
         let emission_id = stable_id(
             "emission",
             &[&request.run_id, &attempt.started.attempt_id, &port_id],
         );
-        let edge_execution_token_id = if node.node_type == "control.parallel" {
+        let edge_execution_token_id = if match_fan_out {
+            let branch_id = port_id
+                .strip_prefix("case-")
+                .ok_or_else(|| WorkflowExecutionError::Integrity("match_case_port".into()))?
+                .to_owned();
+            let child_token_id = stable_id(
+                "execution-token",
+                &[&request.run_id, execution_token_id, &node.id, &branch_id],
+            );
+            let token_event_id = stable_id(
+                "event",
+                &[
+                    &request.run_id,
+                    "execution-token",
+                    &child_token_id,
+                    "created",
+                ],
+            );
+            events.push(runtime_event(
+                command.submitted_at_unix_millis,
+                &token_event_id,
+                workflow_runtime::WORKFLOW_EXECUTION_TOKEN_CREATED_KIND,
+                workflow_runtime::WORKFLOW_EXECUTION_TOKEN_CREATED_TYPE,
+                v1::WorkflowExecutionTokenCreated {
+                    run_id: request.run_id.clone(),
+                    run_token_id: token_id.to_owned(),
+                    execution_token_id: child_token_id.clone(),
+                    parent_execution_token_id: execution_token_id.to_owned(),
+                    fork_node_id: node.id.clone(),
+                    branch_id,
+                    branch_port_id: port_id.clone(),
+                    join_node_id: String::new(),
+                    source_emission_id: emission_id.clone(),
+                    iteration_node_id: String::new(),
+                    iteration_index: 0,
+                    iteration_count: 0,
+                    resume_node_id: String::new(),
+                    resume_reason: String::new(),
+                },
+                &causation_id,
+                &request.run_id,
+            ));
+            causation_id = token_event_id;
+            child_token_id
+        } else if node.node_type == "control.parallel" {
             let config: ParallelConfig = serde_json::from_value(node.config.clone())
                 .map_err(|_| WorkflowExecutionError::Integrity("parallel_config".into()))?;
             let branch = config
@@ -3586,6 +4376,296 @@ fn wait_resolved_event(
     )
 }
 
+/// Human review is a wait whose correlation pins the authority policy and the
+/// exact proposal an approver saw, so a late or re-proposed decision cannot
+/// resume the run silently.
+#[allow(clippy::too_many_arguments)]
+fn human_review_controller_event_sequence(
+    package: &ExecutionPackage,
+    command: &v1::CommandEnvelope,
+    request: &v1::RequestWorkflowRun,
+    run_token_id: &str,
+    state: &RecordedRun,
+    attempt: &RecordedAttempt,
+    node: &CompiledNode,
+    inputs: &[(
+        Option<&v1::WorkflowEdgeCheckpointed>,
+        v1::WorkflowValueReference,
+    )],
+    now_unix_millis: i64,
+) -> Result<Vec<v1::EventEnvelope>> {
+    let config: HumanReviewConfig = serde_json::from_value(node.config.clone())
+        .map_err(|_| WorkflowExecutionError::Integrity("human_review_config".into()))?;
+    let input = inputs
+        .last()
+        .ok_or_else(|| WorkflowExecutionError::Lifecycle("review_input_missing".into()))?
+        .1
+        .clone();
+    let proposal = apply_mapping(
+        &config.proposal,
+        &input,
+        &stable_id(
+            "value",
+            &[
+                &request.run_id,
+                &node.id,
+                &attempt.started.attempt_id,
+                "proposal",
+            ],
+        ),
+    )?
+    .map_err(|_| WorkflowExecutionError::Integrity("review_proposal_mapping".into()))?;
+    let proposal_digest = canonical_sha256(&inline_json(&proposal)?)?;
+    let correlation = review_correlation(&config, &proposal_digest)?;
+    let (owner_kind, owner_id) = wait_owner(request);
+    let subscription_id = stable_id(
+        "review",
+        &[&request.run_id, &node.id, &attempt.started.attempt_id],
+    );
+    let Some(recorded) = state.waits.get(&subscription_id) else {
+        let expiry_millis = config
+            .expiry_seconds
+            .checked_mul(1_000)
+            .and_then(|value| i64::try_from(value).ok())
+            .and_then(|value| attempt.started_at_unix_millis.checked_add(value))
+            .ok_or_else(|| WorkflowExecutionError::Integrity("review_deadline_overflow".into()))?;
+        return Ok(vec![runtime_event(
+            command.submitted_at_unix_millis,
+            &stable_id(
+                "event",
+                &[&request.run_id, "wait-subscribed", &subscription_id],
+            ),
+            workflow_runtime::WORKFLOW_WAIT_SUBSCRIBED_KIND,
+            workflow_runtime::WORKFLOW_WAIT_SUBSCRIBED_TYPE,
+            v1::WorkflowWaitSubscribed {
+                run_id: request.run_id.clone(),
+                run_token_id: run_token_id.to_owned(),
+                subscription_id,
+                wait_node_id: node.id.clone(),
+                execution_token_id: attempt.started.execution_token_id.clone(),
+                controller_attempt_id: attempt.started.attempt_id.clone(),
+                workflow_id: request.workflow_id.clone(),
+                revision_id: request.revision_id.clone(),
+                package_digest: request.package_digest.clone(),
+                kind: REVIEW_WAIT_KIND.into(),
+                owner_kind,
+                owner_id,
+                correlation,
+                input_value_id: proposal.value_id,
+                input_sha256: proposal.sha256,
+                expires_at_unix_millis: expiry_millis,
+            },
+            &attempt.started_event_id,
+            &request.run_id,
+        )]);
+    };
+    if recorded.subscribed.run_token_id != run_token_id
+        || recorded.subscribed.wait_node_id != node.id
+        || recorded.subscribed.execution_token_id != attempt.started.execution_token_id
+        || recorded.subscribed.controller_attempt_id != attempt.started.attempt_id
+        || recorded.subscribed.workflow_id != request.workflow_id
+        || recorded.subscribed.revision_id != request.revision_id
+        || recorded.subscribed.package_digest != request.package_digest
+        || recorded.subscribed.kind != REVIEW_WAIT_KIND
+        || recorded.subscribed.owner_kind != owner_kind
+        || recorded.subscribed.owner_id != owner_id
+        || recorded.subscribed.correlation != correlation
+        || recorded.subscribed.input_value_id != proposal.value_id
+        || recorded.subscribed.input_sha256 != proposal.sha256
+    {
+        return Err(WorkflowExecutionError::Integrity("review_pin_drift".into()));
+    }
+    if let Some(resolved) = recorded.resolved.as_ref() {
+        let resolved_event_id = recorded
+            .resolved_event_id
+            .as_deref()
+            .ok_or_else(|| WorkflowExecutionError::Integrity("review_event_id".into()))?;
+        let decision = v1::WorkflowWaitDecision::try_from(resolved.decision)
+            .map_err(|_| WorkflowExecutionError::Integrity("review_decision".into()))?;
+        let (port_id, outcome, error_code, value) = match decision {
+            v1::WorkflowWaitDecision::Resumed => review_outcome(
+                request,
+                node,
+                &config,
+                &proposal,
+                &proposal_digest,
+                resolved
+                    .output
+                    .as_ref()
+                    .ok_or_else(|| WorkflowExecutionError::Integrity("review_output".into()))?,
+            )?,
+            v1::WorkflowWaitDecision::Expired => (
+                "error",
+                v1::WorkflowAttemptOutcome::Failed,
+                "review.expired",
+                value_from_json(
+                    &stable_id("value", &[&request.run_id, &node.id, "review-expired"]),
+                    &json!({
+                        "code": "review.expired",
+                        "authorityPolicy": config.authority_policy,
+                        "proposalDigest": proposal_digest,
+                        "expiredAtUnixMillis": recorded.subscribed.expires_at_unix_millis
+                    }),
+                )?,
+            ),
+            v1::WorkflowWaitDecision::Cancelled => {
+                return Err(WorkflowExecutionError::Lifecycle(
+                    "cancelled_wait_without_run_cancellation".into(),
+                ));
+            }
+            v1::WorkflowWaitDecision::Unspecified => {
+                return Err(WorkflowExecutionError::Integrity("review_decision".into()));
+            }
+        };
+        return controller_settled_events(
+            &package.compiled,
+            command,
+            request,
+            run_token_id,
+            attempt,
+            node,
+            port_id,
+            value,
+            outcome,
+            error_code.into(),
+            resolved_event_id,
+        );
+    }
+
+    let consumed = state
+        .waits
+        .values()
+        .filter_map(|wait| wait.resolved.as_ref())
+        .map(|resolved| resolved.signal_id.as_str())
+        .filter(|signal_id| !signal_id.is_empty())
+        .collect::<BTreeSet<_>>();
+    let matching_signal = state
+        .wait_signals
+        .values()
+        .filter(|signal| {
+            !consumed.contains(signal.payload.signal_id.as_str())
+                && signal.payload.kind == recorded.subscribed.kind
+                && signal.payload.owner_kind == recorded.subscribed.owner_kind
+                && signal.payload.owner_id == recorded.subscribed.owner_id
+                && signal.payload.correlation == recorded.subscribed.correlation
+                && signal.occurred_at_unix_millis <= recorded.subscribed.expires_at_unix_millis
+        })
+        .min_by_key(|signal| signal.store_position);
+    if let Some(signal) = matching_signal {
+        return Ok(vec![wait_resolved_event(
+            signal.occurred_at_unix_millis,
+            request,
+            run_token_id,
+            recorded,
+            v1::WorkflowWaitDecision::Resumed,
+            signal.payload.signal_id.clone(),
+            signal.payload.value.clone(),
+            String::new(),
+            &signal.event_id,
+        )]);
+    }
+    if now_unix_millis < recorded.subscribed.expires_at_unix_millis {
+        return Err(WorkflowExecutionError::WaitingUntil(
+            recorded.subscribed.expires_at_unix_millis,
+        ));
+    }
+    let output = value_from_json(
+        &stable_id("value", &[&request.run_id, &subscription_id, "expired"]),
+        &json!({
+            "kind": REVIEW_WAIT_KIND,
+            "expiredAtUnixMillis": recorded.subscribed.expires_at_unix_millis,
+            "subscriptionId": subscription_id,
+        }),
+    )?;
+    Ok(vec![wait_resolved_event(
+        recorded.subscribed.expires_at_unix_millis,
+        request,
+        run_token_id,
+        recorded,
+        v1::WorkflowWaitDecision::Expired,
+        String::new(),
+        Some(output),
+        "wait.expired".into(),
+        &recorded.subscribed_event_id,
+    )])
+}
+
+fn review_correlation(
+    config: &HumanReviewConfig,
+    proposal_digest: &str,
+) -> Result<Vec<v1::WorkflowWaitCorrelation>> {
+    let mut correlation = [
+        (
+            "review:/authorityPolicy",
+            json!(config.authority_policy.clone()),
+        ),
+        ("review:/proposalDigest", json!(proposal_digest)),
+    ]
+    .into_iter()
+    .map(|(key, value)| {
+        Ok(v1::WorkflowWaitCorrelation {
+            key: key.into(),
+            sha256: canonical_sha256(&value)?,
+        })
+    })
+    .collect::<Result<Vec<_>>>()?;
+    correlation.sort_by(|left, right| left.key.cmp(&right.key));
+    Ok(correlation)
+}
+
+/// Maps an approver's signal onto the review ports. A stale proposal digest
+/// beats the decision itself: a decision made against a superseded proposal
+/// never approves.
+fn review_outcome(
+    request: &v1::RequestWorkflowRun,
+    node: &CompiledNode,
+    config: &HumanReviewConfig,
+    proposal: &v1::WorkflowValueReference,
+    proposal_digest: &str,
+    signal: &v1::WorkflowValueReference,
+) -> Result<(
+    &'static str,
+    v1::WorkflowAttemptOutcome,
+    &'static str,
+    v1::WorkflowValueReference,
+)> {
+    let signal = inline_json(signal)?;
+    let decision = signal
+        .get("decision")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let signalled_digest = signal.get("proposalDigest").and_then(Value::as_str);
+    let stale = config.stale_check == "digest"
+        && signalled_digest.is_some_and(|digest| digest != proposal_digest);
+    let code = if stale {
+        "review.stale"
+    } else {
+        match decision {
+            "approve" => {
+                return Ok((
+                    "success",
+                    v1::WorkflowAttemptOutcome::Succeeded,
+                    "",
+                    proposal.clone(),
+                ));
+            }
+            "reject" => "review.rejected",
+            _ => "review.decision-invalid",
+        }
+    };
+    let value = value_from_json(
+        &stable_id("value", &[&request.run_id, &node.id, code]),
+        &json!({
+            "code": code,
+            "decision": decision,
+            "authorityPolicy": config.authority_policy,
+            "proposalDigest": proposal_digest,
+            "signalledProposalDigest": signalled_digest
+        }),
+    )?;
+    Ok(("error", v1::WorkflowAttemptOutcome::Failed, code, value))
+}
+
 fn classify_retry_decision(
     error: &Value,
     error_code: &str,
@@ -3646,6 +4726,35 @@ fn controller_output_events(
     value: v1::WorkflowValueReference,
     causation_id: &str,
 ) -> Result<Vec<v1::EventEnvelope>> {
+    controller_settled_events(
+        compiled,
+        command,
+        request,
+        run_token_id,
+        attempt,
+        node,
+        port_id,
+        value,
+        v1::WorkflowAttemptOutcome::Succeeded,
+        String::new(),
+        causation_id,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn controller_settled_events(
+    compiled: &CompiledWorkflow,
+    command: &v1::CommandEnvelope,
+    request: &v1::RequestWorkflowRun,
+    run_token_id: &str,
+    attempt: &RecordedAttempt,
+    node: &CompiledNode,
+    port_id: &str,
+    value: v1::WorkflowValueReference,
+    outcome: v1::WorkflowAttemptOutcome,
+    error_code: String,
+    causation_id: &str,
+) -> Result<Vec<v1::EventEnvelope>> {
     let edge = single_outgoing_edge(compiled, node, port_id)?;
     let emission_id = stable_id(
         "emission",
@@ -3677,6 +4786,7 @@ fn controller_output_events(
             &attempt.started.attempt_id,
         ],
     );
+    let settled_error = (outcome == v1::WorkflowAttemptOutcome::Failed).then(|| value.clone());
     Ok(vec![
         runtime_event(
             command.submitted_at_unix_millis,
@@ -3725,9 +4835,9 @@ fn controller_output_events(
                 attempt_id: attempt.started.attempt_id.clone(),
                 node_id: node.id.clone(),
                 attempt_number: attempt.started.attempt_number,
-                outcome: v1::WorkflowAttemptOutcome::Succeeded as i32,
-                error_code: String::new(),
-                error: None,
+                outcome: outcome as i32,
+                error: settled_error,
+                error_code,
                 emission_ids: vec![emission_id],
                 execution_token_id: attempt.started.execution_token_id.clone(),
             },
@@ -3765,6 +4875,7 @@ fn pending_subflow_event_sequence(
     authority: Option<&WorkflowStorageExecutionAuthority>,
     capabilities: &mut dyn WorkflowCapabilityHost,
     llm: &mut dyn WorkflowLlmProvider,
+    effects: &mut dyn WorkflowEffectHost,
     command: &v1::CommandEnvelope,
     request: &v1::RequestWorkflowRun,
     run_token_id: &str,
@@ -3796,7 +4907,11 @@ fn pending_subflow_event_sequence(
             &edge_input,
             &stable_id(
                 "value",
-                &[&request.run_id, &attempt.started.attempt_id, "subflow-input"],
+                &[
+                    &request.run_id,
+                    &attempt.started.attempt_id,
+                    "subflow-input",
+                ],
             ),
         )?
         .map_err(|_| WorkflowExecutionError::Integrity("subflow_input_mapping".into()))?;
@@ -3844,6 +4959,7 @@ fn pending_subflow_event_sequence(
         authority,
         capabilities,
         llm,
+        effects,
         &child_command,
         now_unix_millis,
         None,
@@ -3965,6 +5081,7 @@ fn cascade_subflow_cancellation(
     authority: Option<&WorkflowStorageExecutionAuthority>,
     capabilities: &mut dyn WorkflowCapabilityHost,
     llm: &mut dyn WorkflowLlmProvider,
+    effects: &mut dyn WorkflowEffectHost,
     parent_command: &v1::CommandEnvelope,
     parent_request: &v1::RequestWorkflowRun,
     recorded: &RecordedSubflow,
@@ -3983,6 +5100,7 @@ fn cascade_subflow_cancellation(
             authority,
             capabilities,
             llm,
+            effects,
             &child_command,
             now_unix_millis,
             None,
@@ -4017,6 +5135,7 @@ fn cascade_subflow_cancellation(
         authority,
         capabilities,
         llm,
+        effects,
         &child_command,
         now_unix_millis,
         None,
@@ -4218,7 +5337,11 @@ fn pending_capability_event_sequence(
         &edge_input,
         &stable_id(
             "value",
-            &[&request.run_id, &attempt.started.attempt_id, "capability-input"],
+            &[
+                &request.run_id,
+                &attempt.started.attempt_id,
+                "capability-input",
+            ],
         ),
     )?
     .map_err(|_| WorkflowExecutionError::Integrity("capability_input_mapping".into()))?;
@@ -4908,12 +6031,17 @@ fn pending_llm_event_sequence(
         .get(&config.output_schema_ref)
         .ok_or_else(|| WorkflowExecutionError::Unsupported("llm_output_schema_missing".into()))?;
     let tool_definitions = validated_llm_tool_definitions(package, &config, &definition)?;
+    let admitted_inputs = inputs
+        .iter()
+        .map(|(_, value)| value.clone())
+        .collect::<Vec<_>>();
     let compiled = compile_llm_context(
         request,
         state.episode.as_ref(),
         attempt,
         node,
         &input,
+        &admitted_inputs,
         &config,
         &definition,
         output_schema,
@@ -4992,6 +6120,7 @@ fn pending_llm_event_sequence(
         recorded,
         output_schema,
         &definition,
+        llm_tool_call_budget(&config),
         result,
     )?]))
 }
@@ -5048,6 +6177,7 @@ fn compile_llm_context(
     attempt: &RecordedAttempt,
     node: &CompiledNode,
     input: &v1::WorkflowValueReference,
+    admitted_inputs: &[v1::WorkflowValueReference],
     config: &LlmConfig,
     definition: &WorkflowLlmProviderDefinition,
     output_schema: &Value,
@@ -5075,6 +6205,7 @@ fn compile_llm_context(
         json!({
             "policy": "Use only the recorded workflow context. Do not reveal hidden reasoning or request credentials, host paths, or undeclared external effects.",
             "outputSchemaDigest": schema_digest(output_schema)?,
+            "maximumToolCalls": llm_tool_call_budget(config),
         }),
         Vec::new(),
         &mut reasons,
@@ -5147,7 +6278,7 @@ fn compile_llm_context(
         }
     }
 
-    let attachments = llm_attachment_handles(input, episode);
+    let attachments = llm_attachment_handles(admitted_inputs, episode);
     if !attachments.is_empty() {
         let attachment_summary = attachments
             .iter()
@@ -5156,6 +6287,7 @@ fn compile_llm_context(
                     "handleId": attachment.handle_id,
                     "role": attachment.role,
                     "valueId": attachment.value.as_ref().map(|value| value.value_id.clone()).unwrap_or_default(),
+                    "contentType": attachment.value.as_ref().map(|value| value.content_type.clone()).unwrap_or_default(),
                     "sha256": attachment.value.as_ref().map(|value| value.sha256.clone()).unwrap_or_default(),
                     "byteCount": attachment.value.as_ref().map(|value| value.byte_count).unwrap_or_default(),
                 })
@@ -5395,11 +6527,18 @@ fn sanitize_llm_label(value: &str) -> String {
     }
 }
 
+/// Collects the artifact references reachable from this attempt's admitted
+/// inputs and its case episode. Each handle keeps its opaque identity and its
+/// content digest, so a prompt can name an artifact without the model, the
+/// provider, or the journal ever seeing a host path or the artifact bytes.
 fn llm_attachment_handles(
-    input: &v1::WorkflowValueReference,
+    admitted_inputs: &[v1::WorkflowValueReference],
     episode: Option<&v1::WorkflowCaseEpisodeStarted>,
 ) -> Vec<v1::WorkflowCapabilityArtifactHandle> {
-    let mut values = artifact_handles_from_value(input, "current-input");
+    let mut values = admitted_inputs
+        .iter()
+        .flat_map(|input| artifact_handles_from_value(input, "current-input"))
+        .collect::<Vec<_>>();
     if let Some(episode) = episode {
         for binding in &episode.inputs {
             if let Some(value) = binding.value.as_ref() {
@@ -5486,12 +6625,14 @@ fn canonical_sha256(value: &Value) -> Result<String> {
         .map_err(|_| WorkflowExecutionError::Encoding("llm_context"))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn llm_provider_result_event(
     request: &v1::RequestWorkflowRun,
     run_token_id: &str,
     recorded: &RecordedLlmAttempt,
     output_schema: &Value,
     definition: &WorkflowLlmProviderDefinition,
+    tool_call_budget: usize,
     result: WorkflowLlmProviderResult,
 ) -> Result<v1::EventEnvelope> {
     let invocation_id = recorded.started.invocation_id.as_str();
@@ -5503,6 +6644,19 @@ fn llm_provider_result_event(
             provider_run_reference,
             trace,
         } if elapsed_milliseconds <= definition.timeout_milliseconds => {
+            if trace.tool_calls.len() > tool_call_budget {
+                return llm_failure_result_event(
+                    request,
+                    run_token_id,
+                    recorded,
+                    v1::WorkflowLlmAttemptOutcome::MalformedResult,
+                    "llm.tool-call-budget-exceeded",
+                    "The model made more tool calls than this node's recorded budget allows.",
+                    elapsed_milliseconds,
+                    receipt_id,
+                    AdmittedLlmTrace::default(),
+                );
+            }
             if llm_value_contains_private_marker(&output) {
                 return llm_failure_result_event(
                     request,
@@ -5520,6 +6674,7 @@ fn llm_provider_result_event(
                 request,
                 recorded,
                 definition,
+                tool_call_budget,
                 &receipt_id,
                 &provider_run_reference,
                 trace,
@@ -5643,8 +6798,16 @@ fn llm_provider_result_event(
             &summary,
             elapsed_milliseconds,
             receipt_id.clone(),
-            admit_llm_trace(request, recorded, definition, &receipt_id, "", trace)
-                .unwrap_or_default(),
+            admit_llm_trace(
+                request,
+                recorded,
+                definition,
+                tool_call_budget,
+                &receipt_id,
+                "",
+                trace,
+            )
+            .unwrap_or_default(),
         ),
         WorkflowLlmProviderResult::Crashed {
             summary,
@@ -5660,21 +6823,31 @@ fn llm_provider_result_event(
             &summary,
             elapsed_milliseconds,
             receipt_id.clone(),
-            admit_llm_trace(request, recorded, definition, &receipt_id, "", trace)
-                .unwrap_or_default(),
+            admit_llm_trace(
+                request,
+                recorded,
+                definition,
+                tool_call_budget,
+                &receipt_id,
+                "",
+                trace,
+            )
+            .unwrap_or_default(),
         ),
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn admit_llm_trace(
     request: &v1::RequestWorkflowRun,
     recorded: &RecordedLlmAttempt,
     definition: &WorkflowLlmProviderDefinition,
+    tool_call_budget: usize,
     receipt_id: &str,
     provider_run_reference: &str,
     trace: WorkflowLlmProviderTrace,
 ) -> Result<AdmittedLlmTrace> {
-    if trace.tool_calls.len() > MAXIMUM_LLM_TOOL_CALLS
+    if trace.tool_calls.len() > tool_call_budget.min(MAXIMUM_LLM_TOOL_CALLS)
         || trace.response_messages.len() > MAXIMUM_LLM_RESPONSE_MESSAGES
         || llm_value_contains_private_marker(&trace.receipt_metadata)
     {
@@ -6096,6 +7269,501 @@ fn llm_invocation_id(
     )
 }
 
+/// One `effect.connector` attempt, either ready to reach the connector host or
+/// already refused before any authority exists.
+enum EffectPreparation {
+    Ready(Box<PreparedEffect>),
+    Refused { code: &'static str, detail: Value },
+}
+
+struct PreparedEffect {
+    proposal: v1::WorkflowEffectProposed,
+    effect_id: String,
+}
+
+/// Builds the exact proposal one attempt would record. The result is derived
+/// only from the compiled node, the mapped input, and durable attempt facts, so
+/// every replay of the same attempt produces the same effect identity.
+fn prepare_effect(
+    request: &v1::RequestWorkflowRun,
+    run_token_id: &str,
+    attempt: &RecordedAttempt,
+    node: &CompiledNode,
+    inputs: &[(
+        Option<&v1::WorkflowEdgeCheckpointed>,
+        v1::WorkflowValueReference,
+    )],
+) -> Result<EffectPreparation> {
+    let config: ConnectorEffectConfig = serde_json::from_value(node.config.clone())
+        .map_err(|_| WorkflowExecutionError::Integrity("connector_effect_config".into()))?;
+    let class = WorkflowMailEffectClass::from_action(&config.action)
+        .ok_or_else(|| WorkflowExecutionError::Integrity("connector_effect_action".into()))?;
+    let edge_input = inputs
+        .last()
+        .ok_or_else(|| WorkflowExecutionError::Lifecycle("effect_input_missing".into()))?
+        .1
+        .clone();
+    let mapped = apply_mapping(
+        &config.input,
+        &edge_input,
+        &stable_id(
+            "value",
+            &[&request.run_id, &attempt.started.attempt_id, "effect-input"],
+        ),
+    )?;
+    let input = match mapped {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(EffectPreparation::Refused {
+                code: "effect.input-mapping-failed",
+                detail: json!({
+                    "action": config.action,
+                    "expressionPath": error.expression_path,
+                    "reason": error.code
+                }),
+            });
+        }
+    };
+    let payload = inline_json(&input)?;
+    let account_binding_id = payload
+        .get("accountBindingId")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let destination_fingerprint = payload
+        .get("destinationFingerprint")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let proposal = mail_effect_proposal(WorkflowMailEffectRequest {
+        class,
+        run_id: request.run_id.clone(),
+        run_token_id: run_token_id.to_owned(),
+        attempt_id: attempt.started.attempt_id.clone(),
+        execution_token_id: attempt.started.execution_token_id.clone(),
+        node_id: node.id.clone(),
+        workflow_id: request.workflow_id.clone(),
+        revision_id: request.revision_id.clone(),
+        project_id: request.installation_id.clone(),
+        workspace_id: request.case_id.clone(),
+        account_binding_id,
+        destination_fingerprint,
+        input_digest: input.sha256.clone(),
+        expires_at_unix_millis: attempt
+            .started_at_unix_millis
+            .saturating_add(EFFECT_AUTHORITY_WINDOW_MILLISECONDS),
+    });
+    let proposal = match proposal {
+        Ok(proposal) => proposal,
+        Err(error) => {
+            return Ok(EffectPreparation::Refused {
+                code: "effect.input-rejected",
+                detail: json!({"action": config.action, "reason": error.to_string()}),
+            });
+        }
+    };
+    let effect_id = proposal
+        .intent
+        .as_ref()
+        .ok_or_else(|| WorkflowExecutionError::Integrity("effect_intent_missing".into()))?
+        .effect_id
+        .clone();
+    Ok(EffectPreparation::Ready(Box::new(PreparedEffect {
+        proposal,
+        effect_id,
+    })))
+}
+
+/// Advances one `effect.connector` attempt by a single durable fact: propose,
+/// authorize, start dispatch, settle dispatch, then bounded reconciliation.
+///
+/// The journaled dispatch-started fact is the outbox boundary. The executor
+/// offers a dispatch record to the connector at most once per pass, and an
+/// interrupted pass re-offers the same record under the same idempotency key,
+/// which the registration must honour (`idempotent` and `supportsReconciliation`
+/// are both required before an intent may cross the boundary at all). Returning
+/// `None` hands the attempt to `execute_settled_effect_node`, which reads the
+/// journaled facts and selects the node's port.
+#[allow(clippy::too_many_arguments)]
+fn pending_effect_event_sequence(
+    effects: &mut dyn WorkflowEffectHost,
+    request: &v1::RequestWorkflowRun,
+    run_token_id: &str,
+    state: &RecordedRun,
+    attempt: &RecordedAttempt,
+    node: &CompiledNode,
+    inputs: &[(
+        Option<&v1::WorkflowEdgeCheckpointed>,
+        v1::WorkflowValueReference,
+    )],
+) -> Result<Option<Vec<v1::EventEnvelope>>> {
+    let EffectPreparation::Ready(prepared) =
+        prepare_effect(request, run_token_id, attempt, node, inputs)?
+    else {
+        return Ok(None);
+    };
+    let proposal = &prepared.proposal;
+    let effect_id = prepared.effect_id.as_str();
+    let intent = proposal
+        .intent
+        .as_ref()
+        .ok_or_else(|| WorkflowExecutionError::Integrity("effect_intent_missing".into()))?;
+    let approval = proposal
+        .approval_request
+        .as_ref()
+        .ok_or_else(|| WorkflowExecutionError::Integrity("effect_approval_missing".into()))?;
+    let preview = proposal
+        .preview
+        .as_ref()
+        .ok_or_else(|| WorkflowExecutionError::Integrity("effect_preview_missing".into()))?;
+    let Some(recorded) = state.effects.get(effect_id) else {
+        return Ok(Some(vec![runtime_event(
+            attempt.started_at_unix_millis,
+            &effect_event_id(request, "effect-proposed", effect_id),
+            workflow_runtime::WORKFLOW_EFFECT_PROPOSED_KIND,
+            workflow_runtime::WORKFLOW_EFFECT_PROPOSED_TYPE,
+            proposal.clone(),
+            &attempt.started_event_id,
+            &request.run_id,
+        )]));
+    };
+    if &recorded.proposed != proposal {
+        return Err(WorkflowExecutionError::Integrity(
+            "recorded_effect_proposal_mismatch".into(),
+        ));
+    }
+    let Some(authorization) = recorded.authorized.as_ref() else {
+        // Authority stays outside the executor: the host returns the exact
+        // resolution an owner recorded for this approval request, or nothing.
+        let Some(resolution) = effects.authorize(proposal) else {
+            return Ok(None);
+        };
+        if resolution.approval_id != approval.approval_id
+            || resolution.expected_fingerprint != approval.fingerprint
+            || v1::ApprovalDecision::try_from(resolution.decision)
+                != Ok(v1::ApprovalDecision::Approve)
+        {
+            return Ok(None);
+        }
+        return Ok(Some(vec![runtime_event(
+            attempt.started_at_unix_millis,
+            &effect_event_id(request, "effect-authorized", effect_id),
+            workflow_runtime::WORKFLOW_EFFECT_AUTHORIZED_KIND,
+            workflow_runtime::WORKFLOW_EFFECT_AUTHORIZED_TYPE,
+            v1::WorkflowEffectAuthorized {
+                run_id: request.run_id.clone(),
+                run_token_id: run_token_id.to_owned(),
+                effect_id: effect_id.to_owned(),
+                grant_id: stable_effect_id("effect-grant", &approval.approval_id, effect_id),
+                resolution: Some(resolution),
+                approval_fingerprint: approval.fingerprint.clone(),
+                intent_digest: proposal.intent_digest.clone(),
+                preview_digest: preview.preview_digest.clone(),
+                destination_fingerprint: intent.destination_fingerprint.clone(),
+                idempotency_key: intent.idempotency_key.clone(),
+                expires_at_unix_millis: approval.expires_at_unix_millis,
+            },
+            &recorded.proposed_event_id,
+            &request.run_id,
+        )]));
+    };
+    let Some(dispatch) = recorded.dispatch_started.as_ref() else {
+        let Some(registration) =
+            effects.registration(&intent.connector_class, &intent.account_binding_id)
+        else {
+            return Ok(None);
+        };
+        if !registration_matches(&registration, intent) {
+            return Ok(None);
+        }
+        let dispatch_id = stable_effect_id("effect-dispatch", effect_id, &intent.idempotency_key);
+        return Ok(Some(vec![runtime_event(
+            attempt.started_at_unix_millis,
+            &effect_event_id(request, "effect-dispatch-started", effect_id),
+            workflow_runtime::WORKFLOW_EFFECT_DISPATCH_STARTED_KIND,
+            workflow_runtime::WORKFLOW_EFFECT_DISPATCH_STARTED_TYPE,
+            v1::WorkflowEffectDispatchStarted {
+                run_id: request.run_id.clone(),
+                run_token_id: run_token_id.to_owned(),
+                effect_id: effect_id.to_owned(),
+                dispatch_id,
+                grant_id: authorization.grant_id.clone(),
+                intent_digest: proposal.intent_digest.clone(),
+                preview_digest: preview.preview_digest.clone(),
+                destination_fingerprint: intent.destination_fingerprint.clone(),
+                idempotency_key: intent.idempotency_key.clone(),
+                registration: Some(registration),
+                deadline_unix_millis: authorization.expires_at_unix_millis.min(
+                    attempt
+                        .started_at_unix_millis
+                        .saturating_add(EFFECT_DISPATCH_TIMEOUT_MILLISECONDS),
+                ),
+            },
+            recorded.latest_event_id(),
+            &request.run_id,
+        )]));
+    };
+    let mut connector_request = WorkflowEffectConnectorRequest {
+        proposal: proposal.clone(),
+        authorization: authorization.clone(),
+        dispatch: dispatch.clone(),
+        prior_receipt: None,
+    };
+    let Some(settled) = recorded.dispatch_settled.as_ref() else {
+        let result =
+            dispatch_result_payload(&connector_request, effects.dispatch(&connector_request));
+        return Ok(Some(vec![runtime_event(
+            occurred_after_effect_phase(
+                recorded.dispatch_started_at_unix_millis,
+                result.elapsed_milliseconds,
+            ),
+            &effect_event_id(request, "effect-dispatch-settled", effect_id),
+            workflow_runtime::WORKFLOW_EFFECT_DISPATCH_SETTLED_KIND,
+            workflow_runtime::WORKFLOW_EFFECT_DISPATCH_SETTLED_TYPE,
+            result,
+            recorded.latest_event_id(),
+            &request.run_id,
+        )]));
+    };
+    if v1::WorkflowEffectDispatchOutcome::try_from(settled.outcome)
+        .map_err(|_| WorkflowExecutionError::Integrity("effect_dispatch_outcome".into()))?
+        != v1::WorkflowEffectDispatchOutcome::Unknown
+    {
+        return Ok(None);
+    }
+    if let Some(latest) = recorded.latest_reconciliation()
+        && v1::WorkflowEffectReconciliationOutcome::try_from(latest.payload.outcome).map_err(
+            |_| WorkflowExecutionError::Integrity("effect_reconciliation_outcome".into()),
+        )? != v1::WorkflowEffectReconciliationOutcome::StillUnknown
+    {
+        return Ok(None);
+    }
+    let ordinal = recorded.reconciliations.len();
+    if ordinal >= MAXIMUM_EFFECT_RECONCILIATION_CHECKS {
+        return Ok(None);
+    }
+    connector_request.prior_receipt = settled.receipt.clone();
+    let reconciliation_id = stable_effect_id(
+        "effect-reconciliation",
+        effect_id,
+        &format!("{}:{}", dispatch.dispatch_id, ordinal + 1),
+    );
+    let reconciled = reconciliation_result_payload(
+        &connector_request,
+        reconciliation_id,
+        effects.reconcile(&connector_request),
+    );
+    Ok(Some(vec![runtime_event(
+        occurred_after_effect_phase(
+            recorded.latest_occurred_at_unix_millis(),
+            reconciled.elapsed_milliseconds,
+        ),
+        &effect_event_id(
+            request,
+            &format!("effect-reconciled-{}", ordinal + 1),
+            effect_id,
+        ),
+        workflow_runtime::WORKFLOW_EFFECT_RECONCILED_KIND,
+        workflow_runtime::WORKFLOW_EFFECT_RECONCILED_TYPE,
+        reconciled,
+        recorded.latest_event_id(),
+        &request.run_id,
+    )]))
+}
+
+fn effect_event_id(request: &v1::RequestWorkflowRun, phase: &str, effect_id: &str) -> String {
+    stable_id("event", &[&request.run_id, phase, effect_id])
+}
+
+fn occurred_after_effect_phase(started_at_unix_millis: i64, elapsed_milliseconds: u64) -> i64 {
+    started_at_unix_millis.saturating_add(i64::try_from(elapsed_milliseconds).unwrap_or(i64::MAX))
+}
+
+/// Selects the node's port from the journaled effect facts. `success` carries
+/// the applied receipt; `error` carries the projection status and the number of
+/// reconciliation checks already spent, which is exactly what a downstream
+/// `control.reconcile` node reads to continue an unknown outcome.
+fn execute_settled_effect_node(
+    request: &v1::RequestWorkflowRun,
+    state: &RecordedRun,
+    attempt: &RecordedAttempt,
+    node: &CompiledNode,
+    inputs: &[(
+        Option<&v1::WorkflowEdgeCheckpointed>,
+        v1::WorkflowValueReference,
+    )],
+) -> Result<NodeExecution> {
+    let prepared = match prepare_effect(
+        request,
+        &attempt.started.run_token_id,
+        attempt,
+        node,
+        inputs,
+    )? {
+        EffectPreparation::Ready(prepared) => prepared,
+        EffectPreparation::Refused { code, detail } => {
+            let value = effect_outcome_value(request, node, code, String::new(), 0, detail)?;
+            return Ok(failure_output("error", code, value));
+        }
+    };
+    let effect_id = prepared.effect_id.as_str();
+    let recorded = state
+        .effects
+        .get(effect_id)
+        .ok_or_else(|| WorkflowExecutionError::Lifecycle("effect_not_proposed".into()))?;
+    let checks = recorded.reconciliations.len() as u64;
+    let failure = |code: &'static str, status: &str, detail: Value| -> Result<NodeExecution> {
+        let value = effect_outcome_value(
+            request,
+            node,
+            code,
+            effect_id.to_owned(),
+            checks,
+            merged_effect_detail(status, detail),
+        )?;
+        Ok(failure_output("error", code, value))
+    };
+    if recorded.authorized.is_none() {
+        return failure("effect.not-authorized", "proposed", json!({}));
+    }
+    let Some(dispatch) = recorded.dispatch_started.as_ref() else {
+        return failure("effect.connector-unavailable", "authorized", json!({}));
+    };
+    let Some(settled) = recorded.dispatch_settled.as_ref() else {
+        return failure("effect.dispatch-interrupted", "dispatching", json!({}));
+    };
+    if let Some(latest) = recorded.latest_reconciliation() {
+        let outcome = v1::WorkflowEffectReconciliationOutcome::try_from(latest.payload.outcome)
+            .map_err(|_| {
+                WorkflowExecutionError::Integrity("effect_reconciliation_outcome".into())
+            })?;
+        return match outcome {
+            v1::WorkflowEffectReconciliationOutcome::Applied => Ok(success_output(
+                "success",
+                effect_applied_value(
+                    request,
+                    node,
+                    effect_id,
+                    checks,
+                    "reconciled_applied",
+                    &latest.payload.receipt,
+                )?,
+            )),
+            v1::WorkflowEffectReconciliationOutcome::NotApplied => failure(
+                "effect.not-applied",
+                "reconciled_not_applied",
+                json!({"reason": latest.payload.error_code}),
+            ),
+            v1::WorkflowEffectReconciliationOutcome::StillUnknown => failure(
+                "effect.outcome-unknown",
+                "outcome_unknown",
+                json!({
+                    "dispatchId": dispatch.dispatch_id,
+                    "reason": latest.payload.error_code
+                }),
+            ),
+            v1::WorkflowEffectReconciliationOutcome::Unspecified => Err(
+                WorkflowExecutionError::Integrity("effect_reconciliation_outcome".into()),
+            ),
+        };
+    }
+    match v1::WorkflowEffectDispatchOutcome::try_from(settled.outcome)
+        .map_err(|_| WorkflowExecutionError::Integrity("effect_dispatch_outcome".into()))?
+    {
+        v1::WorkflowEffectDispatchOutcome::Succeeded => Ok(success_output(
+            "success",
+            effect_applied_value(
+                request,
+                node,
+                effect_id,
+                checks,
+                "succeeded",
+                &settled.receipt,
+            )?,
+        )),
+        v1::WorkflowEffectDispatchOutcome::Rejected => failure(
+            "effect.rejected",
+            "rejected",
+            json!({"reason": settled.error_code}),
+        ),
+        v1::WorkflowEffectDispatchOutcome::NotSent => failure(
+            "effect.not-sent",
+            "not_sent",
+            json!({"reason": settled.error_code}),
+        ),
+        v1::WorkflowEffectDispatchOutcome::Unknown => failure(
+            "effect.outcome-unknown",
+            "outcome_unknown",
+            json!({
+                "dispatchId": dispatch.dispatch_id,
+                "reason": settled.error_code
+            }),
+        ),
+        v1::WorkflowEffectDispatchOutcome::Unspecified => Err(WorkflowExecutionError::Integrity(
+            "effect_dispatch_outcome".into(),
+        )),
+    }
+}
+
+fn merged_effect_detail(status: &str, detail: Value) -> Value {
+    let mut merged = json!({"status": status});
+    if let (Some(target), Some(fields)) = (merged.as_object_mut(), detail.as_object()) {
+        for (key, value) in fields {
+            target.insert(key.clone(), value.clone());
+        }
+    }
+    merged
+}
+
+fn effect_outcome_value(
+    request: &v1::RequestWorkflowRun,
+    node: &CompiledNode,
+    code: &str,
+    effect_id: String,
+    checks: u64,
+    detail: Value,
+) -> Result<v1::WorkflowValueReference> {
+    let mut payload = json!({
+        "code": code,
+        "effectId": effect_id,
+        "checks": checks
+    });
+    if let (Some(target), Some(fields)) = (payload.as_object_mut(), detail.as_object()) {
+        for (key, value) in fields {
+            target.insert(key.clone(), value.clone());
+        }
+    }
+    value_from_json(
+        &stable_id("value", &[&request.run_id, &node.id, code, &effect_id]),
+        &payload,
+    )
+}
+
+fn effect_applied_value(
+    request: &v1::RequestWorkflowRun,
+    node: &CompiledNode,
+    effect_id: &str,
+    checks: u64,
+    status: &str,
+    receipt: &Option<v1::WorkflowEffectReceipt>,
+) -> Result<v1::WorkflowValueReference> {
+    let receipt = receipt
+        .as_ref()
+        .ok_or_else(|| WorkflowExecutionError::Integrity("effect_receipt_missing".into()))?;
+    effect_outcome_value(
+        request,
+        node,
+        "effect.applied",
+        effect_id.to_owned(),
+        checks,
+        json!({
+            "status": status,
+            "receiptId": receipt.receipt_id,
+            "evidenceDigest": receipt.evidence_digest
+        }),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_node(
     package: &ExecutionPackage,
@@ -6109,7 +7777,9 @@ fn execute_node(
     job_run_id: &str,
 ) -> Result<NodeExecution> {
     match node.node_type.as_str() {
-        "trigger.manual" => Ok(success_output("success", input.clone())),
+        "trigger.manual" | "trigger.event" | "trigger.schedule" => {
+            Ok(success_output("success", input.clone()))
+        }
         "data.case-context" => {
             let context = episode
                 .and_then(|episode| episode.compiled_context.clone())
@@ -6126,7 +7796,10 @@ fn execute_node(
             match apply_mapping(
                 mapping,
                 input,
-                &stable_id("value", &[&request.run_id, &node.id, attempt_id, "map-output"]),
+                &stable_id(
+                    "value",
+                    &[&request.run_id, &node.id, attempt_id, "map-output"],
+                ),
             )? {
                 Ok(value) => Ok(success_output("success", value)),
                 Err(error) => {
@@ -6180,18 +7853,18 @@ fn execute_node(
                 .collect::<Vec<_>>();
             let mut emitted_port_ids = evaluation.emitted_port_ids.clone();
             let (outputs, outcome, error_code, error) = match evaluation.outcome {
-                EvaluationOutcome::Matched if emitted_port_ids.len() == 1 => (
-                    vec![(emitted_port_ids[0].clone(), input.clone())],
+                EvaluationOutcome::Matched if !emitted_port_ids.is_empty() => (
+                    emitted_port_ids
+                        .iter()
+                        .map(|port_id| (port_id.clone(), input.clone()))
+                        .collect(),
                     v1::WorkflowAttemptOutcome::Succeeded,
                     String::new(),
                     None,
                 ),
-                EvaluationOutcome::Matched => {
-                    return Err(WorkflowExecutionError::Unsupported(
-                        "match_fanout_not_minimal".into(),
-                    ));
-                }
-                EvaluationOutcome::NotMatched | EvaluationOutcome::EvaluationError => {
+                EvaluationOutcome::Matched
+                | EvaluationOutcome::NotMatched
+                | EvaluationOutcome::EvaluationError => {
                     emitted_port_ids = vec!["error".into()];
                     let evaluation_error = evaluation.error.as_ref();
                     let code = evaluation_error
@@ -6242,6 +7915,53 @@ fn execute_node(
                 error: None,
             })
         }
+        "control.decision" => {
+            let config: DecisionConfig = serde_json::from_value(node.config.clone())
+                .map_err(|_| WorkflowExecutionError::Integrity("decision_config".into()))?;
+            let evaluation = workflow_match::evaluate(
+                &decision_match_config(&config)?,
+                &MatchRoots::with_input(inline_json(input)?),
+            );
+            match evaluation.outcome {
+                EvaluationOutcome::Matched
+                    if evaluation.selected_case_ids.first().map(String::as_str)
+                        == Some(DECISION_MATCHED_CASE_ID) =>
+                {
+                    Ok(success_output("matched", input.clone()))
+                }
+                EvaluationOutcome::Matched => Ok(success_output("not-matched", input.clone())),
+                EvaluationOutcome::NotMatched | EvaluationOutcome::EvaluationError => {
+                    let evaluation_error = evaluation.error.as_ref();
+                    let code = evaluation_error
+                        .map(|error| error.code.clone())
+                        .unwrap_or_else(|| "decision.no-route".into());
+                    let value = value_from_json(
+                        &stable_id("value", &[&request.run_id, &node.id, "decision-error"]),
+                        &json!({
+                            "code": code,
+                            "expressionId": evaluation_error.map(|error| error.expression_id.as_str()),
+                            "message": evaluation_error
+                                .map(|error| error.message.as_str())
+                                .unwrap_or("The Decision condition did not resolve.")
+                        }),
+                    )?;
+                    Ok(failure_output("error", &code, value))
+                }
+            }
+        }
+        "control.reconcile" => execute_reconcile_node(request, node, input),
+        "data.register-artifact" => execute_register_artifact_node(
+            package,
+            storage.ok_or_else(|| {
+                WorkflowExecutionError::Unsupported("storage_service_required".into())
+            })?,
+            request,
+            node,
+            attempt_id,
+            occurred_at_unix_millis,
+            input,
+            job_run_id,
+        ),
         "storage.read" | "storage.write" | "storage.promote" => execute_storage_node(
             package,
             storage.ok_or_else(|| {
@@ -6269,6 +7989,26 @@ fn execute_node(
                 outcome: v1::WorkflowAttemptOutcome::Failed,
                 error_code: code,
                 error: Some(input.clone()),
+            })
+        }
+        "terminal.cancel" => {
+            let config: CancelConfig = serde_json::from_value(node.config.clone())
+                .map_err(|_| WorkflowExecutionError::Integrity("cancel_config".into()))?;
+            let reason = match config.reason.as_ref() {
+                Some(mapping) => apply_mapping(
+                    mapping,
+                    input,
+                    &stable_id("value", &[&request.run_id, &node.id, "cancel-reason"]),
+                )?
+                .unwrap_or_else(|_| input.clone()),
+                None => input.clone(),
+            };
+            Ok(NodeExecution {
+                match_trace: None,
+                outputs: Vec::new(),
+                outcome: v1::WorkflowAttemptOutcome::Cancelled,
+                error_code: cancellation_reason_code(&reason)?,
+                error: Some(reason),
             })
         }
         _ => Err(WorkflowExecutionError::Unsupported(format!(
@@ -6444,10 +8184,86 @@ struct RetryBackoffConfig {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EventTriggerConfig {
+    event_contract: String,
+    deduplication: String,
+    #[serde(default)]
+    correlation: Vec<StorageValueSelector>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ScheduleTriggerConfig {
+    schedule_key: String,
+    misfire_policy: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct WaitConfig {
     kind: String,
     correlation: Vec<StorageValueSelector>,
     expiry_seconds: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DecisionConfig {
+    when: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReconcileConfig {
+    effect: StorageValueSelector,
+    maximum_checks: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HumanReviewConfig {
+    proposal: Value,
+    authority_policy: String,
+    expiry_seconds: u64,
+    stale_check: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RegisterArtifactConfig {
+    role: String,
+    media_types: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CancelConfig {
+    #[serde(default)]
+    reason: Option<Value>,
+}
+
+const DECISION_MATCHED_CASE_ID: &str = "decision-matched";
+const DECISION_OTHERWISE_CASE_ID: &str = "decision-not-matched";
+
+/// A Decision is a two-way Match over the whole node input, so it reuses the
+/// audited Match condition evaluator rather than a second condition engine.
+fn decision_match_config(config: &DecisionConfig) -> Result<MatchConfig> {
+    serde_json::from_value(json!({
+        "value": {"root": "input", "pointer": ""},
+        "hitPolicy": "first",
+        "cases": [{
+            "id": DECISION_MATCHED_CASE_ID,
+            "key": "matched",
+            "label": "Matched",
+            "when": config.when.clone()
+        }],
+        "otherwise": {
+            "id": DECISION_OTHERWISE_CASE_ID,
+            "key": "not-matched",
+            "label": "Not matched"
+        }
+    }))
+    .map_err(|_| WorkflowExecutionError::Integrity("decision_condition".into()))
 }
 
 fn default_retry_jitter() -> String {
@@ -6468,6 +8284,203 @@ const fn default_storage_list_limit() -> u32 {
 
 const fn default_true() -> bool {
     true
+}
+
+/// Reconcile settles an unknown effect outcome from the envelope the caller
+/// already journaled. The executor has no live effect connector in this slice,
+/// so it advances the bounded check counter instead of probing a provider.
+fn execute_reconcile_node(
+    request: &v1::RequestWorkflowRun,
+    node: &CompiledNode,
+    input: &v1::WorkflowValueReference,
+) -> Result<NodeExecution> {
+    let config: ReconcileConfig = serde_json::from_value(node.config.clone())
+        .map_err(|_| WorkflowExecutionError::Integrity("reconcile_config".into()))?;
+    let unknown = inline_json(input)?;
+    let effect_id = unknown
+        .pointer(&config.effect.pointer)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let status = unknown
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let checks = unknown.get("checks").and_then(Value::as_u64).unwrap_or(0) as u32;
+    let summary = |code: &str, checks: u32| -> Result<v1::WorkflowValueReference> {
+        value_from_json(
+            &stable_id("value", &[&request.run_id, &node.id, code]),
+            &json!({
+                "code": code,
+                "effectId": effect_id,
+                "status": status,
+                "checks": checks,
+                "maximumChecks": config.maximum_checks
+            }),
+        )
+    };
+    if effect_id.is_empty() {
+        let value = summary("reconcile.effect-missing", checks)?;
+        return Ok(failure_output("failure", "reconcile.effect-missing", value));
+    }
+    match status {
+        "reconciled_applied" => Ok(success_output(
+            "success",
+            summary("reconcile.applied", checks)?,
+        )),
+        "reconciled_not_applied" => Ok(failure_output(
+            "failure",
+            "reconcile.not-applied",
+            summary("reconcile.not-applied", checks)?,
+        )),
+        "outcome_unknown" if checks < config.maximum_checks => Ok(NodeExecution {
+            match_trace: None,
+            outputs: vec![(
+                "still-unknown".into(),
+                summary("reconcile.still-unknown", checks + 1)?,
+            )],
+            outcome: v1::WorkflowAttemptOutcome::Succeeded,
+            error_code: String::new(),
+            error: None,
+        }),
+        "outcome_unknown" => Ok(failure_output(
+            "failure",
+            "reconcile.exhausted",
+            summary("reconcile.exhausted", checks)?,
+        )),
+        _ => Ok(failure_output(
+            "failure",
+            "reconcile.status-invalid",
+            summary("reconcile.status-invalid", checks)?,
+        )),
+    }
+}
+
+/// Registers an inline artifact envelope in the job storage namespace declared
+/// under the node's role, so the artifact keeps a durable handle and digest.
+#[allow(clippy::too_many_arguments)]
+fn execute_register_artifact_node(
+    package: &ExecutionPackage,
+    storage: &mut WorkflowScopedStorage,
+    request: &v1::RequestWorkflowRun,
+    node: &CompiledNode,
+    attempt_id: &str,
+    occurred_at_unix_millis: i64,
+    input: &v1::WorkflowValueReference,
+    job_run_id: &str,
+) -> Result<NodeExecution> {
+    let config: RegisterArtifactConfig = serde_json::from_value(node.config.clone())
+        .map_err(|_| WorkflowExecutionError::Integrity("register_artifact_config".into()))?;
+    let artifact = inline_json(input)?;
+    let media_type = artifact
+        .get("mediaType")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let content = artifact_content_bytes(&artifact);
+    let rejection = if media_type.is_empty() || content.is_none() {
+        Some("artifact.malformed")
+    } else if !config.media_types.contains(&media_type) {
+        Some("artifact.media-type-rejected")
+    } else {
+        None
+    };
+    if let Some(code) = rejection {
+        let value = value_from_json(
+            &stable_id("value", &[&request.run_id, &node.id, "artifact-error"]),
+            &json!({
+                "code": code,
+                "role": config.role,
+                "mediaType": media_type,
+                "acceptedMediaTypes": config.media_types
+            }),
+        )?;
+        return Ok(failure_output("error", code, value));
+    }
+    let content = content.unwrap();
+    let mut stored = artifact;
+    let envelope = stored
+        .as_object_mut()
+        .ok_or_else(|| WorkflowExecutionError::Integrity("artifact_envelope".into()))?;
+    envelope.insert("role".into(), json!(config.role));
+    envelope.insert("byteCount".into(), json!(content.len()));
+    envelope.insert(
+        "contentSha256".into(),
+        json!(hex::encode(Sha256::digest(&content))),
+    );
+    let declaration = storage_declaration(package, "job", &config.role)?;
+    let (access, namespace) = storage_access(request, "job", job_run_id)?;
+    storage.ensure_namespace_capacity(
+        namespace.clone(),
+        storage_quota(package, "job")?,
+        occurred_at_unix_millis,
+    )?;
+    let version_id = stable_id("storage-version", &[&request.run_id, &node.id, "artifact"]);
+    let receipt = storage.write_value(WorkflowStorageWriteRequest {
+        command_id: stable_id("storage-command", &[&request.run_id, &node.id, "artifact"]),
+        access,
+        namespace: namespace.clone(),
+        entry_id: stable_id(
+            "storage-entry",
+            &[&namespace.owner_id, "job", &declaration.key],
+        ),
+        version_id,
+        reference_id: None,
+        logical_key: declaration.key.clone(),
+        expected_revision: 0,
+        schema_ref: Some(declaration.schema_ref.clone()),
+        media_type: media_type.clone(),
+        classification: declaration.classification.clone(),
+        purpose: "artifact".into(),
+        value: WorkflowStorageValueInput::InlineCanonicalJson {
+            bytes: canonical_json_bytes(&stored)?,
+        },
+        created_by_attempt_id: attempt_id.into(),
+        created_at_unix_millis: occurred_at_unix_millis,
+    })?;
+    Ok(success_output(
+        "success",
+        storage_handle_value(
+            &stable_id("value", &[&request.run_id, &node.id, "artifact"]),
+            &receipt.handle,
+            "written",
+        ),
+    ))
+}
+
+/// Fixture artifacts arrive inline as UTF-8 text or Base64 content.
+fn artifact_content_bytes(artifact: &Value) -> Option<Vec<u8>> {
+    if let Some(text) = artifact.get("text").and_then(Value::as_str) {
+        return Some(text.as_bytes().to_vec());
+    }
+    decode_base64(artifact.get("bytesBase64").and_then(Value::as_str)?)
+}
+
+fn decode_base64(encoded: &str) -> Option<Vec<u8>> {
+    let symbols = encoded.trim_end_matches('=');
+    if !encoded.len().is_multiple_of(4) || encoded.len() - symbols.len() > 2 {
+        return None;
+    }
+    let mut bits = 0_u32;
+    let mut width = 0_u32;
+    let mut decoded = Vec::with_capacity(symbols.len() / 4 * 3);
+    for symbol in symbols.bytes() {
+        let value = match symbol {
+            b'A'..=b'Z' => symbol - b'A',
+            b'a'..=b'z' => symbol - b'a' + 26,
+            b'0'..=b'9' => symbol - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        };
+        bits = (bits << 6) | u32::from(value);
+        width += 6;
+        if width >= 8 {
+            width -= 8;
+            decoded.push(((bits >> width) & 0xff) as u8);
+        }
+    }
+    ((bits & ((1 << width) - 1)) == 0).then_some(decoded)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7115,6 +9128,20 @@ fn pending_execution_token_settlement(
                     None,
                     Vec::new(),
                 ),
+                "control.match"
+                    if attempt
+                        .settled
+                        .as_ref()
+                        .is_some_and(|settled| settled.emission_ids.len() > 1) =>
+                {
+                    (
+                        v1::WorkflowExecutionTokenOutcome::Forked,
+                        String::new(),
+                        String::new(),
+                        None,
+                        Vec::new(),
+                    )
+                }
                 "terminal.complete" => {
                     let inputs =
                         node_inputs(request, state, &node.id, &token.created.execution_token_id)?;
@@ -7133,6 +9160,16 @@ fn pending_execution_token_settlement(
                     let settled = attempt.settled.as_ref().unwrap();
                     (
                         v1::WorkflowExecutionTokenOutcome::Failed,
+                        node.id.clone(),
+                        settled.error_code.clone(),
+                        settled.error.clone(),
+                        Vec::new(),
+                    )
+                }
+                "terminal.cancel" => {
+                    let settled = attempt.settled.as_ref().unwrap();
+                    (
+                        v1::WorkflowExecutionTokenOutcome::Cancelled,
                         node.id.clone(),
                         settled.error_code.clone(),
                         settled.error.clone(),
@@ -7689,6 +9726,7 @@ fn pending_join_lifecycle_event(
             "quorum" => config
                 .quorum
                 .ok_or_else(|| WorkflowExecutionError::Integrity("join_quorum".into()))?,
+            "named" => config.required_branches.len() as u32,
             _ => {
                 return Err(WorkflowExecutionError::Unsupported(
                     "join_policy_not_executable".into(),
@@ -7696,9 +9734,38 @@ fn pending_join_lifecycle_event(
             }
         };
         let threshold_usize = threshold as usize;
-        let decision = if arrived.len() >= threshold_usize {
+        // A named join waits for the exact branch identities it lists, so it
+        // counts branch arrivals rather than any arrival.
+        let (satisfied, reachable) = if config.policy == "named" {
+            let branch_of = |token_id: &String| {
+                state
+                    .execution_tokens
+                    .get(token_id)
+                    .map(|token| token.created.branch_id.clone())
+                    .unwrap_or_default()
+            };
+            let arrived_branches = arrived.iter().map(branch_of).collect::<BTreeSet<_>>();
+            let pending_branches = pending.iter().map(branch_of).collect::<BTreeSet<_>>();
+            (
+                config
+                    .required_branches
+                    .iter()
+                    .filter(|branch| arrived_branches.contains(*branch))
+                    .count(),
+                config
+                    .required_branches
+                    .iter()
+                    .filter(|branch| {
+                        arrived_branches.contains(*branch) || pending_branches.contains(*branch)
+                    })
+                    .count(),
+            )
+        } else {
+            (arrived.len(), arrived.len() + pending.len())
+        };
+        let decision = if satisfied >= threshold_usize {
             Some(v1::WorkflowJoinDecision::Succeeded)
-        } else if arrived.len() + pending.len() < threshold_usize {
+        } else if reachable < threshold_usize {
             Some(v1::WorkflowJoinDecision::Failed)
         } else {
             None
@@ -7782,17 +9849,22 @@ fn completed_run_outcome(state: &RecordedRun) -> Result<CompletedRunOutcome> {
                         v1::WorkflowExecutionTokenOutcome::try_from(settled.outcome),
                         Ok(v1::WorkflowExecutionTokenOutcome::Completed)
                             | Ok(v1::WorkflowExecutionTokenOutcome::Failed)
-                    )
+                    ) || (settled.outcome == v1::WorkflowExecutionTokenOutcome::Cancelled as i32
+                        && !settled.terminal_node_id.is_empty())
                 })
         })
         .collect::<Vec<_>>();
     terminal.sort_by_key(|token| token.created_store_position);
+    let outcome_of = |token: &&RecordedExecutionToken| {
+        token.settled.as_ref().map_or(0, |settled| settled.outcome)
+    };
     let selected = terminal
         .iter()
         .rev()
-        .find(|token| {
-            token.settled.as_ref().is_some_and(|settled| {
-                settled.outcome == v1::WorkflowExecutionTokenOutcome::Failed as i32
+        .find(|token| outcome_of(token) == v1::WorkflowExecutionTokenOutcome::Failed as i32)
+        .or_else(|| {
+            terminal.iter().rev().find(|token| {
+                outcome_of(token) == v1::WorkflowExecutionTokenOutcome::Cancelled as i32
             })
         })
         .copied()
@@ -7803,7 +9875,15 @@ fn completed_run_outcome(state: &RecordedRun) -> Result<CompletedRunOutcome> {
         .settled_event_id
         .clone()
         .ok_or_else(|| WorkflowExecutionError::Lifecycle("token_settle_event_missing".into()))?;
-    if settled.outcome == v1::WorkflowExecutionTokenOutcome::Failed as i32 {
+    if settled.outcome == v1::WorkflowExecutionTokenOutcome::Cancelled as i32 {
+        Ok(CompletedRunOutcome {
+            outcome: v1::WorkflowRunOutcome::Cancelled,
+            error_code: settled.error_code.clone(),
+            error: settled.error.clone(),
+            final_emission_ids: Vec::new(),
+            causation_id: event_id,
+        })
+    } else if settled.outcome == v1::WorkflowExecutionTokenOutcome::Failed as i32 {
         Ok(CompletedRunOutcome {
             outcome: v1::WorkflowRunOutcome::Failed,
             error_code: settled.error_code.clone(),
@@ -8425,14 +10505,76 @@ fn recorded_run(journal: &Journal, run_id: &str) -> Result<RecordedRun> {
                 });
             }
             WorkflowRuntimeEvent::MatchTraceRecorded(_) => {}
-            WorkflowRuntimeEvent::EffectProposed(_)
-            | WorkflowRuntimeEvent::EffectAuthorized(_)
-            | WorkflowRuntimeEvent::EffectDispatchStarted(_)
-            | WorkflowRuntimeEvent::EffectDispatchSettled(_)
-            | WorkflowRuntimeEvent::EffectReconciled(_) => {
-                // Effect execution has its own durable outbox/reconciliation
-                // coordinator. Executor replay consumes these as evidence and
-                // never invokes a connector from journal replay.
+            WorkflowRuntimeEvent::EffectProposed(payload) => {
+                let effect_id = payload
+                    .intent
+                    .as_ref()
+                    .ok_or_else(|| {
+                        WorkflowExecutionError::Integrity("effect_intent_missing".into())
+                    })?
+                    .effect_id
+                    .clone();
+                if state
+                    .effects
+                    .insert(
+                        effect_id,
+                        RecordedEffect {
+                            proposed_event_id: envelope.event_id,
+                            proposed: payload,
+                            authorized_event_id: None,
+                            authorized: None,
+                            dispatch_started_event_id: None,
+                            dispatch_started: None,
+                            dispatch_started_at_unix_millis: 0,
+                            dispatch_settled_event_id: None,
+                            dispatch_settled: None,
+                            dispatch_settled_at_unix_millis: 0,
+                            reconciliations: Vec::new(),
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(WorkflowExecutionError::Lifecycle(
+                        "duplicate_effect_proposal".into(),
+                    ));
+                }
+            }
+            WorkflowRuntimeEvent::EffectAuthorized(payload) => {
+                let effect = recorded_effect_mut(&mut state, &payload.effect_id)?;
+                if effect.authorized.replace(payload).is_some() {
+                    return Err(WorkflowExecutionError::Lifecycle(
+                        "effect_authorized_twice".into(),
+                    ));
+                }
+                effect.authorized_event_id = Some(envelope.event_id);
+            }
+            WorkflowRuntimeEvent::EffectDispatchStarted(payload) => {
+                let effect = recorded_effect_mut(&mut state, &payload.effect_id)?;
+                if effect.dispatch_started.replace(payload).is_some() {
+                    return Err(WorkflowExecutionError::Lifecycle(
+                        "effect_dispatched_twice".into(),
+                    ));
+                }
+                effect.dispatch_started_event_id = Some(envelope.event_id);
+                effect.dispatch_started_at_unix_millis = envelope.occurred_at_unix_millis;
+            }
+            WorkflowRuntimeEvent::EffectDispatchSettled(payload) => {
+                let effect = recorded_effect_mut(&mut state, &payload.effect_id)?;
+                if effect.dispatch_settled.replace(payload).is_some() {
+                    return Err(WorkflowExecutionError::Lifecycle(
+                        "effect_dispatch_settled_twice".into(),
+                    ));
+                }
+                effect.dispatch_settled_event_id = Some(envelope.event_id);
+                effect.dispatch_settled_at_unix_millis = envelope.occurred_at_unix_millis;
+            }
+            WorkflowRuntimeEvent::EffectReconciled(payload) => {
+                let effect = recorded_effect_mut(&mut state, &payload.effect_id)?;
+                effect.reconciliations.push(RecordedEffectReconciliation {
+                    event_id: envelope.event_id,
+                    occurred_at_unix_millis: envelope.occurred_at_unix_millis,
+                    payload,
+                });
             }
             WorkflowRuntimeEvent::ConnectorObservationStarted(_)
             | WorkflowRuntimeEvent::ConnectorObservationSettled(_) => {
@@ -8463,6 +10605,16 @@ fn recorded_run(journal: &Journal, run_id: &str) -> Result<RecordedRun> {
         .attempts
         .sort_by_key(|attempt| attempt.started_store_position);
     Ok(state)
+}
+
+fn recorded_effect_mut<'a>(
+    state: &'a mut RecordedRun,
+    effect_id: &str,
+) -> Result<&'a mut RecordedEffect> {
+    state
+        .effects
+        .get_mut(effect_id)
+        .ok_or_else(|| WorkflowExecutionError::Lifecycle("effect_proposal_missing".into()))
 }
 
 fn active_attempt(state: &RecordedRun) -> Result<Option<&RecordedAttempt>> {
@@ -8601,6 +10753,19 @@ fn error_code(value: &v1::WorkflowValueReference) -> Result<String> {
         .filter(|code| !code.is_empty())
         .map(str::to_owned)
         .ok_or_else(|| WorkflowExecutionError::Integrity("error_code_missing".into()))
+}
+
+/// Cancel carries an operator-facing reason rather than a failure, so a plain
+/// string, a `{"code": ...}` envelope, and an unmapped input all settle.
+fn cancellation_reason_code(value: &v1::WorkflowValueReference) -> Result<String> {
+    let reason = inline_json(value)?;
+    let code = reason
+        .as_str()
+        .or_else(|| reason.get("code").and_then(Value::as_str))
+        .or_else(|| reason.get("reason").and_then(Value::as_str))
+        .filter(|code| !code.is_empty())
+        .unwrap_or(DEFAULT_CANCEL_REASON_CODE);
+    Ok(code.to_owned())
 }
 
 #[allow(clippy::too_many_arguments)]

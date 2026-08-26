@@ -394,6 +394,11 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 65536
+        },
+        "maximumToolCalls": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128
         }
       },
       "additionalProperties": false

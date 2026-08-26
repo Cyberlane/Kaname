@@ -83,7 +83,8 @@
     "reasoningEffort": "medium",
     "temperatureMilli": 200,
     "maximumContextBytes": 32768,
-    "maximumOutputTokens": 4096
+    "maximumOutputTokens": 4096,
+    "maximumToolCalls": 8
   },
   "control.decision": {
     "when": {

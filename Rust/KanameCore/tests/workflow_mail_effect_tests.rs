@@ -12,7 +12,8 @@ use kaname_core::{
         WorkflowEffectConnectorError, dispatch_workflow_effect, reconcile_workflow_effect,
     },
     workflow_mail_effect::{
-        WorkflowMailEffectClass, WorkflowMailEffectRequest, mail_effect_proposal,
+        WORKFLOW_MAIL_EFFECT_CLASSES, WorkflowMailEffectClass, WorkflowMailEffectRequest,
+        mail_effect_proposal,
     },
     workflow_projection::WorkflowRunProjection,
     workflow_runtime::{
@@ -22,17 +23,291 @@ use kaname_core::{
     },
 };
 use prost::Message;
+use sha2::{Digest, Sha256};
 
 const CURSOR_KEY: [u8; 32] = [0x71; 32];
 
 #[test]
-fn send_and_archive_each_require_exact_approval_and_reconcile_without_repeat_dispatch() {
-    for class in [
-        WorkflowMailEffectClass::Send,
-        WorkflowMailEffectClass::Archive,
-    ] {
+fn every_mail_kind_requires_exact_approval_and_reconciles_without_repeat_dispatch() {
+    for class in WORKFLOW_MAIL_EFFECT_CLASSES {
         qualify_effect(class);
     }
+}
+
+#[test]
+fn each_mail_action_names_one_kind_and_unknown_actions_name_none() {
+    let mut actions = WORKFLOW_MAIL_EFFECT_CLASSES
+        .map(WorkflowMailEffectClass::action)
+        .to_vec();
+    actions.sort_unstable();
+    assert_eq!(
+        actions,
+        vec!["archive", "draft", "label", "mark-read", "send", "trash"]
+    );
+    for class in WORKFLOW_MAIL_EFFECT_CLASSES {
+        assert_eq!(
+            WorkflowMailEffectClass::from_action(class.action()),
+            Some(class)
+        );
+    }
+    for action in ["", "Send", "send ", "forward", "delete", "mark_read"] {
+        assert_eq!(
+            WorkflowMailEffectClass::from_action(action),
+            None,
+            "{action}"
+        );
+    }
+}
+
+#[test]
+fn sending_delivers_to_a_recipient_while_drafts_are_distinct_mailbox_writes() {
+    for class in WORKFLOW_MAIL_EFFECT_CLASSES {
+        let proposal = mail_effect_proposal(mail_request(class)).unwrap();
+        let preview = proposal.preview.as_ref().unwrap();
+        let scope = proposal
+            .approval_request
+            .as_ref()
+            .unwrap()
+            .scope
+            .as_ref()
+            .unwrap();
+        let action = class.action();
+        let expected_egress = match class {
+            WorkflowMailEffectClass::Send => "external_communication",
+            WorkflowMailEffectClass::Draft => "mailbox_draft",
+            _ => "mailbox_mutation",
+        };
+        assert_eq!(scope.egress_class, expected_egress, "{action}");
+        assert_eq!(
+            preview.reversible,
+            class != WorkflowMailEffectClass::Send,
+            "{action}"
+        );
+        // The approval the owner sees repeats the preview it approves.
+        assert_eq!(
+            proposal.approval_request.as_ref().unwrap().reversible,
+            preview.reversible,
+            "{action}"
+        );
+        assert_eq!(
+            proposal.approval_request.as_ref().unwrap().consequence,
+            preview.consequence,
+            "{action}"
+        );
+        assert!(!preview.summary.is_empty(), "{action}");
+    }
+}
+
+#[test]
+fn each_mail_kind_earns_its_own_effect_identity_and_idempotency_key() {
+    let mut identities = Vec::new();
+    for class in WORKFLOW_MAIL_EFFECT_CLASSES {
+        let intent = mail_effect_proposal(mail_request(class))
+            .unwrap()
+            .intent
+            .unwrap();
+        assert_eq!(intent.connector_class, "mail");
+        assert_eq!(intent.action, class.action());
+        identities.push((intent.effect_id, intent.idempotency_key));
+    }
+    let mut distinct = identities.clone();
+    distinct.sort_unstable();
+    distinct.dedup();
+    assert_eq!(distinct.len(), identities.len());
+}
+
+#[test]
+fn a_still_unknown_first_check_reconciles_applied_on_the_second_check() {
+    let class = WorkflowMailEffectClass::Send;
+    let action = class.action();
+    let run_id = format!("run-mail-second-check-{action}");
+    let token_id = format!("token-mail-second-check-{action}");
+    let attempt_id = format!("attempt-mail-second-check-{action}");
+    let execution_token_id = format!("execution-mail-second-check-{action}");
+    let node_id = format!("node-mail-second-check-{action}");
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    append_active_attempt(
+        &mut journal,
+        &run_id,
+        &token_id,
+        &attempt_id,
+        &execution_token_id,
+        &node_id,
+    );
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    let proposal = mail_effect_proposal(WorkflowMailEffectRequest {
+        class,
+        run_id,
+        run_token_id: token_id,
+        attempt_id,
+        execution_token_id,
+        node_id,
+        ..mail_request(class)
+    })
+    .unwrap();
+    let effect_id = proposal.intent.as_ref().unwrap().effect_id.clone();
+    let idempotency_key = proposal.intent.as_ref().unwrap().idempotency_key.clone();
+    propose_workflow_effect(&mut journal, &mut projection, proposal.clone(), 2_000).unwrap();
+    approve(&mut journal, &mut projection, &proposal, &effect_id);
+
+    let mut connector = registered_connector(
+        action,
+        DeterministicEffectConnectorPlan::AmbiguousUntilSecondCheck,
+    );
+    let dispatched = dispatch_workflow_effect(
+        &mut journal,
+        &mut projection,
+        &mut connector,
+        &effect_id,
+        4_000,
+    )
+    .unwrap();
+    assert_eq!(dispatched.authority.status, "outcome_unknown");
+
+    // The first check cannot see the remote state yet, so the authority stays
+    // unknown without repeating the effect.
+    let first = reconcile_workflow_effect(
+        &mut journal,
+        &mut projection,
+        &mut connector,
+        &effect_id,
+        5_000,
+    )
+    .unwrap();
+    assert_eq!(first.authority.status, "outcome_unknown");
+    assert_eq!(connector.reconciliation_count(&idempotency_key), 1);
+
+    let second = reconcile_workflow_effect(
+        &mut journal,
+        &mut projection,
+        &mut connector,
+        &effect_id,
+        6_000,
+    )
+    .unwrap();
+    assert_eq!(second.authority.status, "reconciled_applied");
+    assert_eq!(connector.reconciliation_count(&idempotency_key), 2);
+    assert_eq!(connector.dispatch_count(&idempotency_key), 1);
+}
+
+#[test]
+fn a_never_sent_effect_reconciles_not_applied_without_repeat_dispatch() {
+    let class = WorkflowMailEffectClass::Archive;
+    let action = class.action();
+    let run_id = format!("run-mail-not-applied-{action}");
+    let token_id = format!("token-mail-not-applied-{action}");
+    let attempt_id = format!("attempt-mail-not-applied-{action}");
+    let execution_token_id = format!("execution-mail-not-applied-{action}");
+    let node_id = format!("node-mail-not-applied-{action}");
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    append_active_attempt(
+        &mut journal,
+        &run_id,
+        &token_id,
+        &attempt_id,
+        &execution_token_id,
+        &node_id,
+    );
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    let proposal = mail_effect_proposal(WorkflowMailEffectRequest {
+        class,
+        run_id,
+        run_token_id: token_id,
+        attempt_id,
+        execution_token_id,
+        node_id,
+        ..mail_request(class)
+    })
+    .unwrap();
+    let effect_id = proposal.intent.as_ref().unwrap().effect_id.clone();
+    let idempotency_key = proposal.intent.as_ref().unwrap().idempotency_key.clone();
+    propose_workflow_effect(&mut journal, &mut projection, proposal.clone(), 2_000).unwrap();
+    approve(&mut journal, &mut projection, &proposal, &effect_id);
+
+    let mut connector = registered_connector(
+        action,
+        DeterministicEffectConnectorPlan::TimeoutWithoutApply,
+    );
+    dispatch_workflow_effect(
+        &mut journal,
+        &mut projection,
+        &mut connector,
+        &effect_id,
+        4_000,
+    )
+    .unwrap();
+    let reconciled = reconcile_workflow_effect(
+        &mut journal,
+        &mut projection,
+        &mut connector,
+        &effect_id,
+        5_000,
+    )
+    .unwrap();
+    assert_eq!(reconciled.authority.status, "reconciled_not_applied");
+    assert_eq!(connector.dispatch_count(&idempotency_key), 1);
+}
+
+fn mail_request(class: WorkflowMailEffectClass) -> WorkflowMailEffectRequest {
+    let action = class.action();
+    WorkflowMailEffectRequest {
+        class,
+        run_id: format!("run-mail-{action}"),
+        run_token_id: format!("token-mail-{action}"),
+        attempt_id: format!("attempt-mail-{action}"),
+        execution_token_id: format!("execution-mail-{action}"),
+        node_id: format!("node-mail-{action}"),
+        workflow_id: "workflow-mail-effects".into(),
+        revision_id: "revision-mail-effects".into(),
+        project_id: "project-mail-effects".into(),
+        workspace_id: "workspace-mail-effects".into(),
+        account_binding_id: "synthetic-account".into(),
+        destination_fingerprint: "d".repeat(64),
+        input_digest: hex::encode(Sha256::digest(action)),
+        expires_at_unix_millis: 100_000,
+    }
+}
+
+fn registered_connector(
+    action: &str,
+    plan: DeterministicEffectConnectorPlan,
+) -> DeterministicWorkflowEffectConnector {
+    let mut connector = DeterministicWorkflowEffectConnector::default();
+    connector.register(
+        WorkflowEffectConnectorRegistration {
+            connector_class: "mail".into(),
+            version: "1.0.0".into(),
+            package_digest: "c".repeat(64),
+            binding_id: "synthetic-mail-binding".into(),
+            account_binding_id: "synthetic-account".into(),
+            allowed_actions: vec![action.into()],
+            idempotent: true,
+            supports_reconciliation: true,
+            registration_digest: String::new(),
+        },
+        plan,
+    );
+    connector
+}
+
+fn approve(
+    journal: &mut Journal,
+    projection: &mut WorkflowRunProjection,
+    proposal: &kaname_core::v1::WorkflowEffectProposed,
+    effect_id: &str,
+) {
+    let approval = proposal.approval_request.as_ref().unwrap();
+    let resolution = ApprovalResolution {
+        approval_id: approval.approval_id.clone(),
+        decision: ApprovalDecision::Approve as i32,
+        expected_fingerprint: approval.fingerprint.clone(),
+        actor_id: "owner-synthetic".into(),
+        device_id: "device-synthetic".into(),
+        standing_rule_reference: String::new(),
+    };
+    let authorized =
+        authorize_workflow_effect(journal, projection, effect_id, resolution, 3_000).unwrap();
+    assert_eq!(authorized.authority.status, "authorized");
 }
 
 fn qualify_effect(class: WorkflowMailEffectClass) {
@@ -59,18 +334,7 @@ fn qualify_effect(class: WorkflowMailEffectClass) {
         attempt_id,
         execution_token_id,
         node_id,
-        workflow_id: "workflow-mail-effects".into(),
-        revision_id: "revision-mail-effects".into(),
-        project_id: "project-mail-effects".into(),
-        workspace_id: "workspace-mail-effects".into(),
-        account_binding_id: "synthetic-account".into(),
-        destination_fingerprint: "d".repeat(64),
-        input_digest: if class == WorkflowMailEffectClass::Send {
-            "1".repeat(64)
-        } else {
-            "2".repeat(64)
-        },
-        expires_at_unix_millis: 100_000,
+        ..mail_request(class)
     })
     .unwrap();
     let effect_id = proposal.intent.as_ref().unwrap().effect_id.clone();
@@ -78,36 +342,10 @@ fn qualify_effect(class: WorkflowMailEffectClass) {
     let proposed =
         propose_workflow_effect(&mut journal, &mut projection, proposal.clone(), 2_000).unwrap();
     assert_eq!(proposed.authority.status, "proposed");
+    approve(&mut journal, &mut projection, &proposal, &effect_id);
 
-    let approval = proposal.approval_request.as_ref().unwrap();
-    let resolution = ApprovalResolution {
-        approval_id: approval.approval_id.clone(),
-        decision: ApprovalDecision::Approve as i32,
-        expected_fingerprint: approval.fingerprint.clone(),
-        actor_id: "owner-synthetic".into(),
-        device_id: "device-synthetic".into(),
-        standing_rule_reference: String::new(),
-    };
-    let authorized =
-        authorize_workflow_effect(&mut journal, &mut projection, &effect_id, resolution, 3_000)
-            .unwrap();
-    assert_eq!(authorized.authority.status, "authorized");
-
-    let mut connector = DeterministicWorkflowEffectConnector::default();
-    connector.register(
-        WorkflowEffectConnectorRegistration {
-            connector_class: "mail".into(),
-            version: "1.0.0".into(),
-            package_digest: "c".repeat(64),
-            binding_id: "synthetic-mail-binding".into(),
-            account_binding_id: "synthetic-account".into(),
-            allowed_actions: vec![action.into()],
-            idempotent: true,
-            supports_reconciliation: true,
-            registration_digest: String::new(),
-        },
-        DeterministicEffectConnectorPlan::TimeoutAfterSend,
-    );
+    let mut connector =
+        registered_connector(action, DeterministicEffectConnectorPlan::TimeoutAfterSend);
     let dispatched = dispatch_workflow_effect(
         &mut journal,
         &mut projection,

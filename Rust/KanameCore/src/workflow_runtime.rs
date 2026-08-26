@@ -1392,7 +1392,10 @@ fn validate_execution_token_created(payload: &v1::WorkflowExecutionTokenCreated)
         validate_identifier(&payload.fork_node_id, 128, "fork_node_id")?;
         validate_identifier(&payload.branch_id, 128, "branch_id")?;
         validate_identifier(&payload.branch_port_id, 128, "branch_port_id")?;
-        validate_identifier(&payload.join_node_id, 128, "join_node_id")?;
+        // A fan-out branch that never converges (match hit policy "all") carries no join.
+        if !payload.join_node_id.is_empty() {
+            validate_identifier(&payload.join_node_id, 128, "join_node_id")?;
+        }
         validate_identifier(&payload.source_emission_id, 128, "source_emission_id")?;
         if !payload.iteration_node_id.is_empty()
             || payload.iteration_index != 0
@@ -1666,7 +1669,9 @@ fn validate_join_evaluated(payload: &v1::WorkflowJoinEvaluated) -> Result<()> {
         128,
         "resumed_execution_token_id",
     )?;
-    if !matches!(payload.policy.as_str(), "all" | "any" | "quorum") || payload.threshold == 0 {
+    if !matches!(payload.policy.as_str(), "all" | "any" | "quorum" | "named")
+        || payload.threshold == 0
+    {
         return invalid("join_policy");
     }
     let decision = v1::WorkflowJoinDecision::try_from(payload.decision)
@@ -1721,8 +1726,12 @@ fn validate_join_evaluated(payload: &v1::WorkflowJoinEvaluated) -> Result<()> {
         return invalid("join_token_partition");
     }
     let threshold = payload.threshold as usize;
+    // A named join decides on branch identity, so a failure can stand even when
+    // enough unnamed branches arrived; the partition alone cannot express that.
+    let named = payload.policy == "named";
     if (decision == v1::WorkflowJoinDecision::Succeeded && arrived.len() < threshold)
         || (decision == v1::WorkflowJoinDecision::Failed
+            && !named
             && arrived.len() + pending.len() >= threshold)
     {
         return invalid("join_decision_math");

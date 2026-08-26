@@ -391,6 +391,133 @@ fn compiler_checks_storage_dependencies_joins_fanout_and_bounded_cycles() {
     );
 }
 
+#[test]
+fn a_connector_effect_is_executable_only_when_it_declares_its_whole_contract() {
+    let complete = json!({
+        "connectorClass": "dev.kaname.mail",
+        "action": "send",
+        "input": {"whole": true},
+        "previewContract": "mail.send.preview.v1",
+        "reconciliationContract": "mail.send.reconcile.v1",
+        "idempotency": "required"
+    });
+    let node = connector_availability(complete.clone());
+    assert_eq!(node["executionAvailability"], "executable");
+    // The executor reads the ports the compiler emits, so the effect must
+    // publish exactly the input it consumes and the two outcomes it routes.
+    let mut ports = node["ports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|port| port["id"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    ports.sort();
+    assert_eq!(ports, vec!["error", "input", "success"]);
+
+    // Dropping any single declaration leaves the node describable but not
+    // runnable, so the durable executor never reaches a provider without one.
+    for field in [
+        "connectorClass",
+        "action",
+        "input",
+        "previewContract",
+        "reconciliationContract",
+        "idempotency",
+    ] {
+        let mut partial = complete.clone();
+        partial.as_object_mut().unwrap().remove(field);
+        assert_eq!(
+            connector_availability(partial)["executionAvailability"],
+            "schema-only",
+            "{field}"
+        );
+    }
+
+    let mut reconcile_only = complete.clone();
+    reconcile_only["idempotency"] = json!("reconcile-only");
+    assert_eq!(
+        connector_availability(reconcile_only)["executionAvailability"],
+        "executable"
+    );
+    let mut unsupported = complete;
+    unsupported["idempotency"] = json!("none");
+    assert_eq!(
+        connector_availability(unsupported)["executionAvailability"],
+        "schema-only"
+    );
+}
+
+/// Compiles a one-effect graph and returns the compiled connector node.
+fn connector_availability(config: Value) -> Value {
+    let authority = json!({
+        "key": "effect-authority",
+        "type": "authority",
+        "typeVersion": 1,
+        "config": {"authorityClass":"synthetic","approval":"always","reversible":false}
+    });
+    let workflow = json!({
+        "formatVersion": 1,
+        "workflowId": WORKFLOW_ID,
+        "packageId": "dev.kaname.connector-availability",
+        "name": "Connector availability",
+        "summary": "Synthetic connector effect only.",
+        "graph": {
+            "entrypoints": [{"id": ENTRY_ID, "nodeId": START_ID}],
+            "nodes": [
+                {
+                    "id": START_ID,
+                    "key": "effect",
+                    "name": "effect",
+                    "type": "effect.connector",
+                    "typeVersion": 1,
+                    "config": config,
+                    "policyRefs": {"authority":"effect-authority"}
+                },
+                node(END_ID, "complete", "terminal.complete", json!({})),
+                node(FAIL_ID, "failed", "terminal.fail", json!({}))
+            ],
+            "edges": [
+                edge(EDGE_ID, MAPPING_ID, (START_ID, "success"), (END_ID, "input")),
+                edge(
+                    EXTRA_EDGE_ID,
+                    EXTRA_MAPPING_ID,
+                    (START_ID, "error"),
+                    (FAIL_ID, "input")
+                )
+            ]
+        },
+        "interfaces": {},
+        "resources": {},
+        "policies": {"effect-authority": authority},
+        "storage": {},
+        "metadata": {}
+    });
+    let lock = json!({
+        "lockVersion": 1,
+        "dependencies": [{
+            "kind": "connector",
+            "id": "dev.kaname.mail",
+            "version": "1.0.0",
+            "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        }]
+    });
+    let response = workflow_compiler::compile(&request(workflow, lock));
+    assert_eq!(
+        response.outcome,
+        WorkflowCheckOutcome::Valid as i32,
+        "{:?}",
+        diagnostic_pairs(&response)
+    );
+    let artifact: Value = serde_json::from_slice(&response.compiled_artifact).unwrap();
+    artifact["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["type"] == "effect.connector")
+        .unwrap()
+        .clone()
+}
+
 fn bounded_retry_workflow() -> Value {
     let retry_id = EXTRA_ID;
     let authority = json!({

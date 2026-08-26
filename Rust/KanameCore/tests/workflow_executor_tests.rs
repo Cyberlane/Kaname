@@ -2,25 +2,35 @@ use kaname_core::{
     journal::{Journal, ReplayBasis},
     open_workflow_library, open_workflow_scoped_storage,
     v1::{
-        CancelWorkflowRun, CommandEnvelope, OpaqueTypedPayload, RequestWorkflowRun, SchemaVersion,
-        Scope, SignalWorkflowWait, WorkflowInputBinding, WorkflowRunTokenCreated,
-        WorkflowStorageValueMetadata, WorkflowValueReference, WorkflowWaitCorrelation,
+        BeginWorkflowConnectorObservationRequest, CancelWorkflowRun, CommandEnvelope,
+        EventEnvelope, EventProvenance, EvidenceRetentionClass, OpaqueTypedPayload,
+        RequestWorkflowRun, SchemaVersion, Scope, SettleWorkflowConnectorObservationRequest,
+        SignalWorkflowWait, WorkflowConnectorObservationIntent,
+        WorkflowConnectorObservationOutcome, WorkflowConnectorObservationReceipt,
+        WorkflowConnectorObservationRegistration, WorkflowConnectorObservationSettled,
+        WorkflowInputBinding, WorkflowRunTokenCreated, WorkflowStorageValueMetadata,
+        WorkflowValueReference, WorkflowWaitCorrelation,
     },
     workflow_capabilities::{
         DeterministicCapabilityPlan, DeterministicWorkflowCapabilityHost,
+        ProcessWorkflowCapabilityHost, UnavailableWorkflowCapabilityHost,
         WorkflowCapabilityArtifactHandle, WorkflowCapabilityDefinition, WorkflowCapabilityLog,
         WorkflowCapabilityValue,
     },
+    workflow_connector_observation::{
+        begin_workflow_connector_observation, settle_workflow_connector_observation,
+    },
     workflow_drafts::{CreateWorkflowDraft, SaveWorkflowDraft},
     workflow_executor::{
-        self, DurableRunOutcome, WorkflowExecutionError, WorkflowExecutionFault,
-        WorkflowStorageExecutionAuthority,
+        self, DurableRunOutcome, WorkflowEventTrigger, WorkflowExecutionError,
+        WorkflowExecutionFault, WorkflowScheduleTrigger, WorkflowStorageExecutionAuthority,
+        WorkflowTriggerAdmission, WorkflowTriggerRunBinding,
     },
     workflow_llm::{
-        DeterministicLlmPlan, DeterministicWorkflowLlmProvider, WorkflowLlmProviderDefinition,
-        WorkflowLlmProviderResponseMessage, WorkflowLlmProviderToolCall,
-        WorkflowLlmProviderToolDefinition, WorkflowLlmProviderToolResult, WorkflowLlmProviderTrace,
-        WorkflowLlmProviderUsage,
+        DeterministicLlmPlan, DeterministicWorkflowLlmProvider, ProcessWorkflowLlmProvider,
+        WorkflowLlmProvider, WorkflowLlmProviderDefinition, WorkflowLlmProviderResponseMessage,
+        WorkflowLlmProviderToolCall, WorkflowLlmProviderToolDefinition,
+        WorkflowLlmProviderToolResult, WorkflowLlmProviderTrace, WorkflowLlmProviderUsage,
     },
     workflow_object_store::WorkflowObjectStoreQuota,
     workflow_projection::WorkflowRunProjection,
@@ -28,8 +38,10 @@ use kaname_core::{
     workflow_runtime::{
         WORKFLOW_CAPABILITY_ATTEMPT_STARTED_KIND, WORKFLOW_LLM_ATTEMPT_STARTED_KIND,
         WORKFLOW_RUN_CANCEL_KIND, WORKFLOW_RUN_CANCEL_TYPE, WORKFLOW_RUN_REQUEST_KIND,
-        WORKFLOW_RUN_REQUEST_TYPE, WORKFLOW_RUN_TOKEN_CREATED_KIND, WORKFLOW_WAIT_SIGNAL_KIND,
-        WORKFLOW_WAIT_SIGNAL_TYPE,
+        WORKFLOW_RUN_REQUEST_TYPE, WORKFLOW_RUN_TOKEN_CREATED_KIND,
+        WORKFLOW_RUN_TOKEN_CREATED_TYPE, WORKFLOW_WAIT_SIGNAL_KIND, WORKFLOW_WAIT_SIGNAL_TYPE,
+        workflow_connector_observation_intent_digest,
+        workflow_connector_observation_registration_digest,
     },
     workflow_storage::{
         WorkflowStorageAccessContext, WorkflowStorageNamespace, WorkflowStorageScopeKind,
@@ -526,7 +538,7 @@ fn inspectable_llm_context_is_redacted_bounded_and_crash_exact() {
 #[test]
 fn llm_tool_calls_responses_usage_and_large_payload_summaries_are_inspectable() {
     let directory = tempdir().unwrap();
-    let (library, published) = published_llm_tool_library(directory.path());
+    let (library, published) = published_llm_tool_library(directory.path(), None);
     let command = control_run_command(
         "run-llm-tools-001",
         &published,
@@ -573,6 +585,557 @@ fn llm_tool_calls_responses_usage_and_large_payload_summaries_are_inspectable() 
         "provider-request-tools-001"
     );
     assert!(llm.output.is_some());
+}
+
+#[test]
+fn agent_grade_tool_loop_admits_artifact_context_and_bounds_tool_calls() {
+    let directory = tempdir().unwrap();
+    let (library, published) = published_agent_library(directory.path(), Some(2));
+    let mut storage = test_scoped_storage(directory.path());
+
+    let within_budget = agent_run_command("run-agent-budgeted", &published);
+    let mut provider = agent_tool_provider(2);
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    assert_eq!(
+        execute_agent_run(
+            &mut journal,
+            &library,
+            &mut storage,
+            &mut provider,
+            &within_budget,
+        )
+        .unwrap()
+        .outcome,
+        DurableRunOutcome::Succeeded
+    );
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    projection.catch_up(&journal).unwrap();
+    let llm = &projection
+        .inspect_runs(None, Some("run-agent-budgeted"), 1)
+        .unwrap()[0]
+        .llm_attempts[0];
+
+    let group_text = |group_id: &str| {
+        llm.context_groups
+            .iter()
+            .find(|group| group.group_id == group_id)
+            .and_then(|group| group.content.as_ref())
+            .map(|value| String::from_utf8_lossy(&value.inline_canonical_json).into_owned())
+            .unwrap_or_default()
+    };
+    assert!(group_text("system-policy").contains("\"maximumToolCalls\":2"));
+
+    let registered = emitted_references(
+        &journal,
+        "run-agent-budgeted",
+        "018f7b00-0003-7000-8000-000000000003",
+    );
+    let artifact = &registered[0].1;
+    let handle_id = &artifact.storage.as_ref().unwrap().handle_id;
+    let attachments = group_text("attachments");
+    assert!(attachments.contains(&artifact.sha256));
+    assert!(attachments.contains(handle_id.as_str()));
+    assert!(attachments.contains("application/pdf"));
+    assert!(!attachments.contains("Quarterly filing"));
+    assert_eq!(llm.attachments.len(), 1);
+    assert_eq!(llm.attachments[0].handle_id, *handle_id);
+    assert_eq!(llm.attachments[0].role, "current-input");
+
+    assert_eq!(llm.outcome, "succeeded");
+    assert_eq!(llm.tool_calls.len(), 2);
+    assert_eq!(llm.usage.as_ref().unwrap().tool_call_count, 2);
+    assert_eq!(
+        llm.provider_receipt.as_ref().unwrap().request_id,
+        "provider-request-agent-001"
+    );
+    assert!(!llm.receipt_id.is_empty());
+    assert_eq!(llm.idempotency_key, llm.invocation_id);
+    assert_eq!(provider.invocation_count(&llm.invocation_id), 1);
+    let observed = provider.observed(&llm.invocation_id).unwrap();
+    assert_eq!(observed.attachments.len(), 1);
+    assert_eq!(observed.tool_definitions.len(), 1);
+
+    let over_budget = agent_run_command("run-agent-over-budget", &published);
+    let mut provider = agent_tool_provider(3);
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    assert_eq!(
+        execute_agent_run(
+            &mut journal,
+            &library,
+            &mut storage,
+            &mut provider,
+            &over_budget,
+        )
+        .unwrap()
+        .outcome,
+        DurableRunOutcome::Failed
+    );
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    projection.catch_up(&journal).unwrap();
+    let llm = &projection
+        .inspect_runs(None, Some("run-agent-over-budget"), 1)
+        .unwrap()[0]
+        .llm_attempts[0];
+    assert_eq!(llm.error_code, "llm.tool-call-budget-exceeded");
+    assert!(llm.tool_calls.is_empty());
+    assert!(llm.output.is_none());
+}
+
+#[test]
+fn a_tool_call_budget_outside_the_registered_bound_admits_nothing() {
+    for maximum_tool_calls in [0, 129] {
+        let directory = tempdir().unwrap();
+        let (library, published) =
+            published_agent_library(directory.path(), Some(maximum_tool_calls));
+        let mut storage = test_scoped_storage(directory.path());
+        let command = agent_run_command("run-agent-rejected", &published);
+        let mut provider = agent_tool_provider(1);
+        let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+        assert!(matches!(
+            execute_agent_run(&mut journal, &library, &mut storage, &mut provider, &command),
+            Err(WorkflowExecutionError::Unsupported(code)) if code == "llm_execution_contract"
+        ));
+        assert_eq!(journal.event_page_after(0, 10).unwrap().high_water_mark, 0);
+    }
+}
+
+#[test]
+fn an_undescribed_process_host_registers_nothing_and_admits_no_run() {
+    assert!(!ProcessWorkflowLlmProvider::from_environment().is_available());
+    assert!(!ProcessWorkflowCapabilityHost::from_environment().is_available());
+
+    let mut provider = ProcessWorkflowLlmProvider::with_command("/nonexistent/kaname-llm-host");
+    assert!(!provider.is_available());
+    assert!(provider.unavailable_reason().is_some());
+    assert!(provider.definition("reasoning").is_none());
+    assert!(provider.registered_model_classes().is_empty());
+
+    let directory = tempdir().unwrap();
+    let (library, published) = published_llm_library(directory.path(), "job", 32_768);
+    let command = control_run_command(
+        "run-llm-process-unavailable",
+        &published,
+        LLM_WORKFLOW_ID,
+        LLM_REVISION_ID,
+        json!({"request": "Summarize"}),
+    );
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    assert!(matches!(
+        workflow_executor::execute_with_llm(&mut journal, &library, &mut provider, &command),
+        Err(WorkflowExecutionError::Unsupported(code)) if code == "llm_provider_not_registered"
+    ));
+    assert_eq!(journal.event_page_after(0, 10).unwrap().high_water_mark, 0);
+
+    let mut host =
+        ProcessWorkflowCapabilityHost::with_command("/nonexistent/kaname-capability-host", []);
+    assert!(!host.is_available());
+    assert!(host.unavailable_reason().is_some());
+    assert!(host.registered_capabilities().is_empty());
+    let directory = tempdir().unwrap();
+    let (library, published) = published_capability_library(directory.path());
+    let command = control_run_command(
+        "run-capability-process-unavailable",
+        &published,
+        CAPABILITY_WORKFLOW_ID,
+        CAPABILITY_REVISION_ID,
+        json!({"text": "hello"}),
+    );
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    assert!(matches!(
+        workflow_executor::execute_with_capabilities(
+            &mut journal,
+            &library,
+            &mut host,
+            &command
+        ),
+        Err(WorkflowExecutionError::Unsupported(code)) if code == "capability_not_registered"
+    ));
+    assert_eq!(journal.event_page_after(0, 10).unwrap().high_water_mark, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_process_llm_host_records_journal_receipts_and_is_invoked_once() {
+    let directory = tempdir().unwrap();
+    let describe = json!({
+        "providers": [{
+            "providerId": "process-provider",
+            "modelId": "process-model",
+            "modelRevision": "revision-2026-08-15",
+            "modelClass": "reasoning",
+            "timeoutMilliseconds": 100,
+            "maximumContextBytes": 49_152,
+            "idempotent": true,
+            "tools": [{
+                "toolId": "synthetic.search",
+                "version": "1.0.0",
+                "packageDigest": "a".repeat(64),
+                "description": "Search the bounded synthetic fixture",
+                "inputSchemaRef": "dev.kaname.tool/search-input-v1",
+                "inputSchema": synthetic_search_tool().input_schema,
+                "outputSchemaRef": "dev.kaname.tool/search-output-v1",
+                "outputSchema": synthetic_search_tool().output_schema
+            }]
+        }]
+    });
+    let respond = json!({
+        "outcome": "succeeded",
+        "output": {"summary": "Bounded process host result"},
+        "elapsedMilliseconds": 6,
+        "receiptId": "receipt-process-llm-001",
+        "providerRunReference": "process-run-001",
+        "trace": {
+            "requestId": "provider-request-process-001",
+            "responseId": "provider-response-process-001",
+            "receiptMetadata": {"host": "process"},
+            "toolCalls": [{
+                "callId": "call-process-001",
+                "toolId": "synthetic.search",
+                "input": {"query": "bounded evidence"},
+                "status": "succeeded",
+                "output": {"hits": [{"title": "Local result"}]},
+                "durationMilliseconds": 2
+            }],
+            "responseMessages": [{
+                "messageId": "response-message-process-001",
+                "role": "assistant",
+                "kind": "final",
+                "summary": "Final structured response",
+                "content": {"summary": "Bounded process host result"}
+            }],
+            "usage": {
+                "inputTokens": 40,
+                "outputTokens": 12,
+                "costCurrency": "USD",
+                "inputCostMicros": 4,
+                "outputCostMicros": 2
+            }
+        }
+    });
+    let host = process_host_script(directory.path(), "llm-host", &describe, &respond);
+
+    let (library, published) = published_llm_tool_library(directory.path(), Some(4));
+    let command = control_run_command(
+        "run-llm-process-001",
+        &published,
+        LLM_WORKFLOW_ID,
+        LLM_REVISION_ID,
+        json!({"request": "Use the described process host"}),
+    );
+    let mut provider = ProcessWorkflowLlmProvider::with_command(&host.program);
+    assert!(provider.is_available());
+    assert_eq!(provider.registered_model_classes(), ["reasoning"]);
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    assert_eq!(
+        workflow_executor::execute_with_llm(&mut journal, &library, &mut provider, &command)
+            .unwrap()
+            .outcome,
+        DurableRunOutcome::Succeeded
+    );
+    assert_eq!(
+        workflow_executor::execute_with_llm(&mut journal, &library, &mut provider, &command)
+            .unwrap()
+            .outcome,
+        DurableRunOutcome::Succeeded
+    );
+    assert_eq!(host.invocation_count(), 1);
+
+    let request: Value =
+        serde_json::from_slice(&std::fs::read(&host.request_log).unwrap()).unwrap();
+    assert_eq!(request["nodeId"], LLM_NODE_ID);
+    assert_eq!(request["settings"]["modelId"], "process-model");
+    assert_eq!(request["toolDefinitions"][0]["toolId"], "synthetic.search");
+    assert!(!request.to_string().contains("/Users/"));
+
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    projection.catch_up(&journal).unwrap();
+    let llm = &projection
+        .inspect_runs(None, Some("run-llm-process-001"), 1)
+        .unwrap()[0]
+        .llm_attempts[0];
+    assert_eq!(llm.outcome, "succeeded");
+    assert_eq!(llm.receipt_id, "receipt-process-llm-001");
+    assert_eq!(llm.idempotency_key, llm.invocation_id);
+    assert_eq!(
+        llm.settings.as_ref().unwrap().provider_id,
+        "process-provider"
+    );
+    assert_eq!(llm.tool_calls.len(), 1);
+    assert_eq!(llm.tool_calls[0].status, "succeeded");
+    assert_eq!(llm.usage.as_ref().unwrap().total_tokens, 52);
+    assert_eq!(
+        llm.provider_receipt.as_ref().unwrap().request_id,
+        "provider-request-process-001"
+    );
+    assert_eq!(llm.validation.as_ref().unwrap().status, "succeeded");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_process_capability_host_records_receipts_and_honours_the_digest_allowlist() {
+    let directory = tempdir().unwrap();
+    let describe = json!({
+        "capabilities": [{
+            "capabilityId": CAPABILITY_ID,
+            "version": "1.0.0",
+            "packageDigest": CAPABILITY_DIGEST,
+            "configurationSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "required": ["mode"],
+                "properties": {"mode": {"const": "strict"}},
+                "additionalProperties": false
+            },
+            "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "required": ["text"],
+                "properties": {"text": {"type": "string"}},
+                "additionalProperties": false
+            },
+            "outputSchema": capability_output_schema(),
+            "timeoutMilliseconds": 100,
+            "deterministic": true,
+            "idempotent": true
+        }]
+    });
+    let respond = json!({
+        "outcome": "succeeded",
+        "output": {"normalized": "HELLO"},
+        "logs": [{
+            "level": "info",
+            "message": "Read /Users/example/private-input",
+            "offsetMilliseconds": 2
+        }],
+        "elapsedMilliseconds": 3,
+        "receiptId": "receipt-process-capability-001",
+        "providerRunReference": "process-capability-run-001"
+    });
+    let host = process_host_script(directory.path(), "capability-host", &describe, &respond);
+
+    let rejected = ProcessWorkflowCapabilityHost::with_command(&host.program, ["f".repeat(64)]);
+    assert!(!rejected.is_available());
+    assert!(rejected.unavailable_reason().is_some());
+
+    let mut capabilities =
+        ProcessWorkflowCapabilityHost::with_command(&host.program, [CAPABILITY_DIGEST.to_owned()]);
+    assert!(capabilities.is_available());
+    assert_eq!(
+        capabilities.registered_capabilities(),
+        [(
+            CAPABILITY_ID.to_owned(),
+            "1.0.0".to_owned(),
+            CAPABILITY_DIGEST.to_owned()
+        )]
+    );
+
+    let (library, published) = published_capability_library(directory.path());
+    let command = control_run_command(
+        "run-capability-process-001",
+        &published,
+        CAPABILITY_WORKFLOW_ID,
+        CAPABILITY_REVISION_ID,
+        json!({"text": "hello"}),
+    );
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    assert_eq!(
+        workflow_executor::execute_with_capabilities(
+            &mut journal,
+            &library,
+            &mut capabilities,
+            &command
+        )
+        .unwrap()
+        .outcome,
+        DurableRunOutcome::Succeeded
+    );
+    assert_eq!(
+        workflow_executor::execute_with_capabilities(
+            &mut journal,
+            &library,
+            &mut capabilities,
+            &command
+        )
+        .unwrap()
+        .outcome,
+        DurableRunOutcome::Succeeded
+    );
+    assert_eq!(host.invocation_count(), 1);
+
+    let request: Value =
+        serde_json::from_slice(&std::fs::read(&host.request_log).unwrap()).unwrap();
+    assert_eq!(request["capabilityId"], CAPABILITY_ID);
+    assert_eq!(request["packageDigest"], CAPABILITY_DIGEST);
+    assert_eq!(request["configuration"]["mode"], "strict");
+    assert_eq!(request["input"]["inline"]["text"], "hello");
+
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    projection.catch_up(&journal).unwrap();
+    let attempt = &projection
+        .inspect_runs(None, Some("run-capability-process-001"), 1)
+        .unwrap()[0]
+        .capability_attempts[0];
+    assert_eq!(attempt.outcome, "succeeded");
+    assert_eq!(attempt.receipt_id, "receipt-process-capability-001");
+    assert_eq!(attempt.idempotency_key, attempt.invocation_id);
+    assert_eq!(attempt.logs.len(), 1);
+    assert!(!attempt.logs[0].message.contains("/Users/"));
+}
+
+#[cfg(unix)]
+struct ProcessHostScript {
+    program: std::path::PathBuf,
+    request_log: std::path::PathBuf,
+    invocation_log: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+impl ProcessHostScript {
+    fn invocation_count(&self) -> usize {
+        std::fs::read(&self.invocation_log)
+            .map(|bytes| bytes.len())
+            .unwrap_or_default()
+    }
+}
+
+/// Writes a shell-backed host that answers `describe` and `invoke` from fixture
+/// files. Nothing here reaches a network, an account, or a real model.
+#[cfg(unix)]
+fn process_host_script(
+    directory: &std::path::Path,
+    name: &str,
+    describe: &Value,
+    respond: &Value,
+) -> ProcessHostScript {
+    use std::os::unix::fs::PermissionsExt;
+
+    let describe_path = directory.join(format!("{name}-describe.json"));
+    let respond_path = directory.join(format!("{name}-respond.json"));
+    let request_log = directory.join(format!("{name}-request.json"));
+    let invocation_log = directory.join(format!("{name}-invocations"));
+    let program = directory.join(name);
+    std::fs::write(&describe_path, serde_json::to_vec(describe).unwrap()).unwrap();
+    std::fs::write(&respond_path, serde_json::to_vec(respond).unwrap()).unwrap();
+    std::fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\n\
+             PATH=/usr/bin:/bin\n\
+             export PATH\n\
+             if [ \"$1\" = describe ]; then\n\
+             \tcat '{describe}'\n\
+             \texit 0\n\
+             fi\n\
+             cat > '{request}'\n\
+             printf 1 >> '{invocations}'\n\
+             cat '{respond}'\n",
+            describe = describe_path.display(),
+            request = request_log.display(),
+            invocations = invocation_log.display(),
+            respond = respond_path.display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ProcessHostScript {
+        program,
+        request_log,
+        invocation_log,
+    }
+}
+
+fn agent_tool_provider(tool_calls: usize) -> DeterministicWorkflowLlmProvider {
+    let mut provider = DeterministicWorkflowLlmProvider::default();
+    provider.register(
+        synthetic_tool_provider_definition(),
+        DeterministicLlmPlan::Succeed {
+            output: json!({"summary": "Agent-grade result"}),
+            elapsed_milliseconds: 9,
+        },
+    );
+    provider.register_trace(
+        "reasoning",
+        WorkflowLlmProviderTrace {
+            request_id: "provider-request-agent-001".into(),
+            response_id: "provider-response-agent-001".into(),
+            receipt_metadata: json!({"region": "synthetic"}),
+            tool_calls: (1..=tool_calls)
+                .map(|sequence| WorkflowLlmProviderToolCall {
+                    call_id: format!("call-agent-{sequence:03}"),
+                    tool_id: "synthetic.search".into(),
+                    input: json!({"query": format!("artifact step {sequence}")}),
+                    result: WorkflowLlmProviderToolResult::Succeeded(json!({
+                        "hits": [{"step": sequence}]
+                    })),
+                    duration_milliseconds: 1,
+                })
+                .collect(),
+            response_messages: vec![WorkflowLlmProviderResponseMessage {
+                message_id: "response-message-agent-final".into(),
+                role: "assistant".into(),
+                kind: "final".into(),
+                summary: "Final structured response".into(),
+                content: json!({"summary": "Agent-grade result"}),
+                tool_call_id: None,
+            }],
+            usage: WorkflowLlmProviderUsage {
+                input_tokens: 80,
+                cached_input_tokens: 10,
+                output_tokens: 20,
+                reasoning_tokens: 5,
+                cost_currency: "USD".into(),
+                input_cost_micros: 80,
+                output_cost_micros: 20,
+                reasoning_cost_micros: 5,
+                tool_cost_micros: tool_calls as u64,
+            },
+        },
+    );
+    provider
+}
+
+fn agent_run_command(run_id: &str, published: &PublishedWorkflowRevision) -> CommandEnvelope {
+    let mut envelope = control_run_command(
+        run_id,
+        published,
+        AGENT_WORKFLOW_ID,
+        AGENT_REVISION_ID,
+        json!({"mediaType": "application/pdf", "text": "Quarterly filing"}),
+    );
+    let mut request =
+        RequestWorkflowRun::decode(envelope.payload.as_ref().unwrap().value.as_slice()).unwrap();
+    request.installation_id = AGENT_INSTALLATION_ID.into();
+    envelope.payload.as_mut().unwrap().value = request.encode_to_vec();
+    envelope
+}
+
+fn agent_authority() -> WorkflowStorageExecutionAuthority {
+    WorkflowStorageExecutionAuthority {
+        installation_id: AGENT_INSTALLATION_ID.into(),
+        case_id: None,
+    }
+}
+
+/// Runs the agent-grade fixture whose LLM node reads an artifact registered by
+/// an upstream node, so the compiled prompt context can only carry the
+/// artifact's storage handle and content digest.
+fn execute_agent_run(
+    journal: &mut Journal,
+    library: &kaname_core::workflow_library::WorkflowLibraryStore,
+    storage: &mut kaname_core::workflow_storage::WorkflowScopedStorage,
+    provider: &mut dyn WorkflowLlmProvider,
+    command: &CommandEnvelope,
+) -> Result<workflow_executor::WorkflowExecutionResult, WorkflowExecutionError> {
+    let mut capabilities = UnavailableWorkflowCapabilityHost;
+    workflow_executor::execute_with_storage_capabilities_and_llm(
+        journal,
+        library,
+        storage,
+        &agent_authority(),
+        &mut capabilities,
+        provider,
+        command,
+    )
 }
 
 #[test]
@@ -2843,6 +3406,7 @@ fn llm_provider(plan: DeterministicLlmPlan) -> DeterministicWorkflowLlmProvider 
 
 fn published_llm_tool_library(
     application_support: &std::path::Path,
+    maximum_tool_calls: Option<u64>,
 ) -> (
     kaname_core::workflow_library::WorkflowLibraryStore,
     PublishedWorkflowRevision,
@@ -2851,6 +3415,9 @@ fn published_llm_tool_library(
     *source
         .pointer_mut("/graph/nodes/1/config/tools")
         .expect("LLM tool configuration") = json!(["synthetic.search"]);
+    if let Some(maximum_tool_calls) = maximum_tool_calls {
+        source["graph"]["nodes"][1]["config"]["maximumToolCalls"] = json!(maximum_tool_calls);
+    }
     let mut library = open_workflow_library(application_support).unwrap();
     library
         .create_draft(CreateWorkflowDraft {
@@ -2925,42 +3492,48 @@ fn published_llm_tool_library(
     (library, published)
 }
 
+fn synthetic_search_tool() -> WorkflowLlmProviderToolDefinition {
+    WorkflowLlmProviderToolDefinition {
+        tool_id: "synthetic.search".into(),
+        version: "1.0.0".into(),
+        package_digest: "a".repeat(64),
+        description: "Search the bounded synthetic fixture".into(),
+        input_schema_ref: "dev.kaname.tool/search-input-v1".into(),
+        input_schema: json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "required": ["query"],
+            "properties": {"query": {"type": "string"}},
+            "additionalProperties": false
+        }),
+        output_schema_ref: "dev.kaname.tool/search-output-v1".into(),
+        output_schema: json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "required": ["hits"],
+            "properties": {"hits": {"type": "array"}},
+            "additionalProperties": false
+        }),
+    }
+}
+
+fn synthetic_tool_provider_definition() -> WorkflowLlmProviderDefinition {
+    WorkflowLlmProviderDefinition {
+        provider_id: "synthetic-provider".into(),
+        model_id: "synthetic-model".into(),
+        model_revision: "revision-2026-08-15".into(),
+        model_class: "reasoning".into(),
+        timeout_milliseconds: 100,
+        maximum_context_bytes: 49_152,
+        idempotent: true,
+        tools: vec![synthetic_search_tool()],
+    }
+}
+
 fn llm_tool_provider() -> DeterministicWorkflowLlmProvider {
-    let input_schema = json!({
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "required": ["query"],
-        "properties": {"query": {"type": "string"}},
-        "additionalProperties": false
-    });
-    let output_schema = json!({
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "required": ["hits"],
-        "properties": {"hits": {"type": "array"}},
-        "additionalProperties": false
-    });
     let mut provider = DeterministicWorkflowLlmProvider::default();
     provider.register(
-        WorkflowLlmProviderDefinition {
-            provider_id: "synthetic-provider".into(),
-            model_id: "synthetic-model".into(),
-            model_revision: "revision-2026-08-15".into(),
-            model_class: "reasoning".into(),
-            timeout_milliseconds: 100,
-            maximum_context_bytes: 49_152,
-            idempotent: true,
-            tools: vec![WorkflowLlmProviderToolDefinition {
-                tool_id: "synthetic.search".into(),
-                version: "1.0.0".into(),
-                package_digest: "a".repeat(64),
-                description: "Search the bounded synthetic fixture".into(),
-                input_schema_ref: "dev.kaname.tool/search-input-v1".into(),
-                input_schema,
-                output_schema_ref: "dev.kaname.tool/search-output-v1".into(),
-                output_schema,
-            }],
-        },
+        synthetic_tool_provider_definition(),
         DeterministicLlmPlan::Succeed {
             output: json!({"summary": "Safe result with inspected tools"}),
             elapsed_milliseconds: 11,
@@ -4280,8 +4853,7 @@ fn mapped_edge_and_data_map_derive_deterministic_values() {
         .find(|emission| emission.node_id == MAPPING_MAP_ID && emission.port_id == "success")
         .unwrap();
     let map_value: Value =
-        serde_json::from_slice(&map_success.value.as_ref().unwrap().inline_canonical_json)
-            .unwrap();
+        serde_json::from_slice(&map_success.value.as_ref().unwrap().inline_canonical_json).unwrap();
     assert_eq!(map_value, json!("Invoice S-42 totals 12 via edge"));
 
     let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
@@ -4319,10 +4891,14 @@ fn edge_mapping_failure_routes_to_the_target_error_port() {
         .unwrap();
     assert_eq!(map_attempt.error_code, "mapping.pointer-unresolved");
     let error_value: Value =
-        serde_json::from_slice(&map_attempt.error.as_ref().unwrap().inline_canonical_json)
-            .unwrap();
+        serde_json::from_slice(&map_attempt.error.as_ref().unwrap().inline_canonical_json).unwrap();
     assert_eq!(error_value["code"], "mapping.pointer-unresolved");
-    assert!(error_value["context"].as_str().unwrap().starts_with("edge:"));
+    assert!(
+        error_value["context"]
+            .as_str()
+            .unwrap()
+            .starts_with("edge:")
+    );
     assert!(
         settled
             .iter()
@@ -4359,8 +4935,7 @@ fn data_map_evaluation_failure_routes_to_its_error_port() {
         .unwrap();
     assert_eq!(map_attempt.error_code, "mapping.null-value");
     let error_value: Value =
-        serde_json::from_slice(&map_attempt.error.as_ref().unwrap().inline_canonical_json)
-            .unwrap();
+        serde_json::from_slice(&map_attempt.error.as_ref().unwrap().inline_canonical_json).unwrap();
     assert_eq!(error_value["context"], "mapping");
 }
 
@@ -4500,3 +5075,1841 @@ fn published_mapping_library(
     )
 }
 
+const DECISION_WORKFLOW_ID: &str = "018f7200-0001-7000-8000-000000000001";
+const DECISION_REVISION_ID: &str = "revision-decision-001";
+const DECISION_NODE_ID: &str = "018f7200-0003-7000-8000-000000000003";
+const CANCEL_WORKFLOW_ID: &str = "018f7300-0001-7000-8000-000000000001";
+const CANCEL_REVISION_ID: &str = "revision-cancel-001";
+const MATCH_ALL_WORKFLOW_ID: &str = "018f7400-0001-7000-8000-000000000001";
+const MATCH_ALL_REVISION_ID: &str = "revision-match-all-001";
+const MATCH_ALL_NODE_ID: &str = "018f7400-0003-7000-8000-000000000003";
+const MATCH_ALL_SMALL_CASE_ID: &str = "018f7400-0011-7000-8000-000000000011";
+const MATCH_ALL_LARGE_CASE_ID: &str = "018f7400-0012-7000-8000-000000000012";
+const NAMED_JOIN_WORKFLOW_ID: &str = "018f7500-0001-7000-8000-000000000001";
+const NAMED_JOIN_REVISION_ID: &str = "revision-named-join-001";
+const NAMED_JOIN_LEFT_BRANCH_ID: &str = "018f7500-0011-7000-8000-000000000011";
+const NAMED_JOIN_RIGHT_BRANCH_ID: &str = "018f7500-0012-7000-8000-000000000012";
+const REVIEW_WORKFLOW_ID: &str = "018f7600-0001-7000-8000-000000000001";
+const REVIEW_REVISION_ID: &str = "revision-review-001";
+const REVIEW_AUTHORITY_POLICY: &str = "mail-send";
+const RECONCILE_WORKFLOW_ID: &str = "018f7700-0001-7000-8000-000000000001";
+const RECONCILE_REVISION_ID: &str = "revision-reconcile-001";
+const RECONCILE_NODE_ID: &str = "018f7700-0004-7000-8000-000000000004";
+const ARTIFACT_WORKFLOW_ID: &str = "018f7800-0001-7000-8000-000000000001";
+const ARTIFACT_REVISION_ID: &str = "revision-artifact-001";
+const ARTIFACT_NODE_ID: &str = "018f7800-0003-7000-8000-000000000003";
+
+#[test]
+fn decision_routes_matched_and_not_matched() {
+    for (run_id, amount, expected_port) in [
+        ("run-decision-matched-001", 42, "matched"),
+        ("run-decision-other-001", 4, "not-matched"),
+    ] {
+        let directory = tempdir().unwrap();
+        let (library, published) = published_decision_library(directory.path());
+        let command = control_run_command(
+            run_id,
+            &published,
+            DECISION_WORKFLOW_ID,
+            DECISION_REVISION_ID,
+            json!({"amount": amount}),
+        );
+        let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+        assert_eq!(
+            workflow_executor::execute(&mut journal, &library, &command)
+                .unwrap()
+                .outcome,
+            DurableRunOutcome::Succeeded
+        );
+        assert_eq!(
+            emitted_ports(&journal, run_id, DECISION_NODE_ID),
+            [expected_port]
+        );
+    }
+}
+
+#[test]
+fn terminal_cancel_cancels_run() {
+    let directory = tempdir().unwrap();
+    let (library, published) = published_cancel_library(directory.path());
+    let run_id = "run-terminal-cancel-001";
+    let command = control_run_command(
+        run_id,
+        &published,
+        CANCEL_WORKFLOW_ID,
+        CANCEL_REVISION_ID,
+        json!({"reason": "owner-abandoned"}),
+    );
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    assert_eq!(
+        workflow_executor::execute(&mut journal, &library, &command)
+            .unwrap()
+            .outcome,
+        DurableRunOutcome::Cancelled
+    );
+    let settled = run_events(&journal, run_id)
+        .into_iter()
+        .find_map(|event| match event {
+            kaname_core::workflow_runtime::WorkflowRuntimeEvent::RunSettled(payload) => {
+                Some(payload)
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(settled.error_code, "owner-abandoned");
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    projection.catch_up(&journal).unwrap();
+    let run = projection
+        .inspect_runs(None, Some(run_id), 1)
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(run.execution_tokens.len(), 1);
+    assert_eq!(run.execution_tokens[0].outcome, "cancelled");
+    assert!(
+        run.attempts
+            .iter()
+            .any(|attempt| attempt.outcome == "cancelled")
+    );
+}
+
+#[test]
+fn match_all_emits_multiple_case_ports() {
+    let directory = tempdir().unwrap();
+    let (library, published) = published_match_all_library(directory.path());
+    let run_id = "run-match-all-001";
+    let command = control_run_command(
+        run_id,
+        &published,
+        MATCH_ALL_WORKFLOW_ID,
+        MATCH_ALL_REVISION_ID,
+        json!({"amount": 42}),
+    );
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    assert_eq!(
+        workflow_executor::execute(&mut journal, &library, &command)
+            .unwrap()
+            .outcome,
+        DurableRunOutcome::Succeeded
+    );
+    assert_eq!(
+        emitted_ports(&journal, run_id, MATCH_ALL_NODE_ID),
+        [
+            format!("case-{MATCH_ALL_SMALL_CASE_ID}"),
+            format!("case-{MATCH_ALL_LARGE_CASE_ID}")
+        ]
+    );
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    projection.catch_up(&journal).unwrap();
+    let run = projection
+        .inspect_runs(None, Some(run_id), 1)
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(run.execution_tokens.len(), 3);
+    assert_eq!(
+        run.execution_tokens
+            .iter()
+            .filter(|token| token.fork_node_id == MATCH_ALL_NODE_ID)
+            .count(),
+        2
+    );
+    assert_eq!(
+        run.execution_tokens
+            .iter()
+            .filter(|token| token.outcome == "completed")
+            .count(),
+        2
+    );
+    assert!(run.joins.is_empty());
+}
+
+#[test]
+fn join_named_requires_configured_branches() {
+    for (run_id, required_branch, expected) in [
+        (
+            "run-join-named-left-001",
+            NAMED_JOIN_LEFT_BRANCH_ID,
+            DurableRunOutcome::Succeeded,
+        ),
+        (
+            "run-join-named-right-001",
+            NAMED_JOIN_RIGHT_BRANCH_ID,
+            DurableRunOutcome::Failed,
+        ),
+    ] {
+        let directory = tempdir().unwrap();
+        let (library, published) = published_named_join_library(directory.path(), required_branch);
+        let command = control_run_command(
+            run_id,
+            &published,
+            NAMED_JOIN_WORKFLOW_ID,
+            NAMED_JOIN_REVISION_ID,
+            json!({"value": "synthetic"}),
+        );
+        let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+        assert_eq!(
+            workflow_executor::execute(&mut journal, &library, &command)
+                .unwrap()
+                .outcome,
+            expected,
+            "{required_branch}"
+        );
+        let join = run_events(&journal, run_id)
+            .into_iter()
+            .find_map(|event| match event {
+                kaname_core::workflow_runtime::WorkflowRuntimeEvent::JoinEvaluated(payload) => {
+                    Some(payload)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(join.policy, "named");
+        assert_eq!(join.threshold, 1);
+        assert_eq!(join.expected_execution_token_ids.len(), 2);
+        if expected == DurableRunOutcome::Succeeded {
+            assert_eq!(
+                join.decision,
+                kaname_core::v1::WorkflowJoinDecision::Succeeded as i32
+            );
+            assert_eq!(join.arrived_execution_token_ids.len(), 1);
+        } else {
+            assert_eq!(
+                join.decision,
+                kaname_core::v1::WorkflowJoinDecision::Failed as i32
+            );
+            assert_eq!(join.error_code, "join.named-unreachable");
+        }
+    }
+}
+
+#[test]
+fn human_review_approves_rejects_expires_and_detects_stale() {
+    let proposal_digest = canonical_digest(&json!({"amount": 42}));
+    for (run_id, signal, expected_outcome, expected_code) in [
+        (
+            "run-review-approve-001",
+            Some(json!({"decision": "approve", "proposalDigest": proposal_digest.clone()})),
+            DurableRunOutcome::Succeeded,
+            "",
+        ),
+        (
+            "run-review-reject-001",
+            Some(json!({"decision": "reject", "proposalDigest": proposal_digest.clone()})),
+            DurableRunOutcome::Failed,
+            "review.rejected",
+        ),
+        (
+            "run-review-stale-001",
+            Some(json!({"decision": "approve", "proposalDigest": "0".repeat(64)})),
+            DurableRunOutcome::Failed,
+            "review.stale",
+        ),
+        (
+            "run-review-expired-001",
+            None,
+            DurableRunOutcome::Failed,
+            "review.expired",
+        ),
+    ] {
+        let directory = tempdir().unwrap();
+        let (library, published) = published_review_library(directory.path());
+        let command = control_run_command(
+            run_id,
+            &published,
+            REVIEW_WORKFLOW_ID,
+            REVIEW_REVISION_ID,
+            json!({"amount": 42, "subject": "Invoice"}),
+        );
+        let started_at = command.submitted_at_unix_millis;
+        let deadline = started_at + 5_000;
+        let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+        let waiting =
+            workflow_executor::execute_at_unix_millis(&mut journal, &library, &command, started_at)
+                .unwrap();
+        assert_eq!(waiting.outcome, DurableRunOutcome::Waiting, "{run_id}");
+        assert_eq!(waiting.next_attempt_at_unix_millis, Some(deadline));
+
+        let resolved_at = match signal {
+            Some(value) => {
+                workflow_executor::record_wait_signal(
+                    &mut journal,
+                    &review_signal_command(
+                        run_id,
+                        &format!("signal-{run_id}"),
+                        &proposal_digest,
+                        value,
+                        started_at + 100,
+                    ),
+                )
+                .unwrap();
+                started_at + 200
+            }
+            None => deadline,
+        };
+        assert_eq!(
+            workflow_executor::execute_at_unix_millis(
+                &mut journal,
+                &library,
+                &command,
+                resolved_at
+            )
+            .unwrap()
+            .outcome,
+            expected_outcome,
+            "{run_id}"
+        );
+        let settled = run_events(&journal, run_id)
+            .into_iter()
+            .find_map(|event| match event {
+                kaname_core::workflow_runtime::WorkflowRuntimeEvent::RunSettled(payload) => {
+                    Some(payload)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(settled.error_code, expected_code, "{run_id}");
+        let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+        projection.catch_up(&journal).unwrap();
+        let run = projection
+            .inspect_runs(None, Some(run_id), 1)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(run.waits.len(), 1);
+        assert_eq!(run.waits[0].kind, "event");
+        assert_eq!(
+            run.waits[0].decision,
+            if expected_code == "review.expired" {
+                "expired"
+            } else {
+                "resumed"
+            }
+        );
+    }
+}
+
+#[test]
+fn reconcile_applied_not_applied_and_exhausted_still_unknown() {
+    for (run_id, status, checks, expected_outcome, expected_code) in [
+        (
+            "run-reconcile-applied-001",
+            "reconciled_applied",
+            0,
+            DurableRunOutcome::Succeeded,
+            "",
+        ),
+        (
+            "run-reconcile-not-applied-001",
+            "reconciled_not_applied",
+            0,
+            DurableRunOutcome::Failed,
+            "reconcile.not-applied",
+        ),
+        (
+            "run-reconcile-still-unknown-001",
+            "outcome_unknown",
+            0,
+            DurableRunOutcome::Cancelled,
+            "reconcile.still-unknown",
+        ),
+        (
+            "run-reconcile-exhausted-001",
+            "outcome_unknown",
+            2,
+            DurableRunOutcome::Failed,
+            "reconcile.exhausted",
+        ),
+    ] {
+        let directory = tempdir().unwrap();
+        let (library, published) = published_reconcile_library(directory.path(), status, checks);
+        let command = control_run_command(
+            run_id,
+            &published,
+            RECONCILE_WORKFLOW_ID,
+            RECONCILE_REVISION_ID,
+            json!({"amount": 42}),
+        );
+        let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+        assert_eq!(
+            workflow_executor::execute(&mut journal, &library, &command)
+                .unwrap()
+                .outcome,
+            expected_outcome,
+            "{run_id}"
+        );
+        let settled = run_events(&journal, run_id)
+            .into_iter()
+            .find_map(|event| match event {
+                kaname_core::workflow_runtime::WorkflowRuntimeEvent::RunSettled(payload) => {
+                    Some(payload)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(settled.error_code, expected_code, "{run_id}");
+        let reconciled = emitted_values(&journal, run_id, RECONCILE_NODE_ID);
+        assert_eq!(reconciled.len(), 1);
+        assert_eq!(reconciled[0].0, expected_reconcile_port(status, checks));
+        assert_eq!(reconciled[0].1["effectId"], "effect-001");
+        if status == "outcome_unknown" && checks == 0 {
+            assert_eq!(reconciled[0].1["checks"], 1);
+        }
+    }
+}
+
+fn expected_reconcile_port(status: &str, checks: u64) -> &'static str {
+    match (status, checks) {
+        ("reconciled_applied", _) => "success",
+        ("outcome_unknown", 0) => "still-unknown",
+        _ => "failure",
+    }
+}
+
+#[test]
+fn register_artifact_persists_role_and_media_type() {
+    let directory = tempdir().unwrap();
+    let (library, published) = published_artifact_library(directory.path());
+    let mut storage = test_scoped_storage(directory.path());
+    let run_id = "run-artifact-001";
+    let command = artifact_run_command(
+        run_id,
+        &published,
+        json!({"mediaType": "text/plain", "text": "Receipt 42"}),
+    );
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    assert_eq!(
+        workflow_executor::execute_with_storage(
+            &mut journal,
+            &library,
+            &mut storage,
+            &artifact_authority(),
+            &command,
+        )
+        .unwrap()
+        .outcome,
+        DurableRunOutcome::Succeeded
+    );
+    let registered = emitted_references(&journal, run_id, ARTIFACT_NODE_ID);
+    assert_eq!(registered.len(), 1);
+    assert_eq!(registered[0].0, "success");
+    assert_eq!(registered[0].1.content_type, "text/plain");
+    let metadata = registered[0].1.storage.as_ref().unwrap();
+    assert_eq!(metadata.result, "written");
+    assert_eq!(metadata.scope, "job");
+    assert_eq!(metadata.logical_key, "receipt");
+    assert_eq!(metadata.revision, 1);
+
+    let handles = storage
+        .list_current(
+            &artifact_access(run_id),
+            &WorkflowStorageNamespace {
+                kind: WorkflowStorageScopeKind::Job,
+                owner_id: run_id.into(),
+                installation_id: Some("installation-artifact-001".into()),
+            },
+            None,
+            10,
+        )
+        .unwrap();
+    assert_eq!(handles.len(), 1);
+    assert_eq!(handles[0].logical_key, "receipt");
+    assert_eq!(handles[0].media_type, "text/plain");
+
+    let mut stored = Vec::new();
+    storage
+        .copy_value(
+            &artifact_access(run_id),
+            &handles[0].handle_id,
+            handles[0].byte_count,
+            &mut stored,
+        )
+        .unwrap();
+    let stored: Value = serde_json::from_slice(&stored).unwrap();
+    assert_eq!(stored["role"], "receipt");
+    assert_eq!(stored["mediaType"], "text/plain");
+    assert_eq!(stored["text"], "Receipt 42");
+    assert_eq!(
+        stored["contentSha256"],
+        hex::encode(Sha256::digest(b"Receipt 42"))
+    );
+
+    let mut rejected_journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    let rejected_command = artifact_run_command(
+        "run-artifact-rejected-001",
+        &published,
+        json!({"mediaType": "image/png", "bytesBase64": "UmVjZWlwdA=="}),
+    );
+    assert_eq!(
+        workflow_executor::execute_with_storage(
+            &mut rejected_journal,
+            &library,
+            &mut storage,
+            &artifact_authority(),
+            &rejected_command,
+        )
+        .unwrap()
+        .outcome,
+        DurableRunOutcome::Failed
+    );
+    let rejected = emitted_values(
+        &rejected_journal,
+        "run-artifact-rejected-001",
+        ARTIFACT_NODE_ID,
+    );
+    assert_eq!(rejected[0].0, "error");
+    assert_eq!(rejected[0].1["code"], "artifact.media-type-rejected");
+}
+
+fn emitted_ports(journal: &Journal, run_id: &str, node_id: &str) -> Vec<String> {
+    emitted_values(journal, run_id, node_id)
+        .into_iter()
+        .map(|(port_id, _)| port_id)
+        .collect()
+}
+
+fn emitted_references(
+    journal: &Journal,
+    run_id: &str,
+    node_id: &str,
+) -> Vec<(String, WorkflowValueReference)> {
+    run_events(journal, run_id)
+        .into_iter()
+        .filter_map(|event| match event {
+            kaname_core::workflow_runtime::WorkflowRuntimeEvent::PortEmitted(payload)
+                if payload.node_id == node_id =>
+            {
+                Some((payload.port_id.clone(), payload.value.clone()?))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn artifact_access(run_id: &str) -> WorkflowStorageAccessContext {
+    WorkflowStorageAccessContext {
+        run_id: Some(run_id.into()),
+        case_id: None,
+        installation_id: "installation-artifact-001".into(),
+        account_binding_ids: Default::default(),
+    }
+}
+
+fn emitted_values(journal: &Journal, run_id: &str, node_id: &str) -> Vec<(String, Value)> {
+    run_events(journal, run_id)
+        .into_iter()
+        .filter_map(|event| match event {
+            kaname_core::workflow_runtime::WorkflowRuntimeEvent::PortEmitted(payload)
+                if payload.node_id == node_id =>
+            {
+                let value = payload.value.as_ref()?;
+                Some((
+                    payload.port_id.clone(),
+                    serde_json::from_slice(&value.inline_canonical_json).unwrap_or(Value::Null),
+                ))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn canonical_digest(value: &Value) -> String {
+    hex::encode(Sha256::digest(
+        serde_json_canonicalizer::to_vec(value).unwrap(),
+    ))
+}
+
+fn review_signal_command(
+    run_id: &str,
+    signal_id: &str,
+    proposal_digest: &str,
+    value: Value,
+    submitted_at_unix_millis: i64,
+) -> CommandEnvelope {
+    command(
+        &format!("command-{signal_id}"),
+        &format!("idempotency-{signal_id}"),
+        WORKFLOW_WAIT_SIGNAL_KIND,
+        WORKFLOW_WAIT_SIGNAL_TYPE,
+        SignalWorkflowWait {
+            run_id: run_id.into(),
+            signal_id: signal_id.into(),
+            kind: "event".into(),
+            owner_kind: "workflow".into(),
+            owner_id: REVIEW_WORKFLOW_ID.into(),
+            correlation: vec![
+                WorkflowWaitCorrelation {
+                    key: "review:/authorityPolicy".into(),
+                    sha256: canonical_digest(&json!(REVIEW_AUTHORITY_POLICY)),
+                },
+                WorkflowWaitCorrelation {
+                    key: "review:/proposalDigest".into(),
+                    sha256: canonical_digest(&json!(proposal_digest)),
+                },
+            ],
+            value: Some(inline_value(&format!("value-{signal_id}"), value)),
+        },
+        submitted_at_unix_millis,
+    )
+}
+
+fn artifact_run_command(
+    run_id: &str,
+    published: &PublishedWorkflowRevision,
+    input: Value,
+) -> CommandEnvelope {
+    let mut envelope = control_run_command(
+        run_id,
+        published,
+        ARTIFACT_WORKFLOW_ID,
+        ARTIFACT_REVISION_ID,
+        input,
+    );
+    let mut request =
+        RequestWorkflowRun::decode(envelope.payload.as_ref().unwrap().value.as_slice()).unwrap();
+    request.installation_id = "installation-artifact-001".into();
+    envelope.payload.as_mut().unwrap().value = request.encode_to_vec();
+    envelope
+}
+
+fn artifact_authority() -> WorkflowStorageExecutionAuthority {
+    WorkflowStorageExecutionAuthority {
+        installation_id: "installation-artifact-001".into(),
+        case_id: None,
+    }
+}
+
+fn published_decision_library(
+    application_support: &std::path::Path,
+) -> (
+    kaname_core::workflow_library::WorkflowLibraryStore,
+    PublishedWorkflowRevision,
+) {
+    publish_control_library(
+        application_support,
+        DECISION_WORKFLOW_ID,
+        DECISION_REVISION_ID,
+        "dev.kaname.decision-runtime",
+        decision_workflow_source(),
+        json!({"bundleVersion": 1, "schemas": []}),
+    )
+}
+
+fn decision_workflow_source() -> Value {
+    let ids = [
+        "018f7200-0002-7000-8000-000000000002",
+        DECISION_NODE_ID,
+        "018f7200-0004-7000-8000-000000000004",
+        "018f7200-0005-7000-8000-000000000005",
+        "018f7200-0006-7000-8000-000000000006",
+    ];
+    control_graph_source(
+        DECISION_WORKFLOW_ID,
+        "dev.kaname.decision-runtime",
+        &ids,
+        vec![
+            ("manual", "trigger.manual", json!({})),
+            (
+                "decide",
+                "control.decision",
+                json!({
+                    "when": {"compare": {
+                        "left": {"root": "input", "pointer": "/amount"},
+                        "operator": "greaterThan",
+                        "right": {"literal": {"type": "number", "value": 10}}
+                    }}
+                }),
+            ),
+            ("complete-matched", "terminal.complete", json!({})),
+            ("complete-other", "terminal.complete", json!({})),
+            ("fail", "terminal.fail", json!({})),
+        ],
+        vec![
+            ((0, "success"), (1, "input")),
+            ((1, "matched"), (2, "input")),
+            ((1, "not-matched"), (3, "input")),
+            ((1, "error"), (4, "input")),
+        ],
+    )
+}
+
+fn published_cancel_library(
+    application_support: &std::path::Path,
+) -> (
+    kaname_core::workflow_library::WorkflowLibraryStore,
+    PublishedWorkflowRevision,
+) {
+    publish_control_library(
+        application_support,
+        CANCEL_WORKFLOW_ID,
+        CANCEL_REVISION_ID,
+        "dev.kaname.cancel-runtime",
+        cancel_workflow_source(),
+        json!({"bundleVersion": 1, "schemas": []}),
+    )
+}
+
+fn cancel_workflow_source() -> Value {
+    let ids = [
+        "018f7300-0002-7000-8000-000000000002",
+        "018f7300-0003-7000-8000-000000000003",
+    ];
+    control_graph_source(
+        CANCEL_WORKFLOW_ID,
+        "dev.kaname.cancel-runtime",
+        &ids,
+        vec![
+            ("manual", "trigger.manual", json!({})),
+            (
+                "cancel",
+                "terminal.cancel",
+                json!({"reason": {"select": {"root": "input", "pointer": "/reason"}}}),
+            ),
+        ],
+        vec![((0, "success"), (1, "input"))],
+    )
+}
+
+fn published_match_all_library(
+    application_support: &std::path::Path,
+) -> (
+    kaname_core::workflow_library::WorkflowLibraryStore,
+    PublishedWorkflowRevision,
+) {
+    publish_control_library(
+        application_support,
+        MATCH_ALL_WORKFLOW_ID,
+        MATCH_ALL_REVISION_ID,
+        "dev.kaname.match-all-runtime",
+        match_all_workflow_source(),
+        json!({"bundleVersion": 1, "schemas": []}),
+    )
+}
+
+fn match_all_workflow_source() -> Value {
+    let ids = [
+        "018f7400-0002-7000-8000-000000000002",
+        MATCH_ALL_NODE_ID,
+        "018f7400-0004-7000-8000-000000000004",
+        "018f7400-0005-7000-8000-000000000005",
+        "018f7400-0006-7000-8000-000000000006",
+    ];
+    let small_port = format!("case-{MATCH_ALL_SMALL_CASE_ID}");
+    let large_port = format!("case-{MATCH_ALL_LARGE_CASE_ID}");
+    control_graph_source(
+        MATCH_ALL_WORKFLOW_ID,
+        "dev.kaname.match-all-runtime",
+        &ids,
+        vec![
+            ("manual", "trigger.manual", json!({})),
+            (
+                "classify",
+                "control.match",
+                json!({
+                    "value": {"root": "input", "pointer": ""},
+                    "hitPolicy": "all",
+                    "cases": [
+                        {
+                            "id": MATCH_ALL_SMALL_CASE_ID,
+                            "key": "positive",
+                            "label": "Positive",
+                            "when": {"compare": {
+                                "left": {"root": "value", "pointer": "/amount"},
+                                "operator": "greaterThan",
+                                "right": {"literal": {"type": "number", "value": 0}}
+                            }}
+                        },
+                        {
+                            "id": MATCH_ALL_LARGE_CASE_ID,
+                            "key": "large",
+                            "label": "Large",
+                            "when": {"compare": {
+                                "left": {"root": "value", "pointer": "/amount"},
+                                "operator": "greaterThan",
+                                "right": {"literal": {"type": "number", "value": 10}}
+                            }}
+                        }
+                    ]
+                }),
+            ),
+            ("complete-positive", "terminal.complete", json!({})),
+            ("complete-large", "terminal.complete", json!({})),
+            ("fail", "terminal.fail", json!({})),
+        ],
+        vec![
+            ((0, "success"), (1, "input")),
+            ((1, &small_port), (2, "input")),
+            ((1, &large_port), (3, "input")),
+            ((1, "error"), (4, "input")),
+        ],
+    )
+}
+
+fn published_named_join_library(
+    application_support: &std::path::Path,
+    required_branch: &str,
+) -> (
+    kaname_core::workflow_library::WorkflowLibraryStore,
+    PublishedWorkflowRevision,
+) {
+    publish_control_library(
+        application_support,
+        NAMED_JOIN_WORKFLOW_ID,
+        NAMED_JOIN_REVISION_ID,
+        "dev.kaname.named-join-runtime",
+        named_join_workflow_source(required_branch),
+        json!({
+            "bundleVersion": 1,
+            "schemas": [
+                {"id": "dev.kaname.named-join/pass-v1", "schema": {"type": "object"}},
+                {"id": "dev.kaname.named-join/right-v1", "schema": {
+                    "type": "object", "required": ["right"]
+                }}
+            ]
+        }),
+    )
+}
+
+fn named_join_workflow_source(required_branch: &str) -> Value {
+    let ids = [
+        "018f7500-0002-7000-8000-000000000002",
+        "018f7500-0003-7000-8000-000000000003",
+        "018f7500-0004-7000-8000-000000000004",
+        "018f7500-0005-7000-8000-000000000005",
+        "018f7500-0006-7000-8000-000000000006",
+        "018f7500-0007-7000-8000-000000000007",
+        "018f7500-0008-7000-8000-000000000008",
+        "018f7500-0009-7000-8000-000000000009",
+        "018f7500-0010-7000-8000-000000000010",
+    ];
+    let left_port = format!("case-{NAMED_JOIN_LEFT_BRANCH_ID}");
+    let right_port = format!("case-{NAMED_JOIN_RIGHT_BRANCH_ID}");
+    control_graph_source(
+        NAMED_JOIN_WORKFLOW_ID,
+        "dev.kaname.named-join-runtime",
+        &ids,
+        vec![
+            ("manual", "trigger.manual", json!({})),
+            (
+                "fork",
+                "control.parallel",
+                json!({"branches": [
+                    {"id": NAMED_JOIN_LEFT_BRANCH_ID, "key": "left", "label": "Left"},
+                    {"id": NAMED_JOIN_RIGHT_BRANCH_ID, "key": "right", "label": "Right"}
+                ]}),
+            ),
+            (
+                "left",
+                "data.validate",
+                json!({"schemaRef": "dev.kaname.named-join/pass-v1"}),
+            ),
+            (
+                "right",
+                "data.validate",
+                json!({"schemaRef": "dev.kaname.named-join/right-v1"}),
+            ),
+            (
+                "join",
+                "control.join",
+                json!({
+                    "policy": "named",
+                    "requiredBranches": [required_branch],
+                    "cancelRemaining": true
+                }),
+            ),
+            ("complete", "terminal.complete", json!({})),
+            ("fail-left", "terminal.fail", json!({})),
+            ("fail-right", "terminal.fail", json!({})),
+            ("fail-join", "terminal.fail", json!({})),
+        ],
+        vec![
+            ((0, "success"), (1, "input")),
+            ((1, &left_port), (2, "input")),
+            ((1, &right_port), (3, "input")),
+            ((2, "success"), (4, "branches")),
+            ((2, "error"), (6, "input")),
+            ((3, "success"), (4, "branches")),
+            ((3, "error"), (7, "input")),
+            ((4, "success"), (5, "input")),
+            ((4, "error"), (8, "input")),
+        ],
+    )
+}
+
+fn published_review_library(
+    application_support: &std::path::Path,
+) -> (
+    kaname_core::workflow_library::WorkflowLibraryStore,
+    PublishedWorkflowRevision,
+) {
+    publish_control_library(
+        application_support,
+        REVIEW_WORKFLOW_ID,
+        REVIEW_REVISION_ID,
+        "dev.kaname.review-runtime",
+        review_workflow_source(),
+        json!({"bundleVersion": 1, "schemas": []}),
+    )
+}
+
+fn review_workflow_source() -> Value {
+    let ids = [
+        "018f7600-0002-7000-8000-000000000002",
+        "018f7600-0003-7000-8000-000000000003",
+        "018f7600-0004-7000-8000-000000000004",
+        "018f7600-0005-7000-8000-000000000005",
+    ];
+    control_graph_source(
+        REVIEW_WORKFLOW_ID,
+        "dev.kaname.review-runtime",
+        &ids,
+        vec![
+            ("manual", "trigger.manual", json!({})),
+            (
+                "review",
+                "control.human-review",
+                json!({
+                    "proposal": {"object": {
+                        "amount": {"select": {"root": "input", "pointer": "/amount"}}
+                    }},
+                    "authorityPolicy": REVIEW_AUTHORITY_POLICY,
+                    "expirySeconds": 5,
+                    "staleCheck": "digest"
+                }),
+            ),
+            ("complete", "terminal.complete", json!({})),
+            ("fail", "terminal.fail", json!({})),
+        ],
+        vec![
+            ((0, "success"), (1, "input")),
+            ((1, "success"), (2, "input")),
+            ((1, "error"), (3, "input")),
+        ],
+    )
+}
+
+fn published_reconcile_library(
+    application_support: &std::path::Path,
+    status: &str,
+    checks: u64,
+) -> (
+    kaname_core::workflow_library::WorkflowLibraryStore,
+    PublishedWorkflowRevision,
+) {
+    publish_control_library(
+        application_support,
+        RECONCILE_WORKFLOW_ID,
+        RECONCILE_REVISION_ID,
+        "dev.kaname.reconcile-runtime",
+        reconcile_workflow_source(status, checks),
+        json!({
+            "bundleVersion": 1,
+            "schemas": [{
+                "id": "dev.kaname.reconcile/always-fails-v1",
+                "schema": {
+                    "type": "object",
+                    "required": ["required"],
+                    "properties": {"required": {"const": true}}
+                }
+            }]
+        }),
+    )
+}
+
+fn reconcile_workflow_source(status: &str, checks: u64) -> Value {
+    let ids = [
+        "018f7700-0002-7000-8000-000000000002",
+        "018f7700-0003-7000-8000-000000000003",
+        RECONCILE_NODE_ID,
+        "018f7700-0005-7000-8000-000000000005",
+        "018f7700-0006-7000-8000-000000000006",
+        "018f7700-0007-7000-8000-000000000007",
+        "018f7700-0008-7000-8000-000000000008",
+    ];
+    let mut source = control_graph_source(
+        RECONCILE_WORKFLOW_ID,
+        "dev.kaname.reconcile-runtime",
+        &ids,
+        vec![
+            ("manual", "trigger.manual", json!({})),
+            (
+                "validate",
+                "data.validate",
+                json!({"schemaRef": "dev.kaname.reconcile/always-fails-v1"}),
+            ),
+            (
+                "reconcile",
+                "control.reconcile",
+                json!({
+                    "effect": {"root": "input", "pointer": "/effectId"},
+                    "maximumChecks": 2
+                }),
+            ),
+            ("complete-validated", "terminal.complete", json!({})),
+            ("complete-reconciled", "terminal.complete", json!({})),
+            ("fail", "terminal.fail", json!({})),
+            ("cancel", "terminal.cancel", json!({})),
+        ],
+        vec![
+            ((0, "success"), (1, "input")),
+            ((1, "success"), (3, "input")),
+            ((1, "error"), (2, "unknown")),
+            ((2, "success"), (4, "input")),
+            ((2, "failure"), (5, "input")),
+            ((2, "still-unknown"), (6, "input")),
+        ],
+    );
+    source["graph"]["edges"][2]["mapping"] = json!({"object": {
+        "code": {"select": {"root": "input", "pointer": "/code"}},
+        "effectId": {"literal": {"type": "string", "value": "effect-001"}},
+        "status": {"literal": {"type": "string", "value": status}},
+        "checks": {"literal": {"type": "number", "value": checks}}
+    }});
+    source
+}
+
+fn published_artifact_library(
+    application_support: &std::path::Path,
+) -> (
+    kaname_core::workflow_library::WorkflowLibraryStore,
+    PublishedWorkflowRevision,
+) {
+    publish_control_library(
+        application_support,
+        ARTIFACT_WORKFLOW_ID,
+        ARTIFACT_REVISION_ID,
+        "dev.kaname.artifact-runtime",
+        artifact_workflow_source(),
+        json!({"bundleVersion": 1, "schemas": []}),
+    )
+}
+
+fn artifact_workflow_source() -> Value {
+    let ids = [
+        "018f7800-0002-7000-8000-000000000002",
+        ARTIFACT_NODE_ID,
+        "018f7800-0004-7000-8000-000000000004",
+        "018f7800-0005-7000-8000-000000000005",
+    ];
+    let mut source = control_graph_source(
+        ARTIFACT_WORKFLOW_ID,
+        "dev.kaname.artifact-runtime",
+        &ids,
+        vec![
+            ("manual", "trigger.manual", json!({})),
+            (
+                "register",
+                "data.register-artifact",
+                json!({"role": "receipt", "mediaTypes": ["text/plain", "application/pdf"]}),
+            ),
+            ("complete", "terminal.complete", json!({})),
+            ("fail", "terminal.fail", json!({})),
+        ],
+        vec![
+            ((0, "success"), (1, "input")),
+            ((1, "success"), (2, "input")),
+            ((1, "error"), (3, "input")),
+        ],
+    );
+    source["storage"] = json!({
+        "receipt": {
+            "key": "receipt", "scope": "job", "kind": "file",
+            "schemaRef": "dev.kaname.artifact/receipt-v1",
+            "maximumBytes": 65536, "classification": "private"
+        }
+    });
+    source
+}
+
+const AGENT_WORKFLOW_ID: &str = "018f7b00-0001-7000-8000-000000000001";
+const AGENT_REVISION_ID: &str = "revision-agent-001";
+const AGENT_LLM_NODE_ID: &str = "018f7b00-0004-7000-8000-000000000004";
+const AGENT_INSTALLATION_ID: &str = "installation-agent-001";
+
+/// Publishes the agent-grade fixture: a manual trigger registers an artifact in
+/// scoped storage, and the downstream LLM node runs a bounded tool loop over the
+/// artifact reference it inherits.
+fn published_agent_library(
+    application_support: &std::path::Path,
+    maximum_tool_calls: Option<u64>,
+) -> (
+    kaname_core::workflow_library::WorkflowLibraryStore,
+    PublishedWorkflowRevision,
+) {
+    let mut library = open_workflow_library(application_support).unwrap();
+    library
+        .create_draft(CreateWorkflowDraft {
+            workflow_id: AGENT_WORKFLOW_ID.into(),
+            package_id: "dev.kaname.agent-runtime".into(),
+            name: "Agent-grade LLM runtime".into(),
+            summary: "Synthetic bounded tool loop over a registered artifact".into(),
+            edit_id: "edit-agent-001".into(),
+            session_id: "executor-tests".into(),
+            workflow_source: serde_json::to_vec(&agent_workflow_source(maximum_tool_calls))
+                .unwrap(),
+            layout_source: br#"{"nodes":[]}"#.to_vec(),
+            recorded_at_unix_millis: 160,
+        })
+        .unwrap();
+    let published = library
+        .publish_revision(PublishWorkflowRevision {
+            workflow_id: AGENT_WORKFLOW_ID.into(),
+            expected_draft_sequence: 0,
+            revision_id: AGENT_REVISION_ID.into(),
+            registration_id: "registration-agent-001".into(),
+            release_version: "1.0.0".into(),
+            schema_bundle_json: serde_json::to_vec(&json!({
+                "bundleVersion": 1,
+                "schemas": [
+                    {
+                        "id": "dev.kaname.llm/output-v1",
+                        "schema": {
+                            "$schema": "https://json-schema.org/draft/2020-12/schema",
+                            "type": "object",
+                            "required": ["summary"],
+                            "properties": {"summary": {"type": "string"}},
+                            "additionalProperties": false
+                        }
+                    },
+                    {
+                        "id": "dev.kaname.tool/search-input-v1",
+                        "schema": {
+                            "$schema": "https://json-schema.org/draft/2020-12/schema",
+                            "type": "object",
+                            "required": ["query"],
+                            "properties": {"query": {"type": "string"}},
+                            "additionalProperties": false
+                        }
+                    },
+                    {
+                        "id": "dev.kaname.tool/search-output-v1",
+                        "schema": {
+                            "$schema": "https://json-schema.org/draft/2020-12/schema",
+                            "type": "object",
+                            "required": ["hits"],
+                            "properties": {"hits": {"type": "array"}},
+                            "additionalProperties": false
+                        }
+                    }
+                ]
+            }))
+            .unwrap(),
+            dependency_lock_json: serde_json::to_vec(&json!({
+                "lockVersion": 1,
+                "dependencies": [{
+                    "kind": "tool",
+                    "id": "synthetic.search",
+                    "version": "1.0.0",
+                    "digest": "a".repeat(64)
+                }]
+            }))
+            .unwrap(),
+            configuration_contract_json: br#"{"type":"object"}"#.to_vec(),
+            published_at_unix_millis: 170,
+        })
+        .unwrap();
+    (library, published)
+}
+
+fn agent_workflow_source(maximum_tool_calls: Option<u64>) -> Value {
+    let ids = [
+        "018f7b00-0002-7000-8000-000000000002",
+        "018f7b00-0003-7000-8000-000000000003",
+        AGENT_LLM_NODE_ID,
+        "018f7b00-0005-7000-8000-000000000005",
+        "018f7b00-0006-7000-8000-000000000006",
+    ];
+    let mut llm_config = json!({
+        "modelClass": "reasoning",
+        "instructions": "Answer only from the registered artifact and the declared tools.",
+        "prompt": {"whole": true},
+        "context": [],
+        "tools": ["synthetic.search"],
+        "outputSchemaRef": "dev.kaname.llm/output-v1",
+        "conversationScope": "job",
+        "reasoningEffort": "medium",
+        "temperatureMilli": 200,
+        "maximumContextBytes": 32_768,
+        "maximumOutputTokens": 512
+    });
+    if let Some(maximum_tool_calls) = maximum_tool_calls {
+        llm_config["maximumToolCalls"] = json!(maximum_tool_calls);
+    }
+    let mut source = control_graph_source(
+        AGENT_WORKFLOW_ID,
+        "dev.kaname.agent-runtime",
+        &ids,
+        vec![
+            ("manual", "trigger.manual", json!({})),
+            (
+                "register",
+                "data.register-artifact",
+                json!({"role": "filing", "mediaTypes": ["application/pdf"]}),
+            ),
+            ("summarize", "compute.llm", llm_config),
+            ("complete", "terminal.complete", json!({})),
+            ("fail", "terminal.fail", json!({})),
+        ],
+        vec![
+            ((0, "success"), (1, "input")),
+            ((1, "success"), (2, "input")),
+            ((2, "success"), (3, "input")),
+            ((2, "error"), (4, "input")),
+        ],
+    );
+    source["storage"] = json!({
+        "filing": {
+            "key": "filing", "scope": "job", "kind": "file",
+            "schemaRef": "dev.kaname.agent/filing-v1",
+            "maximumBytes": 65536, "classification": "private"
+        }
+    });
+    source
+}
+
+const EVENT_TRIGGER_WORKFLOW_ID: &str = "018f7900-0001-7000-8000-000000000001";
+const EVENT_TRIGGER_REVISION_ID: &str = "revision-event-trigger-001";
+const EVENT_TRIGGER_CONTRACT: &str = "dev.kaname.mail/message-received-v1";
+const SCHEDULE_TRIGGER_WORKFLOW_ID: &str = "018f7a00-0001-7000-8000-000000000001";
+const SCHEDULE_TRIGGER_REVISION_ID: &str = "revision-schedule-trigger-001";
+const OBSERVER_RUN_ID: &str = "run-mail-observer";
+const OBSERVER_TOKEN_ID: &str = "token-mail-observer";
+const OBSERVED_MESSAGE_ID: &str = "opaque-message-001";
+const DAY_MILLIS: i64 = 86_400_000;
+
+// Trigger identity is carried by the run request itself: `RequestWorkflowRun`
+// already declares `trigger_kind` and `trigger_event_id`, so no fixture here
+// smuggles trigger metadata through the input envelope, and the proto is
+// unchanged. `trigger_event_id` holds the derived occurrence identity that the
+// deduplication mode selected, not the raw provider identifier.
+#[test]
+fn event_trigger_entrypoint_runs_and_dedupes() {
+    let directory = tempdir().unwrap();
+    let (library, published) = published_event_trigger_library(directory.path(), "contract-key");
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+
+    let first = workflow_executor::execute_event_trigger(
+        &mut journal,
+        &library,
+        &event_trigger_binding(
+            &published,
+            json!({"messageId": "message-001"}),
+            1_786_220_200_000,
+        ),
+        &event_trigger("provider-event-001", "thread-42"),
+    )
+    .unwrap();
+    assert_eq!(first.admission, WorkflowTriggerAdmission::Admitted);
+    assert_eq!(first.trigger_kind, "event");
+    assert_eq!(
+        first.result.as_ref().unwrap().outcome,
+        DurableRunOutcome::Succeeded
+    );
+    let request = requested_run(first.command.as_ref().unwrap());
+    assert_eq!(request.trigger_kind, "event");
+    assert_eq!(request.trigger_event_id, first.trigger_event_id);
+    assert_eq!(request.run_id, first.run_id);
+    let settled_events = journal.event_page_after(0, 500).unwrap().high_water_mark;
+
+    // A second provider event carrying a different payload under the same
+    // contract key resolves to the same run and appends nothing.
+    let repeat = workflow_executor::execute_event_trigger(
+        &mut journal,
+        &library,
+        &event_trigger_binding(
+            &published,
+            json!({"messageId": "message-002"}),
+            1_786_220_300_000,
+        ),
+        &event_trigger("provider-event-002", "thread-42"),
+    )
+    .unwrap();
+    assert_eq!(repeat.admission, WorkflowTriggerAdmission::Duplicate);
+    assert_eq!(repeat.run_id, first.run_id);
+    assert_eq!(
+        repeat.result.as_ref().unwrap().outcome,
+        DurableRunOutcome::Succeeded
+    );
+    assert_eq!(
+        journal.event_page_after(0, 500).unwrap().high_water_mark,
+        settled_events
+    );
+
+    // Another contract key is a distinct occurrence and earns its own run.
+    let other = workflow_executor::execute_event_trigger(
+        &mut journal,
+        &library,
+        &event_trigger_binding(
+            &published,
+            json!({"messageId": "message-003"}),
+            1_786_220_400_000,
+        ),
+        &event_trigger("provider-event-003", "thread-43"),
+    )
+    .unwrap();
+    assert_eq!(other.admission, WorkflowTriggerAdmission::Admitted);
+    assert_ne!(other.run_id, first.run_id);
+    assert_ne!(other.trigger_event_id, first.trigger_event_id);
+
+    // Re-driving the deterministic command is the ordinary crash-recovery path
+    // and stays byte-exact.
+    let boundary = journal.event_page_after(0, 500).unwrap().high_water_mark;
+    let resumed =
+        workflow_executor::execute(&mut journal, &library, first.command.as_ref().unwrap())
+            .unwrap();
+    assert_eq!(resumed.outcome, DurableRunOutcome::Succeeded);
+    assert_eq!(
+        journal.event_page_after(0, 500).unwrap().high_water_mark,
+        boundary
+    );
+
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    projection.catch_up(&journal).unwrap();
+    assert_eq!(projection.row_count("runs").unwrap(), 2);
+
+    // `event-id` deduplication keys on the provider identity instead, so two
+    // events sharing a contract key remain two runs.
+    let directory = tempdir().unwrap();
+    let (library, published) = published_event_trigger_library(directory.path(), "event-id");
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    let admitted = workflow_executor::execute_event_trigger(
+        &mut journal,
+        &library,
+        &event_trigger_binding(
+            &published,
+            json!({"messageId": "message-001"}),
+            1_786_220_200_000,
+        ),
+        &event_trigger("provider-event-001", "thread-42"),
+    )
+    .unwrap();
+    assert_eq!(admitted.admission, WorkflowTriggerAdmission::Admitted);
+    let replayed = workflow_executor::execute_event_trigger(
+        &mut journal,
+        &library,
+        &event_trigger_binding(
+            &published,
+            json!({"messageId": "message-001"}),
+            1_786_220_250_000,
+        ),
+        &event_trigger("provider-event-001", "thread-42"),
+    )
+    .unwrap();
+    assert_eq!(replayed.admission, WorkflowTriggerAdmission::Duplicate);
+    assert_eq!(replayed.run_id, admitted.run_id);
+    let distinct = workflow_executor::execute_event_trigger(
+        &mut journal,
+        &library,
+        &event_trigger_binding(
+            &published,
+            json!({"messageId": "message-002"}),
+            1_786_220_260_000,
+        ),
+        &event_trigger("provider-event-002", "thread-42"),
+    )
+    .unwrap();
+    assert_eq!(distinct.admission, WorkflowTriggerAdmission::Admitted);
+    assert_ne!(distinct.run_id, admitted.run_id);
+
+    // The selected key must exist before anything is admitted.
+    assert!(matches!(
+        workflow_executor::execute_event_trigger(
+            &mut journal,
+            &library,
+            &event_trigger_binding(
+                &published,
+                json!({"messageId": "message-004"}),
+                1_786_220_270_000
+            ),
+            &event_trigger("", "thread-42"),
+        ),
+        Err(WorkflowExecutionError::InvalidCommand(
+            "event_trigger_key_required"
+        ))
+    ));
+}
+
+#[test]
+fn schedule_trigger_entrypoint_respects_misfire_policy() {
+    let due = 1_786_220_000_000_i64;
+    let directory = tempdir().unwrap();
+    let (library, published) = published_schedule_trigger_library(directory.path(), "skip");
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+
+    // Inside the grace window the occurrence is on time and simply fires.
+    let on_time = workflow_executor::execute_schedule_trigger(
+        &mut journal,
+        &library,
+        &schedule_trigger_binding(&published, due + 1_000),
+        &schedule_trigger(due, 5_000),
+    )
+    .unwrap();
+    assert_eq!(on_time.admission, WorkflowTriggerAdmission::Admitted);
+    assert_eq!(on_time.trigger_kind, "schedule");
+    assert_eq!(
+        on_time.result.as_ref().unwrap().outcome,
+        DurableRunOutcome::Succeeded
+    );
+
+    // A `skip` policy discards a misfired occurrence without admitting a
+    // command or appending a fact.
+    let boundary = journal.event_page_after(0, 500).unwrap().high_water_mark;
+    let skipped = workflow_executor::execute_schedule_trigger(
+        &mut journal,
+        &library,
+        &schedule_trigger_binding(&published, due + DAY_MILLIS + 60_000),
+        &schedule_trigger(due + DAY_MILLIS, 5_000),
+    )
+    .unwrap();
+    assert_eq!(skipped.admission, WorkflowTriggerAdmission::Misfired);
+    assert!(skipped.command.is_none());
+    assert!(skipped.result.is_none());
+    assert_eq!(
+        journal.event_page_after(0, 500).unwrap().high_water_mark,
+        boundary
+    );
+
+    // The same occurrence under `run-once` still runs, exactly once.
+    let directory = tempdir().unwrap();
+    let (library, published) = published_schedule_trigger_library(directory.path(), "run-once");
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    let fired = workflow_executor::execute_schedule_trigger(
+        &mut journal,
+        &library,
+        &schedule_trigger_binding(&published, due + DAY_MILLIS + 60_000),
+        &schedule_trigger(due + DAY_MILLIS, 5_000),
+    )
+    .unwrap();
+    assert_eq!(fired.admission, WorkflowTriggerAdmission::Admitted);
+    assert_eq!(
+        fired.result.as_ref().unwrap().outcome,
+        DurableRunOutcome::Succeeded
+    );
+
+    let settled_events = journal.event_page_after(0, 500).unwrap().high_water_mark;
+    let catch_up = workflow_executor::execute_schedule_trigger(
+        &mut journal,
+        &library,
+        &schedule_trigger_binding(&published, due + DAY_MILLIS + 900_000),
+        &schedule_trigger(due + DAY_MILLIS, 5_000),
+    )
+    .unwrap();
+    assert_eq!(catch_up.admission, WorkflowTriggerAdmission::Duplicate);
+    assert_eq!(catch_up.run_id, fired.run_id);
+    assert_eq!(
+        journal.event_page_after(0, 500).unwrap().high_water_mark,
+        settled_events
+    );
+
+    // A later instant of the same schedule key is a separate occurrence.
+    let next = workflow_executor::execute_schedule_trigger(
+        &mut journal,
+        &library,
+        &schedule_trigger_binding(&published, due + 2 * DAY_MILLIS),
+        &schedule_trigger(due + 2 * DAY_MILLIS, 5_000),
+    )
+    .unwrap();
+    assert_eq!(next.admission, WorkflowTriggerAdmission::Admitted);
+    assert_ne!(next.run_id, fired.run_id);
+
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    projection.catch_up(&journal).unwrap();
+    assert_eq!(projection.row_count("runs").unwrap(), 2);
+
+    // An event trigger cannot admit a schedule occurrence, or the reverse.
+    assert!(matches!(
+        workflow_executor::execute_event_trigger(
+            &mut journal,
+            &library,
+            &schedule_trigger_binding(&published, due),
+            &event_trigger("provider-event-001", "thread-42"),
+        ),
+        Err(WorkflowExecutionError::Unsupported(code)) if code == "event_trigger_entrypoint_required"
+    ));
+}
+
+// Observe-only scaffolding for a mail binding: a read-only connector
+// observation settles with evidence, and that evidence alone admits an event
+// trigger run. Nothing here contacts a provider or records an effect, so the
+// same shape holds for a Gmail binding once WFP-113 lands `effect.connector`.
+#[test]
+fn read_only_observation_admits_an_event_trigger_run_without_effects() {
+    let directory = tempdir().unwrap();
+    let (library, published) = published_event_trigger_library(directory.path(), "event-id");
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    append_observer_run_token(&mut journal);
+
+    let started = begin_workflow_connector_observation(
+        &mut journal,
+        &mut projection,
+        observation_begin_request("begin-mail-scan"),
+    )
+    .unwrap();
+    assert!(!started.duplicate);
+    let settled = settle_workflow_connector_observation(
+        &mut journal,
+        &mut projection,
+        observation_settle_request("settle-mail-scan"),
+    )
+    .unwrap();
+    assert_eq!(settled.status, "succeeded");
+    let observed = settled.settlement.unwrap();
+    assert_eq!(
+        observed.outcome,
+        WorkflowConnectorObservationOutcome::Succeeded as i32
+    );
+
+    let admitted = workflow_executor::execute_event_trigger(
+        &mut journal,
+        &library,
+        &event_trigger_binding(&published, json!({"messageId": OBSERVED_MESSAGE_ID}), 2_100),
+        &event_trigger(OBSERVED_MESSAGE_ID, ""),
+    )
+    .unwrap();
+    assert_eq!(admitted.admission, WorkflowTriggerAdmission::Admitted);
+    assert_eq!(
+        admitted.result.as_ref().unwrap().outcome,
+        DurableRunOutcome::Succeeded
+    );
+
+    // Re-observing the same mailbox page repeats the same read-only evidence
+    // and cannot start a second run.
+    let repeated = begin_workflow_connector_observation(
+        &mut journal,
+        &mut projection,
+        observation_begin_request("begin-mail-rescan"),
+    )
+    .unwrap();
+    assert!(repeated.duplicate);
+    let duplicate = workflow_executor::execute_event_trigger(
+        &mut journal,
+        &library,
+        &event_trigger_binding(&published, json!({"messageId": OBSERVED_MESSAGE_ID}), 2_200),
+        &event_trigger(OBSERVED_MESSAGE_ID, ""),
+    )
+    .unwrap();
+    assert_eq!(duplicate.admission, WorkflowTriggerAdmission::Duplicate);
+    assert_eq!(duplicate.run_id, admitted.run_id);
+
+    projection.catch_up(&journal).unwrap();
+    assert_eq!(projection.row_count("connector_observations").unwrap(), 1);
+    assert!(
+        journal
+            .event_page_after(0, 500)
+            .unwrap()
+            .events
+            .iter()
+            .all(|event| !event.kind.starts_with("workflow.effect."))
+    );
+}
+
+fn published_event_trigger_library(
+    application_support: &std::path::Path,
+    deduplication: &str,
+) -> (
+    kaname_core::workflow_library::WorkflowLibraryStore,
+    PublishedWorkflowRevision,
+) {
+    publish_control_library(
+        application_support,
+        EVENT_TRIGGER_WORKFLOW_ID,
+        EVENT_TRIGGER_REVISION_ID,
+        "dev.kaname.event-trigger-runtime",
+        event_trigger_workflow_source(deduplication),
+        json!({
+            "bundleVersion": 1,
+            "schemas": [{
+                "id": "dev.kaname.event-trigger/message-v1",
+                "schema": {
+                    "type": "object",
+                    "required": ["messageId"],
+                    "properties": {"messageId": {"type": "string"}}
+                }
+            }]
+        }),
+    )
+}
+
+fn published_schedule_trigger_library(
+    application_support: &std::path::Path,
+    misfire_policy: &str,
+) -> (
+    kaname_core::workflow_library::WorkflowLibraryStore,
+    PublishedWorkflowRevision,
+) {
+    publish_control_library(
+        application_support,
+        SCHEDULE_TRIGGER_WORKFLOW_ID,
+        SCHEDULE_TRIGGER_REVISION_ID,
+        "dev.kaname.schedule-trigger-runtime",
+        schedule_trigger_workflow_source(misfire_policy),
+        json!({
+            "bundleVersion": 1,
+            "schemas": [{
+                "id": "dev.kaname.schedule-trigger/tick-v1",
+                "schema": {
+                    "type": "object",
+                    "required": ["scheduledFor"],
+                    "properties": {"scheduledFor": {"type": "integer"}}
+                }
+            }]
+        }),
+    )
+}
+
+fn event_trigger_workflow_source(deduplication: &str) -> Value {
+    let ids = [
+        "018f7900-0002-7000-8000-000000000002",
+        "018f7900-0003-7000-8000-000000000003",
+        "018f7900-0004-7000-8000-000000000004",
+        "018f7900-0005-7000-8000-000000000005",
+    ];
+    control_graph_source(
+        EVENT_TRIGGER_WORKFLOW_ID,
+        "dev.kaname.event-trigger-runtime",
+        &ids,
+        vec![
+            (
+                "event",
+                "trigger.event",
+                json!({
+                    "eventContract": EVENT_TRIGGER_CONTRACT,
+                    "deduplication": deduplication
+                }),
+            ),
+            (
+                "validate",
+                "data.validate",
+                json!({"schemaRef": "dev.kaname.event-trigger/message-v1"}),
+            ),
+            ("complete", "terminal.complete", json!({})),
+            ("fail", "terminal.fail", json!({})),
+        ],
+        vec![
+            ((0, "success"), (1, "input")),
+            ((1, "success"), (2, "input")),
+            ((1, "error"), (3, "input")),
+        ],
+    )
+}
+
+fn schedule_trigger_workflow_source(misfire_policy: &str) -> Value {
+    let ids = [
+        "018f7a00-0002-7000-8000-000000000002",
+        "018f7a00-0003-7000-8000-000000000003",
+        "018f7a00-0004-7000-8000-000000000004",
+        "018f7a00-0005-7000-8000-000000000005",
+    ];
+    control_graph_source(
+        SCHEDULE_TRIGGER_WORKFLOW_ID,
+        "dev.kaname.schedule-trigger-runtime",
+        &ids,
+        vec![
+            (
+                "schedule",
+                "trigger.schedule",
+                json!({
+                    "scheduleKey": "daily-digest",
+                    "misfirePolicy": misfire_policy
+                }),
+            ),
+            (
+                "validate",
+                "data.validate",
+                json!({"schemaRef": "dev.kaname.schedule-trigger/tick-v1"}),
+            ),
+            ("complete", "terminal.complete", json!({})),
+            ("fail", "terminal.fail", json!({})),
+        ],
+        vec![
+            ((0, "success"), (1, "input")),
+            ((1, "success"), (2, "input")),
+            ((1, "error"), (3, "input")),
+        ],
+    )
+}
+
+fn event_trigger_binding(
+    published: &PublishedWorkflowRevision,
+    input: Value,
+    observed_at_unix_millis: i64,
+) -> WorkflowTriggerRunBinding {
+    trigger_binding(
+        EVENT_TRIGGER_WORKFLOW_ID,
+        EVENT_TRIGGER_REVISION_ID,
+        published,
+        input,
+        observed_at_unix_millis,
+    )
+}
+
+fn schedule_trigger_binding(
+    published: &PublishedWorkflowRevision,
+    observed_at_unix_millis: i64,
+) -> WorkflowTriggerRunBinding {
+    trigger_binding(
+        SCHEDULE_TRIGGER_WORKFLOW_ID,
+        SCHEDULE_TRIGGER_REVISION_ID,
+        published,
+        json!({"scheduledFor": observed_at_unix_millis}),
+        observed_at_unix_millis,
+    )
+}
+
+fn trigger_binding(
+    workflow_id: &str,
+    revision_id: &str,
+    published: &PublishedWorkflowRevision,
+    input: Value,
+    observed_at_unix_millis: i64,
+) -> WorkflowTriggerRunBinding {
+    WorkflowTriggerRunBinding {
+        workflow_id: workflow_id.into(),
+        revision_id: revision_id.into(),
+        package_digest: published.package_digest.clone(),
+        input: inline_value(&format!("value-trigger-{observed_at_unix_millis}"), input),
+        scope: Scope {
+            project_id: "project-kaname".into(),
+            workspace_id: "workspace-local".into(),
+            ..Default::default()
+        },
+        actor_id: "local-owner".into(),
+        observed_at_unix_millis,
+        ..Default::default()
+    }
+}
+
+fn event_trigger(event_id: &str, contract_key: &str) -> WorkflowEventTrigger {
+    WorkflowEventTrigger {
+        event_id: event_id.into(),
+        contract_key: contract_key.into(),
+    }
+}
+
+fn schedule_trigger(
+    scheduled_for_unix_millis: i64,
+    misfire_grace_millis: i64,
+) -> WorkflowScheduleTrigger {
+    WorkflowScheduleTrigger {
+        scheduled_for_unix_millis,
+        misfire_grace_millis,
+    }
+}
+
+fn requested_run(command: &CommandEnvelope) -> RequestWorkflowRun {
+    RequestWorkflowRun::decode(command.payload.as_ref().unwrap().value.as_slice()).unwrap()
+}
+
+fn append_observer_run_token(journal: &mut Journal) {
+    journal
+        .append_event(EventEnvelope {
+            schema_version: Some(SchemaVersion { major: 1, minor: 0 }),
+            event_id: "event-mail-observer-token".into(),
+            stream_id: format!("workflow-run:{OBSERVER_RUN_ID}"),
+            occurred_at_unix_millis: 1_000,
+            kind: WORKFLOW_RUN_TOKEN_CREATED_KIND.into(),
+            payload: Some(OpaqueTypedPayload {
+                type_url: WORKFLOW_RUN_TOKEN_CREATED_TYPE.into(),
+                content_type: "application/x-protobuf".into(),
+                value: WorkflowRunTokenCreated {
+                    run_id: OBSERVER_RUN_ID.into(),
+                    run_token_id: OBSERVER_TOKEN_ID.into(),
+                    request_command_id: "command-mail-observer".into(),
+                    workflow_id: "workflow-mail-observer".into(),
+                    revision_id: "revision-mail-observer".into(),
+                    package_digest: "a".repeat(64),
+                    retention_policy: None,
+                }
+                .encode_to_vec(),
+                payload_version: 1,
+            }),
+            provenance: Some(EventProvenance {
+                source_kind: "workflow-runtime".into(),
+                retention_class: EvidenceRetentionClass::None as i32,
+                ..Default::default()
+            }),
+            causation_id: "command-mail-observer".into(),
+            correlation_id: OBSERVER_RUN_ID.into(),
+            ..Default::default()
+        })
+        .unwrap();
+}
+
+fn observation_begin_request(request_id: &str) -> BeginWorkflowConnectorObservationRequest {
+    BeginWorkflowConnectorObservationRequest {
+        schema_version: Some(SchemaVersion { major: 1, minor: 0 }),
+        request_id: request_id.into(),
+        intent: Some(WorkflowConnectorObservationIntent {
+            run_id: OBSERVER_RUN_ID.into(),
+            run_token_id: OBSERVER_TOKEN_ID.into(),
+            observation_id: "observation-mail-inbox".into(),
+            connector_class: "kaname.mail".into(),
+            account_binding_id: "binding-mail-inbox".into(),
+            operation: "read.metadata".into(),
+            target_fingerprint: "7".repeat(64),
+            idempotency_key: "observation-mail-inbox".into(),
+            requested_fields: observation_fields(),
+            request: Some(inline_value(
+                "value-observation-request",
+                json!({"accountBinding": "binding-mail-inbox", "target": "opaque-mailbox"}),
+            )),
+        }),
+        registration: Some(observation_registration()),
+        started_at_unix_millis: 2_000,
+    }
+}
+
+fn observation_settle_request(request_id: &str) -> SettleWorkflowConnectorObservationRequest {
+    let output = inline_value(
+        "value-observation-output",
+        json!({"messages": [{"id": OBSERVED_MESSAGE_ID, "labels": ["INBOX"]}]}),
+    );
+    SettleWorkflowConnectorObservationRequest {
+        schema_version: Some(SchemaVersion { major: 1, minor: 0 }),
+        request_id: request_id.into(),
+        settlement: Some(WorkflowConnectorObservationSettled {
+            run_id: OBSERVER_RUN_ID.into(),
+            run_token_id: OBSERVER_TOKEN_ID.into(),
+            observation_id: "observation-mail-inbox".into(),
+            intent_digest: workflow_connector_observation_intent_digest(
+                observation_begin_request("digest").intent.as_ref().unwrap(),
+            ),
+            outcome: WorkflowConnectorObservationOutcome::Succeeded as i32,
+            output: Some(output.clone()),
+            error_code: String::new(),
+            error: None,
+            receipt: Some(WorkflowConnectorObservationReceipt {
+                receipt_id: "receipt-mail-inbox".into(),
+                evidence_digest: output.sha256.clone(),
+                observed_fields: observation_fields(),
+                item_count: 1,
+                result_byte_count: output.byte_count,
+            }),
+            elapsed_milliseconds: 20,
+            idempotency_key: "observation-mail-inbox".into(),
+        }),
+        settled_at_unix_millis: 2_020,
+    }
+}
+
+fn observation_registration() -> WorkflowConnectorObservationRegistration {
+    let mut registration = WorkflowConnectorObservationRegistration {
+        connector_class: "kaname.mail".into(),
+        account_binding_id: "binding-mail-inbox".into(),
+        binding_id: "binding-installation-mail-inbox".into(),
+        connector_version: "1.0.0".into(),
+        installation_digest: "8".repeat(64),
+        allowed_operations: vec!["read.metadata".into()],
+        allowed_fields: observation_fields(),
+        maximum_result_bytes: 32 * 1_024,
+        registration_digest: String::new(),
+    };
+    registration.registration_digest =
+        workflow_connector_observation_registration_digest(&registration);
+    registration
+}
+
+fn observation_fields() -> Vec<String> {
+    vec!["labels".into(), "metadata".into()]
+}

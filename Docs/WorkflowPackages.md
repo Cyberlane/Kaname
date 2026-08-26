@@ -7,7 +7,7 @@ The [synthetic mailbox review example](../Examples/Workflows/mailbox-review-v3.w
 
 ## Install and activate
 
-1. Open **Email → Workflows → Definitions**.
+1. Open **Automations → Components**.
 2. Choose **Install package…** and select a manifest.
 3. Inspect the immutable revision, ordered stages, publisher/provenance, permissions, compatibility, dependencies, and manifest digest.
 4. For v3, configure one installation. Kaname generates the form from its declared Draft 2020-12 schema and exposes typed pickers for accounts, provider resources, folders, secret references, capabilities, connectors, renderers, and subflows.
@@ -127,7 +127,7 @@ State, datasets, and knowledge are intentionally scoped to a run, work item, wor
 
 Workflow packages may reference only capabilities registered by Kaname. Executable behavior is installed separately as a `.kanamecapability` directory and is never embedded implicitly in a workflow manifest. Each capability has an immutable ID and version, a digest binding every package-relative file, a separately pinned entrypoint digest or reviewed code-signature requirement, JSON input and output schemas, deterministic/idempotent declarations, explicit permissions, and resource limits. Kaname rechecks the complete package digest before every invocation, so a changed helper, rule, or asset invalidates the reviewed receipt.
 
-Open **Email → Workflows → Definitions → Capability library** to install a capability directory. Kaname verifies it, copies it into private app storage disabled, and requires a representative local JSON test before enablement. External capabilities run in a deny-by-default macOS sandbox with no network access, private input/output directories, bounded time and bytes, and content-addressed artifact ingestion. Built-in Gmail, model, context, validation, and artifact services use the same logical routing contract but remain Kaname-signed host behavior.
+Open **Automations → Components** to install a capability directory. Kaname verifies it, copies it into private app storage disabled, and requires a representative local JSON test before enablement. External capability packages run in a deny-by-default macOS sandbox with no network access, private input/output directories, bounded time and bytes, and content-addressed artifact ingestion. That package boundary is distinct from Workflow v2's injectable subprocess transport, which clears the child environment and bounds I/O and time but is not itself a filesystem or network sandbox. Built-in Gmail, model, context, validation, and artifact services use the same logical routing contract but remain Kaname-signed host behavior.
 
 The privacy-safe [synthetic capability](../Examples/Capabilities/synthetic-document-check.kanamecapability/capability.json) and its [representative input](../Examples/Capabilities/synthetic-document-check.input.json) demonstrate the external package boundary. They contain no legacy-workflow behavior.
 
@@ -142,5 +142,7 @@ Structured model steps accept a generic provider request and schema. Kaname curr
 ## Private migrations
 
 Keep proprietary prompts, matching rules, schemas, private knowledge, paths, and adapters outside this repository. Migrate an existing workflow through observe-only, shadow, draft-only, approved-effect, and finally narrowly scoped standing-authority stages. The package boundary lets Kaname provide the generic infrastructure while private installations remain opinionated.
+
+The Candidate enablement checklist for gmail-assistant (WFP-115) and SimplyKay (WFP-116), including the Kimaki rollback rule, lives in [WorkflowCandidateEnablement](WorkflowCandidateEnablement.md). Do not retire a Kimaki path until that checklist's comfort bar is met on Candidate.
 
 Use a private installation export to move or preserve one configured workflow. Use Kaname's whole-app backup for disaster recovery of one coherent generation; these formats are not interchangeable.

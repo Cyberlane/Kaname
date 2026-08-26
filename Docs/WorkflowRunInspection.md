@@ -27,6 +27,20 @@ and cancellation records an explicit cancelled wait before settling its node.
 
 The production Automations screen uses a fixed-size graph world inside two-axis scrolling, with explicit zoom controls. Narrow windows drill from the run list into detail instead of compressing the list, canvas, and inspector into one unreadable row.
 
+## One run history
+
+The Automations **Run history** tab is this durable Rust projection and nothing
+else. The in-memory desktop snapshot still describes workflow structure for the
+Workflows and Builder tabs, but it is a design-time preview rather than a record
+of what ran, so it is no longer offered as a parallel timeline. Two run
+histories side by side would have left the reader deciding which one to trust.
+
+When the local service that owns the projection is unreachable, the tab says so
+and shows nothing in place of the missing evidence. An unavailable projection is
+never presented as an empty run history, because "no run has evidence" and "the
+evidence could not be read" are different facts and only one of them is safe to
+act on.
+
 The inspection transport itself is read-only. It does not dereference scoped
 storage, access accounts or credentials, invoke providers, or perform external
 effects; wait execution remains inside the typed durable runtime.

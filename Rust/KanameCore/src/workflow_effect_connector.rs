@@ -148,6 +148,150 @@ pub trait WorkflowEffectConnector {
     ) -> WorkflowEffectConnectorReconciliationResult;
 }
 
+/// The connector boundary plus the local approval authority an `effect.connector`
+/// node needs to run inside the durable executor. Authority stays outside the
+/// executor: the host either returns the exact resolution an owner recorded for
+/// the proposal's approval request, or nothing, and the executor never invents
+/// one.
+pub trait WorkflowEffectHost: WorkflowEffectConnector {
+    fn authorize(
+        &mut self,
+        proposal: &v1::WorkflowEffectProposed,
+    ) -> Option<v1::ApprovalResolution>;
+}
+
+/// The host an executor entry point without effect support installs. It
+/// registers no connector and authorizes nothing, so a revision containing an
+/// `effect.connector` node cannot execute through it.
+pub struct UnavailableWorkflowEffectHost;
+
+impl WorkflowEffectConnector for UnavailableWorkflowEffectHost {
+    fn registration(
+        &self,
+        _connector_class: &str,
+        _account_binding_id: &str,
+    ) -> Option<v1::WorkflowEffectConnectorRegistration> {
+        None
+    }
+
+    fn dispatch(
+        &mut self,
+        request: &WorkflowEffectConnectorRequest,
+    ) -> WorkflowEffectConnectorDispatchResult {
+        WorkflowEffectConnectorDispatchResult::NotSent {
+            error_code: "connector.unavailable".into(),
+            receipt: deterministic_receipt(
+                &request.dispatch.idempotency_key,
+                "dispatch-unavailable",
+                v1::WorkflowEffectReceiptOutcome::NotApplied,
+            ),
+            elapsed_milliseconds: 0,
+        }
+    }
+
+    fn reconcile(
+        &mut self,
+        request: &WorkflowEffectConnectorRequest,
+    ) -> WorkflowEffectConnectorReconciliationResult {
+        WorkflowEffectConnectorReconciliationResult::NotApplied {
+            error_code: "connector.unavailable".into(),
+            receipt: deterministic_receipt(
+                &request.dispatch.idempotency_key,
+                "reconciled-unavailable",
+                v1::WorkflowEffectReceiptOutcome::NotApplied,
+            ),
+            elapsed_milliseconds: 0,
+        }
+    }
+}
+
+impl WorkflowEffectHost for UnavailableWorkflowEffectHost {
+    fn authorize(
+        &mut self,
+        _proposal: &v1::WorkflowEffectProposed,
+    ) -> Option<v1::ApprovalResolution> {
+        None
+    }
+}
+
+/// A fixture host that approves every proposal it is shown and delegates
+/// dispatch and reconciliation to the deterministic connector. It performs no
+/// network, credential, account, filesystem, or external-effect operation and
+/// exists so the durable `effect.connector` path can be qualified end to end.
+pub struct AutoApprovedWorkflowEffectHost {
+    connector: DeterministicWorkflowEffectConnector,
+    actor_id: String,
+    device_id: String,
+}
+
+impl AutoApprovedWorkflowEffectHost {
+    pub fn new(actor_id: impl Into<String>, device_id: impl Into<String>) -> Self {
+        Self {
+            connector: DeterministicWorkflowEffectConnector::default(),
+            actor_id: actor_id.into(),
+            device_id: device_id.into(),
+        }
+    }
+
+    pub fn register(
+        &mut self,
+        registration: v1::WorkflowEffectConnectorRegistration,
+        plan: DeterministicEffectConnectorPlan,
+    ) {
+        self.connector.register(registration, plan);
+    }
+
+    pub fn dispatch_count(&self, idempotency_key: &str) -> usize {
+        self.connector.dispatch_count(idempotency_key)
+    }
+
+    pub fn reconciliation_count(&self, idempotency_key: &str) -> usize {
+        self.connector.reconciliation_count(idempotency_key)
+    }
+}
+
+impl WorkflowEffectConnector for AutoApprovedWorkflowEffectHost {
+    fn registration(
+        &self,
+        connector_class: &str,
+        account_binding_id: &str,
+    ) -> Option<v1::WorkflowEffectConnectorRegistration> {
+        self.connector
+            .registration(connector_class, account_binding_id)
+    }
+
+    fn dispatch(
+        &mut self,
+        request: &WorkflowEffectConnectorRequest,
+    ) -> WorkflowEffectConnectorDispatchResult {
+        self.connector.dispatch(request)
+    }
+
+    fn reconcile(
+        &mut self,
+        request: &WorkflowEffectConnectorRequest,
+    ) -> WorkflowEffectConnectorReconciliationResult {
+        self.connector.reconcile(request)
+    }
+}
+
+impl WorkflowEffectHost for AutoApprovedWorkflowEffectHost {
+    fn authorize(
+        &mut self,
+        proposal: &v1::WorkflowEffectProposed,
+    ) -> Option<v1::ApprovalResolution> {
+        let approval = proposal.approval_request.as_ref()?;
+        Some(v1::ApprovalResolution {
+            approval_id: approval.approval_id.clone(),
+            decision: v1::ApprovalDecision::Approve as i32,
+            expected_fingerprint: approval.fingerprint.clone(),
+            actor_id: self.actor_id.clone(),
+            device_id: self.device_id.clone(),
+            standing_rule_reference: String::new(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkflowEffectConnectorAdmission {
     pub authority: v1::WorkflowProjectedEffectAuthority,
@@ -361,7 +505,10 @@ fn occurred_after_elapsed(started_at_unix_millis: i64, elapsed_milliseconds: u64
     started_at_unix_millis.saturating_add(i64::try_from(elapsed_milliseconds).unwrap_or(i64::MAX))
 }
 
-fn registration_matches(
+/// A registration may carry an intent only when it binds the same class and
+/// account, allows the exact action, is idempotent, can reconcile, and its
+/// digest still covers its own contents.
+pub(crate) fn registration_matches(
     registration: &v1::WorkflowEffectConnectorRegistration,
     intent: &v1::WorkflowEffectIntent,
 ) -> bool {
@@ -377,7 +524,8 @@ fn registration_matches(
             == workflow_effect_connector_registration_digest(registration)
 }
 
-fn dispatch_result_payload(
+/// Turns one connector dispatch answer into the durable settlement fact.
+pub(crate) fn dispatch_result_payload(
     request: &WorkflowEffectConnectorRequest,
     result: WorkflowEffectConnectorDispatchResult,
 ) -> v1::WorkflowEffectDispatchSettled {
@@ -436,7 +584,8 @@ fn dispatch_result_payload(
     }
 }
 
-fn reconciliation_result_payload(
+/// Turns one connector reconciliation answer into the durable reconciled fact.
+pub(crate) fn reconciliation_result_payload(
     request: &WorkflowEffectConnectorRequest,
     reconciliation_id: String,
     result: WorkflowEffectConnectorReconciliationResult,
@@ -492,7 +641,13 @@ pub enum DeterministicEffectConnectorPlan {
     Reject,
     TimeoutBeforeSend,
     TimeoutAfterSend,
+    /// Dispatch times out without the provider ever applying the effect, so a
+    /// reconciliation check settles the effect as not applied.
+    TimeoutWithoutApply,
     Ambiguous,
+    /// Dispatch is ambiguous and the first reconciliation check still cannot
+    /// tell, so only a later check observes the applied provider state.
+    AmbiguousUntilSecondCheck,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -500,6 +655,8 @@ enum DeterministicRemoteState {
     Applied,
     NotApplied,
     Unknown,
+    /// Unknown to the first reconciliation check and applied to every later one.
+    UnknownUntilSecondCheck,
 }
 
 #[derive(Default)]
@@ -628,9 +785,37 @@ impl WorkflowEffectConnector for DeterministicWorkflowEffectConnector {
                     elapsed_milliseconds: 60_000,
                 }
             }
+            DeterministicEffectConnectorPlan::TimeoutWithoutApply => {
+                self.remote_states
+                    .insert(key.clone(), DeterministicRemoteState::NotApplied);
+                WorkflowEffectConnectorDispatchResult::OutcomeUnknown {
+                    error_code: "connector.timeout_without_apply".into(),
+                    receipt: deterministic_receipt(
+                        &key,
+                        "dispatch-unknown",
+                        v1::WorkflowEffectReceiptOutcome::Unknown,
+                    ),
+                    elapsed_milliseconds: 60_000,
+                }
+            }
             DeterministicEffectConnectorPlan::Ambiguous => {
                 self.remote_states
                     .insert(key.clone(), DeterministicRemoteState::Unknown);
+                WorkflowEffectConnectorDispatchResult::OutcomeUnknown {
+                    error_code: "connector.outcome_ambiguous".into(),
+                    receipt: deterministic_receipt(
+                        &key,
+                        "dispatch-ambiguous",
+                        v1::WorkflowEffectReceiptOutcome::Unknown,
+                    ),
+                    elapsed_milliseconds: 25,
+                }
+            }
+            DeterministicEffectConnectorPlan::AmbiguousUntilSecondCheck => {
+                self.remote_states.insert(
+                    key.clone(),
+                    DeterministicRemoteState::UnknownUntilSecondCheck,
+                );
                 WorkflowEffectConnectorDispatchResult::OutcomeUnknown {
                     error_code: "connector.outcome_ambiguous".into(),
                     receipt: deterministic_receipt(
@@ -652,6 +837,21 @@ impl WorkflowEffectConnector for DeterministicWorkflowEffectConnector {
     ) -> WorkflowEffectConnectorReconciliationResult {
         let key = request.dispatch.idempotency_key.clone();
         *self.reconciliation_counts.entry(key.clone()).or_default() += 1;
+        if self.remote_states.get(&key).copied()
+            == Some(DeterministicRemoteState::UnknownUntilSecondCheck)
+        {
+            self.remote_states
+                .insert(key.clone(), DeterministicRemoteState::Applied);
+            return WorkflowEffectConnectorReconciliationResult::StillUnknown {
+                error_code: "connector.outcome_still_unknown".into(),
+                receipt: deterministic_receipt(
+                    &key,
+                    "reconciled-unknown",
+                    v1::WorkflowEffectReceiptOutcome::Unknown,
+                ),
+                elapsed_milliseconds: 10,
+            };
+        }
         match self.remote_states.get(&key).copied() {
             Some(DeterministicRemoteState::Applied) => {
                 WorkflowEffectConnectorReconciliationResult::Applied {
@@ -674,17 +874,18 @@ impl WorkflowEffectConnector for DeterministicWorkflowEffectConnector {
                     elapsed_milliseconds: 10,
                 }
             }
-            Some(DeterministicRemoteState::Unknown) => {
-                WorkflowEffectConnectorReconciliationResult::StillUnknown {
-                    error_code: "connector.outcome_still_unknown".into(),
-                    receipt: deterministic_receipt(
-                        &key,
-                        "reconciled-unknown",
-                        v1::WorkflowEffectReceiptOutcome::Unknown,
-                    ),
-                    elapsed_milliseconds: 10,
-                }
-            }
+            Some(
+                DeterministicRemoteState::Unknown
+                | DeterministicRemoteState::UnknownUntilSecondCheck,
+            ) => WorkflowEffectConnectorReconciliationResult::StillUnknown {
+                error_code: "connector.outcome_still_unknown".into(),
+                receipt: deterministic_receipt(
+                    &key,
+                    "reconciled-unknown",
+                    v1::WorkflowEffectReceiptOutcome::Unknown,
+                ),
+                elapsed_milliseconds: 10,
+            },
         }
     }
 }
