@@ -62,6 +62,11 @@ private struct CodexJournalMetadata: Codable, Equatable, Sendable {
     let nativeThreadID: String?
     let nativeTurnID: String?
     let approvalID: String?
+    let toolCallID: String?
+    let toolKind: String?
+    let toolState: String?
+    let agentID: String?
+    let agentActivity: String?
     let textByteCount: Int
     let rawPayloadByteCount: Int
     let payloadWasTruncated: Bool
@@ -79,6 +84,11 @@ extension CodexRunEvent {
             nativeThreadID: threadID,
             nativeTurnID: turnID,
             approvalID: approvalID,
+            toolCallID: toolObservation?.callID,
+            toolKind: toolObservation?.kind.rawValue,
+            toolState: toolObservation?.state.rawValue,
+            agentID: agentActivity?.agentID,
+            agentActivity: agentActivity?.activity.rawValue,
             textByteCount: text?.lengthOfBytes(using: .utf8) ?? 0,
             rawPayloadByteCount: payload?.count ?? 0,
             payloadWasTruncated: payloadWasTruncated
@@ -106,7 +116,7 @@ extension CodexRunEvent {
         provenance.nativeType = nativeType
         provenance.retentionClass = .none
         envelope.provenance = provenance
-        envelope.causationID = approvalID ?? ""
+        envelope.causationID = approvalID ?? toolObservation?.callID ?? agentActivity?.agentID ?? ""
         envelope.correlationID = context.runID.rawValue
         return envelope
     }

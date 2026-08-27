@@ -42,6 +42,8 @@ private actor ServiceEventWriter {
             threadID: pendingAssistantEvent.threadID,
             turnID: pendingAssistantEvent.turnID,
             approvalID: pendingAssistantEvent.approvalID,
+            toolObservation: pendingAssistantEvent.toolObservation,
+            agentActivity: pendingAssistantEvent.agentActivity,
             text: pendingAssistantText,
             payload: nil,
             payloadWasTruncated: false
@@ -70,6 +72,8 @@ private actor ServiceEventWriter {
             nativeThreadID: providerEvent?.threadID,
             nativeTurnID: providerEvent?.turnID,
             approvalID: providerEvent?.approvalID,
+            toolObservation: providerEvent?.toolObservation,
+            agentActivity: providerEvent?.agentActivity,
             text: providerEvent?.text ?? text,
             rawPayloadBase64: providerEvent?.payload?.base64EncodedString(),
             payloadWasTruncated: providerEvent?.payloadWasTruncated ?? false,
@@ -80,6 +84,251 @@ private actor ServiceEventWriter {
 
     private func now() -> Int64 {
         Int64(Date().timeIntervalSince1970 * 1_000)
+    }
+}
+
+private enum CodexSessionEventPumpError: Error, LocalizedError {
+    case routingFailed
+    case persistenceFailed
+    case streamEnded
+
+    var errorDescription: String? {
+        switch self {
+        case .routingFailed:
+            "The provider event stream could not be matched to its durable Kaname run."
+        case .persistenceFailed:
+            "The provider event stream could not be persisted without losing ordering."
+        case .streamEnded:
+            "The provider event stream ended before the active turn settled."
+        }
+    }
+}
+
+/// One pump owns the entire lifetime of a reusable Codex session. Per-turn
+/// consumers wait for their own terminal event, while the pump keeps routing
+/// late child activity to the run identified by the native turn ID.
+private actor CodexSessionEventPump {
+    private struct Route {
+        let request: KanameConversationServiceRequest
+        let writer: ServiceEventWriter
+        let recorder: CodexJournalRecorder
+    }
+
+    private let store: KanameConversationServiceStore
+    private var routes: [String: Route] = [:]
+    private var routeTable = CodexRunEventRouteTable()
+    private var waiters: [String: CheckedContinuation<CodexRunEventKind, Error>] = [:]
+    private var terminalResults: [String: Result<CodexRunEventKind, Error>] = [:]
+    private var terminalRunIDs: Set<String> = []
+    private var pumpTask: _Concurrency.Task<Void, Never>?
+    private var controlTask: _Concurrency.Task<Void, Never>?
+    private var fatalError: CodexSessionEventPumpError?
+    private var streamEnded = false
+
+    init(store: KanameConversationServiceStore) {
+        self.store = store
+    }
+
+    func start(_ stream: AsyncStream<CodexRunEvent>, session: CodexLiveSession) {
+        guard pumpTask == nil else { return }
+        pumpTask = _Concurrency.Task { [weak self] in
+            await self?.consume(stream)
+        }
+        controlTask = _Concurrency.Task { [weak self] in
+            await self?.consumeControls(session: session)
+        }
+    }
+
+    func register(
+        request: KanameConversationServiceRequest,
+        writer: ServiceEventWriter,
+        recorder: CodexJournalRecorder
+    ) throws {
+        if let fatalError { throw fatalError }
+        guard !streamEnded else { throw CodexSessionEventPumpError.streamEnded }
+        try routeTable.register(runID: request.runID)
+        routes[request.runID] = Route(request: request, writer: writer, recorder: recorder)
+    }
+
+    func bind(runID: String, nativeThreadID: String, nativeTurnID: String) throws {
+        try routeTable.bind(
+            runID: runID,
+            nativeThreadID: nativeThreadID,
+            nativeTurnID: nativeTurnID
+        )
+    }
+
+    func waitForTerminal(runID: String) async throws -> CodexRunEventKind {
+        if let result = terminalResults.removeValue(forKey: runID) {
+            return try result.get()
+        }
+        guard routes[runID] != nil else { throw CodexSessionEventPumpError.routingFailed }
+        return try await withCheckedThrowingContinuation { continuation in
+            waiters[runID] = continuation
+        }
+    }
+
+    func hasOutstandingAgentActivity() -> Bool {
+        !streamEnded && routeTable.hasOutstandingAgentActivity
+    }
+
+    func waitUntilStopped() async {
+        await pumpTask?.value
+        await controlTask?.value
+    }
+
+    private func consume(_ stream: AsyncStream<CodexRunEvent>) async {
+        for await event in stream {
+            await ingest(event)
+        }
+        await finishStream()
+    }
+
+    private func consumeControls(session: CodexLiveSession) async {
+        while !_Concurrency.Task.isCancelled {
+            let runIDs = routes.keys.sorted()
+            for runID in runIDs {
+                guard let route = routes[runID] else { continue }
+                if let target = routeTable.controlTarget(for: runID),
+                   store.consumeInterrupt(
+                    threadID: route.request.threadID,
+                    runID: route.request.runID
+                ) {
+                    try? await session.interrupt(target)
+                }
+                if let (requestID, answers) = store.consumeAnswer(
+                    threadID: route.request.threadID,
+                    runID: route.request.runID
+                ) {
+                    try? await session.answerQuestion(requestID: requestID, answers: answers)
+                }
+            }
+            try? await _Concurrency.Task.sleep(for: .milliseconds(100))
+        }
+    }
+
+    private func ingest(_ event: CodexRunEvent) async {
+        guard fatalError == nil else { return }
+        let runID: String
+        do {
+            guard let routedRunID = try routeTable.route(event) else { return }
+            runID = routedRunID
+        } catch {
+            await failAll(with: .routingFailed, nativeType: "kaname/routing-failed")
+            return
+        }
+        guard let route = routes[runID] else {
+            await failAll(with: .routingFailed, nativeType: "kaname/routing-failed")
+            return
+        }
+        do {
+            try await persist(event, routedTo: runID, route: route)
+            if [.providerCompleted, .runFailed, .runInterrupted].contains(event.kind) {
+                complete(runID: runID, with: .success(event.kind))
+            }
+            if [.runFailed, .runInterrupted].contains(event.kind) {
+                await settleOutstandingAgents(
+                    for: runID,
+                    as: .interrupted,
+                    nativeType: "kaname/turn-ended"
+                )
+            }
+        } catch {
+            try? await route.writer.append(
+                kind: .serviceFailed,
+                text: CodexSessionEventPumpError.persistenceFailed.localizedDescription
+            )
+            complete(runID: runID, with: .failure(CodexSessionEventPumpError.persistenceFailed))
+            await failAll(with: .persistenceFailed, nativeType: "kaname/persistence-failed")
+        }
+    }
+
+    private func persist(
+        _ event: CodexRunEvent,
+        routedTo runID: String,
+        route: Route
+    ) async throws {
+        _ = try await route.recorder.record(event)
+        if let payload = event.payload {
+            try store.appendEvidence(
+                payload,
+                threadID: route.request.threadID,
+                runID: route.request.runID
+            )
+        }
+        try await route.writer.append(kind: .provider, providerEvent: event)
+        routeTable.observe(event, routedTo: runID)
+    }
+
+    private func settleOutstandingAgents(
+        for runID: String,
+        as terminalActivity: ProviderAgentActivityKind,
+        nativeType: String
+    ) async {
+        guard let route = routes[runID] else { return }
+        let activities = routeTable.agentSettlementActivities(
+            for: runID,
+            as: terminalActivity
+        )
+        for activity in activities {
+            let event = CodexRunEvent(
+                kind: .toolActivity,
+                nativeType: nativeType,
+                agentActivity: activity
+            )
+            do {
+                try await persist(event, routedTo: runID, route: route)
+            } catch {
+                try? await route.writer.append(
+                    kind: .serviceFailed,
+                    text: CodexSessionEventPumpError.persistenceFailed.localizedDescription
+                )
+            }
+        }
+    }
+
+    private func settleAllOutstandingAgents(nativeType: String) async {
+        for runID in routeTable.runIDsWithOutstandingAgentActivity {
+            await settleOutstandingAgents(
+                for: runID,
+                as: .interrupted,
+                nativeType: nativeType
+            )
+        }
+    }
+
+    private func complete(
+        runID: String,
+        with result: Result<CodexRunEventKind, Error>
+    ) {
+        guard terminalRunIDs.insert(runID).inserted else { return }
+        if let waiter = waiters.removeValue(forKey: runID) {
+            waiter.resume(with: result)
+        } else {
+            terminalResults[runID] = result
+        }
+    }
+
+    private func failAll(
+        with error: CodexSessionEventPumpError,
+        nativeType: String
+    ) async {
+        await settleAllOutstandingAgents(nativeType: nativeType)
+        fatalError = error
+        streamEnded = true
+        controlTask?.cancel()
+        for waiter in waiters.values { waiter.resume(throwing: error) }
+        waiters.removeAll()
+    }
+
+    private func finishStream() async {
+        await settleAllOutstandingAgents(nativeType: "kaname/session-ended")
+        streamEnded = true
+        controlTask?.cancel()
+        for waiter in waiters.values {
+            waiter.resume(throwing: CodexSessionEventPumpError.streamEnded)
+        }
+        waiters.removeAll()
     }
 }
 
@@ -109,13 +358,20 @@ private enum KanameConversationWorker {
 
     private static func serve(store: KanameConversationServiceStore, threadID: String) async throws {
         var session: CodexLiveSession?
+        var eventPump: CodexSessionEventPump?
         var activeWorkspace: String?
         var sessionHasNativeThread = false
         var idleChecks = 0
-        while idleChecks < 30 {
+        while true {
+            let hasOutstandingAgentActivity = if let eventPump {
+                await eventPump.hasOutstandingAgentActivity()
+            } else {
+                false
+            }
+            guard idleChecks < 30 || hasOutstandingAgentActivity else { break }
             let pending = try store.pendingRequests(threadID: threadID)
             guard let (requestURL, request) = pending.first else {
-                idleChecks += 1
+                idleChecks = min(idleChecks + 1, 30)
                 try await _Concurrency.Task.sleep(for: .milliseconds(100))
                 continue
             }
@@ -129,20 +385,38 @@ private enum KanameConversationWorker {
             if request.provider.caseInsensitiveCompare("Codex") == .orderedSame {
                 if activeWorkspace != request.workspacePath {
                     await session?.close()
-                    session = makeSession(request)
+                    await eventPump?.waitUntilStopped()
+                    let newSession = makeSession(request)
+                    let newEventPump = CodexSessionEventPump(store: store)
+                    await newEventPump.start(await newSession.events(), session: newSession)
+                    session = newSession
+                    eventPump = newEventPump
                     activeWorkspace = request.workspacePath
                     sessionHasNativeThread = false
                 }
-                guard let session else { continue }
-                sessionHasNativeThread = await processCodex(
+                guard let activeSession = session, let activeEventPump = eventPump else { continue }
+                let sessionIsReusable = await processCodex(
                     request,
-                    session: session,
+                    session: activeSession,
+                    eventPump: activeEventPump,
                     store: store,
                     continueExistingSession: sessionHasNativeThread
-                ) || sessionHasNativeThread
+                )
+                if sessionIsReusable {
+                    sessionHasNativeThread = true
+                } else {
+                    await activeSession.close()
+                    await activeEventPump.waitUntilStopped()
+                    session = nil
+                    eventPump = nil
+                    activeWorkspace = nil
+                    sessionHasNativeThread = false
+                }
             } else {
                 await session?.close()
+                await eventPump?.waitUntilStopped()
                 session = nil
+                eventPump = nil
                 activeWorkspace = nil
                 sessionHasNativeThread = false
                 _ = await processNativeProvider(request, store: store)
@@ -150,6 +424,7 @@ private enum KanameConversationWorker {
             try store.finishRequest(at: requestURL, threadID: threadID)
         }
         await session?.close()
+        await eventPump?.waitUntilStopped()
         try store.writeWorkerState(KanameConversationWorkerState.record(
             threadID: threadID,
             runID: nil,
@@ -161,6 +436,7 @@ private enum KanameConversationWorker {
     private static func processCodex(
         _ request: KanameConversationServiceRequest,
         session: CodexLiveSession,
+        eventPump: CodexSessionEventPump,
         store: KanameConversationServiceStore,
         continueExistingSession: Bool
     ) async -> Bool {
@@ -181,30 +457,13 @@ private enum KanameConversationWorker {
             runner: runner,
             context: CodexJournalContext(projectID: projectID, threadID: threadID, runID: runID, providerInstance: provider)
         )
-        let stream = await session.events()
-        let terminal = _Concurrency.Task<CodexRunEventKind, Error> {
-            for await event in stream {
-                _ = try await recorder.record(event)
-                if let payload = event.payload {
-                    try store.appendEvidence(payload, threadID: request.threadID, runID: request.runID)
-                }
-                try await writer.append(kind: .provider, providerEvent: event)
-                if [.providerCompleted, .runFailed, .runInterrupted].contains(event.kind) { return event.kind }
-            }
-            throw NSError(domain: "KanameConversationWorker", code: 1)
+        do {
+            try await eventPump.register(request: request, writer: writer, recorder: recorder)
+        } catch {
+            try? await writer.append(kind: .serviceFailed, text: error.localizedDescription)
+            return false
         }
-        let controls = _Concurrency.Task<Void, Never> {
-            while !_Concurrency.Task.isCancelled {
-                if store.consumeInterrupt(threadID: request.threadID, runID: request.runID) {
-                    try? await session.interrupt()
-                }
-                if let (requestID, answers) = store.consumeAnswer(threadID: request.threadID, runID: request.runID) {
-                    try? await session.answerQuestion(requestID: requestID, answers: answers)
-                }
-                try? await _Concurrency.Task.sleep(for: .milliseconds(100))
-            }
-        }
-        var didStartSession = false
+        var sessionIsReusable = false
         do {
             let attachmentStore = KanameConversationAttachmentStore(rootDirectory: store.rootDirectory)
             let attachmentPaths = try request.attachments.map {
@@ -224,7 +483,11 @@ private enum KanameConversationWorker {
                     resumingNativeThreadID: request.resumableNativeThreadID
                 )
             }
-            didStartSession = true
+            try await eventPump.bind(
+                runID: request.runID,
+                nativeThreadID: liveRun.nativeThreadID,
+                nativeTurnID: liveRun.nativeTurnID
+            )
             try await writer.append(
                 kind: .serviceStarted,
                 providerEvent: CodexRunEvent(
@@ -234,13 +497,13 @@ private enum KanameConversationWorker {
                     turnID: liveRun.nativeTurnID
                 )
             )
-            _ = try await terminal.value
+            _ = try await eventPump.waitForTerminal(runID: request.runID)
+            sessionIsReusable = true
         } catch {
-            terminal.cancel()
             try? await writer.append(kind: .serviceFailed, text: error.localizedDescription)
+            sessionIsReusable = false
         }
-        controls.cancel()
-        return didStartSession
+        return sessionIsReusable
     }
 
     private static func processNativeProvider(
@@ -313,6 +576,7 @@ private enum KanameConversationWorker {
             }
         }
         var completed = false
+        var agentLedger = ProviderAgentActivityLedger()
         do {
             for await event in stream {
                 _ = try await recorder.record(event)
@@ -320,16 +584,53 @@ private enum KanameConversationWorker {
                     try store.appendEvidence(payload, threadID: request.threadID, runID: request.runID)
                 }
                 try await writer.append(kind: .provider, providerEvent: event)
+                agentLedger.observe(event.agentActivity)
                 if [.providerCompleted, .runFailed, .runInterrupted].contains(event.kind) {
                     completed = event.kind == .providerCompleted
+                    try await settleNativeProviderAgents(
+                        &agentLedger,
+                        recorder: recorder,
+                        writer: writer,
+                        nativeType: "kaname/provider-observation-ended"
+                    )
                     break
                 }
             }
+            try await settleNativeProviderAgents(
+                &agentLedger,
+                recorder: recorder,
+                writer: writer,
+                nativeType: "kaname/provider-stream-ended"
+            )
         } catch {
+            try? await settleNativeProviderAgents(
+                &agentLedger,
+                recorder: recorder,
+                writer: writer,
+                nativeType: "kaname/provider-failed"
+            )
             try? await writer.append(kind: .serviceFailed, text: error.localizedDescription)
         }
         controls.cancel()
         return completed
+    }
+
+    private static func settleNativeProviderAgents(
+        _ agentLedger: inout ProviderAgentActivityLedger,
+        recorder: CodexJournalRecorder,
+        writer: ServiceEventWriter,
+        nativeType: String
+    ) async throws {
+        for activity in agentLedger.settlementActivities(as: .interrupted) {
+            let event = CodexRunEvent(
+                kind: .toolActivity,
+                nativeType: nativeType,
+                agentActivity: activity
+            )
+            _ = try await recorder.record(event)
+            try await writer.append(kind: .provider, providerEvent: event)
+            agentLedger.observe(activity)
+        }
     }
 
     private static func makeSession(_ request: KanameConversationServiceRequest) -> CodexLiveSession {

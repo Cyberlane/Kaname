@@ -568,11 +568,23 @@ struct ProviderConnectivityTests {
             threadID: "thread-1",
             ordinal: 1,
             kind: .provider,
-            providerKind: .runStarted,
-            nativeType: "turn/start",
+            providerKind: .toolActivity,
+            nativeType: "item/completed",
             nativeThreadID: "native-thread",
             nativeTurnID: "native-turn",
             approvalID: nil,
+            toolObservation: ProviderToolObservation(
+                callID: "call-1",
+                kind: .commandExecution,
+                state: .completed,
+                name: "Command"
+            ),
+            agentActivity: ProviderAgentActivity(
+                agentID: "child-1",
+                activity: .completed,
+                agentPath: "/root/child",
+                sourceToolCallID: "call-1"
+            ),
             text: nil,
             rawPayloadBase64: nil,
             payloadWasTruncated: false,
@@ -580,6 +592,17 @@ struct ProviderConnectivityTests {
         )
         try store.append(event)
         #expect(try store.events(threadID: "thread-1") == [event])
+        var legacyObject = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(event)) as? [String: Any]
+        )
+        legacyObject.removeValue(forKey: "toolObservation")
+        legacyObject.removeValue(forKey: "agentActivity")
+        let legacyEvent = try JSONDecoder().decode(
+            KanameConversationServiceEvent.self,
+            from: JSONSerialization.data(withJSONObject: legacyObject)
+        )
+        #expect(legacyEvent.toolObservation == nil)
+        #expect(legacyEvent.agentActivity == nil)
         try store.acknowledge(event)
         #expect(try store.events(threadID: "thread-1").isEmpty)
         try store.appendEvidence(Data("{\"type\":\"message\"}".utf8), threadID: "thread-1", runID: "run-1")
@@ -723,6 +746,18 @@ struct ProviderConnectivityTests {
         #expect(claudeEvents.first?.payload == delta)
         #expect(claudeParser.sessionID == "session-1")
 
+        let claudeToolUse = Data(#"{"type":"assistant","session_id":"session-1","parent_tool_use_id":"parent-call","message":{"content":[{"type":"tool_use","id":"task-call","name":"Task"}]}}"#.utf8)
+        let claudeToolResult = Data(#"{"type":"user","session_id":"session-1","message":{"content":[{"type":"tool_result","tool_use_id":"task-call","is_error":false}]}}"#.utf8)
+        let claudeStarted = try #require(claudeParser.consume(line: claudeToolUse).first { $0.toolObservation != nil })
+        let claudeCompleted = try #require(claudeParser.consume(line: claudeToolResult).first { $0.toolObservation != nil })
+        #expect(claudeStarted.toolObservation?.callID == "task-call")
+        #expect(claudeStarted.toolObservation?.parentCallID == "parent-call")
+        #expect(claudeStarted.toolObservation?.state == .running)
+        #expect(claudeStarted.agentActivity?.agentID == "task-call")
+        #expect(claudeStarted.agentActivity?.parentAgentID == "parent-call")
+        #expect(claudeCompleted.toolObservation?.state == .completed)
+        #expect(claudeCompleted.agentActivity?.activity == .completed)
+
         let openCode = NativeConversationRequest(
             driver: .openCode,
             prompt: "Inspect only",
@@ -769,6 +804,56 @@ struct ProviderConnectivityTests {
         let text = Data(#"{"type":"text","sessionID":"oc-session","part":{"type":"text","text":"Ready"}}"#.utf8)
         #expect(openCodeParser.consume(line: text).contains { $0.kind == .messageDelta && $0.text == "Ready" })
         #expect(openCodeParser.sessionID == "oc-session")
+        let task = Data(#"{"type":"tool_use","sessionID":"oc-session","part":{"type":"tool","id":"part-task","callID":"call-task","tool":"task","state":{"status":"completed","metadata":{"sessionId":"oc-child","parentSessionId":"oc-session"}}}}"#.utf8)
+        let taskEvent = try #require(openCodeParser.consume(line: task).first { $0.toolObservation != nil })
+        #expect(taskEvent.toolObservation?.callID == "call-task")
+        #expect(taskEvent.toolObservation?.kind == .collaboration)
+        #expect(taskEvent.toolObservation?.state == .completed)
+        #expect(taskEvent.agentActivity?.agentID == "oc-child")
+        #expect(taskEvent.agentActivity?.parentAgentID == nil)
+        #expect(taskEvent.agentActivity?.activity == .completed)
+
+        let backgroundTask = Data(#"{"type":"tool_use","sessionID":"oc-session","part":{"type":"tool","callID":"call-background","tool":"task","state":{"status":"completed","output":"<task id=\"oc-background\" state=\"running\">started</task>","metadata":{"sessionId":"oc-background","parentSessionId":"oc-session","background":true}}}}"#.utf8)
+        let backgroundEvent = try #require(
+            openCodeParser.consume(line: backgroundTask).first { $0.toolObservation != nil }
+        )
+        #expect(backgroundEvent.toolObservation?.state == .completed)
+        #expect(backgroundEvent.agentActivity?.agentID == "oc-background")
+        #expect(backgroundEvent.agentActivity?.parentAgentID == nil)
+        #expect(backgroundEvent.agentActivity?.activity == .started)
+
+        let failedTask = Data(#"{"type":"tool_use","sessionID":"oc-session","part":{"type":"tool","callID":"call-failed","tool":"task","state":{"status":"error","metadata":{"sessionId":"oc-failed","parentSessionId":"oc-parent-agent"}}}}"#.utf8)
+        let failedEvent = try #require(
+            openCodeParser.consume(line: failedTask).first { $0.toolObservation != nil }
+        )
+        #expect(failedEvent.toolObservation?.state == .failed)
+        #expect(failedEvent.agentActivity?.parentAgentID == "oc-parent-agent")
+        #expect(failedEvent.agentActivity?.activity == .failed)
+
+        let runningTask = Data(#"{"type":"tool_use","sessionID":"oc-session","part":{"type":"tool","callID":"call-running","tool":"task","state":{"status":"running","metadata":{"sessionId":"oc-running","parentSessionId":"oc-session"}}}}"#.utf8)
+        let runningEvent = try #require(
+            openCodeParser.consume(line: runningTask).first { $0.toolObservation != nil }
+        )
+        #expect(runningEvent.toolObservation?.state == .running)
+        #expect(runningEvent.agentActivity?.activity == .started)
+
+        let taskWithoutChild = Data(#"{"type":"tool_use","sessionID":"oc-session","part":{"type":"tool","callID":"call-no-child","tool":"task","state":{"status":"completed","metadata":{}}}}"#.utf8)
+        let taskWithoutChildEvent = try #require(
+            openCodeParser.consume(line: taskWithoutChild).first { $0.toolObservation != nil }
+        )
+        #expect(taskWithoutChildEvent.toolObservation?.state == .completed)
+        #expect(taskWithoutChildEvent.agentActivity == nil)
+
+        let syntheticCompletionText = Data(#"{"type":"text","sessionID":"oc-session","part":{"type":"text","text":"<task id=\"oc-background\" state=\"completed\">done</task>"}}"#.utf8)
+        #expect(openCodeParser.consume(line: syntheticCompletionText).allSatisfy { $0.agentActivity == nil })
+        let observationEnded = openCodeParser.settleOutstandingAgentEvents(
+            nativeType: "openCode/observation-ended"
+        )
+        #expect(observationEnded.compactMap(\.agentActivity).map(\.agentID) == ["oc-background", "oc-running"])
+        #expect(observationEnded.compactMap(\.agentActivity).allSatisfy { $0.activity == .interrupted })
+        #expect(openCodeParser.settleOutstandingAgentEvents(
+            nativeType: "openCode/observation-ended"
+        ).isEmpty)
     }
 
     @Test

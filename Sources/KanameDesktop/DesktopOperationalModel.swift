@@ -217,6 +217,7 @@ public enum DesktopProviderEventKind: String, Codable, Equatable, Sendable {
 public struct DesktopProviderEventRecord: Codable, Equatable, Identifiable, Sendable {
     public let id: String
     public var threadID: String
+    public var turnID: String
     public var runID: String
     public var kind: DesktopProviderEventKind
     public var title: String
@@ -225,6 +226,8 @@ public struct DesktopProviderEventRecord: Codable, Equatable, Identifiable, Send
     public var nativeThreadID: String?
     public var nativeTurnID: String?
     public var approvalID: String?
+    public var toolObservation: ProviderToolObservation?
+    public var agentActivity: ProviderAgentActivity?
     public var rawPayloadBase64: String?
     public var payloadWasTruncated: Bool
     public var createdAtUnixMillis: Int64
@@ -233,6 +236,7 @@ public struct DesktopProviderEventRecord: Codable, Equatable, Identifiable, Send
         id: String,
         threadID: String,
         runID: String,
+        turnID: String? = nil,
         kind: DesktopProviderEventKind,
         title: String,
         detail: String,
@@ -240,18 +244,48 @@ public struct DesktopProviderEventRecord: Codable, Equatable, Identifiable, Send
         nativeThreadID: String?,
         nativeTurnID: String?,
         approvalID: String?,
+        toolObservation: ProviderToolObservation? = nil,
+        agentActivity: ProviderAgentActivity? = nil,
         rawPayloadBase64: String?,
         payloadWasTruncated: Bool,
         createdAtUnixMillis: Int64
     ) {
         (self.id, self.threadID, self.runID, self.kind) = (id, threadID, runID, kind)
+        self.turnID = turnID ?? runID
         (self.title, self.detail, self.nativeType) = (title, detail, nativeType)
         (self.nativeThreadID, self.nativeTurnID, self.approvalID) = (
             nativeThreadID, nativeTurnID, approvalID
         )
+        (self.toolObservation, self.agentActivity) = (toolObservation, agentActivity)
         (self.rawPayloadBase64, self.payloadWasTruncated, self.createdAtUnixMillis) = (
             rawPayloadBase64, payloadWasTruncated, createdAtUnixMillis
         )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, threadID, turnID, runID, kind, title, detail, nativeType
+        case nativeThreadID, nativeTurnID, approvalID, toolObservation, agentActivity, rawPayloadBase64
+        case payloadWasTruncated, createdAtUnixMillis
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        threadID = try container.decode(String.self, forKey: .threadID)
+        runID = try container.decode(String.self, forKey: .runID)
+        turnID = try container.decodeIfPresent(String.self, forKey: .turnID) ?? runID
+        kind = try container.decode(DesktopProviderEventKind.self, forKey: .kind)
+        title = try container.decode(String.self, forKey: .title)
+        detail = try container.decode(String.self, forKey: .detail)
+        nativeType = try container.decode(String.self, forKey: .nativeType)
+        nativeThreadID = try container.decodeIfPresent(String.self, forKey: .nativeThreadID)
+        nativeTurnID = try container.decodeIfPresent(String.self, forKey: .nativeTurnID)
+        approvalID = try container.decodeIfPresent(String.self, forKey: .approvalID)
+        toolObservation = try container.decodeIfPresent(ProviderToolObservation.self, forKey: .toolObservation)
+        agentActivity = try container.decodeIfPresent(ProviderAgentActivity.self, forKey: .agentActivity)
+        rawPayloadBase64 = try container.decodeIfPresent(String.self, forKey: .rawPayloadBase64)
+        payloadWasTruncated = try container.decode(Bool.self, forKey: .payloadWasTruncated)
+        createdAtUnixMillis = try container.decode(Int64.self, forKey: .createdAtUnixMillis)
     }
 }
 
@@ -490,6 +524,7 @@ private struct DesktopProviderRunPayload: Decodable {
     let id: String
     let threadID: String?
     let sourceMessageID: String?
+    let turnID: String?
     let provider: String
     let model: String
     let reasoningEffort: String?
@@ -519,6 +554,7 @@ public struct DesktopProviderRunRecord: Codable, Equatable, Identifiable, Sendab
     public let id: String
     public var threadID: String?
     public var sourceMessageID: String?
+    public var turnID: String
     public var provider: String
     public var model: String
     public var reasoningEffort: String
@@ -547,6 +583,7 @@ public struct DesktopProviderRunRecord: Codable, Equatable, Identifiable, Sendab
         id: String,
         threadID: String?,
         sourceMessageID: String? = nil,
+        turnID: String? = nil,
         provider: String,
         model: String,
         reasoningEffort: String = "xhigh",
@@ -572,6 +609,7 @@ public struct DesktopProviderRunRecord: Codable, Equatable, Identifiable, Sendab
         workflowContextSnapshotID: String? = nil
     ) {
         (self.id, self.threadID, self.sourceMessageID) = (id, threadID, sourceMessageID)
+        self.turnID = turnID ?? sourceMessageID ?? id
         (self.provider, self.model, self.reasoningEffort) = (provider, model, reasoningEffort)
         (self.runtimeMode, self.networkAccess, self.briefDigest) = (runtimeMode, networkAccess, briefDigest)
         (self.contextReferenceCount, self.nativeThreadID, self.nativeTurnID) = (
@@ -597,6 +635,7 @@ public struct DesktopProviderRunRecord: Codable, Equatable, Identifiable, Sendab
         id = payload.id
         threadID = payload.threadID
         sourceMessageID = payload.sourceMessageID
+        turnID = payload.turnID ?? payload.sourceMessageID ?? payload.id
         provider = payload.provider
         model = payload.model
         reasoningEffort = payload.reasoningEffort ?? "xhigh"

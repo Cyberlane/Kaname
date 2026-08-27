@@ -1,5 +1,6 @@
 import Testing
 @testable import KanameDesktop
+import KanameDomain
 
 struct DesktopConversationTimelineTests {
     @Test
@@ -50,6 +51,51 @@ struct DesktopConversationTimelineTests {
 
         #expect(group.events.map(\.id) == ["tool-1", "tool-2", "tool-3"])
         #expect(group.count == 3)
+    }
+
+    @Test
+    func oneStructuredToolLifecycleGroupsAsOneLogicalToolCall() throws {
+        var started = event(id: "tool-started", kind: .tool, createdAt: 10)
+        started.toolObservation = ProviderToolObservation(
+            callID: "call-1",
+            kind: .commandExecution,
+            state: .running,
+            name: "Command"
+        )
+        var completed = event(id: "tool-completed", kind: .tool, createdAt: 20)
+        completed.toolObservation = ProviderToolObservation(
+            callID: "call-1",
+            kind: .commandExecution,
+            state: .completed,
+            name: "Command"
+        )
+
+        let rows = DesktopConversationTimelinePresentation.rows(
+            messages: [],
+            providerEvents: [started, completed]
+        )
+        let group = try #require(eventGroup(in: rows))
+
+        #expect(group.events.count == 2)
+        #expect(group.count == 1)
+        #expect(group.summaryTitle == "1 tool activity")
+    }
+
+    @Test
+    func oneAgentLifecycleGroupsAsOneLogicalAgent() throws {
+        var started = event(id: "agent-started", kind: .tool, createdAt: 10)
+        started.agentActivity = ProviderAgentActivity(agentID: "agent-1", activity: .started)
+        var completed = event(id: "agent-completed", kind: .tool, createdAt: 20)
+        completed.agentActivity = ProviderAgentActivity(agentID: "agent-1", activity: .completed)
+
+        let rows = DesktopConversationTimelinePresentation.rows(
+            messages: [],
+            providerEvents: [started, completed]
+        )
+        let group = try #require(eventGroup(in: rows))
+
+        #expect(group.count == 1)
+        #expect(group.summaryTitle == "1 agent activity")
     }
 
     @Test

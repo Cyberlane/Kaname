@@ -22,7 +22,12 @@ public struct DesktopConversationRunSummary: Equatable, Identifiable, Sendable {
         events.lazy.filter { !$0.kind.isTransportOnly }.count
     }
 
-    public var toolCount: Int { count(.tool) }
+    public var toolCount: Int {
+        Set(events.lazy.filter { $0.kind == .tool }.compactMap(\.logicalToolIdentity)).count
+    }
+    public var agentCount: Int {
+        Set(events.lazy.compactMap { $0.agentActivity?.agentID }).count
+    }
     public var diffCount: Int { count(.diff) }
     public var reasoningCount: Int { count(.reasoning) }
     public var errorCount: Int { count(.error) }
@@ -48,6 +53,7 @@ public struct DesktopConversationRunSummary: Equatable, Identifiable, Sendable {
     public var conciseActivityLabel: String {
         var parts: [String] = []
         if toolCount > 0 { parts.append("\(toolCount) tool\(toolCount == 1 ? "" : "s")") }
+        if agentCount > 0 { parts.append("\(agentCount) agent\(agentCount == 1 ? "" : "s")") }
         if diffCount > 0 { parts.append("\(diffCount) diff\(diffCount == 1 ? "" : "s")") }
         if reasoningCount > 0 { parts.append("\(reasoningCount) reasoning") }
         if errorCount > 0 { parts.append("\(errorCount) error\(errorCount == 1 ? "" : "s")") }
@@ -59,6 +65,13 @@ public struct DesktopConversationRunSummary: Equatable, Identifiable, Sendable {
 
     private func count(_ kind: DesktopProviderEventKind) -> Int {
         events.lazy.filter { $0.kind == kind }.count
+    }
+}
+
+private extension DesktopProviderEventRecord {
+    var logicalToolIdentity: String? {
+        if let toolObservation { return "call:\(toolObservation.callID)" }
+        return agentActivity == nil ? "event:\(id)" : nil
     }
 }
 

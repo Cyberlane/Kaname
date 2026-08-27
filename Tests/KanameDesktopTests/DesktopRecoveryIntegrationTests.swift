@@ -141,6 +141,213 @@ struct DesktopRecoveryIntegrationTests {
     }
 
     @Test
+    func versionTwentySevenBackfillsApplicationTurnsWithoutUsingNativeTurnIDs() throws {
+        var legacy = DesktopAppSnapshot.starter(now: 1_000)
+        legacy.version = 27
+        let threadID = legacy.threads[0].id
+        legacy.threads[0].messages = [
+            DesktopMessage(
+                id: "user-turn",
+                role: .user,
+                body: "Plan and implement",
+                createdAtUnixMillis: 1_000
+            ),
+            DesktopMessage(
+                id: "assistant-plan-run",
+                turnID: "user-turn",
+                role: .assistant,
+                body: "The plan",
+                createdAtUnixMillis: 1_001
+            ),
+            DesktopMessage(
+                id: "system-note",
+                role: .system,
+                body: "System note",
+                createdAtUnixMillis: 1_002
+            ),
+        ]
+        legacy.operations.providerRuns = [
+            DesktopProviderRunRecord(
+                id: "plan-run",
+                threadID: threadID,
+                sourceMessageID: "user-turn",
+                provider: "Codex",
+                model: "gpt-test",
+                briefDigest: "plan",
+                contextReferenceCount: 0,
+                nativeThreadID: "native-thread",
+                nativeTurnID: "native-plan-turn",
+                tokenUsage: nil,
+                costSummary: "Complete",
+                state: .completed,
+                startedAtUnixMillis: 1_000,
+                completedAtUnixMillis: 1_001,
+                purpose: .codingPlan
+            ),
+            DesktopProviderRunRecord(
+                id: "implementation-run",
+                threadID: threadID,
+                sourceMessageID: "user-turn",
+                provider: "Codex",
+                model: "gpt-test",
+                briefDigest: "implementation",
+                contextReferenceCount: 0,
+                nativeThreadID: "native-thread",
+                nativeTurnID: "native-implementation-turn",
+                tokenUsage: nil,
+                costSummary: "Complete",
+                state: .completed,
+                startedAtUnixMillis: 1_002,
+                completedAtUnixMillis: 1_003,
+                purpose: .codingImplementation
+            ),
+        ]
+        legacy.operations.providerEvents = [
+            migrationEvent(id: "plan-event", runID: "plan-run", kind: .status),
+            migrationEvent(id: "implementation-event", runID: "implementation-run", kind: .status),
+        ]
+
+        var object = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(legacy)) as? [String: Any]
+        )
+        var threads = try #require(object["threads"] as? [[String: Any]])
+        for threadIndex in threads.indices {
+            var messages = try #require(threads[threadIndex]["messages"] as? [[String: Any]])
+            for messageIndex in messages.indices { messages[messageIndex].removeValue(forKey: "turnID") }
+            threads[threadIndex]["messages"] = messages
+        }
+        object["threads"] = threads
+        var operations = try #require(object["operations"] as? [String: Any])
+        var runs = try #require(operations["providerRuns"] as? [[String: Any]])
+        for index in runs.indices { runs[index].removeValue(forKey: "turnID") }
+        operations["providerRuns"] = runs
+        var events = try #require(operations["providerEvents"] as? [[String: Any]])
+        for index in events.indices { events[index].removeValue(forKey: "turnID") }
+        operations["providerEvents"] = events
+        object["operations"] = operations
+
+        let store = RecoveryMemoryStore(
+            primary: try JSONSerialization.data(withJSONObject: object),
+            recovery: nil
+        )
+        let model = DesktopAppModel(store: store, now: { 2_000 })
+
+        #expect(model.snapshot.version == DesktopAppSnapshot.currentVersion)
+        #expect(model.providerRun(id: "plan-run")?.turnID == "user-turn")
+        #expect(model.providerRun(id: "implementation-run")?.turnID == "user-turn")
+        #expect(model.providerRun(id: "plan-run")?.nativeTurnID == "native-plan-turn")
+        #expect(model.providerRun(id: "implementation-run")?.nativeTurnID == "native-implementation-turn")
+        #expect(model.snapshot.operations.providerEvents.map(\.id) == ["plan-event", "implementation-event"])
+        #expect(model.snapshot.operations.providerEvents.allSatisfy { $0.turnID == "user-turn" })
+        #expect(model.message(threadID: threadID, id: "user-turn")?.turnID == "user-turn")
+        #expect(model.message(threadID: threadID, id: "assistant-plan-run")?.turnID == "user-turn")
+        #expect(model.message(threadID: threadID, id: "system-note")?.turnID == nil)
+        #expect(model.snapshot.operations.providerEvents.allSatisfy { $0.turnID != $0.nativeTurnID })
+    }
+
+    @Test
+    func versionTwentySevenDuplicateRunIdentityEntersRecoveryInsteadOfCrashingMigration() throws {
+        var legacy = DesktopAppSnapshot.starter(now: 1_000)
+        legacy.version = 27
+        let threadID = legacy.threads[0].id
+        let run = DesktopProviderRunRecord(
+            id: "duplicate-run",
+            threadID: threadID,
+            sourceMessageID: legacy.threads[0].messages.first?.id,
+            provider: "Codex",
+            model: "gpt-test",
+            briefDigest: "duplicate",
+            contextReferenceCount: 0,
+            tokenUsage: nil,
+            costSummary: "Complete",
+            state: .completed,
+            startedAtUnixMillis: 1_000,
+            completedAtUnixMillis: 1_001
+        )
+        legacy.operations.providerRuns = [run, run]
+        let primary = try JSONEncoder().encode(legacy)
+        let store = RecoveryMemoryStore(primary: primary, recovery: nil)
+
+        let model = DesktopAppModel(store: store, now: { 2_000 })
+
+        #expect(model.isRecoveryReadOnly)
+        #expect(model.recoveryStatus?.reason == .migrationFailed)
+        #expect(store.primary == primary)
+    }
+
+    enum VersionTwentySevenTurnCorruption: String, CaseIterable, Sendable {
+        case orphanEvent
+        case crossThreadEvent
+        case crossThreadAssistantMessage
+    }
+
+    @Test(arguments: VersionTwentySevenTurnCorruption.allCases)
+    func versionTwentySevenRejectsCorruptTurnOwnership(
+        _ corruption: VersionTwentySevenTurnCorruption
+    ) throws {
+        var legacy = DesktopAppSnapshot.starter(now: 1_000)
+        legacy.version = 27
+        let owningThreadID = legacy.threads[0].id
+        legacy.threads[0].messages = [DesktopMessage(
+            id: "owner-user",
+            role: .user,
+            body: "Own this turn",
+            createdAtUnixMillis: 1_000
+        )]
+        var otherThread = DesktopThread(
+            id: "other-thread",
+            title: "Other",
+            summary: "Other thread",
+            kind: .coding,
+            attention: .completed,
+            updatedAtUnixMillis: 1_000
+        )
+        legacy.operations.providerRuns = [DesktopProviderRunRecord(
+            id: "owner-run",
+            threadID: owningThreadID,
+            sourceMessageID: "owner-user",
+            provider: "Codex",
+            model: "gpt-test",
+            briefDigest: "owner",
+            contextReferenceCount: 0,
+            tokenUsage: nil,
+            costSummary: "Complete",
+            state: .completed,
+            startedAtUnixMillis: 1_000,
+            completedAtUnixMillis: 1_001
+        )]
+
+        switch corruption {
+        case .orphanEvent:
+            legacy.operations.providerEvents = [migrationEvent(
+                id: "orphan-event",
+                runID: "missing-run",
+                kind: .status
+            )]
+        case .crossThreadEvent:
+            var event = migrationEvent(id: "cross-thread-event", runID: "owner-run", kind: .status)
+            event.threadID = otherThread.id
+            legacy.operations.providerEvents = [event]
+        case .crossThreadAssistantMessage:
+            otherThread.messages = [DesktopMessage(
+                id: "assistant-owner-run",
+                role: .assistant,
+                body: "Wrong thread",
+                createdAtUnixMillis: 1_001
+            )]
+        }
+        legacy.threads.append(otherThread)
+        let primary = try JSONEncoder().encode(legacy)
+        let store = RecoveryMemoryStore(primary: primary, recovery: nil)
+
+        let model = DesktopAppModel(store: store, now: { 2_000 })
+
+        #expect(model.isRecoveryReadOnly)
+        #expect(model.recoveryStatus?.reason == .migrationFailed)
+        #expect(store.primary == primary)
+    }
+
+    @Test
     func versionFourteenMigrationCompactsOnlyTerminalProviderHistory() throws {
         var legacy = DesktopAppSnapshot.starter(now: 1_000)
         legacy.version = 14

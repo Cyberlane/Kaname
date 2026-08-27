@@ -82,6 +82,7 @@ private struct DesktopThreadPayload: Decodable {
 
 public struct DesktopMessage: Codable, Equatable, Identifiable, Sendable {
     public let id: String
+    public let turnID: String?
     public let role: DesktopMessageRole
     public let body: String
     public let attachments: [ConversationImageAttachment]
@@ -89,12 +90,14 @@ public struct DesktopMessage: Codable, Equatable, Identifiable, Sendable {
 
     public init(
         id: String = UUID().uuidString.lowercased(),
+        turnID: String? = nil,
         role: DesktopMessageRole,
         body: String,
         attachments: [ConversationImageAttachment] = [],
         createdAtUnixMillis: Int64
     ) {
         self.id = id
+        self.turnID = turnID ?? (role == .user ? id : nil)
         self.role = role
         self.body = body
         self.attachments = attachments
@@ -102,13 +105,15 @@ public struct DesktopMessage: Codable, Equatable, Identifiable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, role, body, attachments, createdAtUnixMillis
+        case id, turnID, role, body, attachments, createdAtUnixMillis
     }
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
         role = try container.decode(DesktopMessageRole.self, forKey: .role)
+        turnID = try container.decodeIfPresent(String.self, forKey: .turnID)
+            ?? (role == .user ? id : nil)
         body = try container.decode(String.self, forKey: .body)
         attachments = try container.decodeIfPresent([ConversationImageAttachment].self, forKey: .attachments) ?? []
         createdAtUnixMillis = try container.decode(Int64.self, forKey: .createdAtUnixMillis)
@@ -719,6 +724,70 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
                 // like current acceptance receipts. User-created, edited, and
                 // independently recorded evidence is preserved byte-for-byte.
                 migrated.normalizeLegacyStarterClaims()
+                // Application turns are owned by Kaname and remain stable
+                // across provider retries and coding workflow phases. Native
+                // provider turn IDs are intentionally not used for backfill.
+                for index in migrated.operations.providerRuns.indices {
+                    let run = migrated.operations.providerRuns[index]
+                    if let sourceMessageID = run.sourceMessageID {
+                        guard let threadID = run.threadID,
+                              migrated.threads.first(where: { $0.id == threadID })?.messages.contains(where: {
+                                  $0.id == sourceMessageID && $0.role == .user
+                              }) == true else {
+                            throw DesktopModelError.invalidState
+                        }
+                    }
+                    migrated.operations.providerRuns[index].turnID = run.sourceMessageID ?? run.id
+                }
+                var runIdentities: [String: (turnID: String, threadID: String?)] = [:]
+                for run in migrated.operations.providerRuns {
+                    let identity = (turnID: run.turnID, threadID: run.threadID)
+                    guard runIdentities.updateValue(identity, forKey: run.id) == nil else {
+                        throw DesktopModelError.invalidState
+                    }
+                }
+                for index in migrated.operations.providerEvents.indices {
+                    let event = migrated.operations.providerEvents[index]
+                    guard let identity = runIdentities[event.runID],
+                          identity.threadID == event.threadID else {
+                        throw DesktopModelError.invalidState
+                    }
+                    migrated.operations.providerEvents[index].turnID = identity.turnID
+                }
+                for threadIndex in migrated.threads.indices {
+                    let containingThreadID = migrated.threads[threadIndex].id
+                    migrated.threads[threadIndex].messages = try migrated.threads[threadIndex].messages.map { message in
+                        let turnID: String?
+                        switch message.role {
+                        case .user:
+                            turnID = message.id
+                        case .assistant:
+                            let prefix = "assistant-"
+                            let runID = message.id.hasPrefix(prefix)
+                                ? String(message.id.dropFirst(prefix.count))
+                                : nil
+                            if let runID {
+                                guard let identity = runIdentities[runID],
+                                      identity.threadID == containingThreadID else {
+                                    throw DesktopModelError.invalidState
+                                }
+                                turnID = identity.turnID
+                            } else {
+                                turnID = nil
+                            }
+                        case .system:
+                            turnID = nil
+                        }
+                        return DesktopMessage(
+                            id: message.id,
+                            turnID: turnID,
+                            role: message.role,
+                            body: message.body,
+                            attachments: message.attachments,
+                            createdAtUnixMillis: message.createdAtUnixMillis
+                        )
+                    }
+                }
             default:
                 throw DesktopModelError.unsupportedVersion
             }
@@ -2137,6 +2206,33 @@ public final class DesktopAppModel: ObservableObject {
         snapshot.operations.providerRuns.first { $0.id == id }
     }
 
+    public var providerActivityThreadIDsRequiringPolling: Set<String> {
+        let providerRunThreadIDs: [String] = snapshot.operations.providerRuns.compactMap { run -> String? in
+            guard run.state == .proposed || run.state == .running else { return nil }
+            return run.threadID
+        }
+        let activeSubagentThreadIDs: [String] = snapshot.operations.subagents.compactMap { subagent -> String? in
+            guard Self.isActiveSubagentState(subagent.state) else { return nil }
+            return subagent.threadID
+        }
+        return Set(providerRunThreadIDs).union(activeSubagentThreadIDs)
+    }
+
+    public func hasActiveSubagents(threadID: String) -> Bool {
+        snapshot.operations.subagents.contains {
+            $0.threadID == threadID && Self.isActiveSubagentState($0.state)
+        }
+    }
+
+    @discardableResult
+    public func recoverOrphanedSubagents(threadID: String) -> Bool {
+        guard hasActiveSubagents(threadID: threadID) else { return true }
+        let timestamp = now()
+        return mutate { snapshot in
+            Self.interruptActiveSubagents(in: &snapshot, threadID: threadID, timestamp: timestamp)
+        }
+    }
+
     public func composerDraft(threadID: String) -> String {
         composerDraftCache[threadID] ?? ""
     }
@@ -2255,6 +2351,7 @@ public final class DesktopAppModel: ObservableObject {
             id: UUID().uuidString.lowercased(),
             threadID: threadID,
             sourceMessageID: sourceMessageID,
+            turnID: message.turnID ?? message.id,
             provider: thread.provider,
             model: thread.model,
             reasoningEffort: thread.reasoningEffort,
@@ -2422,6 +2519,10 @@ public final class DesktopAppModel: ObservableObject {
                   item.event.detail.utf8.count <= 65_536
                       && (item.event.rawPayloadBase64?.utf8.count ?? 0) <= 360_000
               }) else { return nil }
+        guard items.allSatisfy({ item in
+            guard let run = snapshot.operations.providerRuns.first(where: { $0.id == item.event.runID }) else { return false }
+            return run.threadID == item.event.threadID
+        }) else { return nil }
         guard !items.isEmpty else {
             return DesktopProviderEventBatchResult(acceptedEventIDs: [], duplicateEventIDs: [])
         }
@@ -2443,17 +2544,21 @@ public final class DesktopAppModel: ObservableObject {
 
         let persisted = mutate { snapshot in
             for item in acceptedItems {
-                snapshot.operations.providerEvents.append(item.event)
-                if item.event.kind == .approval {
-                    if let index = snapshot.threads.firstIndex(where: { $0.id == item.event.threadID }) {
-                        snapshot.threads[index].attention = item.event.title == "Approval requested" ? .needsApproval : .running
+                var event = item.event
+                if let run = snapshot.operations.providerRuns.first(where: { $0.id == event.runID }) {
+                    event.turnID = run.turnID
+                }
+                snapshot.operations.providerEvents.append(event)
+                if event.kind == .approval {
+                    if let index = snapshot.threads.firstIndex(where: { $0.id == event.threadID }) {
+                        snapshot.threads[index].attention = event.title == "Approval requested" ? .needsApproval : .running
                     }
-                } else if item.event.kind == .question {
-                    if let index = snapshot.threads.firstIndex(where: { $0.id == item.event.threadID }) {
-                        snapshot.threads[index].attention = item.event.title == "Question answered" ? .running : .needsInput
+                } else if event.kind == .question {
+                    if let index = snapshot.threads.firstIndex(where: { $0.id == event.threadID }) {
+                        snapshot.threads[index].attention = event.title == "Question answered" ? .running : .needsInput
                     }
                 }
-                Self.applyAssistantDelta(item.assistantDelta, for: item.event, to: &snapshot)
+                Self.applyAssistantDelta(item.assistantDelta, for: event, to: &snapshot)
             }
         }
         guard persisted else { return nil }
@@ -2476,14 +2581,17 @@ public final class DesktopAppModel: ObservableObject {
             let current = snapshot.threads[threadIndex].messages[messageIndex]
             snapshot.threads[threadIndex].messages[messageIndex] = DesktopMessage(
                 id: current.id,
+                turnID: event.turnID,
                 role: .assistant,
                 body: String((current.body + delta).prefix(262_144)),
+                attachments: current.attachments,
                 createdAtUnixMillis: current.createdAtUnixMillis
             )
         } else {
             snapshot.threads[threadIndex].messages.append(
                 DesktopMessage(
                     id: messageID,
+                    turnID: event.turnID,
                     role: .assistant,
                     body: String(delta.prefix(262_144)),
                     createdAtUnixMillis: event.createdAtUnixMillis
@@ -2550,6 +2658,12 @@ public final class DesktopAppModel: ObservableObject {
                 snapshot.operations.providerRuns[index].state = interrupted ? .interrupted : .failed
                 snapshot.operations.providerRuns[index].errorSummary = error
                 snapshot.operations.providerRuns[index].costSummary = interrupted ? "Interrupted" : "Failed"
+                for subagentIndex in snapshot.operations.subagents.indices
+                where snapshot.operations.subagents[subagentIndex].runID == id
+                    && Self.isActiveSubagentState(snapshot.operations.subagents[subagentIndex].state) {
+                    snapshot.operations.subagents[subagentIndex].state = interrupted ? .interrupted : .failed
+                    snapshot.operations.subagents[subagentIndex].completedAtUnixMillis = timestamp
+                }
                 sessionState = interrupted ? .recoverable : .interrupted
                 threadSummary = interrupted ? "Provider turn interrupted. You can retry it." : error
                 attention = interrupted ? .needsResponse : .failed
@@ -2581,7 +2695,9 @@ public final class DesktopAppModel: ObservableObject {
     }
 
     public func recoverOrphanedProviderRuns() {
-        guard snapshot.operations.providerRuns.contains(where: { $0.state == .running }) else { return }
+        let hasOrphanedProviderRun = snapshot.operations.providerRuns.contains { $0.state == .running }
+        let hasOrphanedSubagent = snapshot.operations.subagents.contains { Self.isActiveSubagentState($0.state) }
+        guard hasOrphanedProviderRun || hasOrphanedSubagent else { return }
         let timestamp = now()
         mutate { snapshot in
             let orphaned = snapshot.operations.providerRuns.indices.filter {
@@ -2607,6 +2723,24 @@ public final class DesktopAppModel: ObservableObject {
                     }
                 }
             }
+            Self.interruptActiveSubagents(in: &snapshot, threadID: nil, timestamp: timestamp)
+        }
+    }
+
+    private static func isActiveSubagentState(_ state: DesktopSubagentState) -> Bool {
+        [.queued, .running, .waiting].contains(state)
+    }
+
+    private static func interruptActiveSubagents(
+        in snapshot: inout DesktopAppSnapshot,
+        threadID: String?,
+        timestamp: Int64
+    ) {
+        for subagentIndex in snapshot.operations.subagents.indices
+        where (threadID == nil || snapshot.operations.subagents[subagentIndex].threadID == threadID)
+            && Self.isActiveSubagentState(snapshot.operations.subagents[subagentIndex].state) {
+            snapshot.operations.subagents[subagentIndex].state = .interrupted
+            snapshot.operations.subagents[subagentIndex].completedAtUnixMillis = timestamp
         }
     }
 
@@ -4473,6 +4607,7 @@ public final class DesktopAppModel: ObservableObject {
             DesktopProviderRunRecord(
                 id: UUID().uuidString.lowercased(),
                 threadID: nil,
+                turnID: UUID().uuidString.lowercased(),
                 provider: provider,
                 model: "Not selected",
                 briefDigest: Self.stableLocalDigest(cleanBrief),
@@ -4521,8 +4656,9 @@ public final class DesktopAppModel: ObservableObject {
                     $0.id == runID && $0.threadID == nil
                 }) else { continue }
                 let provider = snapshot.operations.providerRuns[runIndex].provider
+                let turnID = snapshot.operations.providerRuns[runIndex].turnID
                 let threadID = UUID().uuidString.lowercased()
-                let messageID = UUID().uuidString.lowercased()
+                let messageID = turnID
                 let thread = DesktopThread(
                     id: threadID,
                     projectID: projectID,
@@ -4535,6 +4671,7 @@ public final class DesktopAppModel: ObservableObject {
                     updatedAtUnixMillis: timestamp,
                     messages: [DesktopMessage(
                         id: messageID,
+                        turnID: turnID,
                         role: .user,
                         body: comparison.brief,
                         createdAtUnixMillis: timestamp
@@ -4704,14 +4841,20 @@ public final class DesktopAppModel: ObservableObject {
         runID: String,
         provider: String,
         nativeID: String,
+        parentNativeID: String? = nil,
         title: String,
         detail: String,
         state: DesktopSubagentState
     ) {
         let id = "subagent-\(Self.stableLocalDigest("\(runID)|\(nativeID)"))"
+        let parentID = parentNativeID.map {
+            "subagent-\(Self.stableLocalDigest("\(runID)|\($0)"))"
+        }
         let timestamp = now()
         mutate { snapshot in
             if let index = snapshot.operations.subagents.firstIndex(where: { $0.id == id }) {
+                snapshot.operations.subagents[index].parentID = parentID
+                snapshot.operations.subagents[index].title = String(Self.normalized(title).prefix(240))
                 snapshot.operations.subagents[index].detail = String(detail.prefix(8_192))
                 snapshot.operations.subagents[index].state = state
                 snapshot.operations.subagents[index].completedAtUnixMillis = [.completed, .failed, .interrupted].contains(state) ? timestamp : nil
@@ -4720,7 +4863,7 @@ public final class DesktopAppModel: ObservableObject {
                     id: id,
                     threadID: threadID,
                     runID: runID,
-                    parentID: nil,
+                    parentID: parentID,
                     provider: provider,
                     title: String(Self.normalized(title).prefix(240)),
                     detail: String(detail.prefix(8_192)),
@@ -5716,4 +5859,5 @@ public final class DesktopAppModel: ObservableObject {
 
 private enum DesktopModelError: Error {
     case unsupportedVersion
+    case invalidState
 }

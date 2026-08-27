@@ -2,6 +2,7 @@ import Foundation
 import Dispatch
 import Testing
 @testable import KanameDesktop
+import KanameDomain
 
 @MainActor
 struct DesktopProviderEventBatchTests {
@@ -27,10 +28,113 @@ struct DesktopProviderEventBatchTests {
         #expect(fixture.model.snapshot.operations.providerEvents.map(\.id) == [first.id, third.id, second.id])
         #expect(fixture.model.snapshot.operations.providerEvents.map(\.title) == ["First title", "Third title", "Second title"])
         #expect(fixture.model.thread(id: fixture.threadID)?.messages.last?.body == "ACB")
+        let turnID = try #require(fixture.model.providerRun(id: fixture.runID)?.turnID)
+        #expect(fixture.model.snapshot.operations.providerEvents.allSatisfy { $0.turnID == turnID })
+        #expect(fixture.model.thread(id: fixture.threadID)?.messages.last?.turnID == turnID)
 
         let restarted = DesktopAppModel(store: fixture.store, now: { 9_000 })
         #expect(restarted.snapshot.operations.providerEvents.map(\.id) == [first.id, third.id, second.id])
         #expect(restarted.thread(id: fixture.threadID)?.messages.last?.body == "ACB")
+        #expect(restarted.snapshot.operations.providerEvents.allSatisfy { $0.turnID == turnID })
+        #expect(restarted.thread(id: fixture.threadID)?.messages.last?.turnID == turnID)
+    }
+
+    @Test
+    func typedToolObservationSurvivesBatchPersistenceAndRestart() throws {
+        let fixture = makeFixture()
+        let turnID = try #require(fixture.model.providerRun(id: fixture.runID)?.turnID)
+        let tool = DesktopProviderEventRecord(
+            id: "\(fixture.runID)-service-tool",
+            threadID: fixture.threadID,
+            runID: fixture.runID,
+            kind: .tool,
+            title: "Command",
+            detail: "completed",
+            nativeType: "item/completed",
+            nativeThreadID: "native-thread",
+            nativeTurnID: "native-turn",
+            approvalID: nil,
+            toolObservation: ProviderToolObservation(
+                callID: "call-command",
+                kind: .commandExecution,
+                state: .completed,
+                name: "Command"
+            ),
+            agentActivity: ProviderAgentActivity(
+                agentID: "agent-reviewer",
+                activity: .completed,
+                agentPath: "/root/reviewer",
+                sourceToolCallID: "call-command"
+            ),
+            rawPayloadBase64: nil,
+            payloadWasTruncated: false,
+            createdAtUnixMillis: 2
+        )
+
+        #expect(fixture.model.recordProviderEvent(tool))
+        let persisted = try #require(fixture.model.snapshot.operations.providerEvents.first)
+        #expect(persisted.turnID == turnID)
+        #expect(persisted.toolObservation == tool.toolObservation)
+        #expect(persisted.agentActivity == tool.agentActivity)
+        let restarted = DesktopAppModel(store: fixture.store, now: { 9_000 })
+        #expect(restarted.snapshot.operations.providerEvents.first?.turnID == turnID)
+        #expect(restarted.snapshot.operations.providerEvents.first?.toolObservation == tool.toolObservation)
+        #expect(restarted.snapshot.operations.providerEvents.first?.agentActivity == tool.agentActivity)
+    }
+
+    @Test
+    func eventCannotProjectAnotherRunsTurnIntoTheWrongThread() throws {
+        let fixture = makeFixture()
+        let otherThreadID = fixture.model.createConversation(kind: .planning, projectID: nil)
+        fixture.store.resetSaveCount()
+        let mismatched = DesktopProviderEventRecord(
+            id: "\(fixture.runID)-wrong-thread",
+            threadID: otherThreadID,
+            runID: fixture.runID,
+            kind: .assistantText,
+            title: "Response",
+            detail: "Must not persist",
+            nativeType: "item/agentMessage/delta",
+            nativeThreadID: "native-thread",
+            nativeTurnID: "native-turn",
+            approvalID: nil,
+            rawPayloadBase64: nil,
+            payloadWasTruncated: false,
+            createdAtUnixMillis: 2
+        )
+
+        #expect(fixture.model.recordProviderEvents([
+            .init(event: mismatched, assistantDelta: "Must not appear")
+        ]) == nil)
+        #expect(fixture.store.saveCount == 0)
+        #expect(fixture.model.snapshot.operations.providerEvents.isEmpty)
+        #expect(fixture.model.thread(id: otherThreadID)?.messages.isEmpty == true)
+    }
+
+    @Test
+    func eventWithoutAnAuthoritativeRunIsRejected() {
+        let fixture = makeFixture()
+        fixture.store.resetSaveCount()
+        let unknownRunEvent = DesktopProviderEventRecord(
+            id: "unknown-run-service-1",
+            threadID: fixture.threadID,
+            runID: "unknown-run",
+            kind: .assistantText,
+            title: "Response",
+            detail: "Must not persist",
+            nativeType: "item/agentMessage/delta",
+            nativeThreadID: "native-thread",
+            nativeTurnID: "native-turn",
+            approvalID: nil,
+            rawPayloadBase64: nil,
+            payloadWasTruncated: false,
+            createdAtUnixMillis: 2
+        )
+
+        #expect(fixture.model.recordProviderEvent(unknownRunEvent, assistantDelta: "Must not appear") == false)
+        #expect(fixture.store.saveCount == 0)
+        #expect(fixture.model.snapshot.operations.providerEvents.isEmpty)
+        #expect(fixture.model.thread(id: fixture.threadID)?.messages.last?.role == .user)
     }
 
     @Test
@@ -119,6 +223,19 @@ struct DesktopProviderEventBatchTests {
     @Test
     func largePersistedHistoryBatchP95StaysWithinBudget() throws {
         var snapshot = DesktopAppSnapshot.starter(now: 1)
+        snapshot.operations.providerRuns = [DesktopProviderRunRecord(
+            id: "run-performance",
+            threadID: "thread-desktop-dogfood",
+            provider: "Codex",
+            model: "provider-default",
+            briefDigest: "performance",
+            contextReferenceCount: 0,
+            tokenUsage: nil,
+            costSummary: "Complete",
+            state: .completed,
+            startedAtUnixMillis: 1,
+            completedAtUnixMillis: 2
+        )]
         snapshot.operations.providerEvents = (1...5_000).map {
             standaloneEvent(id: "history-\($0)", ordinal: $0)
         }
@@ -185,7 +302,7 @@ struct DesktopProviderEventBatchTests {
     private func standaloneEvent(id: String, ordinal: Int) -> DesktopProviderEventRecord {
         DesktopProviderEventRecord(
             id: id,
-            threadID: "thread-performance",
+            threadID: "thread-desktop-dogfood",
             runID: "run-performance",
             kind: .native,
             title: "Performance event",
