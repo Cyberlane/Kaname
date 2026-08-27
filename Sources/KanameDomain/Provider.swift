@@ -18,6 +18,8 @@ public struct ProviderDriverKind: Codable, Comparable, Hashable, Sendable {
     public static let codex = ProviderDriverKind(rawValue: "codex")!
     public static let claudeAgent = ProviderDriverKind(rawValue: "claudeAgent")!
     public static let openCode = ProviderDriverKind(rawValue: "opencode")!
+    public static let cursorAgent = ProviderDriverKind(rawValue: "cursorAgent")!
+    public static let grokBuild = ProviderDriverKind(rawValue: "grokBuild")!
 
     public static func < (lhs: ProviderDriverKind, rhs: ProviderDriverKind) -> Bool {
         lhs.rawValue < rhs.rawValue

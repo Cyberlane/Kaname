@@ -58,6 +58,12 @@ public actor ProviderCapabilityProber {
             if configuration.instance.driver == .openCode {
                 return try await OpenCodeCapabilityProbe.probe(configuration)
             }
+            if configuration.instance.driver == .cursorAgent {
+                return try await CursorCapabilityProbe.probe(configuration)
+            }
+            if configuration.instance.driver == .grokBuild {
+                return try await GrokCapabilityProbe.probe(configuration)
+            }
             return ProviderCapabilitySnapshot(
                 instance: configuration.instance,
                 state: .unsupported,

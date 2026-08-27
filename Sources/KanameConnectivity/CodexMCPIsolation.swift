@@ -4,7 +4,18 @@ import Foundation
 /// servers. Configuration inspection is necessary but not sufficient: Kaname
 /// also observes the exact initialized app-server connection before loading a
 /// thread, then observes the loaded thread before sending a turn.
+///
+/// Curated `kaname-preview` injection remains fail-closed until an explicit
+/// `coding.preview_mcp_grant` approval is present. This module never opens
+/// blanket user-configured MCP servers.
 enum CodexMCPIsolation {
+    /// Fail-closed gate for the curated preview MCP bridge. Returning `false`
+    /// keeps current isolation; a future CodexLiveSession path may inject only
+    /// `kaname-preview` when this returns `true`.
+    static func allowsCuratedPreviewMCP(hasPreviewGrant: Bool) -> Bool {
+        hasPreviewGrant
+    }
+
     /// The current installed app-server normally reports its initialization and
     /// thread startup state immediately. Keep the window bounded but long
     /// enough to drain asynchronous startup notifications before advancing to

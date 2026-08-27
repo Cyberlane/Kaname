@@ -1,6 +1,7 @@
 import Combine
 import CryptoKit
 import Foundation
+import KanameConnectivity
 import KanameDomain
 import KanameLocalCore
 #if os(macOS)
@@ -4447,6 +4448,39 @@ public final class DesktopAppModel: ObservableObject {
             if let diagnosticSummary { snapshot.operations.worktrees[index].diagnosticSummary = String(diagnosticSummary.prefix(32_000)) }
             snapshot.operations.worktrees[index].state = state
             snapshot.operations.worktrees[index].updatedAtUnixMillis = timestamp
+        }
+    }
+
+    public func upsertCodingTerminal(_ record: DesktopCodingTerminalRecord) {
+        mutate { snapshot in
+            Self.replaceOrAppend(
+                record,
+                in: &snapshot.operations.codingTerminals
+            ) { $0.id == record.id && $0.threadID == record.threadID }
+        }
+    }
+
+    public func upsertCodingCheckpoint(_ record: DesktopCodingCheckpointRecord) {
+        mutate { snapshot in
+            Self.replaceOrAppend(record, in: &snapshot.operations.codingCheckpoints) { $0.id == record.id }
+        }
+    }
+
+    public func upsertCodingPreviewTab(_ record: DesktopCodingPreviewTabRecord) {
+        mutate { snapshot in
+            Self.replaceOrAppend(record, in: &snapshot.operations.codingPreviewTabs) { $0.id == record.id }
+        }
+    }
+
+    private static func replaceOrAppend<Element>(
+        _ element: Element,
+        in elements: inout [Element],
+        matching: (Element) -> Bool
+    ) {
+        if let index = elements.firstIndex(where: matching) {
+            elements[index] = element
+        } else {
+            elements.append(element)
         }
     }
 

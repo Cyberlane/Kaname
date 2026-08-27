@@ -15,10 +15,12 @@ public struct DesktopThreadPanelBadges: Equatable, Sendable {
 
     private let counts: [DesktopThreadPanel: Int]
 
-    public init(plan: Int = 0, changes: Int = 0, evidence: Int = 0, knowledge: Int = 0) {
+    public init(plan: Int = 0, changes: Int = 0, terminal: Int = 0, preview: Int = 0, evidence: Int = 0, knowledge: Int = 0) {
         counts = [
             .plan: plan,
             .changes: changes,
+            .terminal: terminal,
+            .preview: preview,
             .evidence: evidence,
             .knowledge: knowledge,
         ]

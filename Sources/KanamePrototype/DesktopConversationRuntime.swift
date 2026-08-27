@@ -504,6 +504,17 @@ final class DesktopConversationRuntime: ObservableObject {
             prepareCodingPlanContext(run: run, thread: thread, workspace: workspace, authorization: authorization)
             return
         }
+        if run.purpose == .codingImplementation,
+           let worktree = latestCodingWorktree(threadID: threadID) {
+            _Concurrency.Task {
+                await self.recordImplementationCheckpointBefore(
+                    runID: run.id,
+                    threadID: threadID,
+                    worktree: worktree,
+                    workspace: workspace
+                )
+            }
+        }
         guard let machService = Bundle.main.object(forInfoDictionaryKey: "KanameLocalCoreMachService") as? String,
               let requirement = Bundle.main.object(forInfoDictionaryKey: "KanameLocalCoreServiceRequirement") as? String else {
             model.stopProviderRun(
@@ -836,6 +847,14 @@ final class DesktopConversationRuntime: ObservableObject {
                 model.completeProviderRun(id: serviceEvent.runID, tokenUsage: tokenUsage(from: event.payload))
                 guard model.persistenceError == nil else { return false }
             }
+            if completedRun?.purpose == .codingImplementation {
+                _Concurrency.Task {
+                    await self.finalizeImplementationCheckpointAfter(
+                        runID: serviceEvent.runID,
+                        threadID: serviceEvent.threadID
+                    )
+                }
+            }
             if completedRun?.purpose == .codingPlan,
                model.thread(id: serviceEvent.threadID)?.plan.isEmpty == true {
                 model.markCodingPlanUnavailable(threadID: serviceEvent.threadID)
@@ -1134,12 +1153,19 @@ final class DesktopConversationRuntime: ObservableObject {
         let instructions = context?.instructionReferences.joined(separator: ", ") ?? "None selected"
         let knowledge = context?.knowledgeSourceIDs.joined(separator: ", ") ?? "None selected"
         let skills = context?.skillIDs.joined(separator: ", ") ?? "None selected"
+        let loadedSkills = skillContextSources(for: thread, userMessage: userMessage)
+        let skillSection = loadedSkills.isEmpty
+            ? "No skill bodies were loaded for this turn."
+            : loadedSkills.map { "SKILL \($0.title) (\($0.path))" }.joined(separator: "\n")
         return """
         Respond inside Kaname's unified \(thread.kind.label.lowercased()) conversation.
         Project: \(project?.name ?? "Standalone")
         Selected instruction references: \(instructions)
         Selected knowledge sources: \(knowledge)
         Selected skills and tools: \(skills)
+
+        Loaded skill bodies:
+        \(skillSection)
 
         Authority boundary: \(boundary)
 
@@ -1158,11 +1184,13 @@ final class DesktopConversationRuntime: ObservableObject {
         let instructions = project?.context.instructionReferences.joined(separator: ", ") ?? "None selected"
         let knowledge = project?.context.knowledgeSourceIDs.joined(separator: ", ") ?? "None selected"
         let skills = project?.context.skillIDs.joined(separator: ", ") ?? "None selected"
+        let loadedSkills = skillContextSources(for: thread, userMessage: userMessage)
         let frozenContext = CodingWorkspaceInspector.providerPrompt(
             task: userMessage,
             selectedSources: contextSources,
             selectedMatches: [],
-            mode: "DISCUSS AND PLAN ONLY"
+            mode: "DISCUSS AND PLAN ONLY",
+            skillSources: loadedSkills
         )
         return """
         Kaname Coding stage: DISCUSS AND PLAN ONLY.
@@ -1205,6 +1233,63 @@ final class DesktopConversationRuntime: ObservableObject {
             .max { $0.updatedAtUnixMillis < $1.updatedAtUnixMillis }
     }
 
+    private func recordImplementationCheckpointBefore(
+        runID: String,
+        threadID: String,
+        worktree: DesktopWorktreeRecord,
+        workspace: URL
+    ) async {
+        let now = Int64(Date().timeIntervalSince1970 * 1_000)
+        do {
+            let before = try await gitControl.createCheckpointBefore(
+                worktree: workspace,
+                threadID: threadID,
+                turnID: runID
+            )
+            model.upsertCodingCheckpoint(DesktopCodingCheckpointRecord.make(
+                id: "checkpoint-\(runID)",
+                threadID: threadID,
+                worktreeID: worktree.id,
+                turnID: runID,
+                beforeRef: before.ref,
+                createdAtUnixMillis: now
+            ))
+        } catch {
+            codingWorkflowErrors[threadID] = error.localizedDescription
+        }
+    }
+
+    private func finalizeImplementationCheckpointAfter(runID: String, threadID: String) async {
+        guard let checkpoint = model.snapshot.operations.codingCheckpoints.first(where: {
+            $0.turnID == runID && $0.threadID == threadID
+        }),
+              let worktree = latestCodingWorktree(threadID: threadID) else { return }
+        let workspace = URL(fileURLWithPath: worktree.worktreePath, isDirectory: true)
+        do {
+            let after = try await gitControl.createCheckpointAfter(
+                worktree: workspace,
+                threadID: threadID,
+                turnID: runID,
+                beforeRef: checkpoint.beforeRef
+            )
+            var updated = checkpoint
+            updated.afterRef = after.ref
+            updated.diffStat = after.diffStat
+            updated.diffSummary = after.diffSummary
+            model.upsertCodingCheckpoint(updated)
+            let inspected = try await gitControl.inspect(worktree: workspace)
+            model.updateWorktree(
+                id: worktree.id,
+                headRevision: inspected.headRevision,
+                changedFileCount: inspected.changedFiles.count,
+                diffSummary: after.diffStat.isEmpty ? inspected.diffSummary : after.diffStat,
+                state: .dirty
+            )
+        } catch {
+            codingWorkflowErrors[threadID] = error.localizedDescription
+        }
+    }
+
     private func knowledgeSourceID(
         for source: CodingContextSource,
         project: DesktopProject?
@@ -1226,7 +1311,24 @@ final class DesktopConversationRuntime: ObservableObject {
         case .repositoryInstructions: "Selected worktree · repository instructions"
         case .repositoryKnowledge: "Selected worktree · repository knowledge"
         case .searchResult: "Selected worktree · bounded local search"
+        case .skill: "Selected skill · bounded SKILL.md excerpt"
+        case .terminal: "Coding terminal · bounded untrusted scrollback excerpt"
         }
+    }
+
+    private func skillContextSources(for thread: DesktopThread, userMessage: String) -> [CodingContextSource] {
+        let project = model.project(id: thread.projectID)
+        let workspaceRoot = project?.path.flatMap { URL(fileURLWithPath: $0, isDirectory: true) }
+        var identifiers = project?.context.skillIDs ?? []
+        identifiers.append(contentsOf: DesktopComposerSkillPicker.selectedSkillNames(in: userMessage))
+        let catalogNames = Dictionary(
+            uniqueKeysWithValues: model.snapshot.domains.skills.map { ($0.id, $0.name) }
+        )
+        return SkillRegistryLoader.loadContextSources(
+            identifiers: Array(Set(identifiers)).sorted(),
+            catalogNamesByID: catalogNames,
+            workspaceRoot: workspaceRoot
+        )
     }
 
     private func collectCodingEvidence(threadID: String, worktreeID: String, workspace: URL) {

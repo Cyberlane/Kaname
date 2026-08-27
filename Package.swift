@@ -128,7 +128,8 @@ let package = Package(
         ),
         .target(
             name: "KanameDesktop",
-            dependencies: ["KanameDomain", "KanameLocalCore", "KanameMobileSync", "KanameProtocol"]
+            dependencies: ["KanameDomain", "KanameLocalCore", "KanameMobileSync", "KanameProtocol", "KanameConnectivity"],
+            linkerSettings: [.linkedLibrary("sqlite3")]
         ),
         .target(
             name: "KanameDesktopUI",

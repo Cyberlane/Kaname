@@ -3,42 +3,27 @@ import KanameDomain
 
 enum ClaudeCapabilityProbe {
     static func probe(_ configuration: ProviderProbeConfiguration) async throws -> ProviderCapabilitySnapshot {
-        let result = try await LocalProcess.capture(
-            executable: configuration.executable,
-            arguments: ["--version"],
-            workingDirectory: configuration.workingDirectory,
-            timeout: configuration.timeout
-        )
-        guard result.exitStatus == 0 else {
-            throw ProviderConnectivityError.processExited(
-                command: "\(configuration.executable) --version",
-                status: result.exitStatus,
-                detail: Self.nonEmpty(result.standardError) ?? Self.nonEmpty(result.standardOutput)
-            )
-        }
-
         // T3 uses the Claude Agent SDK's initialization result to enrich this
         // probe when that SDK is bundled. Kaname keeps the same fallback
         // behaviour in its Swift-only Phase 0 host: verify the native CLI and
         // report auth as unknown rather than sending a prompt or inferring that
-        // an installed binary is authenticated.
+        // an installed binary is authenticated. Cursor and Grok share the
+        // version probe helper; Claude keeps this named entry point so Settings
+        // and ProviderProbe can continue routing through an explicit Claude
+        // adapter without inventing an SDK handshake in this spike.
+        let detail = """
+        Claude CLI is available. Authentication and command inventory require \
+        the optional Claude Agent SDK handshake; no prompt was sent.
+        """
+        let snapshot = try await ProviderVersionCapabilityProbe.probe(configuration, detail: detail)
+        guard snapshot.installed else { return snapshot }
         return ProviderCapabilitySnapshot(
-            instance: configuration.instance,
-            state: .degraded,
-            installed: true,
-            version: version(in: result.standardOutput + "\n" + result.standardError),
-            authentication: .unknown,
-            detail: "Claude CLI is available. Authentication and command inventory require the optional Claude Agent SDK handshake; no prompt was sent."
+            instance: snapshot.instance,
+            state: snapshot.state,
+            installed: snapshot.installed,
+            version: snapshot.version,
+            authentication: snapshot.authentication,
+            detail: snapshot.detail
         )
-    }
-
-    private static func version(in text: String) -> String? {
-        let components = text.split(whereSeparator: { $0.isWhitespace })
-        return components.first(where: { $0.range(of: #"\d+\.\d+"#, options: .regularExpression) != nil }).map(String.init)
-    }
-
-    private static func nonEmpty(_ text: String) -> String? {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
     }
 }

@@ -6,6 +6,7 @@ public enum LocalGitMutationKind: String, Codable, Equatable, Sendable {
     case cleanupWorktree
     case createPullRequest
     case mergePullRequest
+    case revertCheckpoint
 }
 
 public struct LocalGitMutationGrant: Equatable, Sendable {
@@ -214,6 +215,88 @@ public actor DesktopGitControlService {
             succeeded: output.exitStatus == 0,
             summary: String((text.isEmpty ? "Exited with status \(output.exitStatus)." : text).suffix(32_000))
         )
+    }
+
+    /// Creates a hidden local ref before an implementation turn. Does not require
+    /// mutation approval because it only writes Kaname-owned refs.
+    public func createCheckpointBefore(
+        worktree: URL,
+        threadID: String,
+        turnID: String
+    ) async throws -> (ref: String, head: String) {
+        let path = worktree.standardizedFileURL
+        guard (try? await git(["rev-parse", "--is-inside-work-tree"], at: path)) == "true" else {
+            throw DesktopGitControlError.invalidRepository
+        }
+        let head = try await git(["rev-parse", "HEAD"], at: path)
+        let ref = Self.checkpointRef(threadID: threadID, turnID: turnID, bracket: "before")
+        _ = try await git(["update-ref", ref, head], at: path, preserveWhitespace: true)
+        return (ref, head)
+    }
+
+    /// Creates the after-bracket ref and returns a bounded turn diff summary.
+    public func createCheckpointAfter(
+        worktree: URL,
+        threadID: String,
+        turnID: String,
+        beforeRef: String
+    ) async throws -> (ref: String, diffStat: String, diffSummary: String) {
+        let path = worktree.standardizedFileURL
+        guard (try? await git(["rev-parse", "--is-inside-work-tree"], at: path)) == "true" else {
+            throw DesktopGitControlError.invalidRepository
+        }
+        let head = try await git(["rev-parse", "HEAD"], at: path)
+        let ref = Self.checkpointRef(threadID: threadID, turnID: turnID, bracket: "after")
+        _ = try await git(["update-ref", ref, head], at: path, preserveWhitespace: true)
+        let stat = try await git(
+            ["diff", "--stat", beforeRef, ref],
+            at: path,
+            preserveWhitespace: true
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        let summary = try await git(
+            ["diff", "--name-status", beforeRef, ref],
+            at: path,
+            preserveWhitespace: true
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        return (
+            ref,
+            String(stat.suffix(8_192)),
+            String(summary.suffix(8_192))
+        )
+    }
+
+    /// Restores the worktree to the checkpoint before-ref. Requires an exact
+    /// revertCheckpoint grant and never touches the primary checkout.
+    public func revertToCheckpoint(
+        worktree: URL,
+        beforeRef: String,
+        grant: LocalGitMutationGrant
+    ) async throws -> GitWorktreeSnapshot {
+        let path = worktree.standardizedFileURL
+        try validateManagedTarget(path)
+        guard grant.kind == .revertCheckpoint,
+              grant.exactTarget.hasPrefix("checkpoint:") else {
+            throw DesktopGitControlError.approvalMismatch
+        }
+        guard (try? await git(["rev-parse", "--verify", beforeRef], at: path)) != nil else {
+            throw DesktopGitControlError.invalidTarget
+        }
+        _ = try await git(["reset", "--hard", beforeRef], at: path, preserveWhitespace: true)
+        _ = try await git(["clean", "-fd"], at: path, preserveWhitespace: true)
+        return try await inspect(worktree: path)
+    }
+
+    public static func checkpointRef(threadID: String, turnID: String, bracket: String) -> String {
+        let safeThread = sanitizeRefComponent(threadID)
+        let safeTurn = sanitizeRefComponent(turnID)
+        let safeBracket = sanitizeRefComponent(bracket)
+        return "refs/kaname/checkpoints/\(safeThread)/\(safeTurn)/\(safeBracket)"
+    }
+
+    private static func sanitizeRefComponent(_ value: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_."))
+        let filtered = String(value.unicodeScalars.map { allowed.contains($0) ? Character($0) : "-" })
+        return String(filtered.prefix(120))
     }
 
     private func git(_ arguments: [String], at directory: URL, preserveWhitespace: Bool = false) async throws -> String {

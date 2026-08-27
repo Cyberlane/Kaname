@@ -1,4 +1,5 @@
 import Foundation
+import KanameConnectivity
 import KanameDomain
 
 public enum DesktopActionState: String, Codable, CaseIterable, Equatable, Sendable {
@@ -685,6 +686,9 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
     public var knowledgeWrites: [DesktopKnowledgeWriteRecord]
     public var codingKnowledgeLanes: [DesktopCodingKnowledgeLane]
     public var codingWorkflows: [DesktopCodingWorkflowRecord]
+    public var codingTerminals: [DesktopCodingTerminalRecord]
+    public var codingCheckpoints: [DesktopCodingCheckpointRecord]
+    public var codingPreviewTabs: [DesktopCodingPreviewTabRecord]
     public var capabilityUpdates: [DesktopCapabilityUpdateRecord]
     public var mailActions: [DesktopMailActionRecord]
     public var mailStandingRules: [DesktopMailStandingRule]
@@ -720,7 +724,10 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         workflows: .empty,
         audit: [],
         codingKnowledgeLanes: [],
-        codingWorkflows: []
+        codingWorkflows: [],
+        codingTerminals: [],
+        codingCheckpoints: [],
+        codingPreviewTabs: []
     )
 
     private enum CodingKeys: String, CodingKey {
@@ -746,6 +753,9 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         case knowledgeWrites
         case codingKnowledgeLanes
         case codingWorkflows
+        case codingTerminals
+        case codingCheckpoints
+        case codingPreviewTabs
         case capabilityUpdates
         case mailActions
         case mailStandingRules
@@ -782,7 +792,10 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         workflows: DesktopWorkflowPlatformState = .empty,
         audit: [DesktopAuditRecord],
         codingKnowledgeLanes: [DesktopCodingKnowledgeLane] = [],
-        codingWorkflows: [DesktopCodingWorkflowRecord] = []
+        codingWorkflows: [DesktopCodingWorkflowRecord] = [],
+        codingTerminals: [DesktopCodingTerminalRecord] = [],
+        codingCheckpoints: [DesktopCodingCheckpointRecord] = [],
+        codingPreviewTabs: [DesktopCodingPreviewTabRecord] = []
     ) {
         (self.researchSources, self.knowledgeProposals, self.artifacts) = (researchSources, knowledgeProposals, artifacts)
         (self.approvals, self.gitStackLayers, self.providerRuns) = (approvals, gitStackLayers, providerRuns)
@@ -796,6 +809,9 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
             knowledgeDocuments, knowledgeWrites, capabilityUpdates
         )
         (self.codingKnowledgeLanes, self.codingWorkflows) = (codingKnowledgeLanes, codingWorkflows)
+        (self.codingTerminals, self.codingCheckpoints, self.codingPreviewTabs) = (
+            codingTerminals, codingCheckpoints, codingPreviewTabs
+        )
         (self.mailActions, self.mailStandingRules, self.mailAttention) = (mailActions, mailStandingRules, mailAttention)
         (self.workflows, self.audit) = (workflows, audit)
     }
@@ -827,6 +843,9 @@ public struct DesktopOperationalSnapshot: Codable, Equatable, Sendable {
         knowledgeWrites = try container.decodeIfPresent([DesktopKnowledgeWriteRecord].self, forKey: .knowledgeWrites) ?? []
         codingKnowledgeLanes = try container.decodeIfPresent([DesktopCodingKnowledgeLane].self, forKey: .codingKnowledgeLanes) ?? []
         codingWorkflows = try container.decodeIfPresent([DesktopCodingWorkflowRecord].self, forKey: .codingWorkflows) ?? []
+        codingTerminals = try container.decodeIfPresent([DesktopCodingTerminalRecord].self, forKey: .codingTerminals) ?? []
+        codingCheckpoints = try container.decodeIfPresent([DesktopCodingCheckpointRecord].self, forKey: .codingCheckpoints) ?? []
+        codingPreviewTabs = try container.decodeIfPresent([DesktopCodingPreviewTabRecord].self, forKey: .codingPreviewTabs) ?? []
         capabilityUpdates = try container.decodeIfPresent([DesktopCapabilityUpdateRecord].self, forKey: .capabilityUpdates) ?? []
         mailActions = try container.decodeIfPresent([DesktopMailActionRecord].self, forKey: .mailActions) ?? []
         mailStandingRules = try container.decodeIfPresent([DesktopMailStandingRule].self, forKey: .mailStandingRules) ?? []
