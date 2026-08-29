@@ -2087,9 +2087,26 @@ public final class DesktopAppModel: ObservableObject {
     }
 
     public func applyProviderGeneratedTitle(threadID: String, title: String) -> Bool {
-        let cleanTitle = Self.generatedConversationTitle(from: title)
-        guard !cleanTitle.isEmpty else { return false }
+        guard let cleanTitle = DesktopConversationTitleGeneration.normalizedTitle(from: title) else { return false }
         guard thread(id: threadID)?.titleSource == .provisional else { return false }
+        return mutateThread(id: threadID) { thread in
+            thread.title = cleanTitle
+            thread.titleSource = .providerGenerated
+            thread.updatedAtUnixMillis = now()
+        }
+    }
+
+    public func applyProviderRegeneratedTitle(
+        threadID: String,
+        title: String,
+        expectedTitle: String,
+        expectedSource: DesktopConversationTitleSource
+    ) -> Bool {
+        guard let cleanTitle = DesktopConversationTitleGeneration.normalizedTitle(from: title),
+              let current = thread(id: threadID),
+              cleanTitle != expectedTitle,
+              current.title == expectedTitle,
+              current.titleSource == expectedSource else { return false }
         return mutateThread(id: threadID) { thread in
             thread.title = cleanTitle
             thread.titleSource = .providerGenerated
@@ -5590,17 +5607,6 @@ public final class DesktopAppModel: ObservableObject {
         let maximumCharacters = 72
         guard collapsed.count > maximumCharacters else { return collapsed }
         return "\(String(collapsed.prefix(maximumCharacters)).trimmingCharacters(in: .whitespacesAndNewlines))…"
-    }
-
-    private static func generatedConversationTitle(from value: String) -> String {
-        var collapsed = value.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
-        collapsed = collapsed.trimmingCharacters(in: CharacterSet(charactersIn: "\"'`#* "))
-        if collapsed.lowercased().hasPrefix("title:") {
-            collapsed = String(collapsed.dropFirst(6)).trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        let maximumCharacters = 80
-        guard collapsed.count > maximumCharacters else { return collapsed }
-        return String(collapsed.prefix(maximumCharacters)).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func sortedRecords<Record>(
