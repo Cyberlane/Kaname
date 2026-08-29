@@ -33,6 +33,7 @@ final class DesktopConversationRuntime: ObservableObject {
     private var pollCandidateThreadIDs: Set<String>
     private var runningRunIDByThread: [String: String]
     private var codingContextPreparationRunIDs: Set<String> = []
+    private var checkpointFinalizationRunIDs: Set<String> = []
     private var didReconcilePersistedTitles = false
     private lazy var gitControl = DesktopGitControlService(managedRoot: environment.worktreeDirectory)
 
@@ -464,7 +465,8 @@ final class DesktopConversationRuntime: ObservableObject {
     private func submit(
         runID: String,
         authorization: CodexWorkspaceAuthorization? = nil,
-        codingContextSources: [CodingContextSource]? = nil
+        codingContextSources: [CodingContextSource]? = nil,
+        checkpointPrepared: Bool = false
     ) {
         guard let run = model.providerRun(id: runID),
               let threadID = run.threadID,
@@ -482,9 +484,6 @@ final class DesktopConversationRuntime: ObservableObject {
             model.stopProviderRun(id: run.id, interrupted: false, error: message)
             return
         }
-        quarantineTerminalPendingRequests(threadID: threadID)
-        providerByRunID[run.id] = run.provider
-        pollCandidateThreadIDs.insert(threadID)
         let workspace: URL
         if let override = run.workspacePathOverride {
             workspace = URL(fileURLWithPath: override, isDirectory: true).standardizedFileURL
@@ -504,17 +503,36 @@ final class DesktopConversationRuntime: ObservableObject {
             prepareCodingPlanContext(run: run, thread: thread, workspace: workspace, authorization: authorization)
             return
         }
-        if run.purpose == .codingImplementation,
+        if run.purpose == .codingImplementation, !checkpointPrepared,
            let worktree = latestCodingWorktree(threadID: threadID) {
-            _Concurrency.Task {
-                await self.recordImplementationCheckpointBefore(
+            _Concurrency.Task { [weak self] in
+                guard let self else { return }
+                let captured = await self.recordImplementationCheckpointBefore(
                     runID: run.id,
                     threadID: threadID,
                     worktree: worktree,
                     workspace: workspace
                 )
+                guard captured else {
+                    model.stopProviderRun(
+                        id: run.id,
+                        interrupted: false,
+                        error: "Kaname could not capture the exact pre-turn Git checkpoint, so no provider request was sent."
+                    )
+                    return
+                }
+                self.submit(
+                    runID: run.id,
+                    authorization: authorization,
+                    codingContextSources: codingContextSources,
+                    checkpointPrepared: true
+                )
             }
+            return
         }
+        quarantineTerminalPendingRequests(threadID: threadID)
+        providerByRunID[run.id] = run.provider
+        pollCandidateThreadIDs.insert(threadID)
         guard let machService = Bundle.main.object(forInfoDictionaryKey: "KanameLocalCoreMachService") as? String,
               let requirement = Bundle.main.object(forInfoDictionaryKey: "KanameLocalCoreServiceRequirement") as? String else {
             model.stopProviderRun(
@@ -860,12 +878,10 @@ final class DesktopConversationRuntime: ObservableObject {
                 guard model.persistenceError == nil else { return false }
             }
             if completedRun?.purpose == .codingImplementation {
-                _Concurrency.Task {
-                    await self.finalizeImplementationCheckpointAfter(
-                        runID: serviceEvent.runID,
-                        threadID: serviceEvent.threadID
-                    )
-                }
+                scheduleImplementationCheckpointAfter(
+                    runID: serviceEvent.runID,
+                    threadID: serviceEvent.threadID
+                )
             }
             if completedRun?.purpose == .codingPlan,
                model.thread(id: serviceEvent.threadID)?.plan.isEmpty == true {
@@ -876,15 +892,23 @@ final class DesktopConversationRuntime: ObservableObject {
             guard registerServiceEvidence(threadID: serviceEvent.threadID, runID: serviceEvent.runID) else { return false }
             scheduleTitleIfNeeded(threadID: serviceEvent.threadID)
         case .runInterrupted:
+            let interruptedRun = model.providerRun(id: serviceEvent.runID)
             if model.providerRun(id: serviceEvent.runID)?.state != .interrupted {
                 model.stopProviderRun(id: serviceEvent.runID, interrupted: true, error: event.text ?? "The provider turn was interrupted.")
                 guard model.persistenceError == nil else { return false }
             }
+            if interruptedRun?.purpose == .codingImplementation {
+                scheduleImplementationCheckpointAfter(runID: serviceEvent.runID, threadID: serviceEvent.threadID)
+            }
             runningRunIDByThread.removeValue(forKey: serviceEvent.threadID)
         case .runFailed:
+            let failedRun = model.providerRun(id: serviceEvent.runID)
             if model.providerRun(id: serviceEvent.runID)?.state != .failed {
                 model.stopProviderRun(id: serviceEvent.runID, interrupted: false, error: event.text ?? "The provider stopped without a readable result.")
                 guard model.persistenceError == nil else { return false }
+            }
+            if failedRun?.purpose == .codingImplementation {
+                scheduleImplementationCheckpointAfter(runID: serviceEvent.runID, threadID: serviceEvent.threadID)
             }
             runningRunIDByThread.removeValue(forKey: serviceEvent.threadID)
         case .sessionStarted, .runStarted, .messageDelta, .itemStarted, .itemCompleted,
@@ -908,6 +932,9 @@ final class DesktopConversationRuntime: ObservableObject {
                 interrupted: true,
                 error: "The durable provider worker stopped before completion. Retry reuses the saved user message."
             )
+            if model.providerRun(id: runningRunID)?.purpose == .codingImplementation {
+                scheduleImplementationCheckpointAfter(runID: runningRunID, threadID: threadID)
+            }
             if model.persistenceError == nil { runningRunIDByThread.removeValue(forKey: threadID) }
             orphanChecks[threadID] = 0
         }
@@ -1250,7 +1277,7 @@ final class DesktopConversationRuntime: ObservableObject {
         threadID: String,
         worktree: DesktopWorktreeRecord,
         workspace: URL
-    ) async {
+    ) async -> Bool {
         let now = Int64(Date().timeIntervalSince1970 * 1_000)
         do {
             let before = try await gitControl.createCheckpointBefore(
@@ -1264,10 +1291,29 @@ final class DesktopConversationRuntime: ObservableObject {
                 worktreeID: worktree.id,
                 turnID: runID,
                 beforeRef: before.ref,
+                beforeHeadRevision: before.headRevision,
+                beforeIndexTree: before.indexTree,
+                beforeWorktreeTree: before.worktreeTree,
+                beforeFingerprint: before.fingerprint,
                 createdAtUnixMillis: now
             ))
+            guard model.persistenceError == nil else {
+                codingWorkflowErrors[threadID] = "Kaname could not persist the exact pre-turn Git checkpoint."
+                return false
+            }
+            return true
         } catch {
             codingWorkflowErrors[threadID] = error.localizedDescription
+            return false
+        }
+    }
+
+    private func scheduleImplementationCheckpointAfter(runID: String, threadID: String) {
+        guard checkpointFinalizationRunIDs.insert(runID).inserted else { return }
+        _Concurrency.Task { [weak self] in
+            guard let self else { return }
+            defer { checkpointFinalizationRunIDs.remove(runID) }
+            await finalizeImplementationCheckpointAfter(runID: runID, threadID: threadID)
         }
     }
 
@@ -1275,17 +1321,36 @@ final class DesktopConversationRuntime: ObservableObject {
         guard let checkpoint = model.snapshot.operations.codingCheckpoints.first(where: {
             $0.turnID == runID && $0.threadID == threadID
         }),
-              let worktree = latestCodingWorktree(threadID: threadID) else { return }
+              let worktree = model.snapshot.operations.worktrees.first(where: {
+                  $0.id == checkpoint.worktreeID && $0.threadID == threadID && $0.state != .removed
+              }) else { return }
         let workspace = URL(fileURLWithPath: worktree.worktreePath, isDirectory: true)
+        guard let beforeHeadRevision = checkpoint.beforeHeadRevision,
+              let beforeIndexTree = checkpoint.beforeIndexTree,
+              let beforeWorktreeTree = checkpoint.beforeWorktreeTree,
+              let beforeFingerprint = checkpoint.beforeFingerprint else {
+            codingWorkflowErrors[threadID] = "This legacy checkpoint lacks exact Git state metadata; start a fresh implementation turn."
+            return
+        }
         do {
             let after = try await gitControl.createCheckpointAfter(
                 worktree: workspace,
                 threadID: threadID,
                 turnID: runID,
-                beforeRef: checkpoint.beforeRef
+                before: GitCheckpointSnapshot.captured(
+                    ref: checkpoint.beforeRef,
+                    headRevision: beforeHeadRevision,
+                    indexTree: beforeIndexTree,
+                    worktreeTree: beforeWorktreeTree,
+                    fingerprint: beforeFingerprint
+                )
             )
             var updated = checkpoint
-            updated.afterRef = after.ref
+            updated.afterRef = after.after.ref
+            updated.afterHeadRevision = after.after.headRevision
+            updated.afterIndexTree = after.after.indexTree
+            updated.afterWorktreeTree = after.after.worktreeTree
+            updated.afterFingerprint = after.after.fingerprint
             updated.diffStat = after.diffStat
             updated.diffSummary = after.diffSummary
             model.upsertCodingCheckpoint(updated)

@@ -35,7 +35,12 @@ final class DesktopCodingControlViewModel: ObservableObject {
         case create(approvalID: String, exactTarget: String)
         case refresh
         case commit(approvalID: String, exactTarget: String, paths: [String], message: String)
-        case revertCheckpoint(approvalID: String, exactTarget: String, beforeRef: String)
+        case revertCheckpoint(
+            approvalID: String,
+            exactTarget: String,
+            expiresAtUnixMillis: Int64?,
+            target: GitCheckpointRestoreTarget
+        )
     }
 
     init(environment: KanameDesktopEnvironment = .current) {
@@ -188,12 +193,17 @@ final class DesktopCodingControlViewModel: ObservableObject {
         worktree: DesktopWorktreeRecord,
         checkpoint: DesktopCodingCheckpointRecord
     ) {
+        guard let exactTarget = checkpoint.approvalExactTarget(worktreePath: worktree.worktreePath),
+              let restoreTarget = checkpoint.restoreTarget(worktreePath: worktree.worktreePath) else {
+            message = "This legacy checkpoint cannot be restored safely. Run a new implementation turn first."
+            return
+        }
         guard let approval = model.snapshot.operations.approvals.last(where: {
             $0.threadID == worktree.threadID
-                && $0.exactTarget == checkpoint.approvalExactTarget
+                && $0.exactTarget == exactTarget
                 && $0.title == "Revert implementation turn"
                 && $0.state == .approved
-        }) else {
+        }), model.isApprovalGranted(id: approval.id, exactTarget: exactTarget) else {
             message = "Approve the exact checkpoint revert in Inbox first."
             return
         }
@@ -204,7 +214,8 @@ final class DesktopCodingControlViewModel: ObservableObject {
             mutation: .revertCheckpoint(
                 approvalID: approval.id,
                 exactTarget: approval.exactTarget,
-                beforeRef: checkpoint.beforeRef
+                expiresAtUnixMillis: approval.expiresAtUnixMillis,
+                target: restoreTarget
             )
         )
     }
@@ -304,6 +315,12 @@ final class DesktopCodingControlViewModel: ObservableObject {
                 diagnosticSummary: outcome.diagnosticSummary,
                 state: nextState
             )
+            if case let .revertCheckpoint(approvalID, exactTarget, _, _) = mutation {
+                guard model.consumeApproval(id: approvalID, exactTarget: exactTarget) else {
+                    message = "The checkpoint was restored, but Kaname could not record one-shot approval consumption."
+                    return
+                }
+            }
             message = outcome.userMessage
         } catch {
             model.updateWorktree(
@@ -359,22 +376,23 @@ final class DesktopCodingControlViewModel: ObservableObject {
             outcome.cleanState = .review
             return outcome
 
-        case let .revertCheckpoint(approvalID, exactTarget, beforeRef):
+        case let .revertCheckpoint(approvalID, exactTarget, expiresAtUnixMillis, target):
             let snapshot = try await service.revertToCheckpoint(
                 worktree: worktreeURL,
-                beforeRef: beforeRef,
+                target: target,
                 grant: LocalGitMutationGrant(
                     approvalID: approvalID,
                     kind: .revertCheckpoint,
-                    exactTarget: exactTarget
+                    exactTarget: exactTarget,
+                    expiresAtUnixMillis: expiresAtUnixMillis
                 )
             )
             var outcome = GitMutationOutcome.messaging(
                 snapshot: snapshot,
-                userMessage: "Worktree restored to the approved checkpoint before-ref.",
+                userMessage: "Tracked and non-ignored files plus staged state were restored to the approved checkpoint. Ignored files and empty directories were left untouched.",
                 diagnosticSummary: "Checkpoint revert executed with approval \(approvalID)."
             )
-            outcome.emptyDiffSummary = "Restored to checkpoint \(beforeRef)"
+            outcome.emptyDiffSummary = "Restored to checkpoint \(target.before.ref)"
             return outcome
         }
     }

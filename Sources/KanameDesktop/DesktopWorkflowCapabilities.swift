@@ -239,8 +239,8 @@ public enum DesktopWorkflowBuiltinCapabilities {
                 ].contains(identifier),
                 idempotent: identifier != "kaname.email.send" && identifier != "kaname.connector.effect",
                 enabled: true,
-                lastTestedAtUnixMillis: timestamp,
-                lastTestPassed: true,
+                lastTestedAtUnixMillis: nil,
+                lastTestPassed: false,
                 installedAtUnixMillis: timestamp
             )
         }

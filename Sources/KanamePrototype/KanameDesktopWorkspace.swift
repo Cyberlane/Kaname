@@ -230,6 +230,7 @@ struct KanameDesktopWorkspace: View {
     private let initialGlobalSearchQuery: String
     private let usesQALargeText: Bool
     private let designCapture: DesktopDesignCaptureConfiguration?
+    private let usesSyntheticFixtures: Bool
     @StateObject private var model: DesktopAppModel
     @StateObject private var conversationRuntime: DesktopConversationRuntime
     @StateObject private var automationScheduler: DesktopAutomationSchedulerViewModel
@@ -274,6 +275,10 @@ struct KanameDesktopWorkspace: View {
         let arguments = CommandLine.arguments
         let designCapture = DesktopDesignCaptureConfiguration.resolve(arguments: arguments)
         self.designCapture = designCapture
+        usesSyntheticFixtures = designCapture != nil
+            || arguments.contains("--desktop-plan-review-fixture")
+            || arguments.contains("--desktop-link-synthetic-fixture")
+            || arguments.contains("--desktop-workflow-fixture")
         let desktopStore: any DesktopStateStoring
         let forkFailure: String?
         if designCapture != nil {
@@ -623,7 +628,7 @@ struct KanameDesktopWorkspace: View {
 
     private var designCaptureWorkspace: some View {
         VStack(spacing: 0) {
-            if designCapture != nil {
+            if usesSyntheticFixtures {
                 KanameSyntheticDataBanner()
             }
             primaryCommandWorkspace
@@ -4162,11 +4167,15 @@ private struct DesktopThreadChangesView: View {
         _ checkpoint: DesktopCodingCheckpointRecord,
         worktree: DesktopWorktreeRecord
     ) {
+        guard let exactTarget = checkpoint.approvalExactTarget(worktreePath: worktree.worktreePath) else {
+            revertMessage = "This legacy checkpoint cannot be restored safely. Run a new implementation turn first."
+            return
+        }
         _ = model.createApproval(
             threadID: thread.id,
             title: "Revert implementation turn",
-            exactTarget: checkpoint.approvalExactTarget,
-            consequence: "Restore worktree files to the checkpoint captured before turn \(checkpoint.turnID). Changed paths: \(checkpoint.diffSummary.isEmpty ? "see diff stat after approval" : checkpoint.diffSummary)",
+            exactTarget: exactTarget,
+            consequence: "Restore tracked and non-ignored files plus staged state to the checkpoint captured before turn \(checkpoint.turnID). Ignored files and empty directories are outside this checkpoint and remain untouched. Changed paths: \(checkpoint.diffSummary.isEmpty ? "see diff stat after approval" : checkpoint.diffSummary)",
             dataLeavingDevice: "Nothing",
             reversible: true,
             expiresAtUnixMillis: Int64(Date().addingTimeInterval(15 * 60).timeIntervalSince1970 * 1_000)
@@ -12248,25 +12257,25 @@ private struct DesktopDevicesView: View {
                     DeviceEndpointCard(
                         symbol: "desktopcomputer",
                         title: "This Mac",
-                        subtitle: "Initial authority",
-                        status: "Local workspace available",
-                        tint: Nord.auroraGreen,
+                        subtitle: "Configured foundation",
+                        status: "Current health not checked",
+                        tint: Nord.auroraYellow,
                         facts: [
-                            ("Role", "Execution host and authority"),
-                            ("Private state", "Local 0700 / 0600 storage"),
-                            ("Keychain prompts", "Not used by qualification harness"),
+                            ("Intended role", "Execution host and authority"),
+                            ("Storage policy", "Local 0700 / 0600"),
+                            ("Probe", "Not run in this workspace"),
                         ]
                     )
                     DeviceEndpointCard(
                         symbol: "iphone",
                         title: "iPhone companion",
                         subtitle: "Physical qualification deferred",
-                        status: "Simulator path ready",
+                        status: "Simulator and device checks not run",
                         tint: Nord.auroraYellow,
                         facts: [
-                            ("Connected phone", "Charging only · excluded"),
-                            ("Simulator", "Enrollment and recovery passed"),
-                            ("Real APNs", "Paid team still required"),
+                            ("Physical device", "Not selected or checked"),
+                            ("Simulator", "Qualification not run"),
+                            ("APNs", "Configuration and delivery not checked"),
                         ]
                     )
                 }
@@ -12279,23 +12288,23 @@ private struct DesktopDevicesView: View {
                     RemoteStatusCard(
                         title: "Ciphertext relay",
                         status: model.snapshot.remote.relayStatus,
-                        detail: "Authenticated envelope storage only. The hosted qualification database is clean.",
+                        detail: "Foundation for authenticated envelope storage. No hosted-state or cleanup result is implied.",
                         symbol: "network.badge.shield.half.filled",
-                        tint: Nord.frost0
+                        tint: Nord.auroraYellow
                     )
                     RemoteStatusCard(
                         title: "Notifications",
                         status: model.snapshot.remote.notificationStatus,
-                        detail: "APNs is a wake and attention hint, never a durable queue or plaintext sync channel.",
+                        detail: "The foundation limits APNs to an attention hint; delivery and payload checks require evidence.",
                         symbol: "bell.badge.fill",
-                        tint: Nord.auroraPurple
+                        tint: Nord.auroraYellow
                     )
                     RemoteStatusCard(
                         title: "Reconciliation",
                         status: model.snapshot.remote.queueStatus,
-                        detail: "Queued items remain editable until staged and terminal receipts remove pending state.",
+                        detail: "The recovery contract is implemented as a foundation; queue and receipt behavior is not assumed.",
                         symbol: "arrow.triangle.2.circlepath.circle.fill",
-                        tint: Nord.frost2
+                        tint: Nord.auroraYellow
                     )
                 }
 
@@ -14767,17 +14776,17 @@ private struct DesktopAuthorityCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
-            HStack {
+            LabeledContent {
+                Text("Foundation")
+                    .kanameSemanticFont(.caption.weight(.bold))
+                    .foregroundStyle(Nord.auroraYellow)
+            } label: {
                 Label("Local authority", systemImage: "desktopcomputer")
                     .kanameSemanticFont(.headline)
-                Spacer()
-                Text("Ready")
-                    .kanameSemanticFont(.caption.weight(.bold))
-                    .foregroundStyle(Nord.auroraGreen)
             }
-            InspectorStatus(label: "Workspace", value: "Durable local state", tint: Nord.auroraGreen)
-            InspectorStatus(label: "Remote", value: "Simulator qualified", tint: Nord.frost0)
-            InspectorStatus(label: "Phone", value: "Deferred safely", tint: Nord.auroraYellow)
+            InspectorStatus(label: "Workspace", value: "Configured · not verified", tint: Nord.auroraYellow)
+            InspectorStatus(label: "Remote", value: remote.relayStatus, tint: Nord.auroraYellow)
+            InspectorStatus(label: "Phone", value: "Not run · deferred", tint: Nord.auroraYellow)
         }
         .padding(15)
         .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 16))
@@ -16220,6 +16229,7 @@ private extension DesktopRemoteEvent.State {
         switch self {
         case .passed: "Passed"
         case .ready: "Ready"
+        case .notRun: "Not run"
         case .deferred: "Deferred"
         }
     }
@@ -16228,6 +16238,7 @@ private extension DesktopRemoteEvent.State {
         switch self {
         case .passed: "checkmark.circle.fill"
         case .ready: "circle.dotted"
+        case .notRun: "minus.circle.fill"
         case .deferred: "pause.circle.fill"
         }
     }
@@ -16236,6 +16247,7 @@ private extension DesktopRemoteEvent.State {
         switch self {
         case .passed: Nord.auroraGreen
         case .ready: Nord.frost1
+        case .notRun: Nord.auroraYellow
         case .deferred: Nord.auroraYellow
         }
     }

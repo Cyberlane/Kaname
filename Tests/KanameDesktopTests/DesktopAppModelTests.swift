@@ -264,6 +264,151 @@ struct DesktopAppModelTests {
     }
 
     @Test
+    func freshStarterUsesFoundationAndNotRunLanguageWithoutInventingReceipts() throws {
+        let snapshot = DesktopAppSnapshot.starter(now: 1_000)
+        let dogfood = try #require(snapshot.threads.first { $0.id == "thread-desktop-dogfood" })
+        let mobile = try #require(snapshot.threads.first { $0.id == "thread-phase3-mobile" })
+        let localCore = try #require(snapshot.threads.first { $0.id == "thread-local-core" })
+
+        #expect(dogfood.title == "Starter · Kaname desktop dogfood")
+        #expect(dogfood.plan.allSatisfy { $0.state == .pending })
+        #expect(dogfood.evidence.allSatisfy { $0.state == .notRun })
+        #expect(mobile.evidence.allSatisfy { $0.state == .notRun })
+        #expect(localCore.attention == .needsInput)
+        #expect(localCore.evidence.allSatisfy { $0.state == .notRun })
+
+        #expect(snapshot.remote.lastVerifiedAtUnixMillis == 0)
+        #expect(snapshot.remote.relayStatus == "Not checked in this workspace")
+        #expect(snapshot.remote.events.filter { $0.state == .notRun }.count == 3)
+        #expect(snapshot.remote.events.filter { $0.state == .deferred }.count == 1)
+
+        let starterPresentation = (
+            snapshot.threads.flatMap { thread in
+                [thread.title, thread.summary]
+                    + thread.messages.map(\.body)
+                    + thread.evidence.flatMap { [$0.label, $0.detail] }
+            }
+            + [
+                snapshot.remote.relayStatus,
+                snapshot.remote.enrollmentStatus,
+                snapshot.remote.notificationStatus,
+                snapshot.remote.queueStatus,
+            ]
+            + snapshot.remote.events.flatMap { [$0.title, $0.detail] }
+        ).joined(separator: " ").lowercased()
+        #expect(!starterPresentation.contains("tests passed"))
+        #expect(!starterPresentation.contains("signed, installed"))
+        #expect(!starterPresentation.contains("simulator qualified"))
+        #expect(!starterPresentation.contains("hosted relay clean"))
+        #expect(!starterPresentation.contains("after terminal receipts"))
+    }
+
+    @Test
+    func freshDomainReferencesRequireAProbeBeforeTheyBecomeReady() {
+        let domain = DesktopDomainSnapshot.starter(now: 1_000)
+
+        #expect(domain.knowledgeSources.allSatisfy { $0.status == .needsReview })
+        #expect(domain.knowledgeSources.allSatisfy { $0.lastReadAtUnixMillis == nil })
+        #expect(domain.skills.allSatisfy { $0.status == .needsReview && $0.enabled })
+        #expect(domain.gitWorkspaces.isEmpty)
+
+        let capabilities = DesktopAppSnapshot.starter(now: 1_000)
+            .operations.workflows.capabilityInstallations
+        #expect(!capabilities.isEmpty)
+        #expect(capabilities.allSatisfy { $0.lastTestedAtUnixMillis == nil })
+        #expect(capabilities.allSatisfy { !$0.lastTestPassed })
+    }
+
+    @Test
+    func consumedApprovalCannotAuthorizeTheSameExactActionTwice() throws {
+        let model = DesktopAppModel(store: MemoryDesktopStateStore(), now: { 1_000 })
+        let approvalID = try #require(model.createApproval(
+            threadID: "thread",
+            title: "Revert implementation turn",
+            exactTarget: "checkpoint:exact",
+            consequence: "Restore an exact captured state.",
+            dataLeavingDevice: "Nothing",
+            reversible: true,
+            expiresAtUnixMillis: 2_000
+        ))
+        model.resolveApproval(id: approvalID, approved: true)
+        #expect(model.isApprovalGranted(id: approvalID, exactTarget: "checkpoint:exact"))
+        #expect(model.consumeApproval(id: approvalID, exactTarget: "checkpoint:exact"))
+        #expect(!model.isApprovalGranted(id: approvalID, exactTarget: "checkpoint:exact"))
+        #expect(!model.consumeApproval(id: approvalID, exactTarget: "checkpoint:exact"))
+        #expect(model.snapshot.operations.approvals.first { $0.id == approvalID }?.state == .completed)
+    }
+
+    @Test
+    func schemaTwentyEightNormalizesOnlyExactLegacyStarterClaims() throws {
+        var legacy = DesktopAppSnapshot.starter(now: 1_000)
+        legacy.version = 27
+        let dogfoodIndex = try #require(legacy.threads.firstIndex { $0.id == "thread-desktop-dogfood" })
+        legacy.threads[dogfoodIndex].title = "Kaname desktop dogfood"
+        legacy.threads[dogfoodIndex].summary = "The polished desktop workspace is installed and ready for dogfooding."
+        let readyMessageIndex = try #require(
+            legacy.threads[dogfoodIndex].messages.firstIndex { $0.id == "message-desktop-ready" }
+        )
+        let readyMessage = legacy.threads[dogfoodIndex].messages[readyMessageIndex]
+        legacy.threads[dogfoodIndex].messages[readyMessageIndex] = DesktopMessage(
+            id: readyMessage.id,
+            role: readyMessage.role,
+            body: "The persistent workspace, integrated safety surfaces, private local core, release packaging, and visual qualification are ready.",
+            attachments: readyMessage.attachments,
+            createdAtUnixMillis: readyMessage.createdAtUnixMillis
+        )
+        legacy.threads[dogfoodIndex].plan = [
+            DesktopPlanItem(title: "Persistent desktop workspace", state: .complete),
+            DesktopPlanItem(title: "Integrated devices and remote health", state: .complete),
+            DesktopPlanItem(title: "Packaging and interactive QA", state: .complete),
+        ]
+        legacy.threads[dogfoodIndex].evidence = [
+            DesktopEvidence(label: "Swift tests", detail: "Full desktop suite passed", state: .passed),
+            DesktopEvidence(label: "Owner receipt", detail: "User-authored evidence remains", state: .passed),
+        ]
+        legacy.threads.append(DesktopThread(
+            id: "user-thread",
+            title: "User verification",
+            summary: "Preserve me",
+            kind: .coding,
+            attention: .completed,
+            updatedAtUnixMillis: 1_000,
+            evidence: [DesktopEvidence(label: "Swift tests", detail: "Full desktop suite passed", state: .passed)]
+        ))
+        legacy.remote = DesktopRemoteStatus(
+            relayStatus: "Hosted relay clean",
+            enrollmentStatus: "Simulator qualified · physical device deferred",
+            notificationStatus: "Privacy contract passed · APNs credentials deferred",
+            queueStatus: "Restart-safe · 0 pending after terminal receipts",
+            lastVerifiedAtUnixMillis: 1_000,
+            events: [
+                DesktopRemoteEvent(id: "remote-relay-rehearsal", title: "Encrypted relay rehearsal", detail: "Enrollment, edited queue, receipts, stale approval, rotation, revocation, and cleanup passed.", state: .passed),
+                DesktopRemoteEvent(id: "remote-restart-recovery", title: "Restart recovery", detail: "Enrollment, key custody, queue, receipts, history, and pending rotation recover safely.", state: .passed),
+                DesktopRemoteEvent(id: "remote-apns-contract", title: "APNs payload contract", detail: "Only a generic content-free attention hint is sent; encrypted work remains in the relay.", state: .passed),
+                DesktopRemoteEvent(id: "remote-physical-iphone", title: "Physical iPhone qualification", detail: "Deferred until a different iPhone is explicitly designated.", state: .deferred),
+            ]
+        )
+        for index in legacy.operations.workflows.capabilityInstallations.indices {
+            legacy.operations.workflows.capabilityInstallations[index].lastTestedAtUnixMillis =
+                legacy.operations.workflows.capabilityInstallations[index].installedAtUnixMillis
+            legacy.operations.workflows.capabilityInstallations[index].lastTestPassed = true
+        }
+
+        let migrated = try legacy.migratedToCurrent(now: 2_000)
+        let dogfood = try #require(migrated.threads.first { $0.id == "thread-desktop-dogfood" })
+        #expect(migrated.version == 28)
+        #expect(dogfood.title == "Starter · Kaname desktop dogfood")
+        #expect(dogfood.evidence.first { $0.label == "Swift tests" }?.state == .notRun)
+        #expect(dogfood.evidence.first { $0.label == "Owner receipt" }?.state == .passed)
+        #expect(migrated.threads.first { $0.id == "user-thread" }?.evidence.first?.state == .passed)
+        #expect(migrated.remote.lastVerifiedAtUnixMillis == 0)
+        #expect(migrated.remote.events.allSatisfy { $0.state == .notRun || $0.state == .deferred })
+        #expect(migrated.operations.workflows.capabilityInstallations.allSatisfy {
+            !$0.lastTestPassed && $0.lastTestedAtUnixMillis == nil
+        })
+    }
+
+    @Test
     func legacyDogfoodDisplayModelDecodesAsProviderDefault() throws {
         var snapshot = DesktopAppSnapshot.starter(now: 1_000)
         let index = try #require(snapshot.threads.firstIndex(where: { $0.id == "thread-desktop-dogfood" }))
@@ -642,8 +787,8 @@ struct DesktopAppModelTests {
         #expect(model.snapshot.version == DesktopAppSnapshot.currentVersion)
         #expect(model.snapshot.projects.contains { $0.name == "Preserved project" })
         #expect(model.snapshot.threads.contains { $0.title == "Preserved thread" })
-        #expect(model.thread(id: "thread-desktop-dogfood")?.plan.allSatisfy { $0.state == .complete } == true)
-        #expect(model.thread(id: "thread-desktop-dogfood")?.evidence.allSatisfy { $0.state == .passed } == true)
+        #expect(model.thread(id: "thread-desktop-dogfood")?.plan.allSatisfy { $0.state == .pending } == true)
+        #expect(model.thread(id: "thread-desktop-dogfood")?.evidence.allSatisfy { $0.state == .notRun } == true)
         #expect(!model.snapshot.domains.knowledgeSources.isEmpty)
         #expect(store.data != nil)
     }

@@ -260,7 +260,9 @@ struct AutomationWorkflowProductView: View {
             return AutomationWorkflowPreview(
                 id: definition.id,
                 name: definition.name,
-                summary: definition.summary,
+                summary: definition.source == "Kaname synthetic fixtures"
+                    ? "Synthetic fixture · not operational · \(definition.summary)"
+                    : definition.summary,
                 symbol: definition.icon,
                 progress: progress,
                 state: state,
@@ -1949,15 +1951,15 @@ private struct AutomationWorkflowPreview: Identifiable {
     let retention: String
 
     static let portfolio: [Self] = [
-        .init(id: "reply-driven", name: "Reply-driven reporting", summary: "Produce, deliver, and revise artifacts through email", symbol: "arrow.trianglehead.2.clockwise.rotate.90", progress: 3, state: .waiting, version: "6", trigger: "Email reply", lastRun: "Waiting · 12 min", retention: "30 days"),
-        .init(id: "mailbox-review", name: "Mailbox review", summary: "Review and classify incoming mail", symbol: "tray.full", progress: 3, state: .running, version: "4", trigger: "Every hour", lastRun: "Running · now", retention: "30 days"),
-        .init(id: "approved-cleanup", name: "Approved cleanup", summary: "Apply reviewed labels and archive", symbol: "archivebox", progress: 2, state: .waiting, version: "3", trigger: "Manual", lastRun: "Waiting · 2 h", retention: "30 days"),
-        .init(id: "sender-cleanup", name: "Sender cleanup", summary: "Exact-scope recurring cleanup", symbol: "scope", progress: 1, state: .planned, version: "1", trigger: "Daily 09:00", lastRun: "Never", retention: "After success"),
-        .init(id: "financial-filing", name: "Financial filing", summary: "Preserve and file financial mail", symbol: "doc.text", progress: 2, state: .waiting, version: "5", trigger: "New mail", lastRun: "Passed · yesterday", retention: "Forever"),
-        .init(id: "structured-ingestion", name: "Structured ingestion", summary: "Parse messages into a dataset", symbol: "tablecells", progress: 2, state: .blocked, version: "2", trigger: "New mail", lastRun: "Blocked · 3 d", retention: "30 days"),
-        .init(id: "newsletter", name: "Newsletter management", summary: "Review subscriptions and cleanup", symbol: "newspaper", progress: 1, state: .planned, version: "1", trigger: "Weekly", lastRun: "Never", retention: "30 days"),
-        .init(id: "correspondence", name: "Correspondence", summary: "Draft, review, reply, and forward", symbol: "arrowshape.turn.up.left", progress: 1, state: .planned, version: "2", trigger: "Manual", lastRun: "Passed · 8 d", retention: "30 days"),
-        .init(id: "filter-management", name: "Filter management", summary: "Preview and reconcile provider rules", symbol: "line.3.horizontal.decrease.circle", progress: 1, state: .planned, version: "1", trigger: "Manual", lastRun: "Never", retention: "After success"),
+        .init(id: "reply-driven", name: "Reply-driven reporting", summary: "Synthetic fixture · not operational · Produce, deliver, and revise artifacts through email", symbol: "arrow.trianglehead.2.clockwise.rotate.90", progress: 3, state: .waiting, version: "6", trigger: "Email reply", lastRun: "Waiting · 12 min", retention: "30 days"),
+        .init(id: "mailbox-review", name: "Mailbox review", summary: "Synthetic fixture · not operational · Review and classify incoming mail", symbol: "tray.full", progress: 3, state: .running, version: "4", trigger: "Every hour", lastRun: "Running · now", retention: "30 days"),
+        .init(id: "approved-cleanup", name: "Approved cleanup", summary: "Synthetic fixture · not operational · Apply reviewed labels and archive", symbol: "archivebox", progress: 2, state: .waiting, version: "3", trigger: "Manual", lastRun: "Waiting · 2 h", retention: "30 days"),
+        .init(id: "sender-cleanup", name: "Sender cleanup", summary: "Synthetic fixture · not operational · Exact-scope recurring cleanup", symbol: "scope", progress: 1, state: .planned, version: "1", trigger: "Daily 09:00", lastRun: "Never", retention: "After success"),
+        .init(id: "financial-filing", name: "Financial filing", summary: "Synthetic fixture · not operational · Preserve and file financial mail", symbol: "doc.text", progress: 2, state: .waiting, version: "5", trigger: "New mail", lastRun: "Passed · yesterday", retention: "Forever"),
+        .init(id: "structured-ingestion", name: "Structured ingestion", summary: "Synthetic fixture · not operational · Parse messages into a dataset", symbol: "tablecells", progress: 2, state: .blocked, version: "2", trigger: "New mail", lastRun: "Blocked · 3 d", retention: "30 days"),
+        .init(id: "newsletter", name: "Newsletter management", summary: "Synthetic fixture · not operational · Review subscriptions and cleanup", symbol: "newspaper", progress: 1, state: .planned, version: "1", trigger: "Weekly", lastRun: "Never", retention: "30 days"),
+        .init(id: "correspondence", name: "Correspondence", summary: "Synthetic fixture · not operational · Draft, review, reply, and forward", symbol: "arrowshape.turn.up.left", progress: 1, state: .planned, version: "2", trigger: "Manual", lastRun: "Passed · 8 d", retention: "30 days"),
+        .init(id: "filter-management", name: "Filter management", summary: "Synthetic fixture · not operational · Preview and reconcile provider rules", symbol: "line.3.horizontal.decrease.circle", progress: 1, state: .planned, version: "1", trigger: "Manual", lastRun: "Never", retention: "After success"),
     ]
 }
 
@@ -2894,8 +2896,8 @@ private struct AutomationCanvasPreview: View {
                 Button("Redo", systemImage: "arrow.uturn.forward") {}.buttonStyle(.plain).disabled(true)
                 Label("Draft changes", systemImage: "circle.fill").foregroundStyle(Nord.auroraYellow)
             } else {
-                Label("Validated", systemImage: "checkmark.seal.fill")
-                    .foregroundStyle(Nord.auroraGreen)
+                Text("Preview only · no qualification receipt")
+                    .foregroundStyle(Nord.auroraYellow)
             }
             if !compact {
                 Text("\(graph.steps.count) nodes · \(graph.edges.count) connections")
@@ -5259,8 +5261,13 @@ private struct AutomationNodeInspector: View {
             inspectorContent
             Spacer(minLength: 0)
             Divider()
-            Label(isLive ? "Installed contract" : "Fixture contract passed", systemImage: "checkmark.seal.fill")
-                .foregroundStyle(Nord.auroraGreen)
+            HStack(spacing: 7) {
+                Image(systemName: isLive ? "shippingbox" : "testtube.2")
+                Text(isLive
+                    ? "Installed contract · qualification shown in Readiness"
+                    : "Synthetic fixture contract · not operational")
+            }
+            .foregroundStyle(isLive ? Nord.frost1 : Nord.auroraYellow)
             Label(isLive ? "Bindings and authority are managed in Readiness" : "No live connections", systemImage: "network.slash")
                 .foregroundStyle(.secondary)
         }
