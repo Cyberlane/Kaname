@@ -4,11 +4,15 @@ import KanameDomain
 public enum NativeConversationDriver: String, Codable, CaseIterable, Sendable {
     case claude
     case openCode
+    case cursor
+    case grok
 
     public init?(providerName: String) {
         switch providerName.lowercased() {
         case "claude": self = .claude
         case "opencode", "open code": self = .openCode
+        case "cursor", "cursoragent", "cursor-agent", "cursor agent": self = .cursor
+        case "grok", "grokbuild", "grok build": self = .grok
         default: return nil
         }
     }
@@ -17,6 +21,17 @@ public enum NativeConversationDriver: String, Codable, CaseIterable, Sendable {
         switch self {
         case .claude: "Claude"
         case .openCode: "OpenCode"
+        case .cursor: "Cursor"
+        case .grok: "Grok"
+        }
+    }
+
+    public var executableName: String {
+        switch self {
+        case .claude: "claude"
+        case .openCode: "opencode"
+        case .cursor: "cursor-agent"
+        case .grok: "grok"
         }
     }
 }
@@ -80,7 +95,7 @@ public actor NativeProviderConversationSession {
         _ request: NativeConversationRequest,
         continuation: AsyncStream<CodexRunEvent>.Continuation
     ) async {
-        let command = request.driver == .claude ? "claude" : "opencode"
+        let command = ProviderExecutableLocator.resolveNativeConversationExecutable(for: request.driver)
         do {
             let arguments = Self.arguments(for: request)
             let child = try LocalProcess.start(
@@ -197,6 +212,59 @@ public actor NativeProviderConversationSession {
             for path in request.attachmentPaths { arguments += ["--file", path] }
             arguments.append(request.prompt)
             return arguments
+        case .cursor:
+            var arguments = [
+                "--print",
+                "--output-format", "stream-json",
+                "--stream-partial-output",
+                "--workspace", request.workspace.path,
+            ]
+            switch request.runtimeMode {
+            case .approvalRequired:
+                arguments += ["--mode", "plan"]
+            case .autoAcceptEdits, .auto:
+                break
+            case .fullAccess:
+                arguments += ["--force"]
+            }
+            if !request.networkAccess {
+                arguments += ["--sandbox", "enabled"]
+            }
+            if let model = request.model, !model.isEmpty, model != "Use provider default" {
+                arguments += ["--model", model]
+            }
+            if let sessionID = request.resumableSessionID {
+                arguments += ["--resume", sessionID]
+            }
+            let attachmentContext = request.attachmentPaths.enumerated().map { index, path in
+                "Image \(index + 1): `\(path)`"
+            }.joined(separator: "\n")
+            arguments.append(
+                attachmentContext.isEmpty
+                    ? request.prompt
+                    : [request.prompt, "Attached images:", attachmentContext].filter { !$0.isEmpty }.joined(separator: "\n\n")
+            )
+            return arguments
+        case .grok:
+            var arguments = [
+                "--single", request.prompt,
+                "--output-format", "streaming-messages-json",
+                "--cwd", request.workspace.path,
+                "--disable-web-search",
+            ]
+            switch request.runtimeMode {
+            case .approvalRequired, .autoAcceptEdits:
+                break
+            case .auto, .fullAccess:
+                arguments.append("--always-approve")
+            }
+            if let model = request.model, !model.isEmpty, model != "Use provider default" {
+                arguments += ["--model", model]
+            }
+            if let sessionID = request.resumableSessionID {
+                arguments += ["--resume", sessionID]
+            }
+            return arguments
         }
     }
 
@@ -267,7 +335,7 @@ struct NativeProviderStreamParser {
         var events: [CodexRunEvent] = []
 
         switch driver {
-        case .claude:
+        case .claude, .cursor, .grok:
             let delta = (object["event"] as? [String: Any])?["delta"] as? [String: Any]
             if let text = delta?["text"] as? String, !text.isEmpty {
                 sawTextDelta = true
@@ -276,16 +344,22 @@ struct NativeProviderStreamParser {
                 for text in contentTexts(in: object) where !text.isEmpty {
                     events.append(event(.messageDelta, nativeType: nativeType, text: text, payload: retained, truncated: truncated))
                 }
-            } else if nativeType == "result", !sawTextDelta,
-                      let text = object["result"] as? String, !text.isEmpty {
+            } else if ["result", "message"].contains(nativeType), !sawTextDelta,
+                      let text = object["result"] as? String ?? object["text"] as? String, !text.isEmpty {
                 events.append(event(.messageDelta, nativeType: nativeType, text: text, payload: retained, truncated: truncated))
             }
             for tool in toolNames(in: object) {
                 events.append(event(.toolActivity, nativeType: nativeType, text: tool, payload: retained, truncated: truncated))
             }
-            if nativeType == "system", sessionID != nil, !emittedSessionStarted {
+            if ["system", "session_update", "stream_event"].contains(nativeType), sessionID != nil, !emittedSessionStarted {
                 emittedSessionStarted = true
-                events.append(event(.sessionStarted, nativeType: nativeType, text: "Claude session reconciled.", payload: retained, truncated: truncated))
+                events.append(event(
+                    .sessionStarted,
+                    nativeType: nativeType,
+                    text: "\(driver.displayName) session reconciled.",
+                    payload: retained,
+                    truncated: truncated
+                ))
             }
         case .openCode:
             if let text = openCodeText(in: object), !text.isEmpty {

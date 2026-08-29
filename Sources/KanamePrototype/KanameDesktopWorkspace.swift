@@ -3426,7 +3426,7 @@ private struct DesktopThreadConversation: View {
     }
 
     private func attachTerminalExcerpt(_ terminal: DesktopCodingTerminalRecord) {
-        let service = DesktopCodingTerminalService()
+        let service = DesktopCodingTerminalService.shared
         _Concurrency.Task {
             guard let source = await service.attachContextSource(from: terminal) else { return }
             let attachment = """
@@ -3994,6 +3994,8 @@ private struct DesktopThreadChangesView: View {
     let isAwaitingReview: Bool
     let beginReview: () -> Void
     @StateObject private var changes = DesktopThreadChangesViewModel()
+    @StateObject private var codingControl = DesktopCodingControlViewModel()
+    @State private var revertMessage: String?
 
     private var worktree: DesktopWorktreeRecord? {
         model.snapshot.operations.worktrees
@@ -4076,6 +4078,17 @@ private struct DesktopThreadChangesView: View {
                                 }
                                 .controlSize(.small)
                                 .disabled(!checkpoint.hasAfterBracket || worktree.state == .accepted)
+                                Button("Execute approved revert") {
+                                    codingControl.executeCheckpointRevert(
+                                        model: model,
+                                        worktree: worktree,
+                                        checkpoint: checkpoint
+                                    )
+                                    revertMessage = codingControl.message
+                                    changes.load(worktree: worktree, force: true)
+                                }
+                                .controlSize(.small)
+                                .disabled(!checkpoint.hasAfterBracket || worktree.state == .accepted)
                             }
                         }
                     }
@@ -4083,6 +4096,13 @@ private struct DesktopThreadChangesView: View {
                     .padding(.vertical, 8)
                 }
                 .padding(.horizontal, 16)
+                if let revertMessage {
+                    Text(revertMessage)
+                        .font(.caption2)
+                        .foregroundStyle(Nord.auroraYellow)
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 6)
+                }
                 Divider()
             }
 
@@ -4765,7 +4785,7 @@ private struct DesktopConversationRuntimeSheet: View {
 }
 
 private enum ConversationRuntimeCatalog {
-    static let providers = ["Codex", "Claude", "OpenCode"]
+    static let providers = ["Codex", "Claude", "OpenCode", "Cursor", "Grok"]
 
     static func snapshot(
         for provider: String,
@@ -4775,6 +4795,8 @@ private enum ConversationRuntimeCatalog {
         case "codex": .codex
         case "claude": .claudeAgent
         case "opencode", "open code": .openCode
+        case "cursor", "cursor-agent", "cursor agent": .cursorAgent
+        case "grok", "grok build": .grokBuild
         default: nil
         }
         return capabilities.first { $0.instance.driver == driver }
@@ -12991,8 +13013,8 @@ private struct DesktopSettingsShell: View {
             .init(name: "Codex", driver: .codex, symbol: "terminal.fill", tint: Nord.frost1, detail: "OpenAI coding sessions, models, and skills"),
             .init(name: "Claude", driver: .claudeAgent, symbol: "sparkles", tint: .orange, detail: "Claude Code sessions and models"),
             .init(name: "OpenCode", driver: .openCode, symbol: "chevron.left.forwardslash.chevron.right", tint: .purple, detail: "OpenCode sessions and upstream providers"),
-            .init(name: "Cursor", driver: .cursorAgent, symbol: "cursorarrow.rays", tint: Nord.frost0, detail: "Cursor CLI probe; session adapter deferred"),
-            .init(name: "Grok", driver: .grokBuild, symbol: "bolt.fill", tint: Nord.auroraYellow, detail: "Grok Build CLI probe; session adapter deferred"),
+            .init(name: "Cursor", driver: .cursorAgent, symbol: "cursorarrow.rays", tint: Nord.frost0, detail: "Cursor CLI print + stream-json conversation sessions"),
+            .init(name: "Grok", driver: .grokBuild, symbol: "bolt.fill", tint: Nord.auroraYellow, detail: "Grok Build headless --single conversation sessions"),
         ]
     }
 

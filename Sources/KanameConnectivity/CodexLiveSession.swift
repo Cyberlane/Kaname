@@ -61,6 +61,9 @@ public struct CodexLiveSessionConfiguration: Sendable {
     public let codexHome: URL?
     public let persistentSessionDirectory: URL?
     public let launchArguments: [String]
+    /// When true and an inbox `coding.preview_mcp_grant` was validated by the
+    /// caller, Kaname injects only the curated `kaname-preview` MCP bridge.
+    public let curatedPreviewMCPGranted: Bool
 
     public init(
         instance: ProviderInstance,
@@ -69,13 +72,16 @@ public struct CodexLiveSessionConfiguration: Sendable {
         timeout: Duration = .seconds(20),
         codexHome: URL? = nil,
         persistentSessionDirectory: URL? = nil,
-        launchArguments: [String] = []
+        launchArguments: [String] = [],
+        curatedPreviewMCPGranted: Bool = false
     ) {
         (self.instance, self.executable) = (instance, executable)
         self.workspaceURL = workspaceURL.standardizedFileURL
         (self.timeout, self.codexHome) = (timeout, codexHome)
         self.persistentSessionDirectory = persistentSessionDirectory?.standardizedFileURL
         self.launchArguments = launchArguments
+        self.curatedPreviewMCPGranted = curatedPreviewMCPGranted
+            && CodexMCPIsolation.allowsCuratedPreviewMCP(hasPreviewGrant: curatedPreviewMCPGranted)
     }
 }
 
@@ -401,6 +407,8 @@ public actor CodexLiveSession {
     private var outputStreamOverflowed = false
     private var observedUnsafeMCPActivity = false
     private var ephemeralCodexHome: CodexEphemeralHome?
+    private var previewMCPServer: KanamePreviewMCPHTTPServer?
+    private var allowedMCPServerNames: Set<String> = []
 
     public init(configuration: CodexLiveSessionConfiguration) {
         self.configuration = configuration
@@ -448,12 +456,20 @@ public actor CodexLiveSession {
         ephemeralCodexHome = isolatedHome
 
         do {
+            var curatedBinding: KanamePreviewMCPHTTPServer.Binding?
+            if configuration.curatedPreviewMCPGranted {
+                let server = KanamePreviewMCPHTTPServer()
+                curatedBinding = try await server.start()
+                previewMCPServer = server
+                allowedMCPServerNames = [CodingPreviewMCPGrant.curatedServerName]
+            }
             let launchArguments = try await CodexMCPIsolation.launchArguments(
                 executable: configuration.executable,
                 workingDirectory: configuration.workspaceURL,
                 timeout: configuration.timeout,
                 codexHome: isolatedHome.url,
-                baseArguments: configuration.launchArguments
+                baseArguments: configuration.launchArguments,
+                curatedPreview: curatedBinding
             )
             let processConfiguration = ProviderProbeConfiguration(
                 instance: configuration.instance,
@@ -461,7 +477,12 @@ public actor CodexLiveSession {
                 workingDirectory: configuration.workspaceURL,
                 timeout: configuration.timeout,
                 codexHome: isolatedHome.url,
-                codexLaunchArguments: launchArguments
+                codexLaunchArguments: launchArguments,
+                environmentOverrides: CodexMCPIsolation.curatedPreviewEnvironment(
+                    home: isolatedHome.url,
+                    binding: curatedBinding
+                ),
+                allowedMCPServerNames: allowedMCPServerNames
             )
             let startedConnection = try await CodexAppServerConnection.start(configuration: processConfiguration)
             connection = startedConnection
@@ -618,11 +639,15 @@ public actor CodexLiveSession {
         }
         let isolatedHome = ephemeralCodexHome
         ephemeralCodexHome = nil
+        let previewServer = previewMCPServer
+        previewMCPServer = nil
+        allowedMCPServerNames = []
         for continuation in continuations.values {
             continuation.finish()
         }
         continuations.removeAll()
         try? isolatedHome?.cleanup()
+        await previewServer?.stop()
     }
 
     static func threadStartParameters(

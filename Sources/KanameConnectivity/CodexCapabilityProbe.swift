@@ -87,13 +87,16 @@ actor CodexAppServerConnection {
     private var closed = false
     private var messageStreamOverflowed = false
     private var unsafeMCPStartupObserved = false
+    private let allowedMCPServerNames: Set<String>
 
-    init(process: RunningLocalProcess) {
+    init(process: RunningLocalProcess, allowedMCPServerNames: Set<String> = []) {
         self.process = process
+        self.allowedMCPServerNames = allowedMCPServerNames
     }
 
     static func start(configuration: ProviderProbeConfiguration) async throws -> CodexAppServerConnection {
-        let environment = processEnvironment(codexHome: configuration.codexHome)
+        var environment = processEnvironment(codexHome: configuration.codexHome)
+        environment.merge(configuration.environmentOverrides) { _, replacement in replacement }
 
         let process = try LocalProcess.start(
             executable: configuration.executable,
@@ -102,7 +105,10 @@ actor CodexAppServerConnection {
             environmentOverrides: environment,
             environmentRemovals: CodexMCPIsolation.inheritedEnvironmentRemovals()
         )
-        let connection = CodexAppServerConnection(process: process)
+        let connection = CodexAppServerConnection(
+            process: process,
+            allowedMCPServerNames: configuration.allowedMCPServerNames
+        )
         await connection.beginReading()
         return connection
     }
@@ -264,7 +270,11 @@ actor CodexAppServerConnection {
 
         if let method = message["method"] as? String {
             let parameters = Self.encodedParameters(from: message)
-            if CodexMCPIsolation.indicatesUnsafeStartup(method: method, parameters: parameters) {
+            if CodexMCPIsolation.indicatesUnsafeStartup(
+                method: method,
+                parameters: parameters,
+                allowedServerNames: allowedMCPServerNames
+            ) {
                 unsafeMCPStartupObserved = true
             }
             publish(.notification(

@@ -253,7 +253,13 @@ private enum KanameConversationWorker {
             try? await writer.append(kind: .serviceFailed, text: "\(request.provider) has no installed Kaname conversation adapter.")
             return false
         }
-        let providerKind: ProviderDriverKind = driver == .claude ? .claudeAgent : .openCode
+        let providerKind: ProviderDriverKind
+        switch driver {
+        case .claude: providerKind = .claudeAgent
+        case .openCode: providerKind = .openCode
+        case .cursor: providerKind = .cursorAgent
+        case .grok: providerKind = .grokBuild
+        }
         let provider = ProviderInstance(id: providerID, driver: providerKind, displayName: "\(driver.displayName) local")
         let runner = LocalCoreRunner(
             machService: request.localCoreMachService,
@@ -335,7 +341,8 @@ private enum KanameConversationWorker {
         return CodexLiveSession(configuration: .init(
             instance: instance,
             workspaceURL: URL(fileURLWithPath: request.workspacePath),
-            persistentSessionDirectory: URL(fileURLWithPath: request.providerStatePath)
+            persistentSessionDirectory: URL(fileURLWithPath: request.providerStatePath),
+            curatedPreviewMCPGranted: request.curatedPreviewMCPGranted
         ))
     }
 

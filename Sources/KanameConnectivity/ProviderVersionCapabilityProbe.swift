@@ -47,9 +47,9 @@ enum ProviderVersionCapabilityProbe {
             // an installed binary is authenticated.
             return "Claude CLI is available. Authentication and command inventory require the optional Claude Agent SDK handshake; no prompt was sent."
         case .cursorAgent:
-            return "Cursor CLI is available. Authentication and command inventory require a future Cursor stream-json adapter; no prompt was sent."
+            return "Cursor CLI is available. Conversation turns use print + stream-json; authentication was not probed and no prompt was sent."
         case .grokBuild:
-            return "Grok Build CLI is available. Authentication and command inventory require a future Grok stream adapter; no prompt was sent."
+            return "Grok Build CLI is available. Conversation turns use headless --single + streaming-messages-json; authentication was not probed and no prompt was sent."
         default:
             return "Provider CLI reported a version. Authentication was not probed; no prompt was sent."
         }

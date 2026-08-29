@@ -1,6 +1,6 @@
 # ADR: Desktop preview panel and curated Kaname MCP bridge
 
-Status: proposed · 2026-08-27
+Status: implemented · 2026-08-27
 
 ## Context
 

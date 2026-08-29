@@ -1,6 +1,6 @@
 # Per-turn git checkpoints — design
 
-Status: proposed · 2026-08-27
+Status: implemented · 2026-08-28
 
 ## Problem
 

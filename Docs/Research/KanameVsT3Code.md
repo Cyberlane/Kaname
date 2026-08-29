@@ -8,7 +8,7 @@ tags:
 aliases:
   - Kaname T3 comparison
 obsidian-sync: Projects/Coding ADE/Research/Kaname vs T3 Code.md
-status: proposed
+status: active-implementation
 date: 2026-08-27
 ---
 
@@ -25,7 +25,7 @@ Both products are **control-plane ADEs**: they orchestrate external provider CLI
 |---|--------|---------|
 | UI | Swift macOS desktop (primary) | Web + Electron desktop + mobile |
 | Execution | Conversation worker + Rust Local Core (Mach XPC) | Node server (`npx t3`) + Effect RPC WebSocket |
-| Providers | Codex, Claude, OpenCode | Codex, Claude, Cursor, Grok, OpenCode |
+| Providers | Codex, Claude, OpenCode, Cursor, Grok | Codex, Claude, Cursor, Grok, OpenCode |
 | State | `workspace.json` + worker queues | Event-sourced SQLite projections |
 
 **Philosophy:** Kaname optimizes authority, isolation, and a 7-stage coding workflow. T3 optimizes speed, remote multi-surface control, and git-native iteration.
@@ -47,8 +47,8 @@ Both products are **control-plane ADEs**: they orchestrate external provider CLI
 
 - Provider-native tools delegated to CLIs; Kaname streams activity and approvals
 - Local subprocess: git, rg, obsidian, gh ([`LocalProcess.swift`](../../Sources/KanameConnectivity/LocalProcess.swift))
-- **No interactive terminal** in coding threads
-- **No Kaname MCP router** for coding turns (by design)
+- **Interactive terminal** PTY host + multi-terminal + PID→preview port scan
+- **Curated Kaname preview MCP** behind `coding.preview_mcp_grant` (fail-closed default)
 
 ### Skills
 
@@ -60,7 +60,7 @@ Both products are **control-plane ADEs**: they orchestrate external provider CLI
 
 - Managed worktrees under Application Support; approval-gated lifecycle
 - Signed local commits; Mori quality gates ([`DesktopCodingControlModel.swift`](../../Sources/KanameDesktop/DesktopCodingControlModel.swift))
-- **Gap:** no per-turn checkpoint refs / revert (see [[Docs/CodingGitCheckpointsDesign.md]])
+- **Checkpoints:** per-turn hidden refs + approval-gated revert execution ([[Docs/CodingGitCheckpointsDesign.md]])
 
 ### Search
 
@@ -85,9 +85,9 @@ Source: [pingdotgg/t3code](https://github.com/pingdotgg/t3code)
 
 | Capability | Kaname | T3 | Gap |
 |------------|--------|-----|-----|
-| Coding browser | None | Desktop webview + MCP | High |
-| Terminal attach | Subprocess only | Full PTY | High |
-| Git checkpoint revert | Worktree lifecycle | Per-turn hidden refs | High |
+| Coding browser | Localhost WKWebView + curated MCP | Desktop webview + MCP | Medium |
+| Terminal attach | Interactive PTY + port scan | Full PTY | Low |
+| Git checkpoint revert | Per-turn hidden refs + approved revert | Per-turn hidden refs | Low |
 | Skills in context | Loaded (post-spike) | Claude `$` picker | Medium |
 | Remote coding | Kaname Link (early) | Mature web/mobile | High |
 | Staged workflow | 7-stage | Plan mode only | Kaname ahead |
@@ -101,6 +101,23 @@ Source: [pingdotgg/t3code](https://github.com/pingdotgg/t3code)
 3. [[Docs/CodingPreviewAndMCPBridgeADR.md]] — preview panel + curated MCP bridge
 4. [[Docs/CodingProjectScriptsSchema.md]] — project script manifest
 5. [[Docs/CodingProviderExpansionEvaluation.md]] — Cursor CLI + Grok Build probes
+
+
+## Implementation status (2026-08-28)
+
+Landed in commit `745a33b` and deferred follow-on on `kaname/task/kaname-t3-improvements`:
+
+- Skills registry loader + composer `$` picker
+- Global search FTS
+- Cursor/Grok capability probes + Settings wiring + **session adapters** (print/stream-json and `--single` turns)
+- Interactive PTY host + multi-terminal + PID→localhost preview port scan
+- Per-turn git checkpoint refs + Changes-panel **approval-gated revert execution**
+- Localhost WKWebView preview panel + curated `kaname-preview` MCP HTTP bridge (injection only with `coding.preview_mcp_grant`; fail-closed otherwise)
+- `kaname.json` project scripts schema + intake detection
+
+Known limits: PTY resize is metadata-only under `script(1)`; curated MCP tools acknowledge via broker stubs until desktop preview actions are wired end-to-end; Cursor/Grok auth is still probe-only.
+
+Repo design docs: `Docs/CodingTerminalAttachDesign.md`, `Docs/CodingGitCheckpointsDesign.md`, `Docs/CodingPreviewAndMCPBridgeADR.md`, `Docs/CodingProjectScriptsSchema.md`, `Docs/CodingProviderExpansionEvaluation.md`.
 
 ## What not to copy from T3
 

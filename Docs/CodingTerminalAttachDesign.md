@@ -1,6 +1,6 @@
 # Coding terminal attach — design
 
-Status: proposed · 2026-08-27
+Status: implemented · 2026-08-27
 
 ## Problem
 

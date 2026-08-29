@@ -524,6 +524,17 @@ final class DesktopConversationRuntime: ObservableObject {
             )
             return
         }
+        let previewGrant = model.snapshot.operations.approvals.contains { approval in
+            CodingPreviewMCPGrant.matchesApprovedGrant(
+                title: approval.title,
+                exactTarget: approval.exactTarget,
+                threadID: approval.threadID,
+                isApproved: approval.state == .approved,
+                expiresAtUnixMillis: approval.expiresAtUnixMillis,
+                expectedThreadID: threadID,
+                worktreePath: workspace.path
+            )
+        }
         let request = KanameConversationServiceRequest(
             runID: run.id,
             threadID: threadID,
@@ -550,6 +561,7 @@ final class DesktopConversationRuntime: ObservableObject {
             localCoreRequirement: requirement,
             workspaceAuthorization: authorization,
             isCodingPlan: run.purpose == .codingPlan,
+            curatedPreviewMCPGranted: previewGrant && run.purpose == .codingImplementation,
             createdAtUnixMillis: run.startedAtUnixMillis
         )
         var queuedRequestURL: URL?
@@ -1532,7 +1544,7 @@ final class DesktopConversationRuntime: ObservableObject {
     }
 
     static func supportsImageAttachments(provider: String) -> Bool {
-        ["codex", "claude", "opencode", "open code"].contains(provider.lowercased())
+        ["codex", "claude", "opencode", "open code", "cursor", "grok"].contains(provider.lowercased())
     }
 
     private func prepareStandaloneWorkspace() throws -> URL {

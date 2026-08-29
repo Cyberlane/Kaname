@@ -1,6 +1,6 @@
 # Provider expansion evaluation: Cursor CLI and Grok Build
 
-Status: proposed · 2026-08-27 · **Probes implemented**
+Status: implemented · 2026-08-27 · **Probes + session adapters**
 
 ## Summary
 
