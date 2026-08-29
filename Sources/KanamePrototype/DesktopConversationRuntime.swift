@@ -76,10 +76,7 @@ final class DesktopConversationRuntime: ObservableObject {
         nativeTurnByRunID = model.snapshot.operations.providerRuns.reduce(into: [:]) { result, run in
             if let nativeTurnID = run.nativeTurnID { result[run.id] = nativeTurnID }
         }
-        pollCandidateThreadIDs = Set(model.snapshot.operations.providerRuns.compactMap { run in
-            guard run.state == .proposed || run.state == .running else { return nil }
-            return run.threadID
-        })
+        pollCandidateThreadIDs = model.providerActivityThreadIDsRequiringPolling
         runningRunIDByThread = model.snapshot.operations.providerRuns.reduce(into: [:]) { result, run in
             if run.state == .running, let threadID = run.threadID { result[threadID] = run.id }
         }
@@ -791,7 +788,10 @@ final class DesktopConversationRuntime: ObservableObject {
                 } else {
                     setThreadActive(threadID, active: false)
                     reconcileOrphanedRun(threadID: threadID, runningRunID: cycleState.runningRunIDs[threadID])
-                    if runningRunIDByThread[threadID] == nil { pollCandidateThreadIDs.remove(threadID) }
+                    if runningRunIDByThread[threadID] == nil,
+                       !model.hasActiveSubagents(threadID: threadID) {
+                        pollCandidateThreadIDs.remove(threadID)
+                    }
                 }
             }
             reconcilePersistedTitlesOnce()
@@ -807,8 +807,10 @@ final class DesktopConversationRuntime: ObservableObject {
     }
 
     private func prepare(_ serviceEvent: KanameConversationServiceEvent) -> PreparedServiceEvent? {
+        guard let run = model.providerRun(id: serviceEvent.runID),
+              run.threadID == serviceEvent.threadID else { return nil }
         if serviceEvent.kind == .serviceStarted {
-            if model.providerRun(id: serviceEvent.runID)?.state == .proposed {
+            if run.state == .proposed {
                 let running = model.beginProviderRun(id: serviceEvent.runID)
                 guard model.persistenceError == nil else { return nil }
                 if running?.state == .running { runningRunIDByThread[serviceEvent.threadID] = serviceEvent.runID }
@@ -820,6 +822,7 @@ final class DesktopConversationRuntime: ObservableObject {
                 id: serviceEvent.id,
                 threadID: serviceEvent.threadID,
                 runID: serviceEvent.runID,
+                turnID: model.providerRun(id: serviceEvent.runID)?.turnID,
                 kind: .error,
                 title: "Provider stopped",
                 detail: serviceEvent.text ?? "The durable provider worker stopped safely.",
@@ -848,6 +851,8 @@ final class DesktopConversationRuntime: ObservableObject {
             threadID: serviceEvent.nativeThreadID,
             turnID: serviceEvent.nativeTurnID,
             approvalID: serviceEvent.approvalID,
+            toolObservation: serviceEvent.toolObservation,
+            agentActivity: serviceEvent.agentActivity,
             text: serviceEvent.text,
             payload: serviceEvent.rawPayloadBase64.flatMap { Data(base64Encoded: $0) },
             payloadWasTruncated: serviceEvent.payloadWasTruncated
@@ -896,21 +901,22 @@ final class DesktopConversationRuntime: ObservableObject {
             model.addProviderPlan(threadID: serviceEvent.threadID, text: text, completed: false)
             guard model.persistenceError == nil else { return false }
         }
-        if event.kind == .toolActivity,
-           let text = event.text,
-           ["agent", "subagent", "task", "spawn"].contains(where: {
-               text.localizedCaseInsensitiveContains($0) || event.nativeType.localizedCaseInsensitiveContains($0)
-           }) {
-            let terminal = event.nativeType.localizedCaseInsensitiveContains("completed")
-                || event.nativeType.localizedCaseInsensitiveContains("finished")
+        if let activity = event.agentActivity {
+            let subagentState: DesktopSubagentState = switch activity.activity {
+            case .started, .interacted: .running
+            case .completed: .completed
+            case .failed: .failed
+            case .interrupted: .interrupted
+            }
             model.recordSubagentActivity(
                 threadID: serviceEvent.threadID,
                 runID: serviceEvent.runID,
                 provider: providerName(runID: serviceEvent.runID),
-                nativeID: event.approvalID ?? event.nativeType,
-                title: text,
-                detail: event.nativeType,
-                state: terminal ? .completed : .running
+                nativeID: activity.agentID,
+                parentNativeID: activity.parentAgentID,
+                title: activity.agentPath ?? activity.taskType ?? "Provider subagent",
+                detail: "\(activity.activity.rawValue) · \(event.nativeType)",
+                state: subagentState
             )
             guard model.persistenceError == nil else { return false }
         }
@@ -977,22 +983,30 @@ final class DesktopConversationRuntime: ObservableObject {
     }
 
     private func reconcileOrphanedRun(threadID: String, runningRunID: String?) {
-        guard let runningRunID else {
+        let currentRunningRunID = runningRunID.flatMap { runID in
+            model.providerRun(id: runID)?.state == .running ? runID : nil
+        }
+        guard currentRunningRunID != nil || model.hasActiveSubagents(threadID: threadID) else {
             orphanChecks[threadID] = 0
             return
         }
         let count = (orphanChecks[threadID] ?? 0) + 1
         orphanChecks[threadID] = count
         if count >= pollingPolicy.orphanedRunCheckCount {
-            model.stopProviderRun(
-                id: runningRunID,
-                interrupted: true,
-                error: "The durable provider worker stopped before completion. Retry reuses the saved user message."
-            )
-            if model.providerRun(id: runningRunID)?.purpose == .codingImplementation {
-                scheduleImplementationCheckpointAfter(runID: runningRunID, threadID: threadID)
+            if let currentRunningRunID {
+                let runPurpose = model.providerRun(id: currentRunningRunID)?.purpose
+                model.stopProviderRun(
+                    id: currentRunningRunID,
+                    interrupted: true,
+                    error: "The durable provider worker stopped before completion. Retry reuses the saved user message."
+                )
+                guard model.persistenceError == nil else { return }
+                if runPurpose == .codingImplementation {
+                    scheduleImplementationCheckpointAfter(runID: currentRunningRunID, threadID: threadID)
+                }
             }
-            if model.persistenceError == nil { runningRunIDByThread.removeValue(forKey: threadID) }
+            guard model.recoverOrphanedSubagents(threadID: threadID) else { return }
+            runningRunIDByThread.removeValue(forKey: threadID)
             orphanChecks[threadID] = 0
         }
     }
@@ -1641,6 +1655,7 @@ final class DesktopConversationRuntime: ObservableObject {
             id: id,
             threadID: threadID,
             runID: runID,
+            turnID: model.providerRun(id: runID)?.turnID,
             kind: presentation.kind,
             title: presentation.title,
             detail: String((event.text ?? presentation.detail).prefix(65_536)),
@@ -1648,6 +1663,8 @@ final class DesktopConversationRuntime: ObservableObject {
             nativeThreadID: event.threadID,
             nativeTurnID: event.turnID,
             approvalID: event.approvalID,
+            toolObservation: event.toolObservation,
+            agentActivity: event.agentActivity,
             // Raw provider evidence is sealed separately by the worker. The
             // workspace needs payload bytes only while a question can still be
             // answered after its service event has been acknowledged.
@@ -1684,7 +1701,22 @@ final class DesktopConversationRuntime: ObservableObject {
         case .runFailed: (.error, "Provider stopped", "Inspect the failure and retry without duplicating the message.")
         case .messageDelta: (.assistantText, "Response", "Streaming assistant text")
         case .planUpdated: (.reasoning, "Plan updated", "The provider updated its working plan.")
-        case .toolActivity: (.tool, "Tool activity", event.nativeType)
+        case .toolActivity:
+            if let activity = event.agentActivity {
+                (
+                    .tool,
+                    "Subagent \(activity.activity.rawValue)",
+                    activity.agentPath ?? activity.taskType ?? event.nativeType
+                )
+            } else if let tool = event.toolObservation {
+                (
+                    .tool,
+                    tool.name ?? tool.kind.rawValue,
+                    "\(tool.state.rawValue) · \(event.nativeType)"
+                )
+            } else {
+                (.tool, "Tool activity", event.nativeType)
+            }
         case .diffUpdated: (.diff, "Diff updated", "A file-change proposal was observed; no write authority was granted.")
         case .approvalRequested: (.approval, "Approval requested", "Kaname declined the provider request because this turn has no durable write grant.")
         case .approvalAccepted: (.approval, "Approval accepted", "A durable approval was applied.")

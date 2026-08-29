@@ -96,6 +96,357 @@ struct CodexLiveSessionTests {
     }
 
     @Test
+    func codexItemsPreserveToolCallIdentityKindAndLifecycle() throws {
+        let started = try notification(
+            method: "item/started",
+            parameters: [
+                "threadId": "thread-tools",
+                "turnId": "turn-tools",
+                "item": [
+                    "id": "call-command-1",
+                    "type": "commandExecution",
+                    "status": "inProgress",
+                    "command": "private command stays in raw evidence",
+                ],
+            ]
+        )
+        let completed = try notification(
+            method: "item/completed",
+            parameters: [
+                "threadId": "thread-tools",
+                "turnId": "turn-tools",
+                "item": [
+                    "id": "call-command-1",
+                    "type": "commandExecution",
+                    "status": "completed",
+                ],
+            ]
+        )
+
+        #expect(started.kind == .toolActivity)
+        #expect(started.toolObservation?.callID == "call-command-1")
+        #expect(started.toolObservation?.kind == .commandExecution)
+        #expect(started.toolObservation?.state == .running)
+        #expect(started.toolObservation?.name == "Command")
+        #expect(completed.toolObservation?.callID == started.toolObservation?.callID)
+        #expect(completed.toolObservation?.state == .completed)
+        #expect(completed.toolObservation?.name == "Command")
+    }
+
+    @Test
+    func codexSubagentActivityUsesTypedNativeIdentityWithoutTextGuessing() throws {
+        let startedEnvelope = try notification(
+            method: "item/started",
+            parameters: [
+                "threadId": "thread-parent",
+                "turnId": "turn-parent",
+                "item": [
+                    "id": "activity-1",
+                    "type": "subAgentActivity",
+                    "kind": "completed",
+                    "agentThreadId": "thread-child",
+                ],
+            ]
+        )
+        let activity = try notification(
+            method: "item/completed",
+            parameters: [
+                "threadId": "thread-parent",
+                "turnId": "turn-parent",
+                "item": [
+                    "id": "activity-1",
+                    "type": "subAgentActivity",
+                    "kind": "completed",
+                    "agentThreadId": "thread-child",
+                    "agentPath": "/root/reviewer",
+                ],
+            ]
+        )
+
+        #expect(startedEnvelope.agentActivity == nil)
+        #expect(activity.kind == .toolActivity)
+        #expect(activity.toolObservation == nil)
+        #expect(activity.agentActivity?.agentID == "thread-child")
+        #expect(activity.agentActivity?.activity == .completed)
+        #expect(activity.agentActivity?.agentPath == "/root/reviewer")
+        #expect(activity.agentActivity?.sourceToolCallID == "activity-1")
+    }
+
+    @Test
+    func onlyCollaborationSpawnCreatesAnAgentObservation() throws {
+        let send = try notification(
+            method: "item/completed",
+            parameters: [
+                "item": [
+                    "id": "call-send",
+                    "type": "collabToolCall",
+                    "tool": "sendMessage",
+                    "status": "completed",
+                    "receiverThreadId": "thread-existing",
+                ],
+            ]
+        )
+        let spawn = try notification(
+            method: "item/completed",
+            parameters: [
+                "threadId": "thread-root",
+                "item": [
+                    "id": "call-spawn",
+                    "type": "collabToolCall",
+                    "tool": "spawnAgent",
+                    "status": "completed",
+                    "senderThreadId": "thread-root",
+                    "newThreadId": "thread-new",
+                ],
+            ]
+        )
+        let nestedSpawn = try notification(
+            method: "item/completed",
+            parameters: [
+                "threadId": "thread-root",
+                "item": [
+                    "id": "call-nested-spawn",
+                    "type": "collabToolCall",
+                    "tool": "spawnAgent",
+                    "status": "completed",
+                    "senderThreadId": "thread-parent-agent",
+                    "newThreadId": "thread-nested-agent",
+                ],
+            ]
+        )
+
+        #expect(send.toolObservation?.kind == .collaboration)
+        #expect(send.agentActivity == nil)
+        #expect(spawn.agentActivity?.agentID == "thread-new")
+        #expect(spawn.agentActivity?.activity == .started)
+        #expect(spawn.agentActivity?.parentAgentID == nil)
+        #expect(spawn.agentActivity?.sourceToolCallID == "call-spawn")
+        #expect(nestedSpawn.agentActivity?.agentID == "thread-nested-agent")
+        #expect(nestedSpawn.agentActivity?.parentAgentID == "thread-parent-agent")
+    }
+
+    @Test
+    func sessionRouteTableKeepsLateChildCompletionOnItsOriginalRun() throws {
+        var routes = CodexRunEventRouteTable()
+        try routes.register(runID: "run-one")
+        let firstStarted = CodexRunEvent(
+            kind: .runStarted,
+            nativeType: "turn/started",
+            turnID: "native-turn-one"
+        )
+        #expect(try routes.route(firstStarted) == "run-one")
+        routes.observe(firstStarted, routedTo: "run-one")
+
+        let childStarted = CodexRunEvent(
+            kind: .toolActivity,
+            nativeType: "item/completed",
+            turnID: "native-turn-one",
+            agentActivity: ProviderAgentActivity(
+                agentID: "child-one",
+                parentAgentID: "parent-one",
+                activity: .started,
+                agentPath: "/root/child-one",
+                sourceToolCallID: "call-child-one"
+            )
+        )
+        #expect(try routes.route(childStarted) == "run-one")
+        routes.observe(childStarted, routedTo: "run-one")
+        #expect(routes.hasOutstandingAgentActivity)
+        #expect(routes.runIDsWithOutstandingAgentActivity == ["run-one"])
+        let trackedChild = try #require(childStarted.agentActivity)
+        #expect(routes.outstandingAgentActivities(for: "run-one") == [trackedChild])
+
+        let firstCompleted = CodexRunEvent(
+            kind: .providerCompleted,
+            nativeType: "turn/completed",
+            turnID: "native-turn-one"
+        )
+        #expect(try routes.route(firstCompleted) == "run-one")
+        routes.observe(firstCompleted, routedTo: "run-one")
+        #expect(routes.hasOutstandingAgentActivity)
+
+        try routes.register(runID: "run-two")
+        let secondStarted = CodexRunEvent(
+            kind: .runStarted,
+            nativeType: "turn/started",
+            turnID: "native-turn-two"
+        )
+        #expect(try routes.route(secondStarted) == "run-two")
+        routes.observe(secondStarted, routedTo: "run-two")
+
+        let lateChildCompletion = CodexRunEvent(
+            kind: .toolActivity,
+            nativeType: "item/completed",
+            turnID: "native-turn-one",
+            agentActivity: ProviderAgentActivity(agentID: "child-one", activity: .completed)
+        )
+        #expect(try routes.route(lateChildCompletion) == "run-one")
+        routes.observe(lateChildCompletion, routedTo: "run-one")
+        #expect(!routes.hasOutstandingAgentActivity)
+    }
+
+    @Test
+    func sequentialRunsKeepDistinctImmutableControlTargets() throws {
+        var routes = CodexRunEventRouteTable()
+        try routes.register(runID: "run-one")
+        try routes.bind(
+            runID: "run-one",
+            nativeThreadID: "native-thread",
+            nativeTurnID: "native-turn-one"
+        )
+        routes.observe(
+            CodexRunEvent(kind: .providerCompleted, nativeType: "turn/completed"),
+            routedTo: "run-one"
+        )
+
+        try routes.register(runID: "run-two")
+        try routes.bind(
+            runID: "run-two",
+            nativeThreadID: "native-thread",
+            nativeTurnID: "native-turn-two"
+        )
+
+        #expect(routes.controlTarget(for: "run-one") == CodexRunControlTarget(
+            nativeThreadID: "native-thread",
+            nativeTurnID: "native-turn-one"
+        ))
+        #expect(routes.controlTarget(for: "run-two") == CodexRunControlTarget(
+            nativeThreadID: "native-thread",
+            nativeTurnID: "native-turn-two"
+        ))
+        #expect(throws: CodexRunEventRouteError.nativeTurnAlreadyBound) {
+            try routes.bind(
+                runID: "run-one",
+                nativeThreadID: "native-thread",
+                nativeTurnID: "native-turn-two"
+            )
+        }
+    }
+
+    @Test
+    func targetedInterruptUsesOriginalTurnAndUnexpectedExitFinishesEventStream() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "kaname-codex-control-fixture-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let workspace = root.appending(path: "workspace", directoryHint: .isDirectory)
+        let codexHome = root.appending(path: "codex-home", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: codexHome, withIntermediateDirectories: true)
+        try Data("test-only-authentication".utf8).write(to: codexHome.appending(path: "auth.json"))
+        let executable = try makeCodexControlFixture(in: root)
+        let interruptCapture = URL(fileURLWithPath: executable.path + ".interrupt.json")
+        let session = CodexLiveSession(configuration: CodexLiveSessionConfiguration(
+            instance: codexInstance(),
+            executable: executable.path,
+            workspaceURL: workspace,
+            timeout: .seconds(8),
+            codexHome: codexHome
+        ))
+        let stream = await session.events()
+        let collector = _Concurrency.Task { () -> [CodexRunEvent] in
+            var events: [CodexRunEvent] = []
+            for await event in stream { events.append(event) }
+            return events
+        }
+
+        do {
+            let request = CodexCodingRequest(prompt: "exercise targeted controls")
+            let firstRun = try await session.start(request)
+            let secondRun = try await continueRunAfterTerminal(session: session, request: request)
+            #expect(firstRun.nativeTurnID == "native-turn-one")
+            #expect(secondRun.nativeTurnID == "native-turn-two")
+
+            try await session.interrupt(CodexRunControlTarget(
+                nativeThreadID: firstRun.nativeThreadID,
+                nativeTurnID: firstRun.nativeTurnID
+            ))
+
+            let interruptData = try Data(contentsOf: interruptCapture)
+            let interruptObject = try #require(
+                JSONSerialization.jsonObject(with: interruptData) as? [String: Any]
+            )
+            let interruptParameters = try #require(interruptObject["params"] as? [String: Any])
+            #expect(interruptObject["method"] as? String == "turn/interrupt")
+            #expect(interruptParameters["threadId"] as? String == firstRun.nativeThreadID)
+            #expect(interruptParameters["turnId"] as? String == firstRun.nativeTurnID)
+            #expect(interruptParameters["turnId"] as? String != secondRun.nativeTurnID)
+
+            let events = try await collectedEvents(from: collector, timeout: .seconds(5))
+            #expect(events.contains { event in
+                event.agentActivity?.agentID == "native-child-one"
+                    && event.agentActivity?.activity == .started
+            })
+            #expect(events.filter { $0.kind == .providerCompleted }.count == 2)
+            #expect(events.contains {
+                $0.kind == .runFailed && $0.nativeType == "codex-app-server/exited"
+            })
+        } catch {
+            collector.cancel()
+            await session.close()
+            throw error
+        }
+        await session.close()
+    }
+
+    @Test
+    func agentLedgerPreservesIdentityAndSettlesUnknownChildrenWithoutInventingSuccess() throws {
+        var ledger = ProviderAgentActivityLedger()
+        ledger.observe(ProviderAgentActivity(
+            agentID: "child-two",
+            parentAgentID: "parent-two",
+            activity: .started,
+            agentPath: "/root/child-two",
+            taskType: "review",
+            sourceToolCallID: "call-child-two"
+        ))
+        ledger.observe(ProviderAgentActivity(
+            agentID: "child-one",
+            activity: .started,
+            taskType: "research"
+        ))
+
+        let settlements = ledger.settlementActivities(as: .interrupted)
+        #expect(settlements.map(\.agentID) == ["child-one", "child-two"])
+        #expect(settlements.allSatisfy { $0.activity == .interrupted })
+        let childTwo = try #require(settlements.last)
+        #expect(childTwo.parentAgentID == "parent-two")
+        #expect(childTwo.agentPath == "/root/child-two")
+        #expect(childTwo.taskType == "review")
+        #expect(childTwo.sourceToolCallID == "call-child-two")
+        #expect(ledger.hasOutstandingActivity)
+
+        for settlement in settlements { ledger.observe(settlement) }
+        #expect(!ledger.hasOutstandingActivity)
+        #expect(ledger.outstandingActivities.isEmpty)
+    }
+
+    @Test
+    func failedParentTurnRetainsChildrenUntilTypedInterruptionIsPersisted() throws {
+        var routes = CodexRunEventRouteTable()
+        try routes.register(runID: "run-failed")
+        let child = ProviderAgentActivity(agentID: "child-failed", activity: .started)
+        routes.observe(
+            CodexRunEvent(kind: .toolActivity, nativeType: "item/completed", agentActivity: child),
+            routedTo: "run-failed"
+        )
+        routes.observe(
+            CodexRunEvent(kind: .runFailed, nativeType: "turn/completed"),
+            routedTo: "run-failed"
+        )
+
+        #expect(routes.outstandingAgentActivities(for: "run-failed") == [child])
+        routes.observe(
+            CodexRunEvent(
+                kind: .toolActivity,
+                nativeType: "kaname/turn-ended",
+                agentActivity: ProviderAgentActivity(agentID: "child-failed", activity: .interrupted)
+            ),
+            routedTo: "run-failed"
+        )
+        #expect(!routes.hasOutstandingAgentActivity)
+    }
+
+    @Test
     func initializeHandshakeIsOneImmediateOrderedJSONLSequence() throws {
         let data = try CodexAppServerConnection.encodedRequestSequence(
             method: "initialize",
@@ -560,6 +911,61 @@ struct CodexLiveSessionTests {
     }
 
     @Test
+    func journalEnvelopeRetainsTypedActivityMetadataAndStableCausationOnly() throws {
+        let context = CodexJournalContext(
+            projectID: KanameID(rawValue: "kaname"),
+            threadID: KanameID(rawValue: "thread-001"),
+            runID: KanameID(rawValue: "run-typed"),
+            providerInstance: codexInstance()
+        )
+        let toolEvent = CodexRunEvent(
+            kind: .toolActivity,
+            nativeType: "item/completed",
+            threadID: "native-thread",
+            turnID: "native-turn",
+            toolObservation: ProviderToolObservation(
+                callID: "call-typed",
+                kind: .collaboration,
+                state: .completed,
+                name: "private tool label"
+            ),
+            agentActivity: ProviderAgentActivity(
+                agentID: "agent-typed",
+                activity: .started,
+                agentPath: "/private/provider/path"
+            )
+        )
+        let toolEnvelope = toolEvent.journalEnvelope(
+            context: context,
+            ordinal: 9,
+            occurredAt: Date(timeIntervalSince1970: 1_762_000_000)
+        )
+        let metadata = try #require(
+            JSONSerialization.jsonObject(with: toolEnvelope.payload.value) as? [String: Any]
+        )
+
+        #expect(toolEnvelope.causationID == "call-typed")
+        #expect(metadata["toolCallID"] as? String == "call-typed")
+        #expect(metadata["toolKind"] as? String == "collaboration")
+        #expect(metadata["toolState"] as? String == "completed")
+        #expect(metadata["agentID"] as? String == "agent-typed")
+        #expect(metadata["agentActivity"] as? String == "started")
+        #expect(!String(decoding: toolEnvelope.payload.value, as: UTF8.self).contains("private tool label"))
+        #expect(!String(decoding: toolEnvelope.payload.value, as: UTF8.self).contains("/private/provider/path"))
+
+        let agentEnvelope = CodexRunEvent(
+            kind: .toolActivity,
+            nativeType: "item/completed",
+            agentActivity: ProviderAgentActivity(agentID: "agent-only", activity: .completed)
+        ).journalEnvelope(
+            context: context,
+            ordinal: 10,
+            occurredAt: Date(timeIntervalSince1970: 1_762_000_001)
+        )
+        #expect(agentEnvelope.causationID == "agent-only")
+    }
+
+    @Test
     func commandOutputBurstIsCoalescedBeforeTheBoundedConsumerStream() throws {
         var coalescer = CodexProviderEventCoalescer()
         var delivered: [CodexRunEvent] = []
@@ -584,6 +990,8 @@ struct CodexLiveSessionTests {
 
         #expect(delivered.count == 2)
         #expect(delivered[0].kind == .nativeProviderEvent)
+        #expect(delivered[0].toolObservation?.callID == "command-1")
+        #expect(delivered[0].toolObservation?.kind == .commandExecution)
         #expect(delivered[0].text == (0..<608).map { "\($0)," }.joined())
         #expect(delivered[0].payload?.split(separator: 0x0a).count == 608)
         #expect(delivered[0].payloadWasTruncated == false)
@@ -627,4 +1035,69 @@ struct CodexLiveSessionTests {
         let payload = try JSONSerialization.data(withJSONObject: parameters)
         return CodexRunEvent.from(.notification(method: method, parameters: payload))
     }
+
+    private func makeCodexControlFixture(in root: URL) throws -> URL {
+        let executable = root.appending(path: "codex-fixture")
+        let source = """
+        #!/bin/sh
+        if [ "$1" = "mcp" ]; then
+          printf '[]\n'
+          exit 0
+        fi
+        IFS= read -r initialize_request || exit 10
+        printf '{"id":1,"result":{}}\n'
+        IFS= read -r initialized_notification || exit 11
+        IFS= read -r thread_request || exit 12
+        printf '{"id":2,"result":{"thread":{"id":"native-thread"}}}\n'
+        IFS= read -r first_turn_request || exit 13
+        printf '{"id":3,"result":{"turn":{"id":"native-turn-one"}}}\n'
+        sleep 1
+        printf '{"method":"item/completed","params":{"threadId":"native-thread","turnId":"native-turn-one","item":{"id":"spawn-one","type":"collabToolCall","tool":"spawnAgent","status":"completed","senderThreadId":"native-thread","newThreadId":"native-child-one"}}}\n'
+        printf '{"method":"turn/completed","params":{"threadId":"native-thread","turn":{"id":"native-turn-one","status":"completed"}}}\n'
+        IFS= read -r second_turn_request || exit 14
+        printf '{"id":4,"result":{"turn":{"id":"native-turn-two"}}}\n'
+        IFS= read -r interrupt_request || exit 15
+        printf '%s\n' "$interrupt_request" > "$0.interrupt.json"
+        printf '{"id":5,"result":{}}\n'
+        printf '{"method":"turn/completed","params":{"threadId":"native-thread","turn":{"id":"native-turn-two","status":"completed"}}}\n'
+        sleep 1
+        """
+        try Data(source.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        return executable
+    }
+
+    private func continueRunAfterTerminal(
+        session: CodexLiveSession,
+        request: CodexCodingRequest
+    ) async throws -> CodexLiveRun {
+        for _ in 0..<100 {
+            do {
+                return try await session.continueRun(request)
+            } catch CodexLiveSessionError.notStarted {
+                try await _Concurrency.Task.sleep(for: .milliseconds(20))
+            }
+        }
+        throw CodexControlFixtureError.timeout
+    }
+
+    private func collectedEvents(
+        from collector: _Concurrency.Task<[CodexRunEvent], Never>,
+        timeout: Duration
+    ) async throws -> [CodexRunEvent] {
+        try await withThrowingTaskGroup(of: [CodexRunEvent].self) { group in
+            group.addTask { await collector.value }
+            group.addTask {
+                try await _Concurrency.Task.sleep(for: timeout)
+                collector.cancel()
+                throw CodexControlFixtureError.timeout
+            }
+            defer { group.cancelAll() }
+            return try await group.next() ?? []
+        }
+    }
+}
+
+private enum CodexControlFixtureError: Error {
+    case timeout
 }

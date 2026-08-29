@@ -189,6 +189,8 @@ public struct CodexRunEvent: Equatable, Sendable {
     public let threadID: String?
     public let turnID: String?
     public let approvalID: String?
+    public let toolObservation: ProviderToolObservation?
+    public let agentActivity: ProviderAgentActivity?
     public let text: String?
     public let payload: Data?
     public let payloadWasTruncated: Bool
@@ -199,14 +201,146 @@ public struct CodexRunEvent: Equatable, Sendable {
         threadID: String? = nil,
         turnID: String? = nil,
         approvalID: String? = nil,
+        toolObservation: ProviderToolObservation? = nil,
+        agentActivity: ProviderAgentActivity? = nil,
         text: String? = nil,
         payload: Data? = nil,
         payloadWasTruncated: Bool = false
     ) {
         (self.kind, self.nativeType, self.threadID, self.turnID) =
             (kind, nativeType, threadID, turnID)
-        (self.approvalID, self.text, self.payload, self.payloadWasTruncated) =
-            (approvalID, text, payload, payloadWasTruncated)
+        (self.approvalID, self.toolObservation, self.agentActivity) =
+            (approvalID, toolObservation, agentActivity)
+        (self.text, self.payload, self.payloadWasTruncated) =
+            (text, payload, payloadWasTruncated)
+    }
+}
+
+public enum CodexRunEventRouteError: Error, Equatable, Sendable {
+    case pendingRunAlreadyRegistered
+    case runAlreadyRegistered
+    case unknownRun
+    case nativeTurnAlreadyBound
+}
+
+public struct CodexRunControlTarget: Equatable, Sendable {
+    public let nativeThreadID: String
+    public let nativeTurnID: String
+
+    public init(nativeThreadID: String, nativeTurnID: String) {
+        self.nativeThreadID = nativeThreadID
+        self.nativeTurnID = nativeTurnID
+    }
+}
+
+/// Routes one long-lived provider session back to Kaname-owned run identity.
+/// Completed turns remain registered because Codex may attribute a child
+/// completion to its spawning turn after that turn has already completed.
+public struct CodexRunEventRouteTable: Sendable {
+    private var registeredRunIDs: Set<String> = []
+    private var pendingRunID: String?
+    private var runIDByNativeTurnID: [String: String] = [:]
+    private var controlTargetsByRunID: [String: CodexRunControlTarget] = [:]
+    private var agentLedgersByRunID: [String: ProviderAgentActivityLedger] = [:]
+
+    public init() {}
+
+    public var hasOutstandingAgentActivity: Bool {
+        agentLedgersByRunID.values.contains(where: \.hasOutstandingActivity)
+    }
+
+    public var runIDsWithOutstandingAgentActivity: [String] {
+        agentLedgersByRunID.compactMap { runID, ledger in
+            ledger.hasOutstandingActivity ? runID : nil
+        }.sorted()
+    }
+
+    public func outstandingAgentActivities(for runID: String) -> [ProviderAgentActivity] {
+        agentLedgersByRunID[runID]?.outstandingActivities ?? []
+    }
+
+    public func agentSettlementActivities(
+        for runID: String,
+        as terminalActivity: ProviderAgentActivityKind
+    ) -> [ProviderAgentActivity] {
+        agentLedgersByRunID[runID]?.settlementActivities(as: terminalActivity) ?? []
+    }
+
+    public func controlTarget(for runID: String) -> CodexRunControlTarget? {
+        controlTargetsByRunID[runID]
+    }
+
+    public mutating func register(runID: String) throws {
+        guard pendingRunID == nil else { throw CodexRunEventRouteError.pendingRunAlreadyRegistered }
+        guard registeredRunIDs.insert(runID).inserted else { throw CodexRunEventRouteError.runAlreadyRegistered }
+        pendingRunID = runID
+    }
+
+    public mutating func bind(runID: String, nativeTurnID: String) throws {
+        guard registeredRunIDs.contains(runID) else { throw CodexRunEventRouteError.unknownRun }
+        if let existing = runIDByNativeTurnID[nativeTurnID], existing != runID {
+            throw CodexRunEventRouteError.nativeTurnAlreadyBound
+        }
+        runIDByNativeTurnID[nativeTurnID] = runID
+    }
+
+    public mutating func bind(
+        runID: String,
+        nativeThreadID: String,
+        nativeTurnID: String
+    ) throws {
+        let target = CodexRunControlTarget(
+            nativeThreadID: nativeThreadID,
+            nativeTurnID: nativeTurnID
+        )
+        if let existing = controlTargetsByRunID[runID], existing != target {
+            throw CodexRunEventRouteError.nativeTurnAlreadyBound
+        }
+        try bind(runID: runID, nativeTurnID: nativeTurnID)
+        controlTargetsByRunID[runID] = target
+    }
+
+    public mutating func route(_ event: CodexRunEvent) throws -> String? {
+        if let nativeTurnID = event.turnID,
+           let runID = runIDByNativeTurnID[nativeTurnID] {
+            return runID
+        }
+        guard let runID = pendingRunID else { return nil }
+        if let nativeTurnID = event.turnID {
+            try bind(runID: runID, nativeTurnID: nativeTurnID)
+        }
+        return runID
+    }
+
+    public mutating func observe(_ event: CodexRunEvent, routedTo runID: String) {
+        if let activity = event.agentActivity {
+            var ledger = agentLedgersByRunID[runID] ?? ProviderAgentActivityLedger()
+            ledger.observe(activity)
+            if ledger.hasOutstandingActivity {
+                agentLedgersByRunID[runID] = ledger
+            } else {
+                agentLedgersByRunID.removeValue(forKey: runID)
+            }
+        }
+        switch event.kind {
+        case .providerCompleted:
+            if pendingRunID == runID { pendingRunID = nil }
+        case .runFailed, .runInterrupted:
+            if pendingRunID == runID { pendingRunID = nil }
+        case .sessionStarted, .runStarted, .messageDelta, .itemStarted, .itemCompleted,
+             .planUpdated, .approvalRequested, .approvalAccepted, .approvalRejected,
+             .questionRequested, .questionAnswered, .toolActivity, .diffUpdated,
+             .nativeProviderEvent:
+            break
+        }
+    }
+
+    public mutating func cancel(runID: String) {
+        if pendingRunID == runID { pendingRunID = nil }
+        registeredRunIDs.remove(runID)
+        controlTargetsByRunID.removeValue(forKey: runID)
+        agentLedgersByRunID.removeValue(forKey: runID)
+        runIDByNativeTurnID = runIDByNativeTurnID.filter { $0.value != runID }
     }
 }
 
@@ -372,6 +506,8 @@ struct CodexProviderEventCoalescer {
             threadID: left.threadID,
             turnID: left.turnID,
             approvalID: left.approvalID,
+            toolObservation: left.toolObservation,
+            agentActivity: left.agentActivity,
             text: leftText + rightText,
             payload: payload.data,
             payloadWasTruncated: left.payloadWasTruncated || right.payloadWasTruncated || payload.wasTruncated
@@ -495,9 +631,7 @@ public actor CodexLiveSession {
                 for await message in messages {
                     await self?.receive(message)
                 }
-                if await startedConnection.didMessageStreamOverflow() {
-                    await self?.failClosedForEventLoss()
-                }
+                await self?.messageStreamEnded(startedConnection)
             }
 
             _ = try await Self.object(startedConnection.request(
@@ -614,26 +748,38 @@ public actor CodexLiveSession {
     }
 
     public func interrupt() async throws {
-        guard let connection, let activeRun else {
+        guard let activeRun else {
+            throw CodexLiveSessionError.notStarted
+        }
+        try await interrupt(CodexRunControlTarget(
+            nativeThreadID: activeRun.nativeThreadID,
+            nativeTurnID: activeRun.nativeTurnID
+        ))
+    }
+
+    public func interrupt(_ target: CodexRunControlTarget) async throws {
+        guard let connection, nativeThreadID == target.nativeThreadID else {
             throw CodexLiveSessionError.notStarted
         }
         _ = try await connection.request(
             method: "turn/interrupt",
             parameters: [
-                "threadId": activeRun.nativeThreadID,
-                "turnId": activeRun.nativeTurnID,
+                "threadId": target.nativeThreadID,
+                "turnId": target.nativeTurnID,
             ],
             timeout: configuration.timeout
         )
     }
 
     public func close() async {
-        messageTask?.cancel()
+        let task = messageTask
         messageTask = nil
-        if let connection {
-            await connection.shutdown()
-        }
+        task?.cancel()
+        let closingConnection = connection
         connection = nil
+        if let closingConnection {
+            await closingConnection.shutdown()
+        }
         activeRun = nil
         nativeThreadID = nil
         activeSandbox = nil
@@ -959,6 +1105,15 @@ public actor CodexLiveSession {
         await close()
     }
 
+    private func messageStreamEnded(_ endedConnection: CodexAppServerConnection) async {
+        guard connection === endedConnection else { return }
+        if await endedConnection.didMessageStreamOverflow() {
+            await failClosedForEventLoss()
+        } else {
+            await close()
+        }
+    }
+
     private func removeContinuation(_ id: UUID) {
         continuations.removeValue(forKey: id)
     }
@@ -977,6 +1132,8 @@ extension CodexRunEvent {
             threadID: threadID,
             turnID: turnID,
             approvalID: approvalID,
+            toolObservation: toolObservation,
+            agentActivity: agentActivity,
             text: text,
             payload: payload,
             payloadWasTruncated: payloadWasTruncated
@@ -1003,7 +1160,8 @@ extension CodexRunEvent {
             case "item/started", "item/completed":
                 switch (object?["item"] as? [String: Any])?["type"] as? String {
                 case "plan": kind = .planUpdated
-                case "commandExecution", "dynamicToolCall", "collabToolCall", "mcpToolCall", "webSearch":
+                case "commandExecution", "dynamicToolCall", "collabToolCall", "mcpToolCall", "webSearch",
+                     "imageGeneration", "imageView", "subAgentActivity":
                     kind = .toolActivity
                 case "fileChange": kind = .diffUpdated
                 default: kind = method == "item/started" ? .itemStarted : .itemCompleted
@@ -1075,11 +1233,14 @@ extension CodexRunEvent {
         let boundedText = text.flatMap { text in
             String(data: Data(text.utf8.prefix(maximumTextBytes)), encoding: .utf8)
         }
+        let activity = structuredActivity(nativeType: nativeType, object: object, item: item)
         return CodexRunEvent(
             kind: kind,
             nativeType: nativeType,
             threadID: object?["threadId"] as? String ?? thread?["id"] as? String ?? fallbackThreadID,
             turnID: object?["turnId"] as? String ?? turn?["id"] as? String ?? fallbackTurnID,
+            toolObservation: activity.tool,
+            agentActivity: activity.agent,
             text: boundedText,
             payload: data.count <= maximumRetainedPayloadBytes ? data : nil,
             payloadWasTruncated: data.count > maximumRetainedPayloadBytes
@@ -1100,6 +1261,126 @@ extension CodexRunEvent {
             return nil
         }
         return text
+    }
+
+    private static func structuredActivity(
+        nativeType: String,
+        object: [String: Any]?,
+        item: [String: Any]?
+    ) -> (tool: ProviderToolObservation?, agent: ProviderAgentActivity?) {
+        let itemType = item?["type"] as? String
+        let callID = item?["id"] as? String ?? object?["itemId"] as? String
+        let toolKind: ProviderToolKind? = switch itemType {
+        case "commandExecution": .commandExecution
+        case "fileChange": .fileChange
+        case "mcpToolCall": .mcp
+        case "dynamicToolCall": .dynamic
+        case "collabToolCall": .collaboration
+        case "webSearch": .webSearch
+        case "imageGeneration": .imageGeneration
+        case "imageView": .imageView
+        default:
+            if nativeType.hasPrefix("item/commandExecution/") { .commandExecution }
+            else if nativeType.hasPrefix("item/fileChange/") { .fileChange }
+            else if nativeType.hasPrefix("item/mcpToolCall/") { .mcp }
+            else if nativeType.hasPrefix("item/dynamicToolCall/") { .dynamic }
+            else if nativeType.hasPrefix("item/collabToolCall/") { .collaboration }
+            else { nil }
+        }
+        let tool = callID.flatMap { callID in
+            toolKind.map { kind in
+                ProviderToolObservation(
+                    callID: callID,
+                    kind: kind,
+                    state: toolState(item?["status"] as? String, nativeType: nativeType),
+                    name: toolName(kind: kind, item: item)
+                )
+            }
+        }
+
+        if nativeType == "item/completed",
+           itemType == "subAgentActivity",
+           let agentID = item?["agentThreadId"] as? String,
+           let rawActivity = item?["kind"] as? String,
+           let activity = agentActivity(rawActivity) {
+            return (
+                tool,
+                ProviderAgentActivity(
+                    agentID: agentID,
+                    activity: activity,
+                    agentPath: item?["agentPath"] as? String,
+                    taskType: "subAgentActivity",
+                    sourceToolCallID: callID
+                )
+            )
+        }
+
+        if itemType == "collabToolCall",
+           normalizedIdentifier(item?["tool"] as? String) == "spawnagent",
+           nativeType == "item/completed",
+           let agentID = item?["newThreadId"] as? String ?? item?["receiverThreadId"] as? String {
+            let state = toolState(item?["status"] as? String, nativeType: nativeType)
+            let senderThreadID = item?["senderThreadId"] as? String
+            let rootThreadID = object?["threadId"] as? String
+            let parentAgentID: String? = senderThreadID.flatMap { senderThreadID in
+                guard let rootThreadID, senderThreadID != rootThreadID else { return nil }
+                return senderThreadID
+            }
+            return (
+                tool,
+                ProviderAgentActivity(
+                    agentID: agentID,
+                    parentAgentID: parentAgentID,
+                    activity: state == .failed ? .failed : .started,
+                    taskType: item?["tool"] as? String,
+                    sourceToolCallID: callID
+                )
+            )
+        }
+        return (tool, nil)
+    }
+
+    private static func toolState(_ status: String?, nativeType: String) -> ProviderToolState {
+        switch status?.lowercased() {
+        case "inprogress", "running", "pending": .running
+        case "completed", "success", "succeeded": .completed
+        case "failed", "error": .failed
+        case "declined": .declined
+        case "interrupted", "cancelled", "canceled": .interrupted
+        default: nativeType == "item/started" ? .running : (nativeType == "item/completed" ? .completed : .observed)
+        }
+    }
+
+    private static func toolName(kind: ProviderToolKind, item: [String: Any]?) -> String? {
+        switch kind {
+        case .commandExecution: "Command"
+        case .fileChange: "File change"
+        case .mcp, .dynamic, .collaboration: item?["tool"] as? String
+        case .webSearch: "Web search"
+        case .imageGeneration: "Image generation"
+        case .imageView: "Image view"
+        case .unknown: nil
+        }
+    }
+
+    private static let agentActivityByNativeValue: [String: ProviderAgentActivityKind] = [
+        "started": .started,
+        "interacted": .interacted,
+        "completed": .completed,
+        "failed": .failed,
+        "interrupted": .interrupted,
+        "cancelled": .interrupted,
+        "canceled": .interrupted,
+    ]
+
+    private static func agentActivity(_ value: String) -> ProviderAgentActivityKind? {
+        agentActivityByNativeValue[value.lowercased()]
+    }
+
+    private static func normalizedIdentifier(_ value: String?) -> String {
+        (value ?? "")
+            .lowercased()
+            .filter { $0.isLetter || $0.isNumber }
     }
 
 }

@@ -642,15 +642,89 @@ struct DesktopAppModelTests {
         let messageID = try #require(model.appendUserMessage(threadID: threadID, body: "Recover this exact turn."))
         let runID = try #require(model.enqueueProviderRun(threadID: threadID, sourceMessageID: messageID))
         _ = model.beginProviderRun(id: runID)
+        model.recordSubagentActivity(
+            threadID: threadID,
+            runID: runID,
+            provider: "Codex",
+            nativeID: "orphaned-child",
+            title: "Provider child",
+            detail: "started",
+            state: .running
+        )
 
-        model.recoverOrphanedProviderRuns()
+        requireRecoveredProviderRun(model, originalRunID: runID)
+        #expect(model.snapshot.operations.subagents.first?.state == .interrupted)
+        #expect(model.snapshot.operations.subagents.first?.completedAtUnixMillis == 1_000)
+        _ = try requireRetryPreservingApplicationTurn(
+            model,
+            threadID: threadID,
+            sourceMessageID: messageID,
+            originalRunID: runID
+        )
+    }
 
-        #expect(model.providerRun(id: runID)?.state == .interrupted)
-        #expect(model.thread(id: threadID)?.messages.filter { $0.role == .user }.count == 1)
-        let retryID = try #require(model.retryProviderRun(id: runID))
-        #expect(retryID != runID)
-        #expect(model.providerRun(id: retryID)?.sourceMessageID == messageID)
-        #expect(model.thread(id: threadID)?.messages.filter { $0.role == .user }.count == 1)
+    @Test
+    func completedParentRestartPollingRecoversOnlyActiveSubagentsWithoutChangingParent() throws {
+        let store = MemoryDesktopStateStore()
+        var clock: Int64 = 1_200
+        let model = DesktopAppModel(store: store, now: { clock })
+        let threadID = model.createConversation(kind: .coding, projectID: nil)
+        let messageID = try #require(model.appendUserMessage(threadID: threadID, body: "Recover every active child."))
+        let runID = try #require(model.enqueueProviderRun(threadID: threadID, sourceMessageID: messageID))
+        _ = model.beginProviderRun(id: runID)
+        for (nativeID, title, state) in [
+            ("queued-child", "Queued child", DesktopSubagentState.queued),
+            ("running-child", "Running child", DesktopSubagentState.running),
+            ("waiting-child", "Waiting child", DesktopSubagentState.waiting),
+            ("completed-child", "Completed child", DesktopSubagentState.completed),
+        ] {
+            model.recordSubagentActivity(
+                threadID: threadID,
+                runID: runID,
+                provider: "Codex",
+                nativeID: nativeID,
+                title: title,
+                detail: state.label,
+                state: state
+            )
+        }
+        let completedChildTimestamp = try #require(
+            model.snapshot.operations.subagents.first { $0.title == "Completed child" }?.completedAtUnixMillis
+        )
+        clock += 1
+        model.completeProviderRun(id: runID)
+        let completedParentTimestamp = try #require(model.providerRun(id: runID)?.completedAtUnixMillis)
+        let completedThreadSummary = model.thread(id: threadID)?.summary
+        let completedThreadAttention = model.thread(id: threadID)?.attention
+
+        clock += 1
+        let restarted = DesktopAppModel(store: store, now: { clock })
+        #expect(restarted.providerRun(id: runID)?.state == .completed)
+        #expect(restarted.snapshot.operations.subagents.contains { $0.state == .running })
+        #expect(restarted.providerActivityThreadIDsRequiringPolling == Set([threadID]))
+        #expect(restarted.recoverOrphanedSubagents(threadID: threadID))
+        #expect(restarted.providerActivityThreadIDsRequiringPolling.isEmpty)
+
+        for title in ["Queued child", "Running child", "Waiting child"] {
+            let recoveredChild = try #require(
+                restarted.snapshot.operations.subagents.first { $0.title == title }
+            )
+            #expect(recoveredChild.state == .interrupted)
+            #expect(recoveredChild.completedAtUnixMillis == clock)
+        }
+        let completedChild = try #require(
+            restarted.snapshot.operations.subagents.first { $0.title == "Completed child" }
+        )
+        #expect(completedChild.state == .completed)
+        #expect(completedChild.completedAtUnixMillis == completedChildTimestamp)
+        #expect(restarted.providerRun(id: runID)?.state == .completed)
+        #expect(restarted.providerRun(id: runID)?.completedAtUnixMillis == completedParentTimestamp)
+        #expect(restarted.thread(id: threadID)?.summary == completedThreadSummary)
+        #expect(restarted.thread(id: threadID)?.attention == completedThreadAttention)
+
+        let persisted = DesktopAppModel(store: store, now: { clock + 1 })
+        #expect(persisted.snapshot.operations.subagents.filter { $0.state == .interrupted }.count == 3)
+        #expect(persisted.snapshot.operations.subagents.filter { $0.state == .completed }.count == 1)
     }
 
     @Test
@@ -724,6 +798,13 @@ struct DesktopAppModelTests {
         #expect(Set(threads.map(\.id)).count == 3)
         #expect(Set(threads.flatMap(\.messages).map(\.body)) == ["Review this exact frozen brief."])
         #expect(Set(threads.map(\.provider)) == ["Codex", "Claude", "OpenCode"])
+        let runs = runIDs.compactMap { model.providerRun(id: $0) }
+        #expect(Set(runs.map(\.turnID)).count == 3)
+        #expect(runs.allSatisfy { run in
+            guard let threadID = run.threadID, let sourceMessageID = run.sourceMessageID else { return false }
+            return model.message(threadID: threadID, id: sourceMessageID)?.turnID == run.turnID
+                && run.turnID != run.id
+        })
 
         let selectedRunID = try #require(runIDs.first)
         _ = model.beginProviderRun(id: selectedRunID)
@@ -1477,13 +1558,141 @@ extension DesktopAppModelTests {
         ))
         #expect(model.beginProviderRun(id: runID) != nil)
 
-        model.recoverOrphanedProviderRuns()
-        #expect(model.providerRun(id: runID)?.state == .interrupted)
+        requireRecoveredProviderRun(model, originalRunID: runID)
         #expect(model.codingWorkflow(threadID: threadID)?.state == .failed)
-        let retryID = try #require(model.retryProviderRun(id: runID))
-        #expect(model.providerRun(id: retryID)?.sourceMessageID == messageID)
+        _ = try requireRetryPreservingApplicationTurn(
+            model,
+            threadID: threadID,
+            sourceMessageID: messageID,
+            originalRunID: runID
+        )
         #expect(model.codingWorkflow(threadID: threadID)?.state == .planning)
-        #expect(model.thread(id: threadID)?.messages.filter { $0.role == .user }.count == 1)
+    }
+
+    @Test
+    func codingPlanAndImplementationShareOneApplicationTurnButNotProviderRuns() throws {
+        let model = DesktopAppModel(store: MemoryDesktopStateStore(), now: { 20_400 })
+        let projectID = try #require(model.snapshot.projects.first?.id)
+        let threadID = model.createConversation(kind: .coding, projectID: projectID)
+        let messageID = try #require(model.appendUserMessage(
+            threadID: threadID,
+            body: "Plan and then implement this exact request."
+        ))
+        let planRunID = try #require(model.enqueueProviderRun(
+            threadID: threadID,
+            sourceMessageID: messageID,
+            purpose: .codingPlan
+        ))
+        let implementationRunID = try #require(model.enqueueProviderRun(
+            threadID: threadID,
+            sourceMessageID: messageID,
+            purpose: .codingImplementation
+        ))
+        model.attachNativeProviderRun(
+            id: planRunID,
+            nativeThreadID: "native-thread",
+            nativeTurnID: "native-plan-turn"
+        )
+        model.attachNativeProviderRun(
+            id: implementationRunID,
+            nativeThreadID: "native-thread",
+            nativeTurnID: "native-implementation-turn"
+        )
+
+        let plan = try #require(model.providerRun(id: planRunID))
+        let implementation = try #require(model.providerRun(id: implementationRunID))
+        #expect(planRunID != implementationRunID)
+        #expect(plan.turnID == messageID)
+        #expect(implementation.turnID == messageID)
+        #expect(plan.nativeTurnID == "native-plan-turn")
+        #expect(implementation.nativeTurnID == "native-implementation-turn")
+        #expect(model.message(threadID: threadID, id: messageID)?.turnID == messageID)
+    }
+
+    @Test
+    func typedSubagentLifecycleAndParentLinkageSurviveRestart() throws {
+        let store = MemoryDesktopStateStore()
+        let model = DesktopAppModel(store: store, now: { 20_450 })
+        let threadID = model.createConversation(kind: .coding, projectID: nil)
+        let messageID = try #require(model.appendUserMessage(threadID: threadID, body: "Use a reviewer."))
+        let runID = try #require(model.enqueueProviderRun(threadID: threadID, sourceMessageID: messageID))
+
+        model.recordSubagentActivity(
+            threadID: threadID,
+            runID: runID,
+            provider: "Codex",
+            nativeID: "parent-agent",
+            title: "/root/parent",
+            detail: "started",
+            state: .running
+        )
+        model.recordSubagentActivity(
+            threadID: threadID,
+            runID: runID,
+            provider: "Codex",
+            nativeID: "child-agent",
+            parentNativeID: "parent-agent",
+            title: "/root/parent/reviewer",
+            detail: "started",
+            state: .running
+        )
+        let parent = try #require(model.snapshot.operations.subagents.first { $0.title == "/root/parent" })
+        let child = try #require(model.snapshot.operations.subagents.first { $0.title.contains("reviewer") })
+        #expect(child.parentID == parent.id)
+
+        model.recordSubagentActivity(
+            threadID: threadID,
+            runID: runID,
+            provider: "Codex",
+            nativeID: "child-agent",
+            parentNativeID: "parent-agent",
+            title: "/root/parent/reviewer",
+            detail: "completed",
+            state: .completed
+        )
+        let restarted = DesktopAppModel(store: store, now: { 20_451 })
+        let restoredChild = try #require(restarted.snapshot.operations.subagents.first { $0.id == child.id })
+        #expect(restoredChild.parentID == parent.id)
+        #expect(restoredChild.state == .completed)
+        #expect(restoredChild.completedAtUnixMillis == 20_450)
+    }
+
+    @Test
+    func failedProviderRunSettlesOnlyItsActiveSubagents() throws {
+        let model = DesktopAppModel(store: MemoryDesktopStateStore(), now: { 20_475 })
+        let threadID = model.createConversation(kind: .coding, projectID: nil)
+        let messageID = try #require(model.appendUserMessage(threadID: threadID, body: "Use agents."))
+        let runID = try #require(model.enqueueProviderRun(threadID: threadID, sourceMessageID: messageID))
+        model.recordSubagentActivity(
+            threadID: threadID,
+            runID: runID,
+            provider: "Codex",
+            nativeID: "running-child",
+            title: "Running child",
+            detail: "started",
+            state: .running
+        )
+        model.recordSubagentActivity(
+            threadID: threadID,
+            runID: runID,
+            provider: "Codex",
+            nativeID: "completed-child",
+            title: "Completed child",
+            detail: "completed",
+            state: .completed
+        )
+
+        model.stopProviderRun(id: runID, interrupted: false, error: "Provider stream failed")
+
+        let runningChild = try #require(
+            model.snapshot.operations.subagents.first { $0.title == "Running child" }
+        )
+        let completedChild = try #require(
+            model.snapshot.operations.subagents.first { $0.title == "Completed child" }
+        )
+        #expect(runningChild.state == .failed)
+        #expect(runningChild.completedAtUnixMillis == 20_475)
+        #expect(completedChild.state == .completed)
     }
 
     @Test
@@ -1857,6 +2066,29 @@ extension DesktopAppModelTests {
             )
         }
         #expect(model.replaceCodingKnowledgeContext(threadID: threadID, sources: tooMany) == false)
+    }
+
+    private func requireRecoveredProviderRun(
+        _ model: DesktopAppModel,
+        originalRunID: String
+    ) {
+        model.recoverOrphanedProviderRuns()
+        #expect(model.providerRun(id: originalRunID)?.state == .interrupted)
+    }
+
+    private func requireRetryPreservingApplicationTurn(
+        _ model: DesktopAppModel,
+        threadID: String,
+        sourceMessageID: String,
+        originalRunID: String
+    ) throws -> String {
+        let retryID = try #require(model.retryProviderRun(id: originalRunID))
+        #expect(retryID != originalRunID)
+        #expect(model.providerRun(id: retryID)?.sourceMessageID == sourceMessageID)
+        #expect(model.providerRun(id: originalRunID)?.turnID == sourceMessageID)
+        #expect(model.providerRun(id: retryID)?.turnID == sourceMessageID)
+        #expect(model.thread(id: threadID)?.messages.filter { $0.role == .user }.count == 1)
+        return retryID
     }
 
     private func prepareCodingReview(_ model: DesktopAppModel) throws -> (threadID: String, worktreeID: String) {

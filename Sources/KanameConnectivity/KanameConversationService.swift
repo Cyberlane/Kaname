@@ -69,30 +69,54 @@ public struct KanameConversationServiceRequest: Codable, Equatable, Sendable {
         case isCodingPlan, curatedPreviewMCPGranted, createdAtUnixMillis
     }
 
+    /// The persisted request predates several runtime-policy fields. Keeping
+    /// that optional wire shape separate lets the public initializer enforce
+    /// the current full-access invariant in one place.
+    private struct DecodedPayload: Decodable {
+        let runID: String
+        let threadID: String
+        let projectID: String
+        let provider: String
+        let model: String
+        let reasoningEffort: String
+        let runtimeMode: ConversationRuntimeMode?
+        let networkAccess: Bool?
+        let prompt: String
+        let attachments: [ConversationImageAttachment]?
+        let workspacePath: String
+        let providerStatePath: String
+        let resumableNativeThreadID: String?
+        let localCoreMachService: String
+        let localCoreRequirement: String
+        let workspaceAuthorization: CodexWorkspaceAuthorization?
+        let isCodingPlan: Bool?
+        let curatedPreviewMCPGranted: Bool?
+        let createdAtUnixMillis: Int64
+    }
+
     public init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        runID = try container.decode(String.self, forKey: .runID)
-        threadID = try container.decode(String.self, forKey: .threadID)
-        projectID = try container.decode(String.self, forKey: .projectID)
-        provider = try container.decode(String.self, forKey: .provider)
-        model = try container.decode(String.self, forKey: .model)
-        reasoningEffort = try container.decode(String.self, forKey: .reasoningEffort)
-        runtimeMode = try container.decodeIfPresent(ConversationRuntimeMode.self, forKey: .runtimeMode) ?? .approvalRequired
-        networkAccess = runtimeMode == .fullAccess
-            ? true
-            : try container.decodeIfPresent(Bool.self, forKey: .networkAccess) ?? false
-        prompt = try container.decode(String.self, forKey: .prompt)
-        attachments = try container.decodeIfPresent([ConversationImageAttachment].self, forKey: .attachments) ?? []
-        workspacePath = try container.decode(String.self, forKey: .workspacePath)
-        providerStatePath = try container.decode(String.self, forKey: .providerStatePath)
-        resumableNativeThreadID = try container.decodeIfPresent(String.self, forKey: .resumableNativeThreadID)
-        localCoreMachService = try container.decode(String.self, forKey: .localCoreMachService)
-        localCoreRequirement = try container.decode(String.self, forKey: .localCoreRequirement)
-        workspaceAuthorization = try container.decodeIfPresent(CodexWorkspaceAuthorization.self, forKey: .workspaceAuthorization)
-        isCodingPlan = try container.decodeIfPresent(Bool.self, forKey: .isCodingPlan) ?? false
-        let granted = try container.decodeIfPresent(Bool.self, forKey: .curatedPreviewMCPGranted) ?? false
-        curatedPreviewMCPGranted = granted && CodexMCPIsolation.allowsCuratedPreviewMCP(hasPreviewGrant: granted)
-        createdAtUnixMillis = try container.decode(Int64.self, forKey: .createdAtUnixMillis)
+        let payload = try DecodedPayload(from: decoder)
+        self.init(
+            runID: payload.runID,
+            threadID: payload.threadID,
+            projectID: payload.projectID,
+            provider: payload.provider,
+            model: payload.model,
+            reasoningEffort: payload.reasoningEffort,
+            runtimeMode: payload.runtimeMode ?? .approvalRequired,
+            networkAccess: payload.networkAccess ?? false,
+            prompt: payload.prompt,
+            attachments: payload.attachments ?? [],
+            workspacePath: payload.workspacePath,
+            providerStatePath: payload.providerStatePath,
+            resumableNativeThreadID: payload.resumableNativeThreadID,
+            localCoreMachService: payload.localCoreMachService,
+            localCoreRequirement: payload.localCoreRequirement,
+            workspaceAuthorization: payload.workspaceAuthorization,
+            isCodingPlan: payload.isCodingPlan ?? false,
+            curatedPreviewMCPGranted: payload.curatedPreviewMCPGranted ?? false,
+            createdAtUnixMillis: payload.createdAtUnixMillis
+        )
     }
 }
 
@@ -147,6 +171,8 @@ public struct KanameConversationServiceEvent: Codable, Equatable, Identifiable, 
     public let nativeThreadID: String?
     public let nativeTurnID: String?
     public let approvalID: String?
+    public let toolObservation: ProviderToolObservation?
+    public let agentActivity: ProviderAgentActivity?
     public let text: String?
     public let rawPayloadBase64: String?
     public let payloadWasTruncated: Bool
@@ -163,6 +189,8 @@ public struct KanameConversationServiceEvent: Codable, Equatable, Identifiable, 
         nativeThreadID: String?,
         nativeTurnID: String?,
         approvalID: String?,
+        toolObservation: ProviderToolObservation? = nil,
+        agentActivity: ProviderAgentActivity? = nil,
         text: String?,
         rawPayloadBase64: String?,
         payloadWasTruncated: Bool,
@@ -179,6 +207,8 @@ public struct KanameConversationServiceEvent: Codable, Equatable, Identifiable, 
             nativeThreadID: nativeThreadID,
             nativeTurnID: nativeTurnID,
             approvalID: approvalID,
+            toolObservation: toolObservation,
+            agentActivity: agentActivity,
             text: text,
             rawPayloadBase64: rawPayloadBase64,
             payloadWasTruncated: payloadWasTruncated,

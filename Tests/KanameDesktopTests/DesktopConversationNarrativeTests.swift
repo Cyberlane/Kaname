@@ -1,5 +1,6 @@
 import Testing
 @testable import KanameDesktop
+import KanameDomain
 
 struct DesktopConversationNarrativeTests {
     @Test
@@ -40,6 +41,59 @@ struct DesktopConversationNarrativeTests {
         #expect(summary.events.count == 3)
         #expect(summary.activityCount == 1)
         #expect(summary.conciseActivityLabel.contains("1 update"))
+    }
+
+    @Test
+    func structuredToolLifecycleCountsOneCallWhileLegacyEventsRemainIndependent() throws {
+        var started = event(id: "tool-started", kind: .tool, createdAt: 10)
+        started.toolObservation = ProviderToolObservation(
+            callID: "call-1",
+            kind: .commandExecution,
+            state: .running,
+            name: "Command"
+        )
+        var completed = event(id: "tool-completed", kind: .tool, createdAt: 20)
+        completed.toolObservation = ProviderToolObservation(
+            callID: "call-1",
+            kind: .commandExecution,
+            state: .completed,
+            name: "Command"
+        )
+        let legacy = event(id: "legacy-tool", kind: .tool, createdAt: 30)
+        let summary = try #require(DesktopConversationNarrativePresentation.runSummaries(
+            runs: [providerRun(id: "run-1")],
+            events: [started, completed, legacy]
+        ).first)
+
+        #expect(summary.events.count == 3)
+        #expect(summary.toolCount == 2)
+        #expect(summary.conciseActivityLabel.contains("2 tools"))
+    }
+
+    @Test
+    func agentLifecycleCountsOneAgentWithoutInflatingToolCount() throws {
+        let lifecycle = [ProviderAgentActivityKind.started, .completed]
+        let events = lifecycle.enumerated().map { offset, activity in
+            var observation = event(
+                id: "agent-\(activity.rawValue)",
+                kind: .tool,
+                createdAt: Int64((offset + 1) * 10)
+            )
+            observation.agentActivity = ProviderAgentActivity(
+                agentID: "agent-1",
+                activity: activity,
+                taskType: "review"
+            )
+            return observation
+        }
+        let summary = try #require(DesktopConversationNarrativePresentation.runSummaries(
+            runs: [providerRun(id: "run-1")],
+            events: events
+        ).first)
+
+        #expect(summary.toolCount == 0)
+        #expect(summary.agentCount == 1)
+        #expect(summary.conciseActivityLabel.contains("1 agent"))
     }
 
     @Test

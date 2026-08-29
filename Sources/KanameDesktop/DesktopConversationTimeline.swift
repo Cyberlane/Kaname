@@ -44,13 +44,24 @@ public struct DesktopProviderEventGroup: Equatable, Identifiable, Sendable {
     }
 
     public var kind: DesktopProviderEventKind { events[0].kind }
-    public var count: Int { events.count }
+    public var count: Int {
+        guard kind == .tool else { return events.count }
+        return Set(events.map {
+            if let tool = $0.toolObservation { return "call:\(tool.callID)" }
+            if let agent = $0.agentActivity { return "agent:\(agent.agentID)" }
+            return "event:\($0.id)"
+        }).count
+    }
     public var latestEvent: DesktopProviderEventRecord { events[events.count - 1] }
     public var latestCreatedAtUnixMillis: Int64 { latestEvent.createdAtUnixMillis }
     public var containsTruncatedPayload: Bool { events.contains(where: \.payloadWasTruncated) }
 
     public var summaryTitle: String {
-        "\(count) \(kind.groupSummaryNoun(count: count))"
+        if kind == .tool,
+           events.allSatisfy({ $0.toolObservation == nil && $0.agentActivity != nil }) {
+            return "\(count) \(count == 1 ? "agent activity" : "agent activities")"
+        }
+        return "\(count) \(kind.groupSummaryNoun(count: count))"
     }
 
     public var latestSummary: String {

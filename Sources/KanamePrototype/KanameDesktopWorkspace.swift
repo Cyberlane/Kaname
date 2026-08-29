@@ -13490,6 +13490,7 @@ private struct DesktopThreadInspector: View {
     @ViewBuilder private func runRawEvidence(_ summary: DesktopConversationRunSummary) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Provider identifiers").font(.headline)
+            InspectorFact(label: "Turn", value: summary.run.turnID)
             InspectorFact(label: "Run", value: summary.run.id)
             if let value = summary.run.nativeThreadID { InspectorFact(label: "Native thread", value: value) }
             if let value = summary.run.nativeTurnID { InspectorFact(label: "Native turn", value: value) }
