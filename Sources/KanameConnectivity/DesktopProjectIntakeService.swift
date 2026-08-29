@@ -7,6 +7,10 @@ public struct DesktopProjectIntakeSnapshot: Equatable, Sendable {
     public let repository: LocalGitInspection?
     public let repositoryInstructionReferences: [String]
     public let selectedInstructionReferences: [String]
+    /// Relative path to `kaname.json` when present at the repository or
+    /// selection root; nil when absent or unreadable.
+    public let projectScriptsManifestReference: String?
+    public let projectScriptCount: Int
 
     public var instructionReferences: [String] { repositoryInstructionReferences }
 
@@ -54,13 +58,18 @@ public actor DesktopProjectIntakeService {
         if repositoryRoot.path != canonicalSelected.path {
             repositoryInstructions.append(contentsOf: Self.detectedInstructions(at: canonicalSelected, relativeTo: repositoryRoot))
         }
+        let scripts = Self.detectProjectScripts(at: repositoryRoot)
+            ?? Self.detectProjectScripts(at: canonicalSelected)
+            ?? (reference: nil as String?, count: 0)
         return DesktopProjectIntakeSnapshot(
             selectedPath: selected.path,
             canonicalSelectedPath: canonicalSelected.path,
             suggestedName: canonicalSelected.lastPathComponent,
             repository: repository,
             repositoryInstructionReferences: Self.unique(repositoryInstructions),
-            selectedInstructionReferences: selectedInstructions
+            selectedInstructionReferences: selectedInstructions,
+            projectScriptsManifestReference: scripts.reference,
+            projectScriptCount: scripts.count
         )
     }
 
@@ -152,6 +161,20 @@ public actor DesktopProjectIntakeService {
         }
         let name = try repositoryName(from: components.path)
         return DesktopRemoteProjectReference(cloneURL: trimmed, suggestedName: name, displayName: trimmed)
+    }
+
+    private static func detectProjectScripts(at directory: URL) -> (reference: String?, count: Int)? {
+        let url = directory.appending(path: "kaname.json").standardizedFileURL
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let fileType = attributes?[.type] as? FileAttributeType
+        guard FileManager.default.fileExists(atPath: url.path),
+              fileType != .typeSymbolicLink,
+              let data = try? Data(contentsOf: url),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        let scripts = object["scripts"] as? [Any] ?? []
+        return (reference: "kaname.json", count: scripts.count)
     }
 
     private static func validatedDirectory(_ path: String) throws -> URL {

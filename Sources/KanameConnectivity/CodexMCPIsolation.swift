@@ -1,10 +1,20 @@
 import Foundation
 
 /// Requires an isolated Codex home and a profile with no configured MCP
-/// servers. Configuration inspection is necessary but not sufficient: Kaname
-/// also observes the exact initialized app-server connection before loading a
-/// thread, then observes the loaded thread before sending a turn.
+/// servers by default. Configuration inspection is necessary but not
+/// sufficient: Kaname also observes the exact initialized app-server
+/// connection before loading a thread, then observes the loaded thread before
+/// sending a turn.
+///
+/// Curated `kaname-preview` injection remains fail-closed until an explicit
+/// `coding.preview_mcp_grant` approval is present. This module never opens
+/// blanket user-configured MCP servers.
 enum CodexMCPIsolation {
+    /// Fail-closed gate for the curated preview MCP bridge.
+    static func allowsCuratedPreviewMCP(hasPreviewGrant: Bool) -> Bool {
+        hasPreviewGrant
+    }
+
     /// The current installed app-server normally reports its initialization and
     /// thread startup state immediately. Keep the window bounded but long
     /// enough to drain asynchronous startup notifications before advancing to
@@ -31,11 +41,11 @@ enum CodexMCPIsolation {
         workingDirectory: URL,
         timeout: Duration,
         codexHome: URL?,
-        baseArguments: [String]
+        baseArguments: [String],
+        curatedPreview: KanamePreviewMCPHTTPServer.Binding? = nil
     ) async throws -> [String] {
         let enforcedArguments = try enforcedLaunchArguments(baseArguments: baseArguments)
-
-        let environment = codexEnvironment(home: codexHome)
+        let environment = curatedPreviewEnvironment(home: codexHome, binding: curatedPreview)
         let discovered = try await configuredServers(
             executable: executable,
             workingDirectory: workingDirectory,
@@ -43,6 +53,33 @@ enum CodexMCPIsolation {
             environment: environment,
             arguments: enforcedArguments
         )
+
+        if let curatedPreview {
+            guard allowsCuratedPreviewMCP(hasPreviewGrant: true) else {
+                throw CodexLiveSessionError.mcpConfigurationPresent
+            }
+            guard let home = codexHome else {
+                throw CodexLiveSessionError.isolatedHomeUnavailable
+            }
+            guard discovered.isEmpty else {
+                throw CodexLiveSessionError.mcpConfigurationPresent
+            }
+            try writeCuratedPreviewMCPConfig(home: home, binding: curatedPreview)
+            let afterInjection = try await configuredServers(
+                executable: executable,
+                workingDirectory: workingDirectory,
+                timeout: timeout,
+                environment: curatedPreviewEnvironment(home: home, binding: curatedPreview),
+                arguments: enforcedArguments
+            )
+            let allowed = afterInjection.filter(\.enabled)
+            guard allowed.count == 1,
+                  allowed[0].name == CodingPreviewMCPGrant.curatedServerName else {
+                throw CodexLiveSessionError.mcpConfigurationPresent
+            }
+            return enforcedArguments
+        }
+
         guard discovered.isEmpty else {
             throw CodexLiveSessionError.mcpConfigurationPresent
         }
@@ -68,10 +105,18 @@ enum CodexMCPIsolation {
         return baseArguments + ["--disable", "apps"]
     }
 
-    static func indicatesUnsafeStartup(method: String, parameters: Data) -> Bool {
+    static func indicatesUnsafeStartup(
+        method: String,
+        parameters: Data,
+        allowedServerNames: Set<String> = []
+    ) -> Bool {
         guard method == "mcpServer/startupStatus/updated",
               let value = try? JSONSerialization.jsonObject(with: parameters)
         else {
+            return false
+        }
+        let names = serverNames(in: value)
+        if !names.isEmpty, names.allSatisfy({ allowedServerNames.contains($0) }) {
             return false
         }
         return startupStates(in: value).contains { state in
@@ -120,6 +165,24 @@ enum CodexMCPIsolation {
         }
         if let values = value as? [Any] {
             return values.flatMap(startupStates)
+        }
+        return []
+    }
+
+    private static func serverNames(in value: Any) -> [String] {
+        if let dictionary = value as? [String: Any] {
+            var names: [String] = []
+            for (key, nested) in dictionary {
+                if ["name", "server", "serverName", "mcpServer"].contains(key),
+                   let name = nested as? String, !name.isEmpty {
+                    names.append(name)
+                }
+                names.append(contentsOf: serverNames(in: nested))
+            }
+            return names
+        }
+        if let values = value as? [Any] {
+            return values.flatMap(serverNames)
         }
         return []
     }

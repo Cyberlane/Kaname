@@ -8,6 +8,8 @@ struct DesktopThreadChromePresentationTests {
             .conversation,
             .plan,
             .changes,
+            .terminal,
+            .preview,
             .evidence,
             .knowledge,
         ])
@@ -15,6 +17,8 @@ struct DesktopThreadChromePresentationTests {
             "Chat",
             "Plan",
             "Changes",
+            "Terminal",
+            "Preview",
             "Evidence",
             "Knowledge",
         ])

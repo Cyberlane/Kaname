@@ -10,6 +10,39 @@ final class DesktopCodingControlViewModel: ObservableObject {
 
     private let service: DesktopGitControlService
 
+    private struct GitMutationOutcome: Sendable {
+        var snapshot: GitWorktreeSnapshot
+        var userMessage: String
+        var diagnosticSummary: String
+        var emptyDiffSummary: String = "Working tree clean"
+        var cleanState: DesktopWorktreeState = .ready
+
+        static func messaging(
+            snapshot: GitWorktreeSnapshot,
+            userMessage: String,
+            diagnosticSummary: String? = nil
+        ) -> GitMutationOutcome {
+            let detail = diagnosticSummary ?? userMessage
+            return GitMutationOutcome(
+                snapshot: snapshot,
+                userMessage: userMessage,
+                diagnosticSummary: detail
+            )
+        }
+    }
+
+    private enum ManagedGitMutation: Sendable {
+        case create(approvalID: String, exactTarget: String)
+        case refresh
+        case commit(approvalID: String, exactTarget: String, paths: [String], message: String)
+        case revertCheckpoint(
+            approvalID: String,
+            exactTarget: String,
+            expiresAtUnixMillis: Int64?,
+            target: GitCheckpointRestoreTarget
+        )
+    }
+
     init(environment: KanameDesktopEnvironment = .current) {
         service = DesktopGitControlService(managedRoot: environment.worktreeDirectory)
     }
@@ -33,45 +66,29 @@ final class DesktopCodingControlViewModel: ObservableObject {
             message = "Approve this exact worktree creation in Inbox first."
             return
         }
-        perform(worktree: worktree, model: model, initialState: .preparing) { service in
-            let snapshot = try await service.createWorktree(
-                repository: URL(fileURLWithPath: worktree.rootWorkspacePath, isDirectory: true),
-                target: URL(fileURLWithPath: worktree.worktreePath, isDirectory: true),
-                branch: worktree.branch,
-                baseRevision: worktree.baseRevision,
-                grant: LocalGitMutationGrant(
-                    approvalID: approval.id,
-                    kind: .createWorktree,
-                    exactTarget: approval.exactTarget
-                )
-            )
-            return (snapshot, "Created with local approval \(approval.id).")
-        }
+        perform(
+            worktree: worktree,
+            model: model,
+            initialState: .preparing,
+            mutation: .create(approvalID: approval.id, exactTarget: approval.exactTarget)
+        )
     }
 
     func refresh(model: DesktopAppModel, worktree: DesktopWorktreeRecord) {
-        perform(worktree: worktree, model: model, initialState: worktree.state) { service in
-            let snapshot = try await service.inspect(
-                worktree: URL(fileURLWithPath: worktree.worktreePath, isDirectory: true),
-                rootRepository: URL(fileURLWithPath: worktree.rootWorkspacePath, isDirectory: true)
-            )
-            return (snapshot, "Reconciled local Git state.")
-        }
+        perform(worktree: worktree, model: model, initialState: worktree.state, mutation: .refresh)
     }
 
     func runVerification(model: DesktopAppModel, worktree: DesktopWorktreeRecord, command: String) {
-        guard !busyWorktreeIDs.contains(worktree.id) else { return }
-        busyWorktreeIDs.insert(worktree.id)
-        model.updateWorktree(
-            id: worktree.id,
-            headRevision: worktree.headRevision,
-            changedFileCount: worktree.changedFileCount,
-            diffSummary: worktree.diffSummary,
-            testCommand: command,
-            testSummary: "Running…",
-            state: worktree.state
-        )
-        Task {
+        runWhileBusy(worktreeID: worktree.id) { [self] in
+            model.updateWorktree(
+                id: worktree.id,
+                headRevision: worktree.headRevision,
+                changedFileCount: worktree.changedFileCount,
+                diffSummary: worktree.diffSummary,
+                testCommand: command,
+                testSummary: "Running…",
+                state: worktree.state
+            )
             do {
                 let result = try await service.runVerification(
                     command: command,
@@ -108,7 +125,6 @@ final class DesktopCodingControlViewModel: ObservableObject {
                 )
                 message = error.localizedDescription
             }
-            busyWorktreeIDs.remove(worktree.id)
         }
     }
 
@@ -138,31 +154,17 @@ final class DesktopCodingControlViewModel: ObservableObject {
             self.message = "Approve the exact signed commit in Inbox first."
             return
         }
-        guard !busyWorktreeIDs.contains(worktree.id) else { return }
-        busyWorktreeIDs.insert(worktree.id)
-        Task {
-            do {
-                let snapshot = try await service.createSignedCommit(
-                    worktree: URL(fileURLWithPath: worktree.worktreePath, isDirectory: true),
-                    relativePaths: paths,
-                    message: clean,
-                    grant: LocalGitMutationGrant(approvalID: approval.id, kind: .commit, exactTarget: approval.exactTarget)
-                )
-                changedPathsByWorktreeID[worktree.id] = snapshot.changedFiles
-                model.updateWorktree(
-                    id: worktree.id,
-                    headRevision: snapshot.headRevision,
-                    changedFileCount: snapshot.changedFiles.count,
-                    diffSummary: snapshot.diffSummary.isEmpty ? "Working tree clean after signed commit" : snapshot.diffSummary,
-                    diagnosticSummary: "Signed local commit created with approval \(approval.id).",
-                    state: snapshot.changedFiles.isEmpty ? .review : .dirty
-                )
-                self.message = "Signed local commit created; nothing was pushed."
-            } catch {
-                self.message = error.localizedDescription
-            }
-            busyWorktreeIDs.remove(worktree.id)
-        }
+        perform(
+            worktree: worktree,
+            model: model,
+            initialState: worktree.state,
+            mutation: .commit(
+                approvalID: approval.id,
+                exactTarget: approval.exactTarget,
+                paths: paths,
+                message: clean
+            )
+        )
     }
 
     func requestCleanupApproval(model: DesktopAppModel, worktree: DesktopWorktreeRecord) {
@@ -184,6 +186,38 @@ final class DesktopCodingControlViewModel: ObservableObject {
             state: .cleanupPending
         )
         message = "Cleanup approval is ready in Inbox."
+    }
+
+    func executeCheckpointRevert(
+        model: DesktopAppModel,
+        worktree: DesktopWorktreeRecord,
+        checkpoint: DesktopCodingCheckpointRecord
+    ) {
+        guard let exactTarget = checkpoint.approvalExactTarget(worktreePath: worktree.worktreePath),
+              let restoreTarget = checkpoint.restoreTarget(worktreePath: worktree.worktreePath) else {
+            message = "This legacy checkpoint cannot be restored safely. Run a new implementation turn first."
+            return
+        }
+        guard let approval = model.snapshot.operations.approvals.last(where: {
+            $0.threadID == worktree.threadID
+                && $0.exactTarget == exactTarget
+                && $0.title == "Revert implementation turn"
+                && $0.state == .approved
+        }), model.isApprovalGranted(id: approval.id, exactTarget: exactTarget) else {
+            message = "Approve the exact checkpoint revert in Inbox first."
+            return
+        }
+        perform(
+            worktree: worktree,
+            model: model,
+            initialState: worktree.state,
+            mutation: .revertCheckpoint(
+                approvalID: approval.id,
+                exactTarget: approval.exactTarget,
+                expiresAtUnixMillis: approval.expiresAtUnixMillis,
+                target: restoreTarget
+            )
+        )
     }
 
     func cleanup(model: DesktopAppModel, worktree: DesktopWorktreeRecord) {
@@ -231,46 +265,135 @@ final class DesktopCodingControlViewModel: ObservableObject {
         approval(model: model, worktree: worktree, action: action)?.state
     }
 
+    private func runWhileBusy(
+        worktreeID: String,
+        work: @escaping @MainActor () async -> Void
+    ) {
+        guard !busyWorktreeIDs.contains(worktreeID) else { return }
+        busyWorktreeIDs.insert(worktreeID)
+        Task {
+            defer { busyWorktreeIDs.remove(worktreeID) }
+            await work()
+        }
+    }
+
     private func perform(
         worktree: DesktopWorktreeRecord,
         model: DesktopAppModel,
         initialState: DesktopWorktreeState,
-        operation: @escaping @Sendable (DesktopGitControlService) async throws -> (GitWorktreeSnapshot, String)
+        mutation: ManagedGitMutation
     ) {
-        guard !busyWorktreeIDs.contains(worktree.id) else { return }
-        busyWorktreeIDs.insert(worktree.id)
-        model.updateWorktree(
-            id: worktree.id,
-            headRevision: worktree.headRevision,
-            changedFileCount: worktree.changedFileCount,
-            diffSummary: worktree.diffSummary,
-            state: initialState
-        )
-        Task {
-            do {
-                let (snapshot, detail) = try await operation(service)
-                changedPathsByWorktreeID[worktree.id] = snapshot.changedFiles
-                model.updateWorktree(
-                    id: worktree.id,
-                    headRevision: snapshot.headRevision,
-                    changedFileCount: snapshot.changedFiles.count,
-                    diffSummary: snapshot.diffSummary.isEmpty ? "Working tree clean" : snapshot.diffSummary,
-                    diagnosticSummary: detail,
-                    state: snapshot.changedFiles.isEmpty ? .ready : .dirty
-                )
-                message = detail
-            } catch {
-                model.updateWorktree(
-                    id: worktree.id,
-                    headRevision: worktree.headRevision,
-                    changedFileCount: worktree.changedFileCount,
-                    diffSummary: worktree.diffSummary,
-                    diagnosticSummary: error.localizedDescription,
-                    state: .failed
-                )
-                message = error.localizedDescription
+        runWhileBusy(worktreeID: worktree.id) { [self] in
+            model.updateWorktree(
+                id: worktree.id,
+                headRevision: worktree.headRevision,
+                changedFileCount: worktree.changedFileCount,
+                diffSummary: worktree.diffSummary,
+                state: initialState
+            )
+            await publishGitMutation(mutation, worktree: worktree, model: model)
+        }
+    }
+
+    private func publishGitMutation(
+        _ mutation: ManagedGitMutation,
+        worktree: DesktopWorktreeRecord,
+        model: DesktopAppModel
+    ) async {
+        do {
+            let outcome = try await execute(mutation, worktree: worktree)
+            changedPathsByWorktreeID[worktree.id] = outcome.snapshot.changedFiles
+            let diff = outcome.snapshot.diffSummary.isEmpty
+                ? outcome.emptyDiffSummary
+                : outcome.snapshot.diffSummary
+            let nextState = outcome.snapshot.changedFiles.isEmpty ? outcome.cleanState : .dirty
+            model.updateWorktree(
+                id: worktree.id,
+                headRevision: outcome.snapshot.headRevision,
+                changedFileCount: outcome.snapshot.changedFiles.count,
+                diffSummary: diff,
+                diagnosticSummary: outcome.diagnosticSummary,
+                state: nextState
+            )
+            if case let .revertCheckpoint(approvalID, exactTarget, _, _) = mutation {
+                guard model.consumeApproval(id: approvalID, exactTarget: exactTarget) else {
+                    message = "The checkpoint was restored, but Kaname could not record one-shot approval consumption."
+                    return
+                }
             }
-            busyWorktreeIDs.remove(worktree.id)
+            message = outcome.userMessage
+        } catch {
+            model.updateWorktree(
+                id: worktree.id,
+                headRevision: worktree.headRevision,
+                changedFileCount: worktree.changedFileCount,
+                diffSummary: worktree.diffSummary,
+                diagnosticSummary: error.localizedDescription,
+                state: .failed
+            )
+            message = error.localizedDescription
+        }
+    }
+
+    private func execute(
+        _ mutation: ManagedGitMutation,
+        worktree: DesktopWorktreeRecord
+    ) async throws -> GitMutationOutcome {
+        let worktreeURL = URL(fileURLWithPath: worktree.worktreePath, isDirectory: true)
+        let rootURL = URL(fileURLWithPath: worktree.rootWorkspacePath, isDirectory: true)
+        switch mutation {
+        case let .create(approvalID, exactTarget):
+            let snapshot = try await service.createWorktree(
+                repository: rootURL,
+                target: worktreeURL,
+                branch: worktree.branch,
+                baseRevision: worktree.baseRevision,
+                grant: LocalGitMutationGrant(
+                    approvalID: approvalID,
+                    kind: .createWorktree,
+                    exactTarget: exactTarget
+                )
+            )
+            return .messaging(snapshot: snapshot, userMessage: "Created with local approval \(approvalID).")
+
+        case .refresh:
+            let snapshot = try await service.inspect(worktree: worktreeURL, rootRepository: rootURL)
+            return .messaging(snapshot: snapshot, userMessage: "Reconciled local Git state.")
+
+        case let .commit(approvalID, exactTarget, paths, message):
+            let snapshot = try await service.createSignedCommit(
+                worktree: worktreeURL,
+                relativePaths: paths,
+                message: message,
+                grant: LocalGitMutationGrant(approvalID: approvalID, kind: .commit, exactTarget: exactTarget)
+            )
+            var outcome = GitMutationOutcome.messaging(
+                snapshot: snapshot,
+                userMessage: "Signed local commit created; nothing was pushed.",
+                diagnosticSummary: "Signed local commit created with approval \(approvalID)."
+            )
+            outcome.emptyDiffSummary = "Working tree clean after signed commit"
+            outcome.cleanState = .review
+            return outcome
+
+        case let .revertCheckpoint(approvalID, exactTarget, expiresAtUnixMillis, target):
+            let snapshot = try await service.revertToCheckpoint(
+                worktree: worktreeURL,
+                target: target,
+                grant: LocalGitMutationGrant(
+                    approvalID: approvalID,
+                    kind: .revertCheckpoint,
+                    exactTarget: exactTarget,
+                    expiresAtUnixMillis: expiresAtUnixMillis
+                )
+            )
+            var outcome = GitMutationOutcome.messaging(
+                snapshot: snapshot,
+                userMessage: "Tracked and non-ignored files plus staged state were restored to the approved checkpoint. Ignored files and empty directories were left untouched.",
+                diagnosticSummary: "Checkpoint revert executed with approval \(approvalID)."
+            )
+            outcome.emptyDiffSummary = "Restored to checkpoint \(target.before.ref)"
+            return outcome
         }
     }
 

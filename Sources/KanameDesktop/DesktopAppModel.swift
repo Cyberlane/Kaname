@@ -1,6 +1,7 @@
 import Combine
 import CryptoKit
 import Foundation
+import KanameConnectivity
 import KanameDomain
 import KanameLocalCore
 #if os(macOS)
@@ -335,6 +336,7 @@ public struct DesktopRemoteEvent: Codable, Equatable, Identifiable, Sendable {
     public enum State: String, Codable, Equatable, Sendable {
         case passed
         case ready
+        case notRun
         case deferred
     }
 
@@ -352,36 +354,39 @@ public struct DesktopRemoteStatus: Codable, Equatable, Sendable {
     public var lastVerifiedAtUnixMillis: Int64
     public var events: [DesktopRemoteEvent]
 
-    public static func currentCheckpoint(now: Int64) -> DesktopRemoteStatus {
+    /// Fresh workspaces contain the remote foundation, not evidence that this
+    /// build has exercised it. Operational probes replace these values after
+    /// they produce evidence; persisted snapshots keep their recorded state.
+    public static func unverifiedFoundation() -> DesktopRemoteStatus {
         DesktopRemoteStatus(
-            relayStatus: "Hosted relay clean",
-            enrollmentStatus: "Simulator qualified · physical device deferred",
-            notificationStatus: "Privacy contract passed · APNs credentials deferred",
-            queueStatus: "Restart-safe · 0 pending after terminal receipts",
-            lastVerifiedAtUnixMillis: now,
+            relayStatus: "Not checked in this workspace",
+            enrollmentStatus: "Foundation available · qualification not run",
+            notificationStatus: "Contract available · delivery not run",
+            queueStatus: "Recovery foundation available · not run",
+            lastVerifiedAtUnixMillis: 0,
             events: [
                 DesktopRemoteEvent(
                     id: "remote-relay-rehearsal",
-                    title: "Encrypted relay rehearsal",
-                    detail: "Enrollment, edited queue, receipts, stale approval, rotation, revocation, and cleanup passed.",
-                    state: .passed
+                    title: "Encrypted relay foundation",
+                    detail: "Rehearsal has not run in this workspace; no relay result or cleanup receipt is recorded.",
+                    state: .notRun
                 ),
                 DesktopRemoteEvent(
                     id: "remote-restart-recovery",
-                    title: "Restart recovery",
-                    detail: "Enrollment, key custody, queue, receipts, history, and pending rotation recover safely.",
-                    state: .passed
+                    title: "Restart recovery foundation",
+                    detail: "Recovery has not run in this workspace; behavior and pending state are unknown.",
+                    state: .notRun
                 ),
                 DesktopRemoteEvent(
                     id: "remote-apns-contract",
-                    title: "APNs payload contract",
-                    detail: "Only a generic content-free attention hint is sent; encrypted work remains in the relay.",
-                    state: .passed
+                    title: "APNs privacy contract",
+                    detail: "The foundation defines a content-free hint, but delivery and payload inspection have not run.",
+                    state: .notRun
                 ),
                 DesktopRemoteEvent(
                     id: "remote-physical-iphone",
                     title: "Physical iPhone qualification",
-                    detail: "Deferred until a different iPhone is explicitly designated.",
+                    detail: "Not run; deferred until an iPhone is explicitly designated.",
                     state: .deferred
                 ),
             ]
@@ -509,8 +514,8 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
                 DesktopThread(
                     id: "thread-desktop-dogfood",
                     projectID: project.id,
-                    title: "Kaname desktop dogfood",
-                    summary: "The polished desktop workspace is installed and ready for dogfooding.",
+                    title: "Starter · Kaname desktop dogfood",
+                    summary: "Starter context only. Workspace qualification has not run in this fresh state.",
                     kind: .coding,
                     attention: .needsResponse,
                     provider: "Codex",
@@ -527,27 +532,27 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
                         DesktopMessage(
                             id: "message-desktop-ready",
                             role: .assistant,
-                            body: "The persistent workspace, integrated safety surfaces, private local core, release packaging, and visual qualification are ready.",
+                            body: "This starter describes the intended foundation. It is not an operational receipt; build, test, packaging, and visual qualification are unknown until run.",
                             createdAtUnixMillis: now - 1_000
                         ),
                     ],
                     plan: [
-                        DesktopPlanItem(title: "Persistent desktop workspace", state: .complete),
-                        DesktopPlanItem(title: "Integrated devices and remote health", state: .complete),
-                        DesktopPlanItem(title: "Packaging and interactive QA", state: .complete),
+                        DesktopPlanItem(title: "Verify the persistent desktop foundation", state: .pending),
+                        DesktopPlanItem(title: "Verify devices and remote health", state: .pending),
+                        DesktopPlanItem(title: "Run packaging and interactive QA", state: .pending),
                     ],
                     evidence: [
-                        DesktopEvidence(label: "Swift tests", detail: "Full desktop suite passed", state: .passed),
-                        DesktopEvidence(label: "Rust tests", detail: "26 tests passed", state: .passed),
-                        DesktopEvidence(label: "Packaged app", detail: "Signed, installed, and visually qualified", state: .passed),
-                        DesktopEvidence(label: "Local core", detail: "F-01 through F-14 replayed through Mach XPC", state: .passed),
+                        DesktopEvidence(label: "Swift tests", detail: "Not run for this workspace state", state: .notRun),
+                        DesktopEvidence(label: "Rust tests", detail: "Not run for this workspace state", state: .notRun),
+                        DesktopEvidence(label: "Packaged app", detail: "Signing, installation, and visual qualification not run", state: .notRun),
+                        DesktopEvidence(label: "Local core", detail: "Replay and transport qualification not run", state: .notRun),
                     ]
                 ),
                 DesktopThread(
                     id: "thread-phase3-mobile",
                     projectID: project.id,
-                    title: "Phase 3 mobile qualification",
-                    summary: "Simulator, hosted relay, reconciliation, recovery, and cleanup are complete.",
+                    title: "Starter · Mobile qualification",
+                    summary: "Remote and mobile foundations are available; qualification has not run in this fresh state.",
                     kind: .planning,
                     attention: .needsResponse,
                     provider: "Kaname",
@@ -563,28 +568,28 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
                         ),
                     ],
                     evidence: [
-                        DesktopEvidence(label: "Hosted relay", detail: "Clean after bounded qualification", state: .passed),
-                        DesktopEvidence(label: "Simulator recovery", detail: "Restart and reconciliation passed", state: .passed),
-                        DesktopEvidence(label: "Physical device", detail: "Explicitly deferred", state: .notRun),
+                        DesktopEvidence(label: "Hosted relay", detail: "Not run; remote state is unknown", state: .notRun),
+                        DesktopEvidence(label: "Simulator recovery", detail: "Not run for this workspace state", state: .notRun),
+                        DesktopEvidence(label: "Physical device", detail: "Not run; explicitly deferred", state: .notRun),
                     ]
                 ),
                 DesktopThread(
                     id: "thread-local-core",
                     projectID: project.id,
-                    title: "Local authority health",
-                    summary: "Signed XPC and durable Rust journal evidence remain available for inspection.",
+                    title: "Starter · Local authority health",
+                    summary: "Local-core foundations are configured; current health and qualification are unknown.",
                     kind: .coding,
-                    attention: .completed,
+                    attention: .needsInput,
                     provider: "Kaname local core",
                     model: "Provider-free",
                     updatedAtUnixMillis: now - 120_000,
                     evidence: [
-                        DesktopEvidence(label: "Local core", detail: "Phase 1 acceptance corpus passed", state: .passed),
-                        DesktopEvidence(label: "Codex adapter", detail: "Phase 2 accepted workflow passed", state: .passed),
+                        DesktopEvidence(label: "Local core", detail: "Acceptance corpus not run for this workspace state", state: .notRun),
+                        DesktopEvidence(label: "Codex adapter", detail: "Accepted workflow not run for this workspace state", state: .notRun),
                     ]
                 ),
             ],
-            remote: .currentCheckpoint(now: now),
+            remote: .unverifiedFoundation(),
             preferences: DesktopPreferences(),
             domains: .starter(now: now),
             operations: .empty,
@@ -709,12 +714,145 @@ public struct DesktopAppSnapshot: Codable, Equatable, Sendable {
                 // Existing conversations gain no implementation, acceptance,
                 // or knowledge-write authority during migration.
                 break
+            case 27:
+                // Remove only the exact legacy starter signatures that looked
+                // like current acceptance receipts. User-created, edited, and
+                // independently recorded evidence is preserved byte-for-byte.
+                migrated.normalizeLegacyStarterClaims()
             default:
                 throw DesktopModelError.unsupportedVersion
             }
             migrated.version += 1
         }
         return migrated
+    }
+
+    private mutating func normalizeLegacyStarterClaims() {
+        if let index = threads.firstIndex(where: { $0.id == "thread-desktop-dogfood" }) {
+            if threads[index].title == "Kaname desktop dogfood" {
+                threads[index].title = "Starter · Kaname desktop dogfood"
+            }
+            if threads[index].summary == "The polished desktop workspace is installed and ready for dogfooding." {
+                threads[index].summary = "Starter context only. Workspace qualification has not run in this fresh state."
+            }
+            for messageIndex in threads[index].messages.indices
+                where threads[index].messages[messageIndex].id == "message-desktop-ready"
+                    && threads[index].messages[messageIndex].body == "The persistent workspace, integrated safety surfaces, private local core, release packaging, and visual qualification are ready." {
+                let legacyMessage = threads[index].messages[messageIndex]
+                threads[index].messages[messageIndex] = DesktopMessage(
+                    id: legacyMessage.id,
+                    role: legacyMessage.role,
+                    body: "This starter describes the intended foundation. It is not an operational receipt; build, test, packaging, and visual qualification are unknown until run.",
+                    attachments: legacyMessage.attachments,
+                    createdAtUnixMillis: legacyMessage.createdAtUnixMillis
+                )
+            }
+            let legacyPlans: [String: String] = [
+                "Persistent desktop workspace": "Verify the persistent desktop foundation",
+                "Integrated devices and remote health": "Verify devices and remote health",
+                "Packaging and interactive QA": "Run packaging and interactive QA",
+            ]
+            for planIndex in threads[index].plan.indices {
+                let item = threads[index].plan[planIndex]
+                if item.state == .complete, let replacement = legacyPlans[item.title] {
+                    threads[index].plan[planIndex].title = replacement
+                    threads[index].plan[planIndex].state = .pending
+                }
+            }
+            let legacyEvidence: [String: (String, String)] = [
+                "Full desktop suite passed": ("Swift tests", "Not run for this workspace state"),
+                "26 tests passed": ("Rust tests", "Not run for this workspace state"),
+                "Signed, installed, and visually qualified": ("Packaged app", "Signing, installation, and visual qualification not run"),
+                "F-01 through F-14 replayed through Mach XPC": ("Local core", "Replay and transport qualification not run"),
+            ]
+            for evidenceIndex in threads[index].evidence.indices {
+                let evidence = threads[index].evidence[evidenceIndex]
+                if evidence.state == .passed,
+                   let replacement = legacyEvidence[evidence.detail],
+                   evidence.label == replacement.0 {
+                    threads[index].evidence[evidenceIndex].detail = replacement.1
+                    threads[index].evidence[evidenceIndex].state = .notRun
+                }
+            }
+        }
+
+        if let index = threads.firstIndex(where: { $0.id == "thread-phase3-mobile" }) {
+            if threads[index].title == "Phase 3 mobile qualification" {
+                threads[index].title = "Starter · Mobile qualification"
+            }
+            if threads[index].summary == "Simulator, hosted relay, reconciliation, recovery, and cleanup are complete." {
+                threads[index].summary = "Remote and mobile foundations are available; qualification has not run in this fresh state."
+            }
+            let replacements: [String: String] = [
+                "Clean after bounded qualification": "Not run; remote state is unknown",
+                "Restart and reconciliation passed": "Not run for this workspace state",
+                "Explicitly deferred": "Not run; explicitly deferred",
+            ]
+            for evidenceIndex in threads[index].evidence.indices {
+                let evidence = threads[index].evidence[evidenceIndex]
+                if let replacement = replacements[evidence.detail] {
+                    threads[index].evidence[evidenceIndex].detail = replacement
+                    threads[index].evidence[evidenceIndex].state = .notRun
+                }
+            }
+        }
+
+        if let index = threads.firstIndex(where: { $0.id == "thread-local-core" }) {
+            if threads[index].title == "Local authority health" {
+                threads[index].title = "Starter · Local authority health"
+            }
+            if threads[index].summary == "Signed XPC and durable Rust journal evidence remain available for inspection." {
+                threads[index].summary = "Local-core foundations are configured; current health and qualification are unknown."
+            }
+            let replacements: [String: String] = [
+                "Phase 1 acceptance corpus passed": "Acceptance corpus not run for this workspace state",
+                "Phase 2 accepted workflow passed": "Accepted workflow not run for this workspace state",
+            ]
+            var replacedEvidence = false
+            for evidenceIndex in threads[index].evidence.indices {
+                let evidence = threads[index].evidence[evidenceIndex]
+                if evidence.state == .passed, let replacement = replacements[evidence.detail] {
+                    threads[index].evidence[evidenceIndex].detail = replacement
+                    threads[index].evidence[evidenceIndex].state = .notRun
+                    replacedEvidence = true
+                }
+            }
+            if replacedEvidence, threads[index].attention == .completed {
+                threads[index].attention = .needsInput
+            }
+        }
+
+        let legacyRemoteEvents = [
+            ("remote-relay-rehearsal", "Encrypted relay rehearsal", "Enrollment, edited queue, receipts, stale approval, rotation, revocation, and cleanup passed.", DesktopRemoteEvent.State.passed),
+            ("remote-restart-recovery", "Restart recovery", "Enrollment, key custody, queue, receipts, history, and pending rotation recover safely.", DesktopRemoteEvent.State.passed),
+            ("remote-apns-contract", "APNs payload contract", "Only a generic content-free attention hint is sent; encrypted work remains in the relay.", DesktopRemoteEvent.State.passed),
+            ("remote-physical-iphone", "Physical iPhone qualification", "Deferred until a different iPhone is explicitly designated.", DesktopRemoteEvent.State.deferred),
+        ]
+        let hasExactLegacyRemote = remote.relayStatus == "Hosted relay clean"
+            && remote.enrollmentStatus == "Simulator qualified · physical device deferred"
+            && remote.notificationStatus == "Privacy contract passed · APNs credentials deferred"
+            && remote.queueStatus == "Restart-safe · 0 pending after terminal receipts"
+            && remote.events.count == legacyRemoteEvents.count
+            && zip(remote.events, legacyRemoteEvents).allSatisfy { pair in
+                let (event, expected) = pair
+                return event.id == expected.0 && event.title == expected.1
+                    && event.detail == expected.2 && event.state == expected.3
+            }
+        if hasExactLegacyRemote {
+            remote = .unverifiedFoundation()
+        }
+
+        for index in operations.workflows.capabilityInstallations.indices {
+            let capability = operations.workflows.capabilityInstallations[index]
+            if DesktopWorkflowBuiltinCapabilities.identifiers.contains(capability.capabilityID),
+               capability.runtime == .builtIn,
+               capability.trust == .kanameBuiltIn,
+               capability.lastTestPassed,
+               capability.lastTestedAtUnixMillis == capability.installedAtUnixMillis {
+                operations.workflows.capabilityInstallations[index].lastTestedAtUnixMillis = nil
+                operations.workflows.capabilityInstallations[index].lastTestPassed = false
+            }
+        }
     }
 }
 
@@ -3393,6 +3531,35 @@ public final class DesktopAppModel: ObservableObject {
         return approval.expiresAtUnixMillis.map { $0 >= checkedAt } ?? true
     }
 
+    /// Marks a successfully executed exact action as consumed. Consequential
+    /// one-shot grants must not remain reusable merely because their target is
+    /// still byte-for-byte identical after execution.
+    @discardableResult
+    public func consumeApproval(id: String, exactTarget: String) -> Bool {
+        let timestamp = now()
+        var consumed = false
+        let persisted = mutate { snapshot in
+            guard let index = snapshot.operations.approvals.firstIndex(where: { $0.id == id }),
+                  snapshot.operations.approvals[index].state == .approved,
+                  snapshot.operations.approvals[index].exactTarget == exactTarget,
+                  snapshot.operations.approvals[index].expiresAtUnixMillis.map({ $0 >= timestamp }) ?? true else {
+                return
+            }
+            snapshot.operations.approvals[index].state = .completed
+            snapshot.operations.audit.append(DesktopAuditRecord(
+                id: UUID().uuidString.lowercased(),
+                domain: "approval",
+                action: "consumed",
+                target: exactTarget,
+                state: .completed,
+                detail: "The exact local approval was consumed after the action completed.",
+                recordedAtUnixMillis: timestamp
+            ))
+            consumed = true
+        }
+        return persisted && consumed
+    }
+
     func exactEffectIsAuthorized(approvalID: String, target: String) -> Bool {
         !snapshot.preferences.safeMode && isApprovalGranted(id: approvalID, exactTarget: target)
     }
@@ -4447,6 +4614,39 @@ public final class DesktopAppModel: ObservableObject {
             if let diagnosticSummary { snapshot.operations.worktrees[index].diagnosticSummary = String(diagnosticSummary.prefix(32_000)) }
             snapshot.operations.worktrees[index].state = state
             snapshot.operations.worktrees[index].updatedAtUnixMillis = timestamp
+        }
+    }
+
+    public func upsertCodingTerminal(_ record: DesktopCodingTerminalRecord) {
+        mutate { snapshot in
+            Self.replaceOrAppend(
+                record,
+                in: &snapshot.operations.codingTerminals
+            ) { $0.id == record.id && $0.threadID == record.threadID }
+        }
+    }
+
+    public func upsertCodingCheckpoint(_ record: DesktopCodingCheckpointRecord) {
+        mutate { snapshot in
+            Self.replaceOrAppend(record, in: &snapshot.operations.codingCheckpoints) { $0.id == record.id }
+        }
+    }
+
+    public func upsertCodingPreviewTab(_ record: DesktopCodingPreviewTabRecord) {
+        mutate { snapshot in
+            Self.replaceOrAppend(record, in: &snapshot.operations.codingPreviewTabs) { $0.id == record.id }
+        }
+    }
+
+    private static func replaceOrAppend<Element>(
+        _ element: Element,
+        in elements: inout [Element],
+        matching: (Element) -> Bool
+    ) {
+        if let index = elements.firstIndex(where: matching) {
+            elements[index] = element
+        } else {
+            elements.append(element)
         }
     }
 

@@ -34,6 +34,8 @@ public enum DesktopThreadPanel: String, CaseIterable, Identifiable, Sendable {
     case conversation
     case plan
     case changes
+    case terminal
+    case preview
     case evidence
     case knowledge
 
@@ -44,6 +46,8 @@ public enum DesktopThreadPanel: String, CaseIterable, Identifiable, Sendable {
         case .conversation: "Chat"
         case .plan: "Plan"
         case .changes: "Changes"
+        case .terminal: "Terminal"
+        case .preview: "Preview"
         case .evidence: "Evidence"
         case .knowledge: "Knowledge"
         }
@@ -54,13 +58,18 @@ public enum DesktopThreadPanel: String, CaseIterable, Identifiable, Sendable {
         case .conversation: "bubble.left.and.bubble.right"
         case .plan: "list.bullet.clipboard"
         case .changes: "doc.on.doc"
+        case .terminal: "terminal"
+        case .preview: "safari"
         case .evidence: "checkmark.seal"
         case .knowledge: "books.vertical"
         }
     }
 
     public static func available(forCodingThread isCodingThread: Bool) -> [Self] {
-        isCodingThread ? allCases : allCases.filter { $0 != .knowledge }
+        if isCodingThread {
+            return [.conversation, .plan, .changes, .terminal, .preview, .evidence, .knowledge]
+        }
+        return [.conversation, .plan, .changes, .evidence]
     }
 }
 

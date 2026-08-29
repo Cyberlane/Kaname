@@ -7,11 +7,11 @@ struct KanameProviderProbeCommand {
     static func main() async {
         let requested = Array(CommandLine.arguments.dropFirst())
         let drivers = requested.isEmpty || requested == ["all"]
-            ? [ProviderDriverKind.codex, .claudeAgent, .openCode]
+            ? [ProviderDriverKind.codex, .claudeAgent, .openCode, .cursorAgent, .grokBuild]
             : requested.compactMap(ProviderDriverKind.init(rawValue:))
 
         guard !drivers.isEmpty else {
-            FileHandle.standardError.write(Data("Usage: swift run KanameProviderProbe [all|codex|claudeAgent|opencode]\n".utf8))
+            FileHandle.standardError.write(Data("Usage: swift run KanameProviderProbe [all|codex|claudeAgent|opencode|cursorAgent|grokBuild]\n".utf8))
             return
         }
 
@@ -27,6 +27,8 @@ struct KanameProviderProbeCommand {
             case .codex: "codex"
             case .claudeAgent: "claude"
             case .openCode: "opencode"
+            case .cursorAgent: "cursor-agent"
+            case .grokBuild: "grok"
             default: driver.rawValue
             }
             return await prober.probe(ProviderProbeConfiguration(

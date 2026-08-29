@@ -286,24 +286,16 @@ public enum DesktopComposerCommands {
         cursorOffset: Int,
         hasSelection: Bool = false
     ) -> DesktopComposerCommandQuery? {
-        guard !hasSelection, cursorOffset >= 0, cursorOffset <= text.count else { return nil }
-        let cursor = text.index(text.startIndex, offsetBy: cursorOffset)
-        let prefix = text[..<cursor]
-        let lineStart = prefix.lastIndex(of: "\n").map { text.index(after: $0) } ?? text.startIndex
-        guard lineStart < text.endIndex, text[lineStart] == "/" else { return nil }
-
-        let queryStart = text.index(after: lineStart)
-        var tokenEnd = queryStart
-        while tokenEnd < text.endIndex, !text[tokenEnd].isWhitespace {
-            tokenEnd = text.index(after: tokenEnd)
-        }
-        guard cursor >= queryStart, cursor <= tokenEnd else { return nil }
-
-        let triggerStart = text.distance(from: text.startIndex, to: lineStart)
-        let triggerEnd = text.distance(from: text.startIndex, to: tokenEnd)
+        guard let inline = DesktopComposerInlineQueries.query(
+            in: text,
+            cursorOffset: cursorOffset,
+            hasSelection: hasSelection,
+            trigger: "/",
+            placement: .lineStart
+        ) else { return nil }
         return DesktopComposerCommandQuery(
-            fragment: String(text[queryStart..<cursor]),
-            triggerRange: triggerStart..<triggerEnd
+            fragment: inline.fragment,
+            triggerRange: inline.triggerRange
         )
     }
 
@@ -311,32 +303,27 @@ public enum DesktopComposerCommands {
         _ query: DesktopComposerCommandQuery,
         in commands: [DesktopComposerCommand]
     ) -> [DesktopComposerCommand] {
-        let normalizedQuery = normalized(query.fragment)
-        guard !normalizedQuery.isEmpty else { return commands }
-
-        return commands.enumerated().compactMap { index, command -> (Int, Int, DesktopComposerCommand)? in
-            guard let rank = rank(command.id, for: normalizedQuery) else { return nil }
-            return (rank, index, command)
-        }
-        .sorted { lhs, rhs in
-            lhs.0 == rhs.0 ? lhs.1 < rhs.1 : lhs.0 < rhs.0
-        }
-        .map(\.2)
+        DesktopComposerInlineQueries.rankedMatches(
+            query: DesktopComposerInlineQuery(fragment: query.fragment, triggerRange: query.triggerRange),
+            in: commands,
+            rank: { command, normalizedQuery in
+                rank(command.id, for: normalizedQuery)
+            }
+        )
     }
 
     public static func consuming(
         _ query: DesktopComposerCommandQuery,
         from text: String
     ) -> DesktopComposerCommandEdit? {
-        guard query.triggerRange.lowerBound >= 0,
-              query.triggerRange.upperBound <= text.count else { return nil }
-        let lowerBound = text.index(text.startIndex, offsetBy: query.triggerRange.lowerBound)
-        let upperBound = text.index(text.startIndex, offsetBy: query.triggerRange.upperBound)
-        var updated = text
-        updated.removeSubrange(lowerBound..<upperBound)
+        guard let consumed = DesktopComposerInlineQueries.consuming(
+            DesktopComposerInlineQuery(fragment: query.fragment, triggerRange: query.triggerRange),
+            replacement: "",
+            from: text
+        ) else { return nil }
         return DesktopComposerCommandEdit(
-            text: updated,
-            insertionOffset: query.triggerRange.lowerBound
+            text: consumed.text,
+            insertionOffset: consumed.insertionOffset
         )
     }
 

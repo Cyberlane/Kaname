@@ -21,6 +21,8 @@ public struct ProviderProbeConfiguration: Sendable {
     public let codexHome: URL?
     public let codexLaunchArguments: [String]
     public let openCode: OpenCodeEndpointConfiguration
+    public let environmentOverrides: [String: String]
+    public let allowedMCPServerNames: Set<String>
 
     public init(
         instance: ProviderInstance,
@@ -29,7 +31,9 @@ public struct ProviderProbeConfiguration: Sendable {
         timeout: Duration = .seconds(10),
         codexHome: URL? = nil,
         codexLaunchArguments: [String] = [],
-        openCode: OpenCodeEndpointConfiguration = .init()
+        openCode: OpenCodeEndpointConfiguration = .init(),
+        environmentOverrides: [String: String] = [:],
+        allowedMCPServerNames: Set<String> = []
     ) {
         self.instance = instance
         self.executable = executable
@@ -38,6 +42,8 @@ public struct ProviderProbeConfiguration: Sendable {
         self.codexHome = codexHome
         self.codexLaunchArguments = codexLaunchArguments
         self.openCode = openCode
+        self.environmentOverrides = environmentOverrides
+        self.allowedMCPServerNames = allowedMCPServerNames
     }
 }
 
@@ -57,6 +63,12 @@ public actor ProviderCapabilityProber {
             }
             if configuration.instance.driver == .openCode {
                 return try await OpenCodeCapabilityProbe.probe(configuration)
+            }
+            if configuration.instance.driver == .cursorAgent {
+                return try await CursorCapabilityProbe.probe(configuration)
+            }
+            if configuration.instance.driver == .grokBuild {
+                return try await GrokCapabilityProbe.probe(configuration)
             }
             return ProviderCapabilitySnapshot(
                 instance: configuration.instance,

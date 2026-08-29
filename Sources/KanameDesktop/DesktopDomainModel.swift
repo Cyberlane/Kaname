@@ -348,16 +348,16 @@ public struct DesktopDomainSnapshot: Codable, Equatable, Sendable {
                     name: "Coding ADE",
                     kind: .obsidian,
                     scope: "Projects/Coding ADE/Overview.md",
-                    status: .ready,
-                    lastReadAtUnixMillis: now
+                    status: .needsReview,
+                    lastReadAtUnixMillis: nil
                 ),
                 DesktopKnowledgeSource(
                     id: "knowledge-kaname-repository",
                     name: "Kaname repository",
                     kind: .repository,
                     scope: "Selected project files and instructions",
-                    status: .ready,
-                    lastReadAtUnixMillis: now
+                    status: .needsReview,
+                    lastReadAtUnixMillis: nil
                 ),
             ],
             skills: [
@@ -368,7 +368,7 @@ public struct DesktopDomainSnapshot: Codable, Equatable, Sendable {
                     scope: "Kaname repository",
                     source: "Cyberlane/mori",
                     revision: "Pinned by .mori-version",
-                    status: .ready,
+                    status: .needsReview,
                     enabled: true
                 ),
                 DesktopSkillRecord(
@@ -378,7 +378,7 @@ public struct DesktopDomainSnapshot: Codable, Equatable, Sendable {
                     scope: "Explicit vault paths",
                     source: "Local skill catalogue",
                     revision: "Managed locally",
-                    status: .ready,
+                    status: .needsReview,
                     enabled: true
                 ),
             ],
@@ -420,17 +420,7 @@ public struct DesktopDomainSnapshot: Codable, Equatable, Sendable {
             emailDrafts: [],
             calendarProposals: [],
             automations: [],
-            gitWorkspaces: [
-                DesktopGitWorkspace(
-                    id: "git-kaname-local",
-                    projectID: "project-kaname",
-                    name: "Kaname",
-                    localPath: "/Users/justinnel/Projects/coding-ade",
-                    branch: "main",
-                    remoteSummary: "Local inspection only",
-                    status: .ready
-                ),
-            ]
+            gitWorkspaces: []
         )
     }
 

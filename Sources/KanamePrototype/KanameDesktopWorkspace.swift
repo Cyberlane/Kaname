@@ -230,6 +230,7 @@ struct KanameDesktopWorkspace: View {
     private let initialGlobalSearchQuery: String
     private let usesQALargeText: Bool
     private let designCapture: DesktopDesignCaptureConfiguration?
+    private let usesSyntheticFixtures: Bool
     @StateObject private var model: DesktopAppModel
     @StateObject private var conversationRuntime: DesktopConversationRuntime
     @StateObject private var automationScheduler: DesktopAutomationSchedulerViewModel
@@ -274,6 +275,10 @@ struct KanameDesktopWorkspace: View {
         let arguments = CommandLine.arguments
         let designCapture = DesktopDesignCaptureConfiguration.resolve(arguments: arguments)
         self.designCapture = designCapture
+        usesSyntheticFixtures = designCapture != nil
+            || arguments.contains("--desktop-plan-review-fixture")
+            || arguments.contains("--desktop-link-synthetic-fixture")
+            || arguments.contains("--desktop-workflow-fixture")
         let desktopStore: any DesktopStateStoring
         let forkFailure: String?
         if designCapture != nil {
@@ -623,7 +628,7 @@ struct KanameDesktopWorkspace: View {
 
     private var designCaptureWorkspace: some View {
         VStack(spacing: 0) {
-            if designCapture != nil {
+            if usesSyntheticFixtures {
                 KanameSyntheticDataBanner()
             }
             primaryCommandWorkspace
@@ -1695,6 +1700,7 @@ private struct DesktopGlobalSearchScheduledRequest: Sendable {
     let generation: UInt64
     let query: DesktopGlobalSearchQuery
     let source: DesktopGlobalSearchScheduledSource
+    let ftsRows: [DesktopGlobalSearchFTS.IndexedRow]
 }
 
 private struct DesktopGlobalSearchScheduledOutput: Sendable {
@@ -1918,7 +1924,8 @@ private struct DesktopGlobalSearchPalette: View {
             generation: generation,
             query: searchQuery,
             source: cachedCorpus.map(DesktopGlobalSearchScheduledSource.cached)
-                ?? .snapshot(snapshot)
+                ?? .snapshot(snapshot),
+            ftsRows: DesktopGlobalSearchFTS.supplementalRows(from: snapshot)
         )
     }
 
@@ -1941,7 +1948,11 @@ private struct DesktopGlobalSearchPalette: View {
                 corpus = DesktopGlobalSearchLocalIndex.corpus(from: value)
             }
             guard !_Concurrency.Task<Never, Never>.isCancelled else { return nil }
-            let sections = DesktopGlobalSearch.search(query: request.query, in: corpus)
+            let sections = DesktopGlobalSearch.search(
+                query: request.query,
+                in: corpus,
+                ftsRows: request.ftsRows
+            )
             guard !_Concurrency.Task<Never, Never>.isCancelled else { return nil }
             return DesktopGlobalSearchScheduledOutput(corpus: corpus, sections: sections)
         }
@@ -2670,6 +2681,8 @@ private struct DesktopThreadConversation: View {
     @State private var composerHasSelection = false
     @State private var composerCommandSelection = DesktopComposerCommandSelectionState()
     @State private var composerCommandMenuDismissed = false
+    @State private var composerSkillSelectionIndex = 0
+    @State private var composerSkillMenuDismissed = false
     @State private var composerCommandKeyboardScrollRevision: UInt = 0
     @State private var attachments: [ConversationImageAttachment] = []
     @State private var attachmentError: String?
@@ -2744,6 +2757,10 @@ private struct DesktopThreadConversation: View {
                     isAwaitingReview: thread.kind == .coding && codingStage == .implementationReview,
                     beginReview: { runtime.beginImplementationReview(threadID: thread.id) }
                 )
+            case .terminal:
+                DesktopCodingTerminalPanel(model: model, thread: thread)
+            case .preview:
+                DesktopCodingPreviewPanel(model: model, thread: thread)
             case .plan:
                 ThreadPlanView(
                     items: thread.plan,
@@ -3173,6 +3190,16 @@ private struct DesktopThreadConversation: View {
                     )
                     .padding(.horizontal, 8)
                     .padding(.top, 8)
+                } else if let skillQuery = composerSkillQuery {
+                    DesktopComposerSkillDrawer(
+                        query: skillQuery.fragment,
+                        skills: filteredComposerSkills,
+                        selectedIndex: composerSkillSelectionIndex,
+                        select: { composerSkillSelectionIndex = $0 },
+                        activate: activateComposerSkill
+                    )
+                    .padding(.horizontal, 8)
+                    .padding(.top, 8)
                 }
 
                 TextField(
@@ -3192,13 +3219,16 @@ private struct DesktopThreadConversation: View {
                     .onKeyPress(.return, phases: .down, action: handleComposerReturn)
                     .onChange(of: draft) { body in
                         composerCommandMenuDismissed = false
+                        composerSkillMenuDismissed = false
                         composerCursorOffset = min(composerCursorOffset ?? body.count, body.count)
                         model.updateComposerDraft(threadID: thread.id, body: body)
                     }
                     .onChange(of: composerSelection) { _ in
                         composerCommandMenuDismissed = false
+                        composerSkillMenuDismissed = false
                         updateComposerSelectionState()
                         reconcileComposerCommandSelection()
+                        reconcileComposerSkillSelection()
                     }
                     .accessibilityLabel("Message composer for \(thread.title)")
                     .accessibilityHint("Return sends. Shift-Return inserts a new line.")
@@ -3304,12 +3334,36 @@ private struct DesktopThreadConversation: View {
     }
 
     private var composerCommandQuery: DesktopComposerCommandQuery? {
-        guard composerFocused, !composerCommandMenuDismissed else { return nil }
+        guard composerFocused, !composerCommandMenuDismissed, composerSkillQuery == nil else { return nil }
         return DesktopComposerCommands.query(
             in: draft,
             cursorOffset: composerCursorOffset ?? draft.count,
             hasSelection: composerHasSelection
         )
+    }
+
+    private var composerSkills: [DesktopComposerSkill] {
+        let project = model.project(id: thread.projectID)
+        let workspaceRoot = project?.path.flatMap { URL(fileURLWithPath: $0, isDirectory: true) }
+        return DesktopComposerSkillPicker.skills(
+            SkillRegistryLoader.loadRegistry(workspaceRoot: workspaceRoot).map {
+                ($0.name, $0.description, $0.path)
+            }
+        )
+    }
+
+    private var composerSkillQuery: DesktopComposerSkillQuery? {
+        guard composerFocused, !composerSkillMenuDismissed else { return nil }
+        return DesktopComposerSkillPicker.query(
+            in: draft,
+            cursorOffset: composerCursorOffset ?? draft.count,
+            hasSelection: composerHasSelection
+        )
+    }
+
+    private var filteredComposerSkills: [DesktopComposerSkill] {
+        guard let composerSkillQuery else { return [] }
+        return DesktopComposerSkillPicker.matching(composerSkillQuery, in: composerSkills)
     }
 
     private var filteredComposerCommands: [DesktopComposerCommand] {
@@ -3358,6 +3412,74 @@ private struct DesktopThreadConversation: View {
         composerCommandSelection.reconcile(with: filteredComposerCommands)
     }
 
+    private func reconcileComposerSkillSelection() {
+        guard !filteredComposerSkills.isEmpty else {
+            composerSkillSelectionIndex = 0
+            return
+        }
+        composerSkillSelectionIndex = min(composerSkillSelectionIndex, filteredComposerSkills.count - 1)
+    }
+
+    private func activateComposerSkill(_ skill: DesktopComposerSkill) {
+        guard let query = composerSkillQuery,
+              let edit = DesktopComposerSkillPicker.consuming(query, selectedSkill: skill, from: draft) else { return }
+        draft = edit.text
+        composerCursorOffset = edit.insertionOffset
+        composerSkillMenuDismissed = true
+        composerSkillSelectionIndex = 0
+        model.updateComposerDraft(threadID: thread.id, body: draft)
+    }
+
+    private func attachTerminalExcerpt(_ terminal: DesktopCodingTerminalRecord) {
+        let service = DesktopCodingTerminalService.shared
+        _Concurrency.Task {
+            guard let source = await service.attachContextSource(from: terminal) else { return }
+            let attachment = """
+
+            --- Terminal excerpt (\(terminal.id), digest \(terminal.scrollbackDigest)) ---
+            \(source.excerpt)
+            """
+            draft = draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? attachment.trimmingCharacters(in: .newlines)
+                : draft + attachment
+            model.updateComposerDraft(threadID: thread.id, body: draft)
+        }
+    }
+
+#if os(macOS)
+    private func handleComposerSkillKey(_ event: NSEvent) -> Bool {
+        let commandModifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        guard commandModifiers.isEmpty else { return false }
+        if let inputClient = NSApp.keyWindow?.firstResponder as? NSTextInputClient,
+           inputClient.hasMarkedText() {
+            return false
+        }
+
+        switch event.keyCode {
+        case 125:
+            guard !filteredComposerSkills.isEmpty else { return false }
+            composerSkillSelectionIndex = (composerSkillSelectionIndex + 1) % filteredComposerSkills.count
+            return true
+        case 126:
+            guard !filteredComposerSkills.isEmpty else { return false }
+            composerSkillSelectionIndex = composerSkillSelectionIndex == 0
+                ? filteredComposerSkills.count - 1
+                : composerSkillSelectionIndex - 1
+            return true
+        case 48:
+            guard filteredComposerSkills.indices.contains(composerSkillSelectionIndex) else { return false }
+            activateComposerSkill(filteredComposerSkills[composerSkillSelectionIndex])
+            return true
+        case 53:
+            composerSkillMenuDismissed = true
+            composerSkillSelectionIndex = 0
+            return true
+        default:
+            return false
+        }
+    }
+#endif
+
     private func selectComposerCommand(_ commandID: DesktopComposerCommandID) {
         composerCommandSelection = DesktopComposerCommandSelectionState(selectedCommandID: commandID)
     }
@@ -3398,6 +3520,9 @@ private struct DesktopThreadConversation: View {
 
 #if os(macOS)
     private func handleComposerCommandKey(_ event: NSEvent) -> Bool {
+        if composerSkillQuery != nil {
+            return handleComposerSkillKey(event)
+        }
         guard composerCommandQuery != nil else { return false }
         let commandModifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
         guard commandModifiers.isEmpty else { return false }
@@ -3579,6 +3704,18 @@ private struct DesktopThreadConversation: View {
                 editDetails: { openRuntimeSettings() },
                 update: updateRuntime
             )
+
+            if thread.kind == .coding,
+               let attachableTerminal = model.snapshot.operations.codingTerminals.first(where: {
+                   $0.threadID == thread.id && $0.hasAttachableExcerpt
+               }) {
+                Button("Attach terminal", systemImage: "terminal") {
+                    attachTerminalExcerpt(attachableTerminal)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Insert bounded terminal excerpt as untrusted context")
+            }
 
             Spacer(minLength: 8)
 
@@ -3856,131 +3993,14 @@ private struct DesktopThreadConversation: View {
 
 }
 
-private struct DesktopComposerCommandDrawer: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    let query: String
-    let commands: [DesktopComposerCommand]
-    let selectedCommandID: DesktopComposerCommandID?
-    let keyboardScrollRevision: UInt
-    let select: (DesktopComposerCommandID) -> Void
-    let activate: (DesktopComposerCommandID) -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Label("Commands", systemImage: "command")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(Nord.frost1)
-                Spacer()
-                Text("\(commands.count) match\(commands.count == 1 ? "" : "es")")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, 8)
-            .padding(.top, 7)
-
-            if commands.isEmpty {
-                Text("No local command matches /\(query). Press Return to send this as ordinary chat text.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 9)
-                .padding(.bottom, 9)
-            } else {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(spacing: 3) {
-                            ForEach(commands) { command in
-                                commandRow(command)
-                                    .id(command.id)
-                            }
-                        }
-                        .padding(.horizontal, 4)
-                        .padding(.bottom, 5)
-                    }
-                    .onChange(of: keyboardScrollRevision) { _, _ in
-                        guard let selectedCommandID,
-                              commands.contains(where: { $0.id == selectedCommandID }) else { return }
-                        if reduceMotion {
-                            proxy.scrollTo(selectedCommandID, anchor: .center)
-                        } else {
-                            withAnimation(.easeOut(duration: 0.12)) {
-                                proxy.scrollTo(selectedCommandID, anchor: .center)
-                            }
-                        }
-                    }
-                }
-                .frame(maxHeight: 238)
-            }
-        }
-        .background(Nord.polarNight2.opacity(0.98), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .strokeBorder(Nord.polarNight3, lineWidth: 1)
-        }
-        .shadow(color: .black.opacity(0.24), radius: 12, y: 6)
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("Composer commands")
-        .accessibilityValue("\(commands.count) available")
-    }
-
-    private func commandRow(_ command: DesktopComposerCommand) -> some View {
-        let isSelected = command.id == selectedCommandID
-        return Button {
-            activate(command.id)
-        } label: {
-            HStack(alignment: .top, spacing: 9) {
-                Image(systemName: command.systemImage)
-                    .frame(width: 18)
-                    .foregroundStyle(command.isEnabled ? Nord.frost1 : Color.secondary)
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(
-                        "\(Text(command.invocation).font(.system(.callout, design: .monospaced).weight(.semibold))) "
-                            + "\(Text(command.title).font(.callout.weight(.medium)))"
-                    )
-                    Text(command.disabledReason ?? command.detail)
-                        .font(.caption)
-                        .foregroundStyle(command.isEnabled ? Color.secondary : Nord.auroraYellow)
-                        .lineLimit(2)
-                }
-                Spacer(minLength: 4)
-                if isSelected {
-                    Image(systemName: "return")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(Nord.polarNight1)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 7)
-            .contentShape(Rectangle())
-            .background(
-                isSelected ? Nord.frost1.opacity(command.isEnabled ? 1 : 0.62) : Color.clear,
-                in: RoundedRectangle(cornerRadius: 8)
-            )
-            .foregroundStyle(isSelected ? Nord.polarNight0 : Color.primary)
-        }
-        .buttonStyle(.plain)
-        .focusable(false)
-        .onHover { hovering in
-            if hovering { select(command.id) }
-        }
-        .accessibilityLabel("\(command.invocation), \(command.title)")
-        .accessibilityValue(
-            "\(isSelected ? "Selected. " : "")\(command.disabledReason ?? command.detail)"
-        )
-        .accessibilityHint(command.isEnabled ? "Press Return or Tab to run locally" : "Unavailable")
-    }
-}
-
 private struct DesktopThreadChangesView: View {
     @ObservedObject var model: DesktopAppModel
     let thread: DesktopThread
     let isAwaitingReview: Bool
     let beginReview: () -> Void
     @StateObject private var changes = DesktopThreadChangesViewModel()
+    @StateObject private var codingControl = DesktopCodingControlViewModel()
+    @State private var revertMessage: String?
 
     private var worktree: DesktopWorktreeRecord? {
         model.snapshot.operations.worktrees
@@ -4047,6 +4067,50 @@ private struct DesktopThreadChangesView: View {
             .padding(.vertical, 10)
             .background(Nord.polarNight1)
 
+            if !turnCheckpoints(worktree).isEmpty {
+                DisclosureGroup("Turn checkpoints") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(turnCheckpoints(worktree)) { checkpoint in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Turn \(checkpoint.turnID.suffix(8))")
+                                    .font(.caption.weight(.semibold))
+                                Text(checkpoint.diffStat.isEmpty ? "Awaiting after-bracket diff" : checkpoint.diffStat)
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(4)
+                                Button("Request revert approval") {
+                                    requestCheckpointRevert(checkpoint, worktree: worktree)
+                                }
+                                .controlSize(.small)
+                                .disabled(!checkpoint.hasAfterBracket || worktree.state == .accepted)
+                                Button("Execute approved revert") {
+                                    codingControl.executeCheckpointRevert(
+                                        model: model,
+                                        worktree: worktree,
+                                        checkpoint: checkpoint
+                                    )
+                                    revertMessage = codingControl.message
+                                    changes.load(worktree: worktree, force: true)
+                                }
+                                .controlSize(.small)
+                                .disabled(!checkpoint.hasAfterBracket || worktree.state == .accepted)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                }
+                .padding(.horizontal, 16)
+                if let revertMessage {
+                    Text(revertMessage)
+                        .font(.caption2)
+                        .foregroundStyle(Nord.auroraYellow)
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 6)
+                }
+                Divider()
+            }
+
             Divider()
 
             HSplitView {
@@ -4091,6 +4155,31 @@ private struct DesktopThreadChangesView: View {
                 diffPane
             }
         }
+    }
+
+    private func turnCheckpoints(_ worktree: DesktopWorktreeRecord) -> [DesktopCodingCheckpointRecord] {
+        model.snapshot.operations.codingCheckpoints
+            .filter { $0.threadID == thread.id && $0.worktreeID == worktree.id }
+            .sorted { $0.createdAtUnixMillis > $1.createdAtUnixMillis }
+    }
+
+    private func requestCheckpointRevert(
+        _ checkpoint: DesktopCodingCheckpointRecord,
+        worktree: DesktopWorktreeRecord
+    ) {
+        guard let exactTarget = checkpoint.approvalExactTarget(worktreePath: worktree.worktreePath) else {
+            revertMessage = "This legacy checkpoint cannot be restored safely. Run a new implementation turn first."
+            return
+        }
+        _ = model.createApproval(
+            threadID: thread.id,
+            title: "Revert implementation turn",
+            exactTarget: exactTarget,
+            consequence: "Restore tracked and non-ignored files plus staged state to the checkpoint captured before turn \(checkpoint.turnID). Ignored files and empty directories are outside this checkpoint and remain untouched. Changed paths: \(checkpoint.diffSummary.isEmpty ? "see diff stat after approval" : checkpoint.diffSummary)",
+            dataLeavingDevice: "Nothing",
+            reversible: true,
+            expiresAtUnixMillis: Int64(Date().addingTimeInterval(15 * 60).timeIntervalSince1970 * 1_000)
+        )
     }
 
     private var diffPane: some View {
@@ -4705,7 +4794,7 @@ private struct DesktopConversationRuntimeSheet: View {
 }
 
 private enum ConversationRuntimeCatalog {
-    static let providers = ["Codex", "Claude", "OpenCode"]
+    static let providers = ["Codex", "Claude", "OpenCode", "Cursor", "Grok"]
 
     static func snapshot(
         for provider: String,
@@ -4715,6 +4804,8 @@ private enum ConversationRuntimeCatalog {
         case "codex": .codex
         case "claude": .claudeAgent
         case "opencode", "open code": .openCode
+        case "cursor", "cursor-agent", "cursor agent": .cursorAgent
+        case "grok", "grok build": .grokBuild
         default: nil
         }
         return capabilities.first { $0.instance.driver == driver }
@@ -6860,6 +6951,8 @@ final class DesktopPersonalIntegrationViewModel: ObservableObject {
                 ("codexLocal", .codex, "Codex", "codex"),
                 ("claudeLocal", .claudeAgent, "Claude", "claude"),
                 ("opencodeLocal", .openCode, "OpenCode", "opencode"),
+                ("cursorLocal", .cursorAgent, "Cursor", "cursor-agent"),
+                ("grokLocal", .grokBuild, "Grok", "grok"),
             ]
             let prober = ProviderCapabilityProber()
             var results: [ProviderCapabilitySnapshot] = []
@@ -12164,25 +12257,25 @@ private struct DesktopDevicesView: View {
                     DeviceEndpointCard(
                         symbol: "desktopcomputer",
                         title: "This Mac",
-                        subtitle: "Initial authority",
-                        status: "Local workspace available",
-                        tint: Nord.auroraGreen,
+                        subtitle: "Configured foundation",
+                        status: "Current health not checked",
+                        tint: Nord.auroraYellow,
                         facts: [
-                            ("Role", "Execution host and authority"),
-                            ("Private state", "Local 0700 / 0600 storage"),
-                            ("Keychain prompts", "Not used by qualification harness"),
+                            ("Intended role", "Execution host and authority"),
+                            ("Storage policy", "Local 0700 / 0600"),
+                            ("Probe", "Not run in this workspace"),
                         ]
                     )
                     DeviceEndpointCard(
                         symbol: "iphone",
                         title: "iPhone companion",
                         subtitle: "Physical qualification deferred",
-                        status: "Simulator path ready",
+                        status: "Simulator and device checks not run",
                         tint: Nord.auroraYellow,
                         facts: [
-                            ("Connected phone", "Charging only · excluded"),
-                            ("Simulator", "Enrollment and recovery passed"),
-                            ("Real APNs", "Paid team still required"),
+                            ("Physical device", "Not selected or checked"),
+                            ("Simulator", "Qualification not run"),
+                            ("APNs", "Configuration and delivery not checked"),
                         ]
                     )
                 }
@@ -12195,23 +12288,23 @@ private struct DesktopDevicesView: View {
                     RemoteStatusCard(
                         title: "Ciphertext relay",
                         status: model.snapshot.remote.relayStatus,
-                        detail: "Authenticated envelope storage only. The hosted qualification database is clean.",
+                        detail: "Foundation for authenticated envelope storage. No hosted-state or cleanup result is implied.",
                         symbol: "network.badge.shield.half.filled",
-                        tint: Nord.frost0
+                        tint: Nord.auroraYellow
                     )
                     RemoteStatusCard(
                         title: "Notifications",
                         status: model.snapshot.remote.notificationStatus,
-                        detail: "APNs is a wake and attention hint, never a durable queue or plaintext sync channel.",
+                        detail: "The foundation limits APNs to an attention hint; delivery and payload checks require evidence.",
                         symbol: "bell.badge.fill",
-                        tint: Nord.auroraPurple
+                        tint: Nord.auroraYellow
                     )
                     RemoteStatusCard(
                         title: "Reconciliation",
                         status: model.snapshot.remote.queueStatus,
-                        detail: "Queued items remain editable until staged and terminal receipts remove pending state.",
+                        detail: "The recovery contract is implemented as a foundation; queue and receipt behavior is not assumed.",
                         symbol: "arrow.triangle.2.circlepath.circle.fill",
-                        tint: Nord.frost2
+                        tint: Nord.auroraYellow
                     )
                 }
 
@@ -12929,6 +13022,8 @@ private struct DesktopSettingsShell: View {
             .init(name: "Codex", driver: .codex, symbol: "terminal.fill", tint: Nord.frost1, detail: "OpenAI coding sessions, models, and skills"),
             .init(name: "Claude", driver: .claudeAgent, symbol: "sparkles", tint: .orange, detail: "Claude Code sessions and models"),
             .init(name: "OpenCode", driver: .openCode, symbol: "chevron.left.forwardslash.chevron.right", tint: .purple, detail: "OpenCode sessions and upstream providers"),
+            .init(name: "Cursor", driver: .cursorAgent, symbol: "cursorarrow.rays", tint: Nord.frost0, detail: "Cursor CLI print + stream-json conversation sessions"),
+            .init(name: "Grok", driver: .grokBuild, symbol: "bolt.fill", tint: Nord.auroraYellow, detail: "Grok Build headless --single conversation sessions"),
         ]
     }
 
@@ -14681,17 +14776,17 @@ private struct DesktopAuthorityCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
-            HStack {
+            LabeledContent {
+                Text("Foundation")
+                    .kanameSemanticFont(.caption.weight(.bold))
+                    .foregroundStyle(Nord.auroraYellow)
+            } label: {
                 Label("Local authority", systemImage: "desktopcomputer")
                     .kanameSemanticFont(.headline)
-                Spacer()
-                Text("Ready")
-                    .kanameSemanticFont(.caption.weight(.bold))
-                    .foregroundStyle(Nord.auroraGreen)
             }
-            InspectorStatus(label: "Workspace", value: "Durable local state", tint: Nord.auroraGreen)
-            InspectorStatus(label: "Remote", value: "Simulator qualified", tint: Nord.frost0)
-            InspectorStatus(label: "Phone", value: "Deferred safely", tint: Nord.auroraYellow)
+            InspectorStatus(label: "Workspace", value: "Configured · not verified", tint: Nord.auroraYellow)
+            InspectorStatus(label: "Remote", value: remote.relayStatus, tint: Nord.auroraYellow)
+            InspectorStatus(label: "Phone", value: "Not run · deferred", tint: Nord.auroraYellow)
         }
         .padding(15)
         .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 16))
@@ -16134,6 +16229,7 @@ private extension DesktopRemoteEvent.State {
         switch self {
         case .passed: "Passed"
         case .ready: "Ready"
+        case .notRun: "Not run"
         case .deferred: "Deferred"
         }
     }
@@ -16142,6 +16238,7 @@ private extension DesktopRemoteEvent.State {
         switch self {
         case .passed: "checkmark.circle.fill"
         case .ready: "circle.dotted"
+        case .notRun: "minus.circle.fill"
         case .deferred: "pause.circle.fill"
         }
     }
@@ -16150,6 +16247,7 @@ private extension DesktopRemoteEvent.State {
         switch self {
         case .passed: Nord.auroraGreen
         case .ready: Nord.frost1
+        case .notRun: Nord.auroraYellow
         case .deferred: Nord.auroraYellow
         }
     }

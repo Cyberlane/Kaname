@@ -585,6 +585,11 @@ public enum DesktopGlobalSearchLocalIndex {
             ))
         }
 
+        documents.append(contentsOf: DesktopGlobalSearchFTS.supplementalDocuments(
+            from: snapshot,
+            capturedAtUnixMillis: capturedAt
+        ))
+
         return DesktopGlobalSearchLocalCorpus(documents: documents, capturedAtUnixMillis: capturedAt)
     }
 
@@ -631,14 +636,34 @@ public enum DesktopGlobalSearch {
     public static func search(
         query: DesktopGlobalSearchQuery,
         in corpus: DesktopGlobalSearchLocalCorpus,
-        limit: Int = 50
+        limit: Int = 50,
+        ftsRows: [DesktopGlobalSearchFTS.IndexedRow] = []
     ) -> [DesktopGlobalSearchSection] {
         guard !query.isEmpty, limit > 0 else { return [] }
         let boundedLimit = min(limit, maximumResults)
         var bestByTarget: [String: DesktopGlobalSearchCandidate] = [:]
+        let ftsRank = Dictionary(
+            uniqueKeysWithValues: DesktopGlobalSearchFTS.matchingDocumentIDs(
+                query: query,
+                rows: ftsRows,
+                limit: boundedLimit
+            ).enumerated().map { ($1, $0) }
+        )
 
         for indexedDocument in corpus.indexedDocuments {
-            guard let candidate = result(for: indexedDocument, query: query) else { continue }
+            guard var candidate = result(for: indexedDocument, query: query) else { continue }
+            if let ftsOrder = ftsRank[indexedDocument.document.id] {
+                candidate = DesktopGlobalSearchCandidate(
+                    document: candidate.document,
+                    score: candidate.score + 1_000 - ftsOrder,
+                    matchedTitle: candidate.matchedTitle,
+                    matchedSummary: true,
+                    matchedKeywords: candidate.matchedKeywords,
+                    matchedProvenance: candidate.matchedProvenance,
+                    normalizedTitle: candidate.normalizedTitle,
+                    stableTieBreakKey: candidate.stableTieBreakKey
+                )
+            }
             if let existing = bestByTarget[indexedDocument.deduplicationKey], resultPrecedes(existing, candidate) {
                 continue
             }

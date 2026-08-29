@@ -22,6 +22,7 @@ public struct KanameConversationServiceRequest: Codable, Equatable, Sendable {
     public let localCoreRequirement: String
     public let workspaceAuthorization: CodexWorkspaceAuthorization?
     public let isCodingPlan: Bool
+    public let curatedPreviewMCPGranted: Bool
     public let createdAtUnixMillis: Int64
 
     public init(
@@ -42,6 +43,7 @@ public struct KanameConversationServiceRequest: Codable, Equatable, Sendable {
         localCoreRequirement: String,
         workspaceAuthorization: CodexWorkspaceAuthorization? = nil,
         isCodingPlan: Bool = false,
+        curatedPreviewMCPGranted: Bool = false,
         createdAtUnixMillis: Int64
     ) {
         (self.runID, self.threadID, self.projectID) = (runID, threadID, projectID)
@@ -55,13 +57,16 @@ public struct KanameConversationServiceRequest: Codable, Equatable, Sendable {
         )
         self.workspaceAuthorization = workspaceAuthorization
         self.isCodingPlan = isCodingPlan
+        self.curatedPreviewMCPGranted = curatedPreviewMCPGranted
+            && CodexMCPIsolation.allowsCuratedPreviewMCP(hasPreviewGrant: curatedPreviewMCPGranted)
         self.createdAtUnixMillis = createdAtUnixMillis
     }
 
     private enum CodingKeys: String, CodingKey {
         case runID, threadID, projectID, provider, model, reasoningEffort
         case runtimeMode, networkAccess, prompt, attachments, workspacePath, providerStatePath
-        case resumableNativeThreadID, localCoreMachService, localCoreRequirement, workspaceAuthorization, isCodingPlan, createdAtUnixMillis
+        case resumableNativeThreadID, localCoreMachService, localCoreRequirement, workspaceAuthorization
+        case isCodingPlan, curatedPreviewMCPGranted, createdAtUnixMillis
     }
 
     public init(from decoder: any Decoder) throws {
@@ -85,6 +90,8 @@ public struct KanameConversationServiceRequest: Codable, Equatable, Sendable {
         localCoreRequirement = try container.decode(String.self, forKey: .localCoreRequirement)
         workspaceAuthorization = try container.decodeIfPresent(CodexWorkspaceAuthorization.self, forKey: .workspaceAuthorization)
         isCodingPlan = try container.decodeIfPresent(Bool.self, forKey: .isCodingPlan) ?? false
+        let granted = try container.decodeIfPresent(Bool.self, forKey: .curatedPreviewMCPGranted) ?? false
+        curatedPreviewMCPGranted = granted && CodexMCPIsolation.allowsCuratedPreviewMCP(hasPreviewGrant: granted)
         createdAtUnixMillis = try container.decode(Int64.self, forKey: .createdAtUnixMillis)
     }
 }

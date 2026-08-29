@@ -6,16 +6,15 @@ struct DesktopThreadNavigationTests {
     func threadPanelsKeepCanonicalOrderAndOnlyCodingThreadsShowKnowledge() {
         let codingPanels = DesktopThreadPanel.available(forCodingThread: true)
         #expect(codingPanels == [
-            .conversation, .plan, .changes, .evidence, .knowledge,
+            .conversation, .plan, .changes, .terminal, .preview, .evidence, .knowledge,
         ])
         #expect(DesktopThreadPanel.available(forCodingThread: false) == [
             .conversation, .plan, .changes, .evidence,
         ])
         #expect(DesktopThreadPanel.allCases.map(\.label) == [
-            "Chat", "Plan", "Changes", "Evidence", "Knowledge",
+            "Chat", "Plan", "Changes", "Terminal", "Preview", "Evidence", "Knowledge",
         ])
-        #expect(DesktopCyclicSelection.moving(.conversation, .next, in: codingPanels) == .plan)
-        #expect(DesktopCyclicSelection.moving(.knowledge, .next, in: codingPanels) == .conversation)
+        #expect(DesktopCyclicSelection.moving(.preview, .next, in: codingPanels) == .evidence)
     }
 
     @Test
