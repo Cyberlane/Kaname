@@ -4,14 +4,18 @@ use kaname_link_core::{
     gateway::GatewayStore,
     model::{
         EnrollmentPayload, InviteArtifact, MAXIMUM_CLOCK_SKEW_MILLIS, MAXIMUM_HTTP_RESPONSE_BYTES,
-        RpcOperation, RpcRequest, SCHEMA_VERSION, now_unix_millis,
+        MAXIMUM_NOISE_MESSAGE_BYTES, NoiseHttpRequest, NoiseHttpResponse, RpcOperation, RpcRequest,
+        SCHEMA_VERSION, now_unix_millis,
     },
-    noise::{encode_bytes, generate_invite_secret, generate_static_keypair},
-    secret_store::{SecretStore, SharedSecretStore},
+    noise::{
+        decode_bytes, encode_bytes, generate_invite_secret, generate_static_keypair,
+        read_handshake_message, session_responder, write_handshake_message,
+    },
+    secret_store::{SecretStore, SharedSecretStore, state_secret_reference},
     server::spawn_gateway_with_secret_store,
     shell::{ClientShellRequest, execute_client_rpc_with_secret_store},
 };
-use rusqlite::Connection;
+use rusqlite::{Connection, params};
 use serde_json::json;
 use std::{
     collections::HashMap,
@@ -124,6 +128,7 @@ async fn encrypted_local_lifecycle_is_scoped_idempotent_and_revocable() {
     let gateway_root = temporary.path().join("gateway-state");
     let client_root = temporary.path().join("client-state");
     let replay_client_root = temporary.path().join("replay-client-state");
+    let denied_client_root = temporary.path().join("denied-client-state");
     let secrets = TestSecretStore::shared();
     let gateway = spawn_gateway_with_secret_store(
         &gateway_root,
@@ -141,6 +146,7 @@ async fn encrypted_local_lifecycle_is_scoped_idempotent_and_revocable() {
     let workflow_gateway_root = gateway_root.clone();
     let workflow_client_root = client_root.clone();
     let workflow_replay_root = replay_client_root.clone();
+    let workflow_denied_root = denied_client_root.clone();
     let workflow_secrets = secrets.clone();
     tokio::task::spawn_blocking(move || {
         assert_secure_database_shape(&workflow_gateway_root, "kaname-link-gateway.sqlite3");
@@ -249,6 +255,59 @@ async fn encrypted_local_lifecycle_is_scoped_idempotent_and_revocable() {
             message.message_id == "message-host" && message.text == "Approved reply"
         }));
 
+        let client_secret_reference = workflow_secrets
+            .references()
+            .into_iter()
+            .find(|reference| reference.starts_with("client:"))
+            .expect("the approved client must retain its static private key");
+        let client_static_public: Vec<u8> = Connection::open(&client_database)
+            .unwrap()
+            .query_row(
+                "SELECT client_static_public FROM client_identity WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let gateway_database = workflow_gateway_root.join("kaname-link-gateway.sqlite3");
+        assert_eq!(
+            Connection::open(&gateway_database)
+                .unwrap()
+                .execute(
+                    "UPDATE devices SET static_public = ?1 WHERE device_id = ?2",
+                    params![vec![0_u8; 32], enrollment.device_id],
+                )
+                .unwrap(),
+            1
+        );
+        let unknown_device = client.sync().unwrap();
+        assert!(!unknown_device.connected);
+        assert_eq!(
+            unknown_device.last_error.as_deref(),
+            Some("session_rejected")
+        );
+        assert_eq!(
+            unknown_device.snapshot.enrollment_state.as_deref(),
+            Some("approved")
+        );
+        assert!(
+            workflow_secrets
+                .references()
+                .contains(&client_secret_reference),
+            "an unknown-device rejection is not authenticated revocation"
+        );
+        assert_eq!(
+            workflow_secrets.successful_delete_count(&client_secret_reference),
+            0
+        );
+        Connection::open(&gateway_database)
+            .unwrap()
+            .execute(
+                "UPDATE devices SET static_public = ?1 WHERE device_id = ?2",
+                params![client_static_public, enrollment.device_id],
+            )
+            .unwrap();
+        assert!(client.sync().unwrap().connected);
+
         let references_before_replay = workflow_secrets.references();
         let mut replay_client =
             LinkClient::open_with_secret_store(&workflow_replay_root, workflow_secrets.as_shared())
@@ -263,7 +322,7 @@ async fn encrypted_local_lifecycle_is_scoped_idempotent_and_revocable() {
             .unwrap();
         assert!(!revoked_send.connected);
         assert_eq!(revoked_send.receipt.state, "queued");
-        assert_eq!(revoked_send.last_error.as_deref(), Some("session_rejected"));
+        assert_eq!(revoked_send.last_error.as_deref(), Some("device_revoked"));
         assert_eq!(
             client.snapshot().unwrap().enrollment_state.as_deref(),
             Some("revoked")
@@ -275,9 +334,107 @@ async fn encrypted_local_lifecycle_is_scoped_idempotent_and_revocable() {
                 .all(|reference| !reference.starts_with("client:")),
             "revocation must delete the client's static private key"
         );
+        assert_eq!(
+            workflow_secrets.successful_delete_count(&client_secret_reference),
+            1
+        );
+        let revoked_retry = client.sync().unwrap();
+        assert!(!revoked_retry.connected);
+        assert_eq!(
+            revoked_retry.last_error.as_deref(),
+            Some("client_key_unavailable")
+        );
+        assert_eq!(
+            workflow_secrets.successful_delete_count(&client_secret_reference),
+            1,
+            "authenticated revocation must destroy the key exactly once"
+        );
+        assert_eq!(admin.inbox("space-pilot", 0, 100).unwrap().len(), 1);
+
+        let denied_invite = admin
+            .create_invite("space-pilot", "Pilot space", &invite.gateway_url, 3_600)
+            .unwrap();
+        let mut denied_client =
+            LinkClient::open_with_secret_store(&workflow_denied_root, workflow_secrets.as_shared())
+                .unwrap();
+        let denied_enrollment = denied_client
+            .enroll(&denied_invite, "Denied collaborator")
+            .unwrap();
+        let denied_private_reference = state_secret_reference(
+            &workflow_denied_root,
+            "client",
+            &format!("device-{}-static-v1", denied_enrollment.device_id),
+        )
+        .unwrap();
+        let denied_queued = denied_client
+            .send_text(
+                "Host denial must leave this queued.",
+                Some("message-denied-pending"),
+            )
+            .unwrap();
+        assert!(!denied_queued.connected);
+        assert_eq!(denied_queued.receipt.state, "queued");
+        assert_eq!(
+            denied_queued.last_error.as_deref(),
+            Some("session_rejected")
+        );
+        assert_eq!(
+            denied_client
+                .snapshot()
+                .unwrap()
+                .enrollment_state
+                .as_deref(),
+            Some("pending")
+        );
+        assert!(
+            workflow_secrets
+                .references()
+                .contains(&denied_private_reference)
+        );
+        assert_eq!(
+            workflow_secrets.successful_delete_count(&denied_private_reference),
+            0
+        );
+
+        admin.revoke_device(&denied_enrollment.device_id).unwrap();
+        let denied_sync = denied_client.sync().unwrap();
+        assert!(!denied_sync.connected);
+        assert_eq!(denied_sync.last_error.as_deref(), Some("device_revoked"));
+        assert_eq!(
+            denied_sync.snapshot.enrollment_state.as_deref(),
+            Some("revoked")
+        );
+        assert!(denied_sync.snapshot.queued_messages.iter().any(|receipt| {
+            receipt.message_id == "message-denied-pending" && receipt.state == "queued"
+        }));
+        assert!(
+            !workflow_secrets
+                .references()
+                .contains(&denied_private_reference)
+        );
+        assert_eq!(
+            workflow_secrets.successful_delete_count(&denied_private_reference),
+            1
+        );
+
+        let denied_retry = denied_client.sync().unwrap();
+        assert!(!denied_retry.connected);
+        assert_eq!(
+            denied_retry.last_error.as_deref(),
+            Some("client_key_unavailable")
+        );
+        assert!(denied_retry.snapshot.queued_messages.iter().any(|receipt| {
+            receipt.message_id == "message-denied-pending" && receipt.state == "queued"
+        }));
+        assert_eq!(
+            workflow_secrets.successful_delete_count(&denied_private_reference),
+            1,
+            "authenticated denial must destroy the pending key exactly once"
+        );
         assert_eq!(admin.inbox("space-pilot", 0, 100).unwrap().len(), 1);
 
         assert_secure_database_shape(&workflow_client_root, "kaname-link-client.sqlite3");
+        assert_secure_database_shape(&workflow_denied_root, "kaname-link-client.sqlite3");
     })
     .await
     .unwrap();
@@ -511,6 +668,97 @@ fn exact_rpc_replay_survives_freshness_window_but_changed_reuse_is_rejected() {
 }
 
 #[test]
+fn unauthenticated_rejections_and_malformed_noise_preserve_enrollment() {
+    let copied_revocation = json!({
+        "schemaVersion": SCHEMA_VERSION,
+        "error": { "code": "device_revoked" }
+    })
+    .to_string();
+    let malformed_noise = serde_json::to_string(&NoiseHttpResponse {
+        schema_version: SCHEMA_VERSION,
+        noise_message: encode_bytes(&[1, 2, 3]),
+    })
+    .unwrap();
+    let cases = [
+        ("401 Unauthorized", String::new(), "session_rejected"),
+        ("403 Forbidden", String::new(), "session_rejected"),
+        ("403 Forbidden", copied_revocation, "session_rejected"),
+        (
+            "500 Internal Server Error",
+            String::new(),
+            "gateway_unavailable",
+        ),
+        ("200 OK", malformed_noise, "noise_failure"),
+    ];
+
+    for (index, (status, body, expected_error)) in cases.into_iter().enumerate() {
+        let (gateway_url, server) = serve_one_http_response(status, body);
+        let temporary = tempdir().unwrap();
+        let secrets = TestSecretStore::shared();
+        let host_keys = generate_static_keypair().unwrap();
+        let (mut client, private_reference) = seed_approved_client(
+            &temporary.path().join(format!("client-{index}")),
+            secrets.clone(),
+            &gateway_url,
+            &host_keys.public,
+        );
+        let message_id = format!("message-edge-{index}");
+        let result = client
+            .send_text("This must remain enrolled.", Some(&message_id))
+            .unwrap();
+        assert!(!result.connected);
+        assert_eq!(result.last_error.as_deref(), Some(expected_error));
+        let snapshot = client.snapshot().unwrap();
+        assert!(snapshot.enrolled);
+        assert_eq!(snapshot.enrollment_state.as_deref(), Some("approved"));
+        assert!(secrets.references().contains(&private_reference));
+        assert_eq!(secrets.successful_delete_count(&private_reference), 0);
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn authenticated_malformed_session_envelope_preserves_enrollment() {
+    let host_keys = generate_static_keypair().unwrap();
+    let host_public = host_keys.public.clone();
+    let malformed_envelope = json!({
+        "schemaVersion": SCHEMA_VERSION,
+        "reply": {
+            "kind": "rejection",
+            "code": "edge_copied_device_revoked"
+        }
+    })
+    .to_string()
+    .into_bytes();
+    let (gateway_url, server) =
+        serve_one_authenticated_noise_response(host_keys.private, malformed_envelope);
+    let temporary = tempdir().unwrap();
+    let secrets = TestSecretStore::shared();
+    let (mut client, private_reference) = seed_approved_client(
+        &temporary.path().join("client"),
+        secrets.clone(),
+        &gateway_url,
+        &host_public,
+    );
+
+    let result = client
+        .send_text(
+            "Malformed replies cannot revoke me.",
+            Some("message-malformed"),
+        )
+        .unwrap();
+    assert!(!result.connected);
+    assert_eq!(result.last_error.as_deref(), Some("invalid_json"));
+    assert_eq!(
+        client.snapshot().unwrap().enrollment_state.as_deref(),
+        Some("approved")
+    );
+    assert!(secrets.references().contains(&private_reference));
+    assert_eq!(secrets.successful_delete_count(&private_reference), 0);
+    server.join().unwrap();
+}
+
+#[test]
 fn oversized_http_response_is_rejected_before_json_decode() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -586,6 +834,124 @@ fn native_shell_envelope_has_bounded_snapshot_adapter() {
     assert_eq!(wire["ok"], true);
     assert_eq!(wire["snapshot"]["connection"], "enrollmentRequired");
     assert_eq!(wire["snapshot"]["spaces"], json!([]));
+}
+
+fn serve_one_http_response(status: &'static str, body: String) -> (String, thread::JoinHandle<()>) {
+    serve_one_http_exchange(move |_| (status, body))
+}
+
+fn serve_one_authenticated_noise_response(
+    host_private: Vec<u8>,
+    encrypted_payload: Vec<u8>,
+) -> (String, thread::JoinHandle<()>) {
+    serve_one_http_exchange(move |body| {
+        let request: NoiseHttpRequest = serde_json::from_slice(&body).unwrap();
+        let first = decode_bytes(
+            &request.noise_message,
+            MAXIMUM_NOISE_MESSAGE_BYTES,
+            "invalid_noise_message",
+        )
+        .unwrap();
+        let mut noise = session_responder(&host_private).unwrap();
+        read_handshake_message(&mut noise, &first).unwrap();
+        let second = write_handshake_message(&mut noise, &encrypted_payload).unwrap();
+        let response = serde_json::to_string(&NoiseHttpResponse {
+            schema_version: SCHEMA_VERSION,
+            noise_message: encode_bytes(&second),
+        })
+        .unwrap();
+        ("200 OK", response)
+    })
+}
+
+fn serve_one_http_exchange<Response>(response: Response) -> (String, thread::JoinHandle<()>)
+where
+    Response: FnOnce(Vec<u8>) -> (&'static str, String) + Send + 'static,
+{
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let request_body = read_http_request_body(&mut stream);
+        let (status, response_body) = response(request_body);
+        let header = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            response_body.len()
+        );
+        stream.write_all(header.as_bytes()).unwrap();
+        stream.write_all(response_body.as_bytes()).unwrap();
+    });
+    (format!("http://{address}"), server)
+}
+
+fn read_http_request_body(stream: &mut std::net::TcpStream) -> Vec<u8> {
+    let mut request = Vec::new();
+    let (body_start, body_length) = loop {
+        let mut chunk = [0_u8; 4096];
+        let count = stream.read(&mut chunk).unwrap();
+        assert!(count > 0, "HTTP request ended before its body arrived");
+        request.extend_from_slice(&chunk[..count]);
+        let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+            continue;
+        };
+        let header = std::str::from_utf8(&request[..header_end]).unwrap();
+        let body_length = header
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().unwrap())
+            })
+            .expect("Noise RPC request must include Content-Length");
+        break (header_end + 4, body_length);
+    };
+    while request.len() < body_start + body_length {
+        let mut chunk = [0_u8; 4096];
+        let count = stream.read(&mut chunk).unwrap();
+        assert!(count > 0, "HTTP request body was truncated");
+        request.extend_from_slice(&chunk[..count]);
+    }
+    request[body_start..body_start + body_length].to_vec()
+}
+
+fn seed_approved_client(
+    state_root: &Path,
+    secrets: Arc<TestSecretStore>,
+    gateway_url: &str,
+    host_static_public: &[u8],
+) -> (LinkClient, String) {
+    let client = LinkClient::open_with_secret_store(state_root, secrets.as_shared()).unwrap();
+    drop(client);
+    let client_keys = generate_static_keypair().unwrap();
+    let private_reference =
+        state_secret_reference(state_root, "client", "device-device-edge-static-v1").unwrap();
+    secrets
+        .put(&private_reference, &client_keys.private)
+        .unwrap();
+    Connection::open(state_root.join("kaname-link-client.sqlite3"))
+        .unwrap()
+        .execute(
+            "INSERT INTO client_identity(
+                 singleton, enrollment_id, device_id, display_name, space_id, space_name,
+                 gateway_url, host_static_public, client_static_private_reference,
+                 client_static_public, state, enrolled_at_unix_millis
+             ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'approved', ?10)",
+            params![
+                "enrollment-edge",
+                "device-edge",
+                "Edge fixture",
+                "space-edge",
+                "Edge space",
+                gateway_url,
+                host_static_public,
+                private_reference,
+                client_keys.public,
+                now_unix_millis(),
+            ],
+        )
+        .unwrap();
+    let client = LinkClient::open_with_secret_store(state_root, secrets.as_shared()).unwrap();
+    (client, private_reference)
 }
 
 fn assert_secure_database_shape(state_root: &Path, filename: &str) {

@@ -4,8 +4,9 @@ use crate::{
         EnrollmentHttpRequest, EnrollmentPayload, EnrollmentReply, InviteArtifact, LinkMessage,
         MAXIMUM_HTTP_RESPONSE_BYTES, MAXIMUM_NOISE_MESSAGE_BYTES, MAXIMUM_PAGE_SIZE,
         MAXIMUM_SYNC_PAGE_SIZE, MessageReceipt, NoiseHttpRequest, NoiseHttpResponse, RpcOperation,
-        RpcRequest, RpcResponse, RpcResult, SCHEMA_VERSION, now_unix_millis, validate_gateway_url,
-        validate_identifier, validate_name, validate_schema, validate_text,
+        RpcRequest, RpcResponse, RpcResult, SCHEMA_VERSION, SessionRejection, SessionReply,
+        SessionReplyEnvelope, now_unix_millis, validate_gateway_url, validate_identifier,
+        validate_name, validate_schema, validate_text,
     },
     noise::{
         decode_bytes, encode_bytes, enrollment_initiator, generate_static_keypair, key_fingerprint,
@@ -384,7 +385,7 @@ impl LinkClient {
                 Err(error) => {
                     connected = false;
                     last_error = Some(error.code().to_owned());
-                    if matches!(error, LinkError::Forbidden(_)) {
+                    if matches!(error, LinkError::DeviceRevoked) {
                         self.mark_authorization_failure()?;
                     }
                 }
@@ -533,7 +534,7 @@ impl LinkClient {
             let response = match self.rpc_roundtrip(&identity, &request) {
                 Ok(response) => response,
                 Err(error) => {
-                    if matches!(error, LinkError::Forbidden(_)) {
+                    if matches!(error, LinkError::DeviceRevoked) {
                         self.mark_authorization_failure()?;
                     }
                     return Ok((receipts, Some(error)));
@@ -594,12 +595,20 @@ impl LinkClient {
             "invalid_noise_response",
         )?;
         let response_wire = read_handshake_message(&mut noise, &second)?;
-        let decoded: RpcResponse = serde_json::from_slice(&response_wire)?;
-        validate_schema(decoded.schema_version)?;
-        if decoded.request_id != request.request_id {
-            return Err(LinkError::Conflict("rpc_response_mismatch"));
+        let envelope: SessionReplyEnvelope = serde_json::from_slice(&response_wire)?;
+        validate_schema(envelope.schema_version)?;
+        match envelope.reply {
+            SessionReply::RpcResponse { response } => {
+                validate_schema(response.schema_version)?;
+                if response.request_id != request.request_id {
+                    return Err(LinkError::Conflict("rpc_response_mismatch"));
+                }
+                Ok(response)
+            }
+            SessionReply::Rejection {
+                code: SessionRejection::DeviceRevoked,
+            } => Err(LinkError::DeviceRevoked),
         }
-        Ok(decoded)
     }
 
     fn post_json<Request: Serialize, Response: for<'de> Deserialize<'de>>(
@@ -714,12 +723,14 @@ impl LinkClient {
         Ok(())
     }
 
-    fn mark_authorization_failure(&self) -> Result<()> {
-        let reference = self
+    fn mark_authorization_failure(&mut self) -> Result<()> {
+        let transaction = self
             .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let reference = transaction
             .query_row(
                 "SELECT client_static_private_reference FROM client_identity
-                  WHERE singleton = 1 AND state = 'approved'",
+                  WHERE singleton = 1 AND state IN ('pending', 'approved')",
                 [],
                 |row| row.get::<_, String>(0),
             )
@@ -727,12 +738,14 @@ impl LinkClient {
         let Some(reference) = reference else {
             return Ok(());
         };
-        let transaction = self.connection.unchecked_transaction()?;
-        transaction.execute(
+        let updated = transaction.execute(
             "UPDATE client_identity SET state = 'revoked'
-              WHERE singleton = 1 AND state = 'approved'",
+              WHERE singleton = 1 AND state IN ('pending', 'approved')",
             [],
         )?;
+        if updated != 1 {
+            return Err(LinkError::Conflict("client_state_conflict"));
+        }
         self.secrets.delete(&reference)?;
         transaction.commit()?;
         Ok(())

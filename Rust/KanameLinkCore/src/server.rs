@@ -4,7 +4,8 @@ use crate::{
     model::{
         EnrollmentHttpRequest, EnrollmentPayload, EnrollmentReply, MAXIMUM_HTTP_REQUEST_BYTES,
         MAXIMUM_NOISE_MESSAGE_BYTES, NoiseHttpRequest, NoiseHttpResponse, RpcRequest,
-        SCHEMA_VERSION, now_unix_millis, validate_schema,
+        SCHEMA_VERSION, SessionRejection, SessionReply, SessionReplyEnvelope, now_unix_millis,
+        validate_schema,
     },
     noise::{
         decode_bytes, encode_bytes, enrollment_responder, key_fingerprint, read_handshake_message,
@@ -163,9 +164,23 @@ async fn rpc(
         let request_wire = read_handshake_message(&mut noise, &first)?;
         let client_static = remote_static(&noise)?;
         let device = store.device_for_static(&client_static)?;
-        let rpc_request: RpcRequest = serde_json::from_slice(&request_wire)?;
-        let response = store.handle_rpc(&device, &rpc_request, now_unix_millis())?;
-        let second = write_handshake_message(&mut noise, &serde_json::to_vec(&response)?)?;
+        let response = (|| -> Result<_> {
+            device.require_approved_session()?;
+            let rpc_request: RpcRequest = serde_json::from_slice(&request_wire)?;
+            store.handle_rpc(&device, &rpc_request, now_unix_millis())
+        })();
+        let reply = match response {
+            Ok(response) => SessionReply::RpcResponse { response },
+            Err(LinkError::DeviceRevoked) => SessionReply::Rejection {
+                code: SessionRejection::DeviceRevoked,
+            },
+            Err(error) => return Err(error),
+        };
+        let envelope = SessionReplyEnvelope {
+            schema_version: SCHEMA_VERSION,
+            reply,
+        };
+        let second = write_handshake_message(&mut noise, &serde_json::to_vec(&envelope)?)?;
         Ok(NoiseHttpResponse {
             schema_version: SCHEMA_VERSION,
             noise_message: encode_bytes(&second),
