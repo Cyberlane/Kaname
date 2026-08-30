@@ -310,6 +310,10 @@ struct DesktopAppModelTests {
         #expect(domain.knowledgeSources.allSatisfy { $0.status == .needsReview })
         #expect(domain.knowledgeSources.allSatisfy { $0.lastReadAtUnixMillis == nil })
         #expect(domain.skills.allSatisfy { $0.status == .needsReview && $0.enabled })
+        #expect(domain.skills.first { $0.id == "skill-mori-review" }?.name == "Mori structural review")
+        #expect(domain.skills.first { $0.id == "skill-mori-review" }?.registryName == "mori-review-similarity")
+        #expect(domain.skills.first { $0.id == "skill-obsidian" }?.name == "Obsidian knowledge")
+        #expect(domain.skills.first { $0.id == "skill-obsidian" }?.registryName == "obsidian-cli")
         #expect(domain.gitWorkspaces.isEmpty)
 
         let capabilities = DesktopAppSnapshot.starter(now: 1_000)
@@ -317,6 +321,44 @@ struct DesktopAppModelTests {
         #expect(!capabilities.isEmpty)
         #expect(capabilities.allSatisfy { $0.lastTestedAtUnixMillis == nil })
         #expect(capabilities.allSatisfy { !$0.lastTestPassed })
+    }
+
+    @Test
+    func currentVersionLegacySeedSkillsGainOnlyTheirExactRegistryNames() throws {
+        let snapshot = DesktopAppSnapshot.starter(now: 1_000)
+        var object = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot)) as? [String: Any]
+        )
+        var domains = try #require(object["domains"] as? [String: Any])
+        var skills = try #require(domains["skills"] as? [[String: Any]])
+        for index in skills.indices {
+            skills[index].removeValue(forKey: "registryName")
+        }
+        skills.append([
+            "id": "skill-custom",
+            "name": "Mori structural review",
+            "kind": "skill",
+            "scope": "Explicit project scope",
+            "source": "Local skill catalogue",
+            "revision": "Managed locally",
+            "status": "needsReview",
+            "enabled": true,
+        ])
+        domains["skills"] = skills
+        object["domains"] = domains
+
+        let model = DesktopAppModel(
+            store: MemoryDesktopStateStore(data: try JSONSerialization.data(withJSONObject: object)),
+            now: { 2_000 }
+        )
+
+        #expect(model.snapshot.version == DesktopAppSnapshot.currentVersion)
+        #expect(
+            model.snapshot.domains.skills.first { $0.id == "skill-mori-review" }?.registryName
+                == "mori-review-similarity"
+        )
+        #expect(model.snapshot.domains.skills.first { $0.id == "skill-obsidian" }?.registryName == "obsidian-cli")
+        #expect(model.snapshot.domains.skills.first { $0.id == "skill-custom" }?.registryName == nil)
     }
 
     @Test

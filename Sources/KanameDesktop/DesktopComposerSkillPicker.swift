@@ -86,7 +86,10 @@ public enum DesktopComposerSkillPicker {
         }
     }
 
-    public static func selectedSkillNames(in text: String) -> [String] {
+    public static func selectedSkillNames(
+        in text: String,
+        resolving resolve: (String) -> String?
+    ) -> [String] {
         var names: [String] = []
         for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
             var remainder = line[...]
@@ -94,7 +97,9 @@ public enum DesktopComposerSkillPicker {
                 remainder = remainder[range.upperBound...]
                 let token = remainder.prefix(while: { !$0.isWhitespace })
                 guard !token.isEmpty else { continue }
-                names.append(String(token))
+                if let name = resolve(String(token)) {
+                    names.append(name)
+                }
                 remainder = remainder[token.endIndex...]
             }
         }

@@ -45,26 +45,26 @@ public enum SkillRegistryLoader {
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
-    /// Resolves catalog identifiers and display names to loaded skill excerpts for prompt injection.
+    /// Loads lexical registry names and catalog IDs through their distinct exact identities.
     public static func loadContextSources(
-        identifiers: [String],
-        catalogNamesByID: [String: String],
+        registryNames: [String],
+        catalogIDs: [String] = [],
+        catalogRegistryNamesByID: [String: String],
         workspaceRoot: URL? = nil,
-        searchRoots: [URL]? = nil
+        searchRoots: [URL]? = nil,
+        registry providedRegistry: [SkillRegistryEntry]? = nil
     ) -> [CodingContextSource] {
-        let registry = searchRoots.map(loadRegistry(searchRoots:))
+        let registry = providedRegistry ?? searchRoots.map(loadRegistry(searchRoots:))
             ?? loadRegistry(workspaceRoot: workspaceRoot)
-        guard !identifiers.isEmpty, !registry.isEmpty else { return [] }
+        let requestedRegistryNames = catalogIDs.compactMap { catalogRegistryNamesByID[$0] } + registryNames
+        guard !requestedRegistryNames.isEmpty, !registry.isEmpty else { return [] }
 
         var sources: [CodingContextSource] = []
         var consumedBytes = 0
-        for identifier in identifiers {
+        var loadedRegistryNames: Set<String> = []
+        for registryName in requestedRegistryNames where loadedRegistryNames.insert(registryName).inserted {
             guard consumedBytes < maximumTotalSkillContextBytes else { break }
-            guard let entry = resolveEntry(
-                identifier: identifier,
-                catalogName: catalogNamesByID[identifier],
-                in: registry
-            ) else { continue }
+            guard let entry = resolveExactName(registryName, in: registry) else { continue }
             guard let body = boundedText(
                 at: URL(fileURLWithPath: entry.path),
                 maximumBytes: min(maximumSkillBodyBytes, maximumTotalSkillContextBytes - consumedBytes)
@@ -83,30 +83,12 @@ public enum SkillRegistryLoader {
         return sources
     }
 
-    public static func resolveEntry(
-        identifier: String,
-        catalogName: String?,
+    /// Resolves a lexical skill token without allowing catalog IDs or filesystem paths.
+    public static func resolveExactName(
+        _ name: String,
         in registry: [SkillRegistryEntry]
     ) -> SkillRegistryEntry? {
-        if let exact = registry.first(where: { $0.path == identifier || $0.name == identifier }) {
-            return exact
-        }
-        let normalizedID = normalized(identifier)
-        if let idMatch = registry.first(where: { normalized($0.name) == normalizedID }) {
-            return idMatch
-        }
-        if let catalogName,
-           let catalogMatch = registry.first(where: { normalized($0.name) == normalized(catalogName) }) {
-            return catalogMatch
-        }
-        let slug = normalizedID.replacingOccurrences(of: "skill-", with: "")
-        return registry.first {
-            normalized($0.name).contains(slug) || normalized($0.path).contains(slug)
-        }
-    }
-
-    private static func normalized(_ value: String) -> String {
-        value.lowercased().filter { $0.isLetter || $0.isNumber }
+        registry.first { $0.name == name }
     }
 
     private static func boundedText(at url: URL, maximumBytes: Int) -> String? {
