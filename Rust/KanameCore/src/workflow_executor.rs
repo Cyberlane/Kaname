@@ -6,10 +6,10 @@
 //! the next missing fact. This bounded slice supports typed scoped storage,
 //! version-pinned idempotent capabilities through an explicitly supplied host,
 //! and deterministic mapping evaluation over the `input` root for edges,
-//! `data.map`, capability inputs, model prompts, and subflow inputs — but no
-//! connector or external effect. Mapped values are recomputed on replay from
-//! the compiled mapping and the journaled source value; they add no new
-//! journal facts.
+//! `data.map`, capability inputs, model prompts, subflow inputs, and
+//! authority-gated connector effects through an explicitly supplied host.
+//! Mapped values are recomputed on replay from the compiled mapping and the
+//! journaled source value; they add no new journal facts.
 
 use crate::{
     journal::{Journal, JournalError, ReplayBasis},
@@ -76,6 +76,39 @@ const EFFECT_AUTHORITY_WINDOW_MILLISECONDS: i64 = 900_000;
 const MAXIMUM_EFFECT_RECONCILIATION_CHECKS: usize = 3;
 /// How long a started dispatch may stay unsettled before its deadline passes.
 const EFFECT_DISPATCH_TIMEOUT_MILLISECONDS: i64 = 60_000;
+
+/// Node identities the durable executor accepts from a compiled revision.
+pub const EXECUTOR_ADMITTED_NODE_TYPES: &[&str] = &[
+    "compute.capability",
+    "compute.llm",
+    "control.decision",
+    "control.for-each",
+    "control.human-review",
+    "control.join",
+    "control.match",
+    "control.parallel",
+    "control.reconcile",
+    "control.retry",
+    "control.subflow",
+    "control.wait",
+    "data.case-context",
+    "data.map",
+    "data.register-artifact",
+    "data.validate",
+    "effect.connector",
+    "storage.promote",
+    "storage.read",
+    "storage.write",
+    "terminal.cancel",
+    "terminal.complete",
+    "terminal.fail",
+    "trigger.event",
+    "trigger.manual",
+    "trigger.schedule",
+];
+
+/// Refusal code used when a compiled edge cannot be evaluated durably.
+pub const EDGE_MAPPING_NOT_EXECUTABLE_CODE: &str = "edge_mapping_not_executable";
 
 #[derive(Default)]
 struct AdmittedLlmTrace {
@@ -2245,35 +2278,7 @@ fn validate_compiled_subset(compiled: &CompiledWorkflow) -> Result<()> {
             || node.key.is_empty()
             || node.name.is_empty()
             || node.ports.is_empty()
-            || !matches!(
-                node.node_type.as_str(),
-                "trigger.manual"
-                    | "trigger.event"
-                    | "trigger.schedule"
-                    | "data.map"
-                    | "data.validate"
-                    | "data.case-context"
-                    | "data.register-artifact"
-                    | "control.match"
-                    | "control.decision"
-                    | "control.parallel"
-                    | "control.join"
-                    | "control.for-each"
-                    | "control.retry"
-                    | "control.wait"
-                    | "control.reconcile"
-                    | "control.human-review"
-                    | "control.subflow"
-                    | "storage.read"
-                    | "storage.write"
-                    | "storage.promote"
-                    | "compute.capability"
-                    | "compute.llm"
-                    | "effect.connector"
-                    | "terminal.complete"
-                    | "terminal.fail"
-                    | "terminal.cancel"
-            )
+            || !EXECUTOR_ADMITTED_NODE_TYPES.contains(&node.node_type.as_str())
         {
             return Err(WorkflowExecutionError::Unsupported(format!(
                 "node:{}",
@@ -2293,11 +2298,19 @@ fn validate_compiled_subset(compiled: &CompiledWorkflow) -> Result<()> {
             || edge.to.port_id.is_empty()
         {
             return Err(WorkflowExecutionError::Unsupported(
-                "edge_mapping_not_executable".into(),
+                EDGE_MAPPING_NOT_EXECUTABLE_CODE.into(),
             ));
         }
     }
     Ok(())
+}
+
+/// Validates the node and edge portion of a compiler artifact through the same
+/// admission gate used when the executor loads an active revision.
+pub fn validate_compiled_source_node_admission(compiled_source: &[u8]) -> Result<()> {
+    let compiled: CompiledWorkflow = serde_json::from_slice(compiled_source)
+        .map_err(|_| WorkflowExecutionError::Integrity("compiled_contract".into()))?;
+    validate_compiled_subset(&compiled)
 }
 
 fn is_executable_trigger(node_type: &str) -> bool {
@@ -7982,13 +7995,22 @@ fn execute_node(
             error: None,
         }),
         "terminal.fail" => {
-            let code = error_code(input)?;
+            let error = match node.config.get("error") {
+                Some(mapping) => apply_mapping(
+                    mapping,
+                    input,
+                    &stable_id("value", &[&request.run_id, &node.id, "terminal-error"]),
+                )?
+                .unwrap_or_else(|_| input.clone()),
+                None => input.clone(),
+            };
+            let code = error_code(&error)?;
             Ok(NodeExecution {
                 match_trace: None,
                 outputs: Vec::new(),
                 outcome: v1::WorkflowAttemptOutcome::Failed,
                 error_code: code,
-                error: Some(input.clone()),
+                error: Some(error),
             })
         }
         "terminal.cancel" => {

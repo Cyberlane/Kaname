@@ -401,190 +401,236 @@ fn emit_compiled_artifact(
     Ok((compiled.canonical_bytes, digests))
 }
 
-fn execution_availability(node: &Node) -> &'static str {
-    match node.node_type.as_str() {
-        "trigger.manual" | "terminal.complete" | "terminal.fail"
-            if node.config.as_object().is_some_and(Map::is_empty) =>
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkflowNodeExecutionAvailability {
+    pub availability: &'static str,
+    pub downgrade_condition: Option<&'static str>,
+}
+
+impl WorkflowNodeExecutionAvailability {
+    const fn executable() -> Self {
+        Self {
+            availability: "executable",
+            downgrade_condition: None,
+        }
+    }
+
+    const fn schema_only(condition: &'static str) -> Self {
+        Self {
+            availability: "schema-only",
+            downgrade_condition: Some(condition),
+        }
+    }
+}
+
+/// Returns the Rust compiler's execution decision for one registered node.
+///
+/// The Builder registry deliberately does not evaluate these configuration
+/// conditions. Its built-ins remain schema-only until a Rust compile result is
+/// available.
+pub fn node_execution_availability(
+    node_type: &str,
+    config: &Value,
+) -> WorkflowNodeExecutionAvailability {
+    let downgrade_condition = match node_type {
+        "trigger.manual" | "terminal.complete"
+            if config.as_object().is_some_and(Map::is_empty) =>
         {
-            "executable"
+            return WorkflowNodeExecutionAvailability::executable();
         }
         // Trigger correlation binds an event to an already running case, which
         // this slice does not admit; only uncorrelated event triggers execute.
         "trigger.event"
-            if string_field(&node.config, "eventContract")
+            if string_field(config, "eventContract")
                 .is_some_and(|contract| !contract.is_empty() && contract.len() <= 240)
                 && matches!(
-                    string_field(&node.config, "deduplication"),
+                    string_field(config, "deduplication"),
                     Some("event-id" | "contract-key")
                 )
-                && array_field(&node.config, "correlation").is_none_or(Vec::is_empty) =>
+                && array_field(config, "correlation").is_none_or(Vec::is_empty) =>
         {
-            "executable"
+            return WorkflowNodeExecutionAvailability::executable();
         }
         "trigger.schedule"
-            if string_field(&node.config, "scheduleKey").is_some_and(|key| !key.is_empty())
+            if string_field(config, "scheduleKey").is_some_and(|key| !key.is_empty())
                 && matches!(
-                    string_field(&node.config, "misfirePolicy"),
+                    string_field(config, "misfirePolicy"),
                     Some("skip" | "run-once")
                 ) =>
         {
-            "executable"
+            return WorkflowNodeExecutionAvailability::executable();
         }
-        "data.validate" | "data.case-context" => "executable",
+        "data.validate" | "data.case-context" => {
+            return WorkflowNodeExecutionAvailability::executable();
+        }
         "data.map"
-            if node
-                .config
+            if config
                 .get("mapping")
                 .is_some_and(crate::workflow_expression::executable_mapping) =>
         {
-            "executable"
+            return WorkflowNodeExecutionAvailability::executable();
         }
         "compute.capability"
-            if string_field(&node.config, "capabilityId").is_some()
-                && string_field(&node.config, "version").is_some()
-                && node
-                    .config
+            if string_field(config, "capabilityId").is_some()
+                && string_field(config, "version").is_some()
+                && config
                     .get("input")
                     .is_some_and(crate::workflow_expression::executable_mapping)
-                && string_field(&node.config, "outputSchemaRef").is_some()
-                && node
-                    .config
-                    .get("configuration")
-                    .is_none_or(Value::is_object) =>
+                && string_field(config, "outputSchemaRef").is_some()
+                && config.get("configuration").is_none_or(Value::is_object) =>
         {
-            "executable"
+            return WorkflowNodeExecutionAvailability::executable();
         }
         "compute.llm"
-            if string_field(&node.config, "modelClass").is_some()
-                && string_field(&node.config, "instructions").is_some()
-                && node
-                    .config
+            if string_field(config, "modelClass").is_some()
+                && string_field(config, "instructions").is_some()
+                && config
                     .get("prompt")
                     .is_some_and(crate::workflow_expression::executable_mapping)
-                && array_field(&node.config, "tools").is_some()
-                && string_field(&node.config, "outputSchemaRef").is_some()
-                && string_field(&node.config, "reasoningEffort").is_some()
-                && node
-                    .config
+                && array_field(config, "tools").is_some()
+                && string_field(config, "outputSchemaRef").is_some()
+                && string_field(config, "reasoningEffort").is_some()
+                && config
                     .get("temperatureMilli")
                     .and_then(Value::as_u64)
                     .is_some()
-                && node
-                    .config
+                && config
                     .get("maximumContextBytes")
                     .and_then(Value::as_u64)
                     .is_some()
-                && node
-                    .config
+                && config
                     .get("maximumOutputTokens")
                     .and_then(Value::as_u64)
                     .is_some() =>
         {
-            "executable"
+            return WorkflowNodeExecutionAvailability::executable();
         }
         "control.subflow"
-            if string_field(&node.config, "packageId").is_some()
-                && string_field(&node.config, "revisionDigest").is_some()
-                && string_field(&node.config, "entrypoint").is_some()
-                && node
-                    .config
+            if string_field(config, "packageId").is_some()
+                && string_field(config, "revisionDigest").is_some()
+                && string_field(config, "entrypoint").is_some()
+                && config
                     .get("input")
                     .is_some_and(crate::workflow_expression::executable_mapping) =>
         {
-            "executable"
+            return WorkflowNodeExecutionAvailability::executable();
         }
-        "storage.read" => "executable",
-        "storage.promote" => "executable",
+        "storage.read" | "storage.promote" => {
+            return WorkflowNodeExecutionAvailability::executable();
+        }
         "storage.write"
-            if node.config.get("operation").and_then(Value::as_str) == Some("delete-reference")
-                || node
-                    .config
+            if config.get("operation").and_then(Value::as_str) == Some("delete-reference")
+                || config
                     .get("value")
                     .and_then(|value| value.get("root"))
                     .and_then(Value::as_str)
                     == Some("input") =>
         {
-            "executable"
+            return WorkflowNodeExecutionAvailability::executable();
         }
         "control.match"
             if matches!(
-                node.config.get("hitPolicy").and_then(Value::as_str),
+                config.get("hitPolicy").and_then(Value::as_str),
                 Some("first" | "unique" | "all")
             ) =>
         {
-            "executable"
+            return WorkflowNodeExecutionAvailability::executable();
         }
-        "control.parallel" => "executable",
-        "control.for-each" => "executable",
-        "control.retry" => "executable",
-        "control.wait" => "executable",
+        "control.parallel" | "control.for-each" | "control.retry" | "control.wait" => {
+            return WorkflowNodeExecutionAvailability::executable();
+        }
         "control.join"
             if matches!(
-                node.config.get("policy").and_then(Value::as_str),
+                config.get("policy").and_then(Value::as_str),
                 Some("all" | "any" | "quorum" | "named")
             ) =>
         {
-            "executable"
+            return WorkflowNodeExecutionAvailability::executable();
         }
-        "control.decision" if node.config.get("when").is_some_and(Value::is_object) => "executable",
+        "control.decision" if config.get("when").is_some_and(Value::is_object) => {
+            return WorkflowNodeExecutionAvailability::executable();
+        }
         "control.reconcile"
-            if value_reference_field(&node.config, "effect").is_some()
-                && integer_field(&node.config, "maximumChecks")
-                    .is_some_and(|checks| checks > 0) =>
+            if value_reference_field(config, "effect").is_some()
+                && integer_field(config, "maximumChecks").is_some_and(|checks| checks > 0) =>
         {
-            "executable"
+            return WorkflowNodeExecutionAvailability::executable();
         }
         "control.human-review"
-            if node
-                .config
+            if config
                 .get("proposal")
                 .is_some_and(crate::workflow_expression::executable_mapping)
-                && string_field(&node.config, "authorityPolicy").is_some()
-                && integer_field(&node.config, "expirySeconds")
-                    .is_some_and(|seconds| seconds > 0)
+                && string_field(config, "authorityPolicy").is_some()
+                && integer_field(config, "expirySeconds").is_some_and(|seconds| seconds > 0)
                 && matches!(
-                    string_field(&node.config, "staleCheck"),
+                    string_field(config, "staleCheck"),
                     Some("revision" | "digest")
                 ) =>
         {
-            "executable"
+            return WorkflowNodeExecutionAvailability::executable();
         }
         "effect.connector"
-            if string_field(&node.config, "connectorClass").is_some_and(|id| !id.is_empty())
-                && string_field(&node.config, "action")
-                    .is_some_and(|action| !action.is_empty())
-                && node
-                    .config
+            if string_field(config, "connectorClass").is_some_and(|id| !id.is_empty())
+                && string_field(config, "action").is_some_and(|action| !action.is_empty())
+                && config
                     .get("input")
                     .is_some_and(crate::workflow_expression::executable_mapping)
-                && bounded_contract_field(&node.config, "previewContract")
-                && bounded_contract_field(&node.config, "reconciliationContract")
+                && bounded_contract_field(config, "previewContract")
+                && bounded_contract_field(config, "reconciliationContract")
                 && matches!(
-                    string_field(&node.config, "idempotency"),
+                    string_field(config, "idempotency"),
                     Some("required" | "reconcile-only")
                 ) =>
         {
-            "executable"
+            return WorkflowNodeExecutionAvailability::executable();
         }
         "data.register-artifact"
-            if string_field(&node.config, "role").is_some()
-                && array_field(&node.config, "mediaTypes").is_some_and(|types| {
+            if string_field(config, "role").is_some()
+                && array_field(config, "mediaTypes").is_some_and(|types| {
                     !types.is_empty() && types.iter().all(|media_type| media_type.is_string())
                 }) =>
         {
-            "executable"
+            return WorkflowNodeExecutionAvailability::executable();
         }
         "terminal.cancel"
-            if node.config.as_object().is_some_and(Map::is_empty)
-                || node
-                    .config
+            if config.as_object().is_some_and(Map::is_empty)
+                || config
                     .get("reason")
                     .is_some_and(crate::workflow_expression::executable_mapping) =>
         {
-            "executable"
+            return WorkflowNodeExecutionAvailability::executable();
         }
-        _ => "schema-only",
-    }
+        "terminal.fail"
+            if config
+                .get("error")
+                .is_some_and(crate::workflow_expression::executable_mapping) =>
+        {
+            return WorkflowNodeExecutionAvailability::executable();
+        }
+        "trigger.manual" | "terminal.complete" => "empty_configuration_required",
+        "trigger.event" => "event_trigger_contract_not_executable",
+        "trigger.schedule" => "schedule_trigger_contract_not_executable",
+        "data.map" => "mapping_not_executable",
+        "compute.capability" => "capability_contract_incomplete",
+        "compute.llm" => "llm_contract_incomplete",
+        "control.subflow" => "subflow_contract_incomplete",
+        "storage.write" => "storage_write_not_executable",
+        "control.match" => "match_policy_not_executable",
+        "control.join" => "join_policy_not_executable",
+        "control.decision" => "decision_condition_not_executable",
+        "control.reconcile" => "reconciliation_contract_incomplete",
+        "control.human-review" => "human_review_contract_incomplete",
+        "effect.connector" => "connector_contract_incomplete",
+        "data.register-artifact" => "artifact_contract_incomplete",
+        "terminal.cancel" => "cancel_reason_not_executable",
+        "terminal.fail" => "error_mapping_not_executable",
+        _ => "node_type_not_executable",
+    };
+    WorkflowNodeExecutionAvailability::schema_only(downgrade_condition)
+}
+
+fn execution_availability(node: &Node) -> &'static str {
+    node_execution_availability(&node.node_type, &node.config).availability
 }
 
 fn compile_graph(
