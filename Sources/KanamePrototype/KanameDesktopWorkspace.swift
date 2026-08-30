@@ -231,6 +231,7 @@ struct KanameDesktopWorkspace: View {
     private let usesQALargeText: Bool
     private let designCapture: DesktopDesignCaptureConfiguration?
     private let usesSyntheticFixtures: Bool
+    private let gitControl: DesktopGitControlService
     @StateObject private var model: DesktopAppModel
     @StateObject private var conversationRuntime: DesktopConversationRuntime
     @StateObject private var automationScheduler: DesktopAutomationSchedulerViewModel
@@ -270,8 +271,9 @@ struct KanameDesktopWorkspace: View {
     @State private var navigationPreviousResponders: [NSResponder?] = []
 #endif
 
-    init() {
+    init(gitControl: DesktopGitControlService) {
         let environment = KanameDesktopEnvironment.current
+        self.gitControl = gitControl
         let arguments = CommandLine.arguments
         let designCapture = DesktopDesignCaptureConfiguration.resolve(arguments: arguments)
         self.designCapture = designCapture
@@ -312,7 +314,11 @@ struct KanameDesktopWorkspace: View {
             )
             desktopModel.finalizeCodingPlanForApproval(threadID: "thread-desktop-dogfood")
         }
-        let runtime = DesktopConversationRuntime(model: desktopModel, environment: environment)
+        let runtime = DesktopConversationRuntime(
+            model: desktopModel,
+            environment: environment,
+            gitControl: gitControl
+        )
         _developmentForkFailure = State(initialValue: forkFailure)
         _model = StateObject(wrappedValue: desktopModel)
         _conversationRuntime = StateObject(wrappedValue: runtime)
@@ -986,6 +992,7 @@ struct KanameDesktopWorkspace: View {
                 DesktopThreadsView(
                     model: model,
                     runtime: conversationRuntime,
+                    gitControl: gitControl,
                     capabilities: personalIntegrations.providerCapabilities,
                     searchText: searchText,
                     selectedThreadID: threadSelection,
@@ -1053,6 +1060,7 @@ struct KanameDesktopWorkspace: View {
                     model: model,
                     integrations: personalIntegrations,
                     runtime: conversationRuntime,
+                    gitControl: gitControl,
                     openThread: { openThread($0) },
                     startConversation: { beginConversation(projectID: $0) }
                 )
@@ -2512,6 +2520,7 @@ private struct DesktopHomeView: View {
 private struct DesktopThreadsView: View {
     @ObservedObject var model: DesktopAppModel
     @ObservedObject var runtime: DesktopConversationRuntime
+    let gitControl: DesktopGitControlService
     let capabilities: [ProviderCapabilitySnapshot]
     let searchText: String
     @Binding var selectedThreadID: String?
@@ -2551,6 +2560,7 @@ private struct DesktopThreadsView: View {
                 DesktopThreadConversation(
                     model: model,
                     runtime: runtime,
+                    gitControl: gitControl,
                     capabilities: capabilities,
                     thread: thread,
                     selectedRunID: $selectedRunID,
@@ -2670,6 +2680,7 @@ private enum DesktopConversationRuntimeSheetFocus {
 private struct DesktopThreadConversation: View {
     @ObservedObject var model: DesktopAppModel
     @ObservedObject var runtime: DesktopConversationRuntime
+    let gitControl: DesktopGitControlService
     let capabilities: [ProviderCapabilitySnapshot]
     let thread: DesktopThread
     @Binding var selectedRunID: String?
@@ -2713,6 +2724,7 @@ private struct DesktopThreadConversation: View {
     init(
         model: DesktopAppModel,
         runtime: DesktopConversationRuntime,
+        gitControl: DesktopGitControlService,
         capabilities: [ProviderCapabilitySnapshot],
         thread: DesktopThread,
         selectedRunID: Binding<String?>,
@@ -2721,6 +2733,7 @@ private struct DesktopThreadConversation: View {
     ) {
         self.model = model
         self.runtime = runtime
+        self.gitControl = gitControl
         self.capabilities = capabilities
         self.thread = thread
         _selectedRunID = selectedRunID
@@ -2754,6 +2767,7 @@ private struct DesktopThreadConversation: View {
                 DesktopThreadChangesView(
                     model: model,
                     thread: thread,
+                    gitControl: gitControl,
                     isAwaitingReview: thread.kind == .coding && codingStage == .implementationReview,
                     beginReview: { runtime.beginImplementationReview(threadID: thread.id) }
                 )
@@ -4014,9 +4028,24 @@ private struct DesktopThreadChangesView: View {
     let thread: DesktopThread
     let isAwaitingReview: Bool
     let beginReview: () -> Void
-    @StateObject private var changes = DesktopThreadChangesViewModel()
-    @StateObject private var codingControl = DesktopCodingControlViewModel()
+    @StateObject private var changes: DesktopThreadChangesViewModel
+    @StateObject private var codingControl: DesktopCodingControlViewModel
     @State private var revertMessage: String?
+
+    init(
+        model: DesktopAppModel,
+        thread: DesktopThread,
+        gitControl: DesktopGitControlService,
+        isAwaitingReview: Bool,
+        beginReview: @escaping () -> Void
+    ) {
+        self.model = model
+        self.thread = thread
+        self.isAwaitingReview = isAwaitingReview
+        self.beginReview = beginReview
+        _changes = StateObject(wrappedValue: DesktopThreadChangesViewModel(service: gitControl))
+        _codingControl = StateObject(wrappedValue: DesktopCodingControlViewModel(service: gitControl))
+    }
 
     private var worktree: DesktopWorktreeRecord? {
         model.snapshot.operations.worktrees
@@ -11620,11 +11649,27 @@ private struct DesktopCodingView: View {
     @ObservedObject var runtime: DesktopConversationRuntime
     let openThread: (String) -> Void
     let startConversation: (String?) -> Void
-    @StateObject private var control = DesktopCodingControlViewModel()
+    @StateObject private var control: DesktopCodingControlViewModel
     @State private var panel = Panel.overview
     @State private var showsNewComparison = false
     @State private var showsNewWorktree = false
     @State private var commitMessages: [String: String] = [:]
+
+    init(
+        model: DesktopAppModel,
+        integrations: DesktopPersonalIntegrationViewModel,
+        runtime: DesktopConversationRuntime,
+        gitControl: DesktopGitControlService,
+        openThread: @escaping (String) -> Void,
+        startConversation: @escaping (String?) -> Void
+    ) {
+        self.model = model
+        self.integrations = integrations
+        self.runtime = runtime
+        self.openThread = openThread
+        self.startConversation = startConversation
+        _control = StateObject(wrappedValue: DesktopCodingControlViewModel(service: gitControl))
+    }
 
     private enum Panel: String, CaseIterable, Identifiable {
         case overview

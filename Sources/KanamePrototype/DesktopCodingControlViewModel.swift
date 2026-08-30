@@ -43,8 +43,8 @@ final class DesktopCodingControlViewModel: ObservableObject {
         )
     }
 
-    init(environment: KanameDesktopEnvironment = .current) {
-        service = DesktopGitControlService(managedRoot: environment.worktreeDirectory)
+    init(service: DesktopGitControlService) {
+        self.service = service
     }
 
     func requestCreationApproval(model: DesktopAppModel, worktree: DesktopWorktreeRecord) {

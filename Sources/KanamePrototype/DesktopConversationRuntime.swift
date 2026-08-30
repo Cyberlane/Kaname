@@ -59,11 +59,16 @@ final class DesktopConversationRuntime: ObservableObject {
     private var codingContextPreparationRunIDs: Set<String> = []
     private var checkpointFinalizationRunIDs: Set<String> = []
     private var didReconcilePersistedTitles = false
-    private lazy var gitControl = DesktopGitControlService(managedRoot: environment.worktreeDirectory)
+    private let gitControl: DesktopGitControlService
 
-    init(model: DesktopAppModel, environment: KanameDesktopEnvironment = .current) {
+    init(
+        model: DesktopAppModel,
+        environment: KanameDesktopEnvironment = .current,
+        gitControl: DesktopGitControlService
+    ) {
         self.model = model
         self.environment = environment
+        self.gitControl = gitControl
         let indexStarted = DispatchTime.now().uptimeNanoseconds
         eventIndex = DesktopConversationEventCursorIndex(
             persistedEvents: model.snapshot.operations.providerEvents.map(Self.persistedIdentity)
