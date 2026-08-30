@@ -57,6 +57,33 @@ public struct ProviderInstance: Codable, Equatable, Sendable {
     }
 }
 
+/// Adapter behavior that Kaname's local implementation currently exposes.
+/// Claims describe the adapter contract only; they do not imply that a provider
+/// is installed, authenticated, or qualified for a particular CLI version.
+public enum ProviderCapabilityClaim: String, Codable, CaseIterable, Hashable, Sendable {
+    case conversation
+    case imageAttachments
+    case modelDiscovery
+    case modelSelection
+    case reasoningEffort
+    case resumableSessions
+    case skillDiscovery
+    case toolEventStreaming
+}
+
+/// A half-open CLI version interval backed by qualification evidence.
+/// `nil` on an inventory entry means that no version interval has been qualified
+/// yet; callers must not interpret a missing range as accepting every version.
+public struct ProviderVersionRange: Codable, Equatable, Sendable {
+    public let minimumInclusive: String
+    public let maximumExclusive: String
+
+    public init(minimumInclusive: String, maximumExclusive: String) {
+        self.minimumInclusive = minimumInclusive
+        self.maximumExclusive = maximumExclusive
+    }
+}
+
 public enum ProviderConnectionState: String, Codable, Sendable {
     case ready
     case degraded

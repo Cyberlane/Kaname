@@ -55,28 +55,26 @@ public actor ProviderCapabilityProber {
 
     public func probe(_ configuration: ProviderProbeConfiguration) async -> ProviderCapabilitySnapshot {
         do {
-            if configuration.instance.driver == .codex {
+            guard let provider = ProviderInventory.provider(id: configuration.instance.driver) else {
+                return ProviderCapabilitySnapshot(
+                    instance: configuration.instance,
+                    state: .unsupported,
+                    installed: false,
+                    authentication: .unknown,
+                    detail: "This Kaname build has no connector for driver '\(configuration.instance.driver.rawValue)'."
+                )
+            }
+
+            switch provider.probeSupport {
+            case .codexAppServer:
                 return try await CodexCapabilityProbe.probe(configuration)
-            }
-            if configuration.instance.driver == .claudeAgent {
+            case .claudeVersion:
                 return try await ClaudeCapabilityProbe.probe(configuration)
-            }
-            if configuration.instance.driver == .openCode {
+            case .openCodeEndpoint:
                 return try await OpenCodeCapabilityProbe.probe(configuration)
+            case .sharedVersion:
+                return try await ProviderVersionCapabilityProbe.probe(configuration)
             }
-            if configuration.instance.driver == .cursorAgent {
-                return try await CursorCapabilityProbe.probe(configuration)
-            }
-            if configuration.instance.driver == .grokBuild {
-                return try await GrokCapabilityProbe.probe(configuration)
-            }
-            return ProviderCapabilitySnapshot(
-                instance: configuration.instance,
-                state: .unsupported,
-                installed: false,
-                authentication: .unknown,
-                detail: "This Kaname build has no connector for driver '\(configuration.instance.driver.rawValue)'."
-            )
         } catch let error as ProviderConnectivityError {
             return unavailableSnapshot(for: configuration.instance, error: error)
         } catch {

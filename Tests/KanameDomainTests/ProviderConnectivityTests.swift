@@ -225,6 +225,91 @@ struct ProviderConnectivityTests {
     }
 
     @Test
+    func canonicalProviderInventoryDeclaresFiveStableAdaptersWithoutDecoration() throws {
+        let providers = ProviderInventory.providers
+
+        #expect(providers.map(\.id) == [
+            .codex, .claudeAgent, .openCode, .cursorAgent, .grokBuild,
+        ])
+        #expect(providers.map(\.displayName) == ["Codex", "Claude", "OpenCode", "Cursor", "Grok"])
+        #expect(providers.map(\.defaultInstanceID.rawValue) == [
+            "codexLocal", "claudeLocal", "opencodeLocal", "cursorLocal", "grokLocal",
+        ])
+        #expect(providers.map(\.executableCandidates) == [
+            ["codex"], ["claude"], ["opencode"], ["cursor-agent", "agent"], ["grok"],
+        ])
+        #expect(providers.map(\.conversationDriver) == [
+            .codex, .native(.claude), .native(.openCode), .native(.cursor), .native(.grok),
+        ])
+        #expect(providers.map(\.probeSupport) == [
+            .codexAppServer, .claudeVersion, .openCodeEndpoint, .sharedVersion, .sharedVersion,
+        ])
+        #expect(providers.compactMap { provider in
+            provider.versionProbeDetail.map { _ in provider.id }
+        } == [.cursorAgent, .grokBuild])
+        #expect(providers.allSatisfy { $0.declaredVersionRange == nil })
+        #expect(Set(providers.map(\.id)).count == providers.count)
+        #expect(Set(providers.map(\.defaultInstanceID)).count == providers.count)
+        #expect(Set(providers.map(\.displayName)).count == providers.count)
+
+        let codex = try #require(ProviderInventory.provider(id: .codex))
+        #expect(codex.capabilityClaims == [
+            .conversation, .imageAttachments, .modelDiscovery, .modelSelection,
+            .reasoningEffort, .resumableSessions, .skillDiscovery, .toolEventStreaming,
+        ])
+        let claude = try #require(ProviderInventory.provider(id: .claudeAgent))
+        #expect(claude.capabilityClaims == [
+            .conversation, .imageAttachments, .modelSelection, .reasoningEffort,
+            .resumableSessions, .toolEventStreaming,
+        ])
+        let openCode = try #require(ProviderInventory.provider(id: .openCode))
+        #expect(openCode.capabilityClaims == [
+            .conversation, .imageAttachments, .modelDiscovery, .modelSelection,
+            .reasoningEffort, .resumableSessions, .skillDiscovery, .toolEventStreaming,
+        ])
+        let cursor = try #require(ProviderInventory.provider(id: .cursorAgent))
+        #expect(cursor.capabilityClaims == [
+            .conversation, .imageAttachments, .modelSelection, .resumableSessions,
+            .toolEventStreaming,
+        ])
+        let grok = try #require(ProviderInventory.provider(id: .grokBuild))
+        #expect(grok.capabilityClaims == [
+            .conversation, .modelSelection, .resumableSessions, .toolEventStreaming,
+        ])
+
+        #expect(ProviderInventory.provider(conversationDriver: .native(.cursor))?.id == .cursorAgent)
+        #expect(NativeConversationDriver.cursor.displayName == "Cursor")
+        #expect(NativeConversationDriver.cursor.executableName == "cursor-agent")
+        #expect(providers.map(\.defaultInstance.driver) == providers.map(\.id))
+    }
+
+    @Test
+    func sharedVersionProbesConsumeInventoryDetailsWhileClaudeDetailRemainsDeferred() async throws {
+        let claude = try #require(ProviderInventory.provider(id: .claudeAgent))
+        #expect(claude.probeSupport == .claudeVersion)
+        #expect(claude.versionProbeDetail == nil)
+
+        let executable = try makeFixtureExecutable("""
+        #!/bin/sh
+        printf '%s\\n' 'fixture-provider 1.2.3'
+        """)
+        defer { try? FileManager.default.removeItem(at: executable.deletingLastPathComponent()) }
+
+        for driver: ProviderDriverKind in [.cursorAgent, .grokBuild] {
+            let provider = try #require(ProviderInventory.provider(id: driver))
+            let snapshot = await ProviderCapabilityProber().probe(ProviderProbeConfiguration(
+                instance: provider.defaultInstance,
+                executable: executable.path,
+                workingDirectory: executable.deletingLastPathComponent()
+            ))
+
+            #expect(provider.probeSupport == .sharedVersion)
+            #expect(snapshot.version == "1.2.3")
+            #expect(snapshot.detail == provider.versionProbeDetail)
+        }
+    }
+
+    @Test
     func unknownAndMissingDriversProduceDistinctFailureSnapshots() async {
         let unsupported = await capabilitySnapshot(
             id: "communityFork",

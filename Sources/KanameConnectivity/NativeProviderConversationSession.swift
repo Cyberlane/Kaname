@@ -18,21 +18,18 @@ public enum NativeConversationDriver: String, Codable, CaseIterable, Sendable {
     }
 
     public var displayName: String {
-        switch self {
-        case .claude: "Claude"
-        case .openCode: "OpenCode"
-        case .cursor: "Cursor"
-        case .grok: "Grok"
-        }
+        inventoryEntry.displayName
     }
 
     public var executableName: String {
-        switch self {
-        case .claude: "claude"
-        case .openCode: "opencode"
-        case .cursor: "cursor-agent"
-        case .grok: "grok"
+        inventoryEntry.executableCandidates[0]
+    }
+
+    private var inventoryEntry: ProviderInventoryEntry {
+        guard let provider = ProviderInventory.provider(conversationDriver: .native(self)) else {
+            preconditionFailure("Native conversation driver '\(rawValue)' is missing from ProviderInventory.")
         }
+        return provider
     }
 }
 
