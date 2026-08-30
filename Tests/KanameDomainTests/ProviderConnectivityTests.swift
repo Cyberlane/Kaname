@@ -857,6 +857,84 @@ struct ProviderConnectivityTests {
     }
 
     @Test
+    func nativeProviderParserRetainsUnrecognizedNonemptyLinesWithinEvidenceBounds() throws {
+        var parser = NativeProviderStreamParser(driver: .cursor, sessionID: "cursor-fallback")
+        let malformed = Data("not-json".utf8)
+        let malformedEvents = parser.consume(line: malformed)
+        #expect(malformedEvents.count == 1)
+        let malformedEvent = try #require(malformedEvents.first)
+
+        #expect(malformedEvent.kind == .nativeProviderEvent)
+        #expect(malformedEvent.nativeType == "cursor/unrecognized-event")
+        #expect(malformedEvent.threadID == "cursor-fallback")
+        #expect(malformedEvent.text == "Unrecognized provider event.")
+        #expect(malformedEvent.payload == malformed)
+        #expect(!malformedEvent.payloadWasTruncated)
+
+        let nonObjectJSON = Data(#"["future", "shape"]"#.utf8)
+        let nonObjectEvents = parser.consume(line: nonObjectJSON)
+        #expect(nonObjectEvents.count == 1)
+        #expect(nonObjectEvents.first?.payload == nonObjectJSON)
+        let whitespaceEvents = parser.consume(line: Data("   ".utf8))
+        #expect(whitespaceEvents.count == 1)
+        #expect(whitespaceEvents.first?.kind == .nativeProviderEvent)
+        #expect(parser.consume(line: Data()).isEmpty)
+
+        let futureJSON = Data(#"{"type":"future_event","opaque":true}"#.utf8)
+        let futureEvents = parser.consume(line: futureJSON)
+        #expect(futureEvents.count == 1)
+        let futureEvent = try #require(futureEvents.first)
+        #expect(futureEvent.kind == .nativeProviderEvent)
+        #expect(futureEvent.nativeType == "future_event")
+        #expect(futureEvent.payload == futureJSON)
+
+        let oversized = Data(
+            repeating: 0x78,
+            count: CodexRunEvent.maximumRetainedPayloadBytes + 17
+        )
+        let oversizedEvents = parser.consume(line: oversized)
+        #expect(oversizedEvents.count == 1)
+        let oversizedEvent = try #require(oversizedEvents.first)
+        #expect(oversizedEvent.payload?.count == CodexRunEvent.maximumRetainedPayloadBytes)
+        #expect(oversizedEvent.payloadWasTruncated)
+    }
+
+    @Test
+    func nativeProviderStreamEmitsOneTruncationEventAndDrainsWithoutParsingOmittedBytes() throws {
+        #expect(NativeProviderEventStreamDecoder.maximumParsedOutputBytes == 8 * 1_024 * 1_024)
+        var decoder = NativeProviderEventStreamDecoder(
+            driver: .claude,
+            sessionID: "claude-fallback"
+        )
+        let beforeLimit = Data((#"{"type":"future_event"}"# + "\n").utf8)
+        let beforeEvents = decoder.consume(chunk: beforeLimit)
+        #expect(beforeEvents.count == 1)
+        let beforeEvent = try #require(beforeEvents.first)
+        #expect(beforeEvent.nativeType == "future_event")
+
+        let boundaryFragment = Data(
+            repeating: 0x78,
+            count: NativeProviderEventStreamDecoder.maximumParsedOutputBytes - beforeLimit.count
+        )
+        #expect(decoder.consume(chunk: boundaryFragment).isEmpty)
+
+        let firstOmittedChunk = Data((#"{"type":"after_limit"}"# + "\n").utf8)
+        let truncationEvents = decoder.consume(chunk: firstOmittedChunk)
+        #expect(truncationEvents.count == 1)
+        let truncation = try #require(truncationEvents.first)
+        #expect(truncation.kind == .nativeProviderEvent)
+        #expect(truncation.nativeType == "claude/output-truncated")
+        #expect(truncation.threadID == "claude-fallback")
+        #expect(truncation.text == "Provider output truncated at 8388608 bytes.")
+        #expect(truncation.payload == nil)
+        #expect(truncation.payloadWasTruncated)
+
+        let laterOmittedChunk = Data((#"{"type":"also_after_limit"}"# + "\n").utf8)
+        #expect(decoder.consume(chunk: laterOmittedChunk).isEmpty)
+        #expect(decoder.finish().isEmpty)
+    }
+
+    @Test
     func googleLoopbackReceiverBindsBeforeCompletingCallback() async throws {
         let receiver = try await GoogleLoopbackReceiver.start()
         let expectedState = "state-\(UUID().uuidString)"

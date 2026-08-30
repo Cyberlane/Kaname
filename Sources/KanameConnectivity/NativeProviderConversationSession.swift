@@ -279,28 +279,17 @@ public actor NativeProviderConversationSession {
         fallbackSessionID: String?,
         continuation: AsyncStream<CodexRunEvent>.Continuation
     ) -> ReadResult {
-        var buffered = Data()
-        var parser = NativeProviderStreamParser(driver: driver, sessionID: fallbackSessionID)
-        var totalBytes = 0
+        var decoder = NativeProviderEventStreamDecoder(
+            driver: driver,
+            sessionID: fallbackSessionID
+        )
         while true {
             let data = handle.availableData
             guard !data.isEmpty else { break }
-            totalBytes += data.count
-            guard totalBytes <= 8 * 1_024 * 1_024 else { continue }
-            buffered.append(data)
-            while let newline = buffered.firstIndex(of: 0x0A) {
-                let line = Data(buffered[..<newline])
-                buffered.removeSubrange(...newline)
-                parser.consume(line: line).forEach { continuation.yield($0) }
-            }
+            decoder.consume(chunk: data).forEach { continuation.yield($0) }
         }
-        if !buffered.isEmpty {
-            parser.consume(line: buffered).forEach { continuation.yield($0) }
-        }
-        parser.settleOutstandingAgentEvents(
-            nativeType: "\(driver.rawValue)/observation-ended"
-        ).forEach { continuation.yield($0) }
-        return ReadResult(sessionID: parser.sessionID, usageSummary: parser.usageSummary)
+        decoder.finish().forEach { continuation.yield($0) }
+        return ReadResult(sessionID: decoder.sessionID, usageSummary: decoder.usageSummary)
     }
 
     private static func readBounded(_ handle: FileHandle, maximumBytes: Int) -> Data {
@@ -313,6 +302,69 @@ public actor NativeProviderConversationSession {
             }
         }
         return result
+    }
+}
+
+struct NativeProviderEventStreamDecoder {
+    static let maximumParsedOutputBytes = 8 * 1_024 * 1_024
+
+    private let maximumParsedBytes: Int
+    private var buffered = Data()
+    private var parsedByteCount = 0
+    private var didTruncate = false
+    private var parser: NativeProviderStreamParser
+
+    var sessionID: String? { parser.sessionID }
+    var usageSummary: String? { parser.usageSummary }
+
+    init(
+        driver: NativeConversationDriver,
+        sessionID: String? = nil,
+        maximumParsedBytes: Int = Self.maximumParsedOutputBytes
+    ) {
+        precondition(maximumParsedBytes > 0)
+        self.maximumParsedBytes = maximumParsedBytes
+        parser = NativeProviderStreamParser(driver: driver, sessionID: sessionID)
+    }
+
+    mutating func consume(chunk: Data) -> [CodexRunEvent] {
+        guard !chunk.isEmpty, !didTruncate else { return [] }
+        let remainingBytes = maximumParsedBytes - parsedByteCount
+        let accepted = chunk.prefix(remainingBytes)
+        buffered.append(contentsOf: accepted)
+        parsedByteCount += accepted.count
+
+        var events = consumeCompleteLines()
+        guard accepted.count < chunk.count else { return events }
+
+        // The retained prefix may end inside a provider line. Discard it rather
+        // than reporting a fragment whose omitted suffix was never parsed.
+        buffered.removeAll(keepingCapacity: false)
+        didTruncate = true
+        events.append(parser.outputTruncationEvent(maximumBytes: maximumParsedBytes))
+        return events
+    }
+
+    mutating func finish() -> [CodexRunEvent] {
+        var events: [CodexRunEvent] = []
+        if !didTruncate, !buffered.isEmpty {
+            events.append(contentsOf: parser.consume(line: buffered))
+            buffered.removeAll(keepingCapacity: false)
+        }
+        events.append(contentsOf: parser.settleOutstandingAgentEvents(
+            nativeType: "\(parser.driver.rawValue)/observation-ended"
+        ))
+        return events
+    }
+
+    private mutating func consumeCompleteLines() -> [CodexRunEvent] {
+        var events: [CodexRunEvent] = []
+        while let newline = buffered.firstIndex(of: 0x0A) {
+            let line = Data(buffered[..<newline])
+            buffered.removeSubrange(...newline)
+            events.append(contentsOf: parser.consume(line: line))
+        }
+        return events
     }
 }
 
@@ -337,12 +389,20 @@ struct NativeProviderStreamParser {
     }
 
     mutating func consume(line: Data) -> [CodexRunEvent] {
-        guard !line.isEmpty,
-              let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { return [] }
-        sessionID = findString(keys: ["session_id", "sessionID"], in: object) ?? sessionID
-        let nativeType = (object["type"] as? String) ?? "\(driver.rawValue)/event"
+        guard !line.isEmpty else { return [] }
         let retained = Data(line.prefix(CodexRunEvent.maximumRetainedPayloadBytes))
         let truncated = line.count > retained.count
+        guard let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else {
+            return [event(
+                .nativeProviderEvent,
+                nativeType: "\(driver.rawValue)/unrecognized-event",
+                text: "Unrecognized provider event.",
+                payload: retained,
+                truncated: truncated
+            )]
+        }
+        sessionID = findString(keys: ["session_id", "sessionID"], in: object) ?? sessionID
+        let nativeType = (object["type"] as? String) ?? "\(driver.rawValue)/event"
         var events: [CodexRunEvent] = []
 
         switch driver {
@@ -495,6 +555,16 @@ struct NativeProviderStreamParser {
         }
         for event in events { agentLedger.observe(event.agentActivity) }
         return events
+    }
+
+    func outputTruncationEvent(maximumBytes: Int) -> CodexRunEvent {
+        CodexRunEvent(
+            kind: .nativeProviderEvent,
+            nativeType: "\(driver.rawValue)/output-truncated",
+            threadID: sessionID,
+            text: "Provider output truncated at \(maximumBytes) bytes.",
+            payloadWasTruncated: true
+        )
     }
 
     mutating func settleOutstandingAgentEvents(nativeType: String) -> [CodexRunEvent] {
