@@ -1,0 +1,215 @@
+{
+  "fixtureVersion": 1,
+  "privacyClass": "synthetic-public",
+  "executorEdgeDowngradeCode": "edge_mapping_not_executable",
+  "nodeTypes": [
+    {
+      "type": "compute.capability",
+      "typeVersion": 1,
+      "executorAdmitted": true,
+      "builderAvailability": "schema-only",
+      "executableConfig": {"capabilityId":"dev.kaname.document.check","version":"1.0.0","input":{"whole":true},"outputSchemaRef":"dev.kaname.schema/result/v1","configuration":{"mode":"strict"}},
+      "downgradeCases": [{"condition":"capability_contract_incomplete","config":{}}]
+    },
+    {
+      "type": "compute.llm",
+      "typeVersion": 1,
+      "executorAdmitted": true,
+      "builderAvailability": "schema-only",
+      "executableConfig": {"modelClass":"reasoning","instructions":"Return the registered schema.","prompt":{"whole":true},"context":[],"tools":[],"outputSchemaRef":"dev.kaname.schema/result/v1","reasoningEffort":"medium","temperatureMilli":200,"maximumContextBytes":32768,"maximumOutputTokens":4096},
+      "downgradeCases": [{"condition":"llm_contract_incomplete","config":{}}]
+    },
+    {
+      "type": "control.decision",
+      "typeVersion": 1,
+      "executorAdmitted": true,
+      "builderAvailability": "schema-only",
+      "executableConfig": {"when":{"exists":{"root":"input","pointer":"/approved"}}},
+      "downgradeCases": [{"condition":"decision_condition_not_executable","config":{}}]
+    },
+    {
+      "type": "control.for-each",
+      "typeVersion": 1,
+      "executorAdmitted": true,
+      "builderAvailability": "schema-only",
+      "executableConfig": {"items":{"pointer":"/items","root":"input"},"as":"item","maximumItems":256,"maximumConcurrency":4,"failurePolicy":"collect"},
+      "downgradeCases": []
+    },
+    {
+      "type": "control.human-review",
+      "typeVersion": 1,
+      "executorAdmitted": true,
+      "builderAvailability": "schema-only",
+      "executableConfig": {"proposal":{"whole":true},"authorityPolicy":"reviewer","expirySeconds":86400,"staleCheck":"digest"},
+      "downgradeCases": [{"condition":"human_review_contract_incomplete","config":{}}]
+    },
+    {
+      "type": "control.join",
+      "typeVersion": 1,
+      "executorAdmitted": true,
+      "builderAvailability": "schema-only",
+      "executableConfig": {"policy":"all","cancelRemaining":false},
+      "downgradeCases": [{"condition":"join_policy_not_executable","config":{"policy":"unsupported"}}]
+    },
+    {
+      "type": "control.match",
+      "typeVersion": 1,
+      "executorAdmitted": true,
+      "builderAvailability": "schema-only",
+      "executableConfig": {"value":{"pointer":"","root":"input"},"hitPolicy":"first","cases":[{"id":"018f0000-0001-7000-8000-000000000001","key":"approved","label":"Approved","when":{"exists":{"root":"value","pointer":"/approved"}}}],"otherwise":{"id":"018f0000-0002-7000-8000-000000000002","key":"otherwise","label":"Otherwise"}},
+      "downgradeCases": [{"condition":"match_policy_not_executable","config":{}}]
+    },
+    {
+      "type": "control.parallel",
+      "typeVersion": 1,
+      "executorAdmitted": true,
+      "builderAvailability": "schema-only",
+      "executableConfig": {"branches":[{"id":"018f0000-0003-7000-8000-000000000003","key":"left","label":"Left"},{"id":"018f0000-0004-7000-8000-000000000004","key":"right","label":"Right"}]},
+      "downgradeCases": []
+    },
+    {
+      "type": "control.reconcile",
+      "typeVersion": 1,
+      "executorAdmitted": true,
+      "builderAvailability": "schema-only",
+      "executableConfig": {"effect":{"pointer":"/effect","root":"input"},"maximumChecks":5},
+      "downgradeCases": [{"condition":"reconciliation_contract_incomplete","config":{"maximumChecks":0}}]
+    },
+    {
+      "type": "control.retry",
+      "typeVersion": 1,
+      "executorAdmitted": true,
+      "builderAvailability": "schema-only",
+      "executableConfig": {"maximumAttempts":3,"retryOn":["TRANSIENT"],"backoff":{"mode":"exponential","initialSeconds":1,"maximumSeconds":60,"jitter":"deterministic"}},
+      "downgradeCases": []
+    },
+    {
+      "type": "control.subflow",
+      "typeVersion": 1,
+      "executorAdmitted": true,
+      "builderAvailability": "schema-only",
+      "executableConfig": {"packageId":"dev.kaname.review.child","revisionDigest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","entrypoint":"start","input":{"whole":true}},
+      "downgradeCases": [{"condition":"subflow_contract_incomplete","config":{}}]
+    },
+    {
+      "type": "control.wait",
+      "typeVersion": 1,
+      "executorAdmitted": true,
+      "builderAvailability": "schema-only",
+      "executableConfig": {"kind":"reply","correlation":[{"root":"input","pointer":"/caseId"}],"expirySeconds":86400},
+      "downgradeCases": []
+    },
+    {
+      "type": "data.case-context",
+      "typeVersion": 1,
+      "executorAdmitted": true,
+      "builderAvailability": "schema-only",
+      "executableConfig": {},
+      "downgradeCases": []
+    },
+    {
+      "type": "data.map",
+      "typeVersion": 1,
+      "executorAdmitted": true,
+      "builderAvailability": "schema-only",
+      "executableConfig": {"mapping":{"whole":true}},
+      "downgradeCases": [{"condition":"mapping_not_executable","config":{}}]
+    },
+    {
+      "type": "data.register-artifact",
+      "typeVersion": 1,
+      "executorAdmitted": true,
+      "builderAvailability": "schema-only",
+      "executableConfig": {"role":"result","mediaTypes":["application/pdf"]},
+      "downgradeCases": [{"condition":"artifact_contract_incomplete","config":{}}]
+    },
+    {
+      "type": "data.validate",
+      "typeVersion": 1,
+      "executorAdmitted": true,
+      "builderAvailability": "schema-only",
+      "executableConfig": {"schemaRef":"dev.kaname.schema/input/v1"},
+      "downgradeCases": []
+    },
+    {
+      "type": "effect.connector",
+      "typeVersion": 1,
+      "executorAdmitted": true,
+      "builderAvailability": "schema-only",
+      "executableConfig": {"connectorClass":"dev.kaname.email","action":"draft-reply","input":{"whole":true},"previewContract":"email.draft.preview.v1","reconciliationContract":"email.draft.reconcile.v1","idempotency":"required"},
+      "downgradeCases": [{"condition":"connector_contract_incomplete","config":{}}]
+    },
+    {
+      "type": "storage.promote",
+      "typeVersion": 1,
+      "executorAdmitted": true,
+      "builderAvailability": "schema-only",
+      "executableConfig": {"from":"job","sourceKey":"draft","to":"workflow","destinationKey":"latest-result","conflictPolicy":"compare-and-swap","expectedRevision":0},
+      "downgradeCases": []
+    },
+    {
+      "type": "storage.read",
+      "typeVersion": 1,
+      "executorAdmitted": true,
+      "builderAvailability": "schema-only",
+      "executableConfig": {"scope":"job","key":"draft","required":true},
+      "downgradeCases": []
+    },
+    {
+      "type": "storage.write",
+      "typeVersion": 1,
+      "executorAdmitted": true,
+      "builderAvailability": "schema-only",
+      "executableConfig": {"scope":"job","key":"draft","value":{"pointer":"/draft","root":"input"},"conflictPolicy":"compare-and-swap","expectedRevision":0},
+      "downgradeCases": [{"condition":"storage_write_not_executable","config":{}}]
+    },
+    {
+      "type": "terminal.cancel",
+      "typeVersion": 1,
+      "executorAdmitted": true,
+      "builderAvailability": "schema-only",
+      "executableConfig": {},
+      "downgradeCases": [{"condition":"cancel_reason_not_executable","config":{"reason":{}}}]
+    },
+    {
+      "type": "terminal.complete",
+      "typeVersion": 1,
+      "executorAdmitted": true,
+      "builderAvailability": "schema-only",
+      "executableConfig": {},
+      "downgradeCases": [{"condition":"empty_configuration_required","config":{"output":{"whole":true}}}]
+    },
+    {
+      "type": "terminal.fail",
+      "typeVersion": 1,
+      "executorAdmitted": true,
+      "builderAvailability": "schema-only",
+      "executableConfig": {"error":{"whole":true}},
+      "downgradeCases": [{"condition":"error_mapping_not_executable","config":{}}]
+    },
+    {
+      "type": "trigger.event",
+      "typeVersion": 1,
+      "executorAdmitted": true,
+      "builderAvailability": "schema-only",
+      "executableConfig": {"eventContract":"email.reply.received.v1","deduplication":"event-id","correlation":[]},
+      "downgradeCases": [{"condition":"event_trigger_contract_not_executable","config":{"eventContract":"email.reply.received.v1","deduplication":"event-id","correlation":[{"pointer":"/caseId","root":"input"}]}}]
+    },
+    {
+      "type": "trigger.manual",
+      "typeVersion": 1,
+      "executorAdmitted": true,
+      "builderAvailability": "schema-only",
+      "executableConfig": {},
+      "downgradeCases": [{"condition":"empty_configuration_required","config":{"unexpected":true}}]
+    },
+    {
+      "type": "trigger.schedule",
+      "typeVersion": 1,
+      "executorAdmitted": true,
+      "builderAvailability": "schema-only",
+      "executableConfig": {"scheduleKey":"weekday-review","misfirePolicy":"run-once"},
+      "downgradeCases": [{"condition":"schedule_trigger_contract_not_executable","config":{}}]
+    }
+  ]
+}

@@ -577,7 +577,7 @@ fn effect_workflow_source(action: &str) -> Value {
                     "idempotency": "required"
                 }), true),
                 node(2, "complete", "terminal.complete", json!({}), false),
-                node(3, "fail", "terminal.fail", json!({}), false)
+                node(3, "fail", "terminal.fail", json!({"error": {"whole": true}}), false)
             ],
             "edges": [
                 edge(1, (0, "success"), (1, "input")),

@@ -4,6 +4,57 @@ import Testing
 
 struct DesktopWorkflowNodeRegistryTests {
     @Test
+    func builderSchemaOnlyAvailabilityMatchesExecutabilityCrosswalk() throws {
+        struct Crosswalk: Decodable {
+            struct Node: Decodable {
+                struct DowngradeCase: Decodable {
+                    let condition: String
+                    let config: DesktopWorkflowJSONValue
+                }
+
+                let type: String
+                let typeVersion: UInt32
+                let executorAdmitted: Bool
+                let builderAvailability: String
+                let executableConfig: DesktopWorkflowJSONValue
+                let downgradeCases: [DowngradeCase]
+            }
+
+            let fixtureVersion: UInt32
+            let privacyClass: String
+            let nodeTypes: [Node]
+        }
+
+        let data = try Data(contentsOf: repositoryRoot.appendingPathComponent(
+            "Fixtures/workflow-v2/executability-crosswalk.json"
+        ))
+        let crosswalk = try JSONDecoder().decode(Crosswalk.self, from: data)
+        let registry = try DesktopWorkflowNodeRegistry.builtInSchemaOnlyV1()
+        let fixtureByType = Dictionary(uniqueKeysWithValues: crosswalk.nodeTypes.map { ($0.type, $0) })
+        let isObject: (DesktopWorkflowJSONValue) -> Bool = { value in
+            if case .object = value { return true }
+            return false
+        }
+
+        #expect(crosswalk.fixtureVersion == 1)
+        #expect(crosswalk.privacyClass == "synthetic-public")
+        #expect(fixtureByType.count == crosswalk.nodeTypes.count)
+        #expect(Set(fixtureByType.keys) == Set(registry.registrations.map(\.type)))
+        for registration in registry.registrations {
+            let fixture = try #require(fixtureByType[registration.type])
+            let downgradeConditions = fixture.downgradeCases.map(\.condition)
+            #expect(fixture.typeVersion == registration.typeVersion)
+            #expect(fixture.executorAdmitted)
+            #expect(fixture.builderAvailability == "schema-only")
+            #expect(isObject(fixture.executableConfig))
+            #expect(downgradeConditions.allSatisfy { !$0.isEmpty })
+            #expect(Set(downgradeConditions).count == downgradeConditions.count)
+            #expect(fixture.downgradeCases.allSatisfy { isObject($0.config) })
+            #expect(registration.availability == .schemaOnly)
+        }
+    }
+
+    @Test
     func builtInRegistryMatchesSchemaInventoryAndResolvesContracts() throws {
         let registry = try DesktopWorkflowNodeRegistry.builtInSchemaOnlyV1()
         let data = try Data(contentsOf: repositoryRoot.appendingPathComponent("Schema/Workflow/v1/registry.json"))

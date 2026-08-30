@@ -474,7 +474,7 @@ fn connector_availability(config: Value) -> Value {
                     "policyRefs": {"authority":"effect-authority"}
                 },
                 node(END_ID, "complete", "terminal.complete", json!({})),
-                node(FAIL_ID, "failed", "terminal.fail", json!({}))
+                node(FAIL_ID, "failed", "terminal.fail", json!({"error": {"whole": true}}))
             ],
             "edges": [
                 edge(EDGE_ID, MAPPING_ID, (START_ID, "success"), (END_ID, "input")),
@@ -550,7 +550,7 @@ fn bounded_retry_workflow() -> Value {
                     "backoff":{"mode":"fixed","initialSeconds":1,"maximumSeconds":60,"jitter":"none"}
                 })),
                 node(END_ID, "complete", "terminal.complete", json!({})),
-                node(FAIL_ID, "failed", "terminal.fail", json!({}))
+                node(FAIL_ID, "failed", "terminal.fail", json!({"error": {"whole": true}}))
             ],
             "edges": [
                 edge(EDGE_ID, MAPPING_ID, (START_ID, "error"), (retry_id, "error")),

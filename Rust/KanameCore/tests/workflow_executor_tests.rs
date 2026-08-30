@@ -3321,7 +3321,7 @@ fn capability_workflow_source() -> Value {
                 }),
             ),
             ("complete", "terminal.complete", json!({})),
-            ("fail", "terminal.fail", json!({})),
+            ("fail", "terminal.fail", json!({"error": {"whole": true}})),
         ],
         vec![
             ((0, "success"), (1, "input")),
@@ -3636,7 +3636,7 @@ fn llm_workflow_source(conversation_scope: &str, maximum_context_bytes: u64) -> 
                 }),
             ),
             ("complete", "terminal.complete", json!({})),
-            ("fail", "terminal.fail", json!({})),
+            ("fail", "terminal.fail", json!({"error": {"whole": true}})),
         ],
         vec![
             ((0, "success"), (1, "input")),
@@ -3851,7 +3851,7 @@ fn iteration_workflow_source(failure_policy: &str) -> Value {
                 }),
             ),
             ("complete", "terminal.complete", json!({})),
-            ("fail", "terminal.fail", json!({})),
+            ("fail", "terminal.fail", json!({"error": {"whole": true}})),
         ],
         vec![
             ((0, "success"), (1, "input")),
@@ -3900,7 +3900,7 @@ fn retry_workflow_source() -> Value {
                 }),
             ),
             ("complete", "terminal.complete", json!({})),
-            ("fail", "terminal.fail", json!({})),
+            ("fail", "terminal.fail", json!({"error": {"whole": true}})),
         ],
         vec![
             ((0, "success"), (1, "input")),
@@ -4298,7 +4298,7 @@ fn storage_workflow_source() -> Value {
                     "conflictPolicy": "fail"
                 })),
                 node(7, "complete", "terminal.complete", json!({})),
-                node(8, "fail", "terminal.fail", json!({}))
+                node(8, "fail", "terminal.fail", json!({"error": {"whole": true}}))
             ],
             "edges": [
                 edge(1, (0, "success"), (1, "input")),
@@ -4396,9 +4396,9 @@ fn parallel_workflow_source(
                 node(3, "right", "data.validate", json!({"schemaRef": if fail_right { "dev.kaname.parallel/right-v1" } else { "dev.kaname.parallel/pass-v1" }})),
                 node(4, "join", "control.join", join_config),
                 node(5, "complete", "terminal.complete", json!({})),
-                node(6, "fail-left", "terminal.fail", json!({})),
-                node(7, "fail-right", "terminal.fail", json!({})),
-                node(8, "fail-join", "terminal.fail", json!({}))
+                node(6, "fail-left", "terminal.fail", json!({"error": {"whole": true}})),
+                node(7, "fail-right", "terminal.fail", json!({"error": {"whole": true}})),
+                node(8, "fail-join", "terminal.fail", json!({"error": {"whole": true}}))
             ],
             "edges": [
                 edge(1, (0, "success".into()), (1, "input")),
@@ -4591,8 +4591,8 @@ fn workflow_source() -> Value {
                 })),
                 node(COMPLETE_MATCH_ID, "complete-five", "terminal.complete", json!({})),
                 node(COMPLETE_OTHERWISE_ID, "complete-otherwise", "terminal.complete", json!({})),
-                node(FAIL_VALIDATE_ID, "fail-validation", "terminal.fail", json!({})),
-                node(FAIL_MATCH_ID, "fail-match", "terminal.fail", json!({}))
+                node(FAIL_VALIDATE_ID, "fail-validation", "terminal.fail", json!({"error": {"whole": true}})),
+                node(FAIL_MATCH_ID, "fail-match", "terminal.fail", json!({"error": {"whole": true}}))
             ],
             "edges": [
                 edge(1, (MANUAL_ID, "success"), (VALIDATE_ID, "input")),
@@ -5021,7 +5021,7 @@ fn mapping_workflow_source() -> Value {
                     }}
                 })),
                 node(MAPPING_COMPLETE_ID, "complete", "terminal.complete", json!({})),
-                node(MAPPING_FAIL_ID, "fail", "terminal.fail", json!({}))
+                node(MAPPING_FAIL_ID, "fail", "terminal.fail", json!({"error": {"whole": true}}))
             ],
             "edges": [
                 {
@@ -5722,7 +5722,7 @@ fn decision_workflow_source() -> Value {
             ),
             ("complete-matched", "terminal.complete", json!({})),
             ("complete-other", "terminal.complete", json!({})),
-            ("fail", "terminal.fail", json!({})),
+            ("fail", "terminal.fail", json!({"error": {"whole": true}})),
         ],
         vec![
             ((0, "success"), (1, "input")),
@@ -5834,7 +5834,7 @@ fn match_all_workflow_source() -> Value {
             ),
             ("complete-positive", "terminal.complete", json!({})),
             ("complete-large", "terminal.complete", json!({})),
-            ("fail", "terminal.fail", json!({})),
+            ("fail", "terminal.fail", json!({"error": {"whole": true}})),
         ],
         vec![
             ((0, "success"), (1, "input")),
@@ -5918,9 +5918,21 @@ fn named_join_workflow_source(required_branch: &str) -> Value {
                 }),
             ),
             ("complete", "terminal.complete", json!({})),
-            ("fail-left", "terminal.fail", json!({})),
-            ("fail-right", "terminal.fail", json!({})),
-            ("fail-join", "terminal.fail", json!({})),
+            (
+                "fail-left",
+                "terminal.fail",
+                json!({"error": {"whole": true}}),
+            ),
+            (
+                "fail-right",
+                "terminal.fail",
+                json!({"error": {"whole": true}}),
+            ),
+            (
+                "fail-join",
+                "terminal.fail",
+                json!({"error": {"whole": true}}),
+            ),
         ],
         vec![
             ((0, "success"), (1, "input")),
@@ -5978,7 +5990,7 @@ fn review_workflow_source() -> Value {
                 }),
             ),
             ("complete", "terminal.complete", json!({})),
-            ("fail", "terminal.fail", json!({})),
+            ("fail", "terminal.fail", json!({"error": {"whole": true}})),
         ],
         vec![
             ((0, "success"), (1, "input")),
@@ -6047,7 +6059,7 @@ fn reconcile_workflow_source(status: &str, checks: u64) -> Value {
             ),
             ("complete-validated", "terminal.complete", json!({})),
             ("complete-reconciled", "terminal.complete", json!({})),
-            ("fail", "terminal.fail", json!({})),
+            ("fail", "terminal.fail", json!({"error": {"whole": true}})),
             ("cancel", "terminal.cancel", json!({})),
         ],
         vec![
@@ -6103,7 +6115,7 @@ fn artifact_workflow_source() -> Value {
                 json!({"role": "receipt", "mediaTypes": ["text/plain", "application/pdf"]}),
             ),
             ("complete", "terminal.complete", json!({})),
-            ("fail", "terminal.fail", json!({})),
+            ("fail", "terminal.fail", json!({"error": {"whole": true}})),
         ],
         vec![
             ((0, "success"), (1, "input")),
@@ -6248,7 +6260,7 @@ fn agent_workflow_source(maximum_tool_calls: Option<u64>) -> Value {
             ),
             ("summarize", "compute.llm", llm_config),
             ("complete", "terminal.complete", json!({})),
-            ("fail", "terminal.fail", json!({})),
+            ("fail", "terminal.fail", json!({"error": {"whole": true}})),
         ],
         vec![
             ((0, "success"), (1, "input")),
@@ -6684,7 +6696,7 @@ fn event_trigger_workflow_source(deduplication: &str) -> Value {
                 json!({"schemaRef": "dev.kaname.event-trigger/message-v1"}),
             ),
             ("complete", "terminal.complete", json!({})),
-            ("fail", "terminal.fail", json!({})),
+            ("fail", "terminal.fail", json!({"error": {"whole": true}})),
         ],
         vec![
             ((0, "success"), (1, "input")),
@@ -6720,7 +6732,7 @@ fn schedule_trigger_workflow_source(misfire_policy: &str) -> Value {
                 json!({"schemaRef": "dev.kaname.schedule-trigger/tick-v1"}),
             ),
             ("complete", "terminal.complete", json!({})),
-            ("fail", "terminal.fail", json!({})),
+            ("fail", "terminal.fail", json!({"error": {"whole": true}})),
         ],
         vec![
             ((0, "success"), (1, "input")),
