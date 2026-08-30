@@ -247,6 +247,8 @@ struct KanameDesktopWorkspace: View {
     @State private var newConversationRequest: NewConversationRequest?
     @State private var showsNewProject = false
     @State private var showsInspector = true
+    @State private var showsCompactInspector = false
+    @State private var workspaceUsesCompactLayout = true
     @State private var showsThreadDirectory = true
     @State private var showsSettings = false
     @State private var showsGlobalSearch = false
@@ -267,6 +269,7 @@ struct KanameDesktopWorkspace: View {
     @State private var modalPreviousResponder: NSResponder?
     @State private var importPreviousResponder: NSResponder?
     @State private var diagnosticsPreviousResponder: NSResponder?
+    @State private var compactInspectorPreviousResponder: NSResponder?
     @State private var navigationPreviousResponders: [NSResponder?] = []
 #endif
 
@@ -404,7 +407,7 @@ struct KanameDesktopWorkspace: View {
     @ViewBuilder
     private var workspaceStack: some View {
         navigationLayout
-            .background(Nord.polarNight0)
+            .background(KanameColor.canvas)
             .dropDestination(for: URL.self) { urls, _ in
                 prepareImport(urls: urls)
             }
@@ -741,17 +744,26 @@ struct KanameDesktopWorkspace: View {
     @ViewBuilder
     private var workspaceColumns: some View {
         GeometryReader { geometry in
-            if showsInspector && geometry.size.width >= 980 {
-                HSplitView {
-                    centerColumn
-                        .frame(minWidth: 560, maxWidth: .infinity, maxHeight: .infinity)
+            let presentation = DesktopWorkspaceChromePresentation(
+                availableWidth: Double(geometry.size.width),
+                splitInspectorVisible: showsInspector,
+                compactInspectorPresented: showsCompactInspector
+            )
+            Group {
+                if presentation.inspectorPlacement == .split {
+                    HSplitView {
+                        centerColumn
+                            .frame(minWidth: 560, maxWidth: .infinity, maxHeight: .infinity)
 
-                    inspectorColumn
-                        .frame(minWidth: 280, idealWidth: 340, maxWidth: 380)
+                        inspectorColumn
+                            .frame(minWidth: 280, idealWidth: 340, maxWidth: 380)
+                    }
+                } else {
+                    centerColumn
                 }
-            } else {
-                centerColumn
             }
+            .onAppear { updateWorkspaceWidth(geometry.size.width) }
+            .onChange(of: geometry.size.width) { _, width in updateWorkspaceWidth(width) }
         }
     }
 
@@ -759,6 +771,12 @@ struct KanameDesktopWorkspace: View {
         VStack(spacing: 0) {
             workspaceHeader
             Divider()
+            if inspectorSupportsFiltering,
+               !searchText.isEmpty,
+               workspaceChromePresentation.inspectorPlacement == .hidden {
+                activeInspectorFilterBanner
+                Divider()
+            }
             if let notice = searchFallbackNotice, notice.destination == destination {
                 searchFallbackBanner(notice)
                 Divider()
@@ -766,39 +784,64 @@ struct KanameDesktopWorkspace: View {
             content
         }
         .toolbar { toolbar }
+        .background(KanameColor.canvas)
+    }
+
+    private var activeInspectorFilterBanner: some View {
+        HStack(spacing: KanameSpacing.small) {
+            Image(systemName: "line.3.horizontal.decrease.circle.fill")
+                .foregroundStyle(KanameColor.accent)
+                .accessibilityHidden(true)
+            Text("Filtered by “\(searchText)”")
+                .kanameSemanticFont(.caption.weight(.semibold))
+                .foregroundStyle(KanameColor.textPrimary)
+                .lineLimit(1)
+            Spacer(minLength: KanameSpacing.small)
+            Button("Edit filter") {
+                toggleInspector()
+            }
+            .buttonStyle(.borderless)
+            .kanameMinimumInteractiveTarget()
+            Button("Clear") {
+                searchText = ""
+            }
+            .buttonStyle(.borderless)
+            .kanameMinimumInteractiveTarget()
+        }
+        .padding(.horizontal, KanameSpacing.large)
+        .background(KanameColor.raised)
+        .accessibilityElement(children: .contain)
     }
 
     private func searchFallbackBanner(_ notice: DesktopSearchFallbackNotice) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "scope")
-                .foregroundStyle(Nord.frost1)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Opened the closest local view for “\(notice.title)”")
-                    .font(.subheadline.weight(.semibold))
-                Text(notice.detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .accessibilityElement(children: .combine)
-            Spacer()
+        KanameSectionHeader(
+            "Opened the closest local view for “\(notice.title)”",
+            detail: notice.detail
+        ) {
             Button("Dismiss search navigation notice", systemImage: "xmark") {
                 searchFallbackNotice = nil
             }
             .labelStyle(.iconOnly)
             .buttonStyle(.plain)
+            .kanameMinimumInteractiveTarget()
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(Nord.polarNight1)
+        .padding(.horizontal, KanameSpacing.large)
+        .padding(.vertical, KanameSpacing.small)
+        .background(KanameColor.raised)
     }
 
     private var workspaceHeader: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: KanameSpacing.medium) {
+            Image(systemName: destination.symbol)
+                .foregroundStyle(KanameColor.accentStrong)
+                .accessibilityHidden(true)
             Text(workspaceTitle)
-                .font(.headline)
+                .kanameSemanticFont(KanameTypography.sectionTitle)
+                .foregroundStyle(KanameColor.textPrimary)
                 .lineLimit(1)
+                .layoutPriority(1)
 
-            Spacer()
+            Spacer(minLength: KanameSpacing.small)
 
             ControlGroup {
                 if destination == .threads {
@@ -811,6 +854,7 @@ struct KanameDesktopWorkspace: View {
                         )
                     }
                     .help(showsThreadDirectory ? "Hide thread directory" : "Show thread directory")
+                    .kanameMinimumInteractiveTarget()
                 }
                 Button {
                     presentGlobalSearch()
@@ -818,39 +862,91 @@ struct KanameDesktopWorkspace: View {
                     Label("Open Command Center", systemImage: "command")
                 }
                 .help("Open Command Center (Command-K)")
-
-                Button {
-                    beginConversation(projectID: inheritedProjectID)
-                } label: {
-                    Label("New conversation", systemImage: "square.and.pencil")
-                }
-                .help("New conversation")
-
-                Menu {
-                    Button("New project") { presentNewProject() }
-                    Button("Configure new conversation…") {
-                        beginConfiguredConversation(projectID: inheritedProjectID)
-                    }
-                    Divider()
-                    Button("Start research") { navigate(to: .research) }
-                    Button("Draft email") { navigate(to: .email) }
-                    Button("Propose calendar event") { navigate(to: .calendar) }
-                    Button("Create automation") { navigate(to: .automations) }
-                    Divider()
-                    Button("Open Devices & Remote") { navigate(to: .devices) }
-                    Button("Open Kaname Link") { navigate(to: .links) }
-                    Button("Open Coding") { navigate(to: .liveCodex) }
-                } label: {
-                    Label("More", systemImage: "ellipsis.circle")
-                }
-                .help("More workspace actions")
+                .kanameMinimumInteractiveTarget()
             }
             .controlGroupStyle(.navigation)
             .labelStyle(.iconOnly)
+
+            primaryNewConversationHeaderAction
+
+            Menu {
+                Button("New project") { presentNewProject() }
+                Button("Configure new conversation…") {
+                    beginConfiguredConversation(projectID: inheritedProjectID)
+                }
+                Divider()
+                Button("Start research") { navigate(to: .research) }
+                Button("Draft email") { navigate(to: .email) }
+                Button("Propose calendar event") { navigate(to: .calendar) }
+                Button("Create automation") { navigate(to: .automations) }
+                Divider()
+                Button("Open Devices & Remote") { navigate(to: .devices) }
+                Button("Open Kaname Link") { navigate(to: .links) }
+                Button("Open Coding") { navigate(to: .liveCodex) }
+            } label: {
+                Label("More", systemImage: "ellipsis.circle")
+            }
+            .labelStyle(.iconOnly)
+            .buttonStyle(.borderless)
+            .help("More workspace actions")
+            .kanameMinimumInteractiveTarget()
         }
-        .padding(.horizontal, 16)
-        .frame(height: 53)
-        .background(Nord.polarNight0)
+        .padding(.horizontal, KanameSpacing.large)
+        .padding(.vertical, KanameSpacing.small)
+        .frame(minHeight: 56)
+        .background(KanameColor.canvas)
+    }
+
+    private var primaryNewConversationHeaderAction: some View {
+        Group {
+            if [.home, .threads, .inbox].contains(destination) {
+                ViewThatFits(in: .horizontal) {
+                    Button {
+                        beginConversation(projectID: inheritedProjectID)
+                    } label: {
+                        Label("New conversation", systemImage: "square.and.pencil")
+                            .kanameSemanticFont(.body.weight(.semibold))
+                            .foregroundStyle(KanameColor.canvas)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(KanameColor.accent)
+                    .help("New conversation")
+                    .kanameMinimumInteractiveTarget()
+
+                    compactProminentNewConversationHeaderAction
+                }
+            } else {
+                compactSecondaryNewConversationHeaderAction
+            }
+        }
+        .accessibilityIdentifier("workspace-new-conversation")
+    }
+
+    private var compactProminentNewConversationHeaderAction: some View {
+        Button {
+            beginConversation(projectID: inheritedProjectID)
+        } label: {
+            Label("New conversation", systemImage: "square.and.pencil")
+                .foregroundStyle(KanameColor.canvas)
+        }
+        .labelStyle(.iconOnly)
+        .buttonStyle(.borderedProminent)
+        .tint(KanameColor.accent)
+        .help("New conversation")
+        .kanameMinimumInteractiveTarget()
+    }
+
+    private var compactSecondaryNewConversationHeaderAction: some View {
+        Button {
+            beginConversation(projectID: inheritedProjectID)
+        } label: {
+            Label("New conversation", systemImage: "square.and.pencil")
+        }
+        .labelStyle(.iconOnly)
+        .buttonStyle(.borderless)
+        .foregroundStyle(KanameColor.accentStrong)
+        .help("New conversation")
+        .kanameMinimumInteractiveTarget()
     }
 
     private var sidebar: some View {
@@ -859,6 +955,7 @@ struct KanameDesktopWorkspace: View {
                 Section {
                     KanameIdentityRow()
                         .listRowInsets(EdgeInsets(top: 8, leading: 10, bottom: 10, trailing: 10))
+                        .listRowBackground(Color.clear)
                 }
 
                 Section("Workspace") {
@@ -897,7 +994,7 @@ struct KanameDesktopWorkspace: View {
                 }
             }
             .scrollContentBackground(.hidden)
-            .background(Nord.polarNight1)
+            .background(KanameColor.sidebar)
             .listStyle(.sidebar)
 
             Divider()
@@ -929,44 +1026,70 @@ struct KanameDesktopWorkspace: View {
 
                 Divider()
             }
-            Button("Settings", systemImage: DesktopDestination.settings.symbol, action: presentSettings)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-                .padding(.horizontal, 14)
-                .padding(.vertical, 12)
+            Button(action: presentSettings) {
+                Label("Settings", systemImage: DesktopDestination.settings.symbol)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
             .buttonStyle(.plain)
-            .background(showsSettings ? Nord.polarNight2.opacity(0.72) : Color.clear)
+            .kanameSemanticFont(showsSettings ? .body.weight(.semibold) : .body)
+            .foregroundStyle(KanameColor.textPrimary)
+            .kanameMinimumInteractiveTarget()
+            .padding(.horizontal, KanameSpacing.small)
+            .background(
+                showsSettings ? KanameColor.selected : Color.clear,
+                in: RoundedRectangle(cornerRadius: KanameRadius.control, style: .continuous)
+            )
+            .padding(.horizontal, KanameSpacing.small)
+            .padding(.vertical, KanameSpacing.xSmall)
+            .accessibilityAddTraits(showsSettings ? .isSelected : [])
         }
         .frame(minWidth: 230, idealWidth: 258, maxWidth: 300)
+        .background(KanameColor.sidebar)
         .navigationTitle("Kaname")
     }
 
     private func destinationButton(_ item: DesktopDestination, count: Int? = nil) -> some View {
-        Button {
+        let visibleCount = count.flatMap { $0 > 0 ? $0 : nil }
+        return Button {
             navigate(to: item)
         } label: {
-            HStack(spacing: 10) {
+            Label {
+                Text(item.title)
+            } icon: {
                 Image(systemName: item.symbol)
                     .frame(width: 20)
-                    .foregroundStyle(destination == item ? Nord.frost1 : .secondary)
-                Text(item.title)
-                Spacer()
-                if let count, count > 0 {
-                    Text("\(count)")
-                        .font(.caption2.weight(.bold))
-                        .foregroundStyle(destination == item ? Nord.polarNight0 : .secondary)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3)
-                        .background(
-                            destination == item ? Nord.frost1 : Nord.polarNight2,
-                            in: Capsule()
-                        )
+                    .foregroundStyle(destination == item ? KanameColor.accent : KanameColor.textSecondary)
+            }
+            .padding(.trailing, visibleCount == nil ? 0 : KanameSpacing.xLarge)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .overlay(alignment: .trailing) {
+                if let visibleCount {
+                    Text("\(visibleCount)")
+                        .kanameSemanticFont(.caption.monospacedDigit().weight(.semibold))
+                        .foregroundStyle(destination == item ? KanameColor.accent : KanameColor.textTertiary)
                 }
             }
+            .padding(.horizontal, KanameSpacing.small)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .font(destination == item ? .body.weight(.semibold) : .body)
+        .kanameSemanticFont(destination == item ? .body.weight(.semibold) : .body)
+        .foregroundStyle(KanameColor.textPrimary)
+        .kanameMinimumInteractiveTarget()
+        .background(
+            destination == item ? KanameColor.selected : Color.clear,
+            in: RoundedRectangle(cornerRadius: KanameRadius.control, style: .continuous)
+        )
+        .listRowInsets(EdgeInsets(
+            top: KanameSpacing.hairline,
+            leading: KanameSpacing.small,
+            bottom: KanameSpacing.hairline,
+            trailing: KanameSpacing.small
+        ))
+        .listRowBackground(Color.clear)
+        .accessibilityLabel(item.title)
+        .accessibilityValue(count.map { $0 == 1 ? "1 item" : "\($0) items" } ?? "")
         .accessibilityAddTraits(destination == item ? .isSelected : [])
     }
 
@@ -1087,18 +1210,75 @@ struct KanameDesktopWorkspace: View {
     }
 
     private var inspectorColumn: some View {
-        VStack(spacing: 0) {
-            DesktopInspectorSearchField(text: $searchText)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
+        inspectorColumn(focusSearchOnAppear: false)
+    }
 
-            Divider()
+    private func inspectorColumn(focusSearchOnAppear: Bool) -> some View {
+        VStack(spacing: 0) {
+            if inspectorSupportsFiltering {
+                DesktopInspectorSearchField(
+                    text: $searchText,
+                    focusOnAppear: focusSearchOnAppear
+                )
+                    .padding(.horizontal, KanameSpacing.large)
+                    .padding(.vertical, KanameSpacing.medium)
+
+                Divider()
+            }
 
             inspector
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Nord.polarNight1)
+        .background(KanameColor.surface)
+    }
+
+    private var inspectorSupportsFiltering: Bool {
+        [.home, .threads, .inbox].contains(destination)
+    }
+
+    private var workspaceChromePresentation: DesktopWorkspaceChromePresentation {
+        DesktopWorkspaceChromePresentation(
+            availableWidth: workspaceUsesCompactLayout
+                ? 0
+                : DesktopWorkspaceChromePresentation.splitInspectorMinimumWidth,
+            splitInspectorVisible: showsInspector,
+            compactInspectorPresented: showsCompactInspector
+        )
+    }
+
+    private var compactInspectorPopoverBinding: Binding<Bool> {
+        Binding(
+            get: { workspaceChromePresentation.inspectorPlacement == .popover },
+            set: { isPresented in
+                if isPresented {
+                    presentCompactInspector()
+                } else {
+                    dismissCompactInspector(restoringFocus: true)
+                }
+            }
+        )
+    }
+
+    private var compactInspectorPopover: some View {
+        inspectorColumn(focusSearchOnAppear: true)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                KanameSectionHeader("Inspector", detail: workspaceTitle) {
+                    Button("Close Inspector", systemImage: "xmark") {
+                        toggleInspector()
+                    }
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.plain)
+                    .kanameMinimumInteractiveTarget()
+                }
+                .padding(.horizontal, KanameSpacing.large)
+                .padding(.vertical, KanameSpacing.small)
+                .background(KanameColor.surface)
+                .overlay(alignment: .bottom) { Divider() }
+            }
+            .foregroundStyle(KanameColor.textPrimary)
+            .background(KanameColor.surface)
+            .desktopAdaptiveSheet(idealWidth: 420, idealHeight: 620)
     }
 
     @ToolbarContentBuilder
@@ -1115,15 +1295,20 @@ struct KanameDesktopWorkspace: View {
         }
 
         ToolbarItem(placement: .primaryAction) {
+            let presentation = workspaceChromePresentation
             Button {
                 toggleInspector()
             } label: {
                 Label(
-                    showsInspector ? "Hide Inspector" : "Show Inspector",
-                    systemImage: "sidebar.right"
+                    presentation.inspectorToggleTitle,
+                    systemImage: presentation.inspectorToggleSystemImage
                 )
             }
-            .help(showsInspector ? "Hide Inspector" : "Show Inspector")
+            .help(presentation.inspectorToggleTitle)
+            .accessibilityIdentifier("workspace-inspector-toggle")
+            .popover(isPresented: compactInspectorPopoverBinding, arrowEdge: .bottom) {
+                compactInspectorPopover
+            }
         }
     }
 
@@ -1476,6 +1661,7 @@ struct KanameDesktopWorkspace: View {
         let entersProject = target.destination == .projects
             && target.selectedProjectID != nil
             && (destination != .projects || selectedProjectID == nil)
+        dismissCompactInspector(restoringFocus: false)
         preservingWindowFrame {
             destination = target.destination
             selectedThreadID = target.selectedThreadID
@@ -1491,15 +1677,60 @@ struct KanameDesktopWorkspace: View {
 
     private func toggleInspector() {
         guard acceptsNonRecoveryCommands else { return }
+        let action = workspaceChromePresentation.inspectorToggleAction
+        switch action {
+        case let .setSplitVisible(isVisible):
 #if os(macOS)
-        let previousResponder = currentDesktopResponder()
+            let previousResponder = currentDesktopResponder()
 #endif
-        preservingWindowFrame {
-            showsInspector.toggle()
+            preservingWindowFrame {
+                showsInspector = isVisible
+                showsCompactInspector = false
+            }
+#if os(macOS)
+            restoreDesktopResponder(previousResponder)
+#endif
+        case let .setCompactPopoverPresented(isPresented):
+            if isPresented {
+                presentCompactInspector()
+            } else {
+                dismissCompactInspector(restoringFocus: true)
+            }
         }
+    }
+
+    private func presentCompactInspector() {
+        guard !showsCompactInspector else { return }
 #if os(macOS)
-        restoreDesktopResponder(previousResponder)
+        compactInspectorPreviousResponder = currentDesktopResponder()
 #endif
+        showsCompactInspector = true
+    }
+
+    private func dismissCompactInspector(restoringFocus: Bool) {
+#if os(macOS)
+        guard showsCompactInspector || compactInspectorPreviousResponder != nil else { return }
+#else
+        guard showsCompactInspector else { return }
+#endif
+        showsCompactInspector = false
+#if os(macOS)
+        let responder = compactInspectorPreviousResponder
+        compactInspectorPreviousResponder = nil
+        if restoringFocus {
+            restoreDesktopResponder(responder)
+        }
+#endif
+    }
+
+    private func updateWorkspaceWidth(_ width: CGFloat) {
+        let resolvedWidth = width.isFinite ? max(0, Double(width)) : 0
+        let usesCompactLayout = resolvedWidth < DesktopWorkspaceChromePresentation.splitInspectorMinimumWidth
+        guard workspaceUsesCompactLayout != usesCompactLayout else { return }
+        workspaceUsesCompactLayout = usesCompactLayout
+        if !usesCompactLayout {
+            dismissCompactInspector(restoringFocus: true)
+        }
     }
 
     private func preservingWindowFrame(_ updates: () -> Void) {
@@ -1525,6 +1756,10 @@ struct KanameDesktopWorkspace: View {
 
     @discardableResult
     private func handleBack() -> Bool {
+        if showsCompactInspector {
+            dismissCompactInspector(restoringFocus: true)
+            return true
+        }
         if showsDiagnostics {
             showsDiagnostics = false
             return true
@@ -1618,6 +1853,7 @@ struct KanameDesktopWorkspace: View {
     private func dismissNonRecoveryPresentations() {
         showsGlobalSearch = false
         showsSettings = false
+        dismissCompactInspector(restoringFocus: false)
         newConversationRequest = nil
         showsNewProject = false
         portableTransfer.importReview = nil
@@ -2274,9 +2510,11 @@ struct DesktopPaletteKeyMonitor: View {
 
 private struct KanameIdentityRow: View {
     var body: some View {
-        HStack(spacing: 11) {
+        HStack(spacing: KanameSpacing.medium) {
             ZStack {
-                RoundedRectangle(cornerRadius: 11)
+                // The identity mark is Kaname's one brand-only primitive exception;
+                // product chrome around it continues to use adaptive semantic roles.
+                RoundedRectangle(cornerRadius: KanameRadius.control, style: .continuous)
                     .fill(
                         LinearGradient(
                             colors: [Nord.frost1, Nord.frost3],
@@ -2285,24 +2523,15 @@ private struct KanameIdentityRow: View {
                         )
                     )
                 Text("要")
-                    .font(.title2.weight(.bold))
+                    .kanameSemanticFont(.title2.weight(.bold))
                     .foregroundStyle(Nord.polarNight0)
             }
             .frame(width: 42, height: 42)
+            .accessibilityHidden(true)
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Kaname")
-                    .font(.headline)
-                Text("Local-first desktop")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            Circle()
-                .fill(Nord.auroraGreen)
-                .frame(width: 8, height: 8)
-                .accessibilityLabel("Local workspace available")
+            KanameSectionHeader("Kaname", detail: "Local-first desktop")
         }
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -13728,32 +13957,43 @@ private struct DesktopInspectorProviderEventDetail: View {
 private struct DesktopInspectorSearchField: View {
     @Binding var text: String
     var placeholder = "Search Kaname"
+    var focusOnAppear = false
+    @FocusState private var searchFocused: Bool
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: KanameSpacing.small) {
             Image(systemName: "magnifyingglass")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(KanameColor.textSecondary)
 
             TextField(placeholder, text: $text)
                 .textFieldStyle(.plain)
+                .focused($searchFocused)
 
             if !text.isEmpty {
                 Button {
                     text = ""
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(KanameColor.textSecondary)
                 }
                 .buttonStyle(.plain)
                 .help("Clear search")
+                .kanameMinimumInteractiveTarget()
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .background(Nord.polarNight0.opacity(0.74), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .padding(.horizontal, KanameSpacing.medium)
+        .frame(minHeight: KanameSize.minimumInteractiveTarget)
+        .background(
+            KanameColor.canvas,
+            in: RoundedRectangle(cornerRadius: KanameRadius.control, style: .continuous)
+        )
         .overlay {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(Nord.polarNight3.opacity(0.72), lineWidth: 1)
+            RoundedRectangle(cornerRadius: KanameRadius.control, style: .continuous)
+                .stroke(KanameColor.separator, lineWidth: 1)
+        }
+        .onAppear {
+            guard focusOnAppear else { return }
+            DispatchQueue.main.async { searchFocused = true }
         }
     }
 }
