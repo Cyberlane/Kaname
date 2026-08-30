@@ -345,11 +345,146 @@ public indirect enum DesktopWorkflowJSONValue: Codable, Equatable, Sendable {
     }
 
     public static func decode(_ data: Data) throws -> Self {
-        try JSONDecoder().decode(Self.self, from: data)
+        return try JSONDecoder().decode(Self.self, from: data)
+    }
+
+    static func decodeCanonicalInput(_ data: Data) throws -> Self {
+        try DesktopWorkflowJSONInputValidator.validate(data)
+        return try decode(data)
     }
 
     public func canonicalData() throws -> Data {
         try DesktopWorkflowCanonicalJSON.encode(self)
+    }
+}
+
+private enum DesktopWorkflowJSONInputValidator {
+    static let maximumBytes = 512 * 1_024
+    static let maximumNestingDepth = 127
+    private struct InvalidJSON: Error {}
+
+    static func validate(_ data: Data) throws {
+        guard !data.isEmpty, data.count <= maximumBytes,
+              String(data: data, encoding: .utf8) != nil else { throw InvalidJSON() }
+        var parser = Parser(bytes: Array(data))
+        try parser.value(depth: 0)
+        parser.whitespace()
+        guard parser.index == parser.bytes.count else { throw InvalidJSON() }
+    }
+
+    private struct Parser {
+        let bytes: [UInt8]
+        var index = 0
+
+        mutating func whitespace() {
+            while index < bytes.count, [9, 10, 13, 32].contains(bytes[index]) { index += 1 }
+        }
+
+        mutating func value(depth: Int) throws {
+            whitespace()
+            guard index < bytes.count else { throw InvalidJSON() }
+            if bytes[index] == 45 || (48...57).contains(bytes[index]) { try number(); return }
+            switch bytes[index] {
+            case 34: _ = try string()
+            case 91: guard depth < maximumNestingDepth else { throw InvalidJSON() }; try array(depth: depth + 1)
+            case 123: guard depth < maximumNestingDepth else { throw InvalidJSON() }; try object(depth: depth + 1)
+            case 116: try literal("true")
+            case 102: try literal("false")
+            case 110: try literal("null")
+            default: throw InvalidJSON()
+            }
+        }
+
+        mutating func literal(_ literal: String) throws {
+            let expected = Array(literal.utf8)
+            guard bytes[index...].starts(with: expected) else { throw InvalidJSON() }
+            index += expected.count
+        }
+
+        mutating func array(depth: Int) throws {
+            index += 1; whitespace()
+            if take(93) { return }
+            while true {
+                try value(depth: depth); whitespace()
+                if take(93) { return }
+                guard take(44) else { throw InvalidJSON() }
+            }
+        }
+
+        mutating func object(depth: Int) throws {
+            index += 1; whitespace()
+            if take(125) { return }
+            var keys = Set<String>()
+            while true {
+                whitespace()
+                let key = try string()
+                guard keys.insert(key).inserted else { throw InvalidJSON() }
+                whitespace(); guard take(58) else { throw InvalidJSON() }
+                try value(depth: depth); whitespace()
+                if take(125) { return }
+                guard take(44) else { throw InvalidJSON() }
+            }
+        }
+
+        mutating func string() throws -> String {
+            let start = index
+            guard take(34) else { throw InvalidJSON() }
+            while index < bytes.count {
+                let byte = bytes[index]; index += 1
+                if byte == 34 {
+                    guard let decoded = try JSONSerialization.jsonObject(
+                        with: Data(bytes[start..<index]), options: .fragmentsAllowed
+                    ) as? String else { throw InvalidJSON() }
+                    return decoded
+                }
+                guard byte >= 32 else { throw InvalidJSON() }
+                if byte == 92 {
+                    guard index < bytes.count else { throw InvalidJSON() }
+                    let escape = bytes[index]; index += 1
+                    if escape == 117 {
+                        guard index + 4 <= bytes.count,
+                              bytes[index..<index + 4].allSatisfy({ (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0) })
+                        else { throw InvalidJSON() }
+                        index += 4
+                    } else if ![34, 47, 92, 98, 102, 110, 114, 116].contains(escape) { throw InvalidJSON() }
+                }
+            }
+            throw InvalidJSON()
+        }
+
+        mutating func number() throws {
+            let start = index
+            _ = take(45)
+            guard index < bytes.count else { throw InvalidJSON() }
+            if take(48) {
+                guard index == bytes.count || !(48...57).contains(bytes[index]) else { throw InvalidJSON() }
+            } else {
+                guard takeDigit(49...57) else { throw InvalidJSON() }
+                while takeDigit(48...57) {}
+            }
+            var integer = true
+            if take(46) { integer = false; guard takeDigit(48...57) else { throw InvalidJSON() }; while takeDigit(48...57) {} }
+            if index < bytes.count, bytes[index] == 101 || bytes[index] == 69 {
+                integer = false; index += 1
+                if index < bytes.count, bytes[index] == 43 || bytes[index] == 45 { index += 1 }
+                guard takeDigit(48...57) else { throw InvalidJSON() }; while takeDigit(48...57) {}
+            }
+            if integer {
+                guard let value = Int64(String(decoding: bytes[start..<index], as: UTF8.self)),
+                      (-9_007_199_254_740_991...9_007_199_254_740_991).contains(value)
+                else { throw InvalidJSON() }
+            }
+        }
+
+        mutating func take(_ byte: UInt8) -> Bool {
+            guard index < bytes.count, bytes[index] == byte else { return false }
+            index += 1; return true
+        }
+
+        mutating func takeDigit(_ range: ClosedRange<UInt8>) -> Bool {
+            guard index < bytes.count, range.contains(bytes[index]) else { return false }
+            index += 1; return true
+        }
     }
 }
 
