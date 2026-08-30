@@ -3711,7 +3711,7 @@ public final class DesktopAppModel: ObservableObject {
         return persisted && consumed
     }
 
-    func exactEffectIsAuthorized(approvalID: String, target: String) -> Bool {
+    public func exactEffectIsAuthorized(approvalID: String, target: String) -> Bool {
         !snapshot.preferences.safeMode && isApprovalGranted(id: approvalID, exactTarget: target)
     }
 

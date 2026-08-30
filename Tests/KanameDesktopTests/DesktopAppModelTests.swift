@@ -340,6 +340,31 @@ struct DesktopAppModelTests {
     }
 
     @Test
+    func checkpointRevertRefusedInSafeMode() throws {
+        let model = DesktopAppModel(store: MemoryDesktopStateStore(), now: { 1_000 })
+        let exactTarget = "checkpoint:thread:turn:before-after"
+        let approvalID = try #require(model.createApproval(
+            threadID: "thread",
+            title: "Revert implementation turn",
+            exactTarget: exactTarget,
+            consequence: "Restore an exact captured state.",
+            dataLeavingDevice: "Nothing",
+            reversible: true,
+            expiresAtUnixMillis: 2_000
+        ))
+        model.resolveApproval(id: approvalID, approved: true)
+
+        #expect(model.exactEffectIsAuthorized(approvalID: approvalID, target: exactTarget))
+
+        var preferences = model.snapshot.preferences
+        preferences.safeMode = true
+        model.updatePreferences(preferences)
+
+        #expect(!model.exactEffectIsAuthorized(approvalID: approvalID, target: exactTarget))
+        #expect(model.isApprovalGranted(id: approvalID, exactTarget: exactTarget))
+    }
+
+    @Test
     func schemaTwentyEightNormalizesOnlyExactLegacyStarterClaims() throws {
         var legacy = DesktopAppSnapshot.starter(now: 1_000)
         legacy.version = 27
