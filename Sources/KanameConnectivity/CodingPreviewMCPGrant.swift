@@ -39,9 +39,47 @@ public enum CodingPreviewMCPGrant {
     }
 
     public static func isLocalPreviewURL(_ url: URL) -> Bool {
-        guard let host = url.host?.lowercased() else { return false }
+        guard url.baseURL == nil,
+              url.user == nil,
+              url.password == nil,
+              url.fragment == nil,
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let rawHost = url.host?.lowercased(),
+              hasValidAuthorityPort(in: url) else { return false }
+        let host = rawHost.hasPrefix("[") && rawHost.hasSuffix("]")
+            ? String(rawHost.dropFirst().dropLast())
+            : rawHost
         return ["127.0.0.1", "localhost", "::1"].contains(host)
-            && (url.scheme == "http" || url.scheme == "https")
+    }
+
+    private static func hasValidAuthorityPort(in url: URL) -> Bool {
+        let absolute = url.absoluteString
+        guard let schemeDelimiter = absolute.range(of: "://") else { return false }
+        let authorityEnd = absolute[schemeDelimiter.upperBound...].firstIndex { character in
+            character == "/" || character == "?" || character == "#"
+        } ?? absolute.endIndex
+        let authority = absolute[schemeDelimiter.upperBound ..< authorityEnd]
+        guard !authority.isEmpty, !authority.contains("@") else { return false }
+
+        let portText: Substring?
+        if authority.first == "[" {
+            guard let closingBracket = authority.firstIndex(of: "]") else { return false }
+            let suffix = authority[authority.index(after: closingBracket)...]
+            guard suffix.isEmpty || suffix.first == ":" else { return false }
+            portText = suffix.isEmpty ? nil : suffix.dropFirst()
+        } else {
+            let separators = authority.indices.filter { authority[$0] == ":" }
+            guard separators.count <= 1 else { return false }
+            portText = separators.first.map { authority[authority.index(after: $0)...] }
+        }
+
+        guard let portText else { return true }
+        guard !portText.isEmpty,
+              portText.allSatisfy({ $0.isASCII && $0.isNumber }),
+              let port = Int(portText),
+              (1 ... 65_535).contains(port) else { return false }
+        return true
     }
 
     /// Pure grant matcher so callers can supply approval fields without
