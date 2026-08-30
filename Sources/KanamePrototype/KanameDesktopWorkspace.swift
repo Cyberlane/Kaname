@@ -3447,9 +3447,11 @@ private struct DesktopThreadConversation: View {
     }
 
     private func attachTerminalExcerpt(_ terminal: DesktopCodingTerminalRecord) {
+        guard terminal.threadID == thread.id else { return }
         let service = DesktopCodingTerminalService.shared
+        let key = DesktopCodingTerminalKey(threadID: thread.id, terminalID: terminal.id)
         _Concurrency.Task {
-            guard let source = await service.attachContextSource(from: terminal) else { return }
+            guard let source = await service.attachContextSource(key: key, from: terminal) else { return }
             let attachment = """
 
             --- Terminal excerpt (\(terminal.id), digest \(terminal.scrollbackDigest)) ---

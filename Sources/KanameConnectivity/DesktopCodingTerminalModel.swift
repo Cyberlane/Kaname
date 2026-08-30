@@ -9,6 +9,16 @@ public enum DesktopCodingTerminalState: String, Codable, CaseIterable, Equatable
     public var label: String { rawValue.capitalized }
 }
 
+public struct DesktopCodingTerminalKey: Hashable, Sendable {
+    public let threadID: String
+    public let terminalID: String
+
+    public init(threadID: String, terminalID: String) {
+        self.threadID = threadID
+        self.terminalID = terminalID
+    }
+}
+
 /// Coding-thread terminal metadata with bounded prompt excerpt and optional
 /// interactive PTY session identity (PID, geometry, discovered ports).
 public struct DesktopCodingTerminalRecord: Codable, Equatable, Identifiable, Sendable {
@@ -69,6 +79,10 @@ public struct DesktopCodingTerminalRecord: Codable, Equatable, Identifiable, Sen
 
     public var hasAttachableExcerpt: Bool {
         !scrollbackExcerpt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    public var key: DesktopCodingTerminalKey {
+        DesktopCodingTerminalKey(threadID: threadID, terminalID: id)
     }
 
     private enum CodingKeys: String, CodingKey {
