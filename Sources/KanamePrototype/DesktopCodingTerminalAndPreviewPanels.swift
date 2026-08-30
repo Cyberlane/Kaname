@@ -160,7 +160,9 @@ struct DesktopCodingTerminalPanel: View {
             do {
                 let record = try await service.attachInteractive(updating: base) { chunk in
                     _Concurrency.Task { @MainActor in
-                        if var current = model.snapshot.operations.codingTerminals.first(where: { $0.id == base.id }) {
+                        if var current = model.snapshot.operations.codingTerminals.first(where: {
+                            $0.threadID == base.threadID && $0.id == base.id
+                        }) {
                             current.scrollbackExcerpt = DesktopCodingTerminalService.boundedScrollback(
                                 (current.scrollbackExcerpt) + chunk
                             )
