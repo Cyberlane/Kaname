@@ -38,6 +38,16 @@ pub struct GatewayDevice {
     pub static_public: Vec<u8>,
 }
 
+impl GatewayDevice {
+    pub(crate) fn require_approved_session(&self) -> Result<()> {
+        match self.state.as_str() {
+            "approved" => Ok(()),
+            "revoked" => Err(LinkError::DeviceRevoked),
+            _ => Err(LinkError::Forbidden("device_not_approved")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct GatewayStatus {
@@ -465,9 +475,7 @@ impl GatewayStore {
         validate_identifier(&request.request_id, "invalid_request_id")?;
         validate_identifier(&request.device_id, "invalid_device_id")?;
         validate_identifier(&request.space_id, "invalid_space_id")?;
-        if device.state != "approved" {
-            return Err(LinkError::Forbidden("device_not_approved"));
-        }
+        device.require_approved_session()?;
         if request.device_id != device.device_id || request.space_id != device.space_id {
             return Err(LinkError::Forbidden("space_scope_mismatch"));
         }

@@ -6,6 +6,7 @@ pub type Result<T> = std::result::Result<T, LinkError>;
 pub enum LinkError {
     Invalid(&'static str),
     Forbidden(&'static str),
+    DeviceRevoked,
     NotFound(&'static str),
     Conflict(&'static str),
     Unavailable(&'static str),
@@ -24,6 +25,7 @@ impl LinkError {
             | Self::NotFound(code)
             | Self::Conflict(code)
             | Self::Unavailable(code) => code,
+            Self::DeviceRevoked => "device_revoked",
             Self::Io(_) => "io_failure",
             Self::Sql(_) => "storage_failure",
             Self::Json(_) => "invalid_json",
