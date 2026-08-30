@@ -114,10 +114,18 @@ public actor KanamePreviewMCPHTTPServer {
     }
 
     private func handleHTTP(headers: String, body: Data) -> Data {
+        Self.handleHTTPRequest(
+            headers: headers,
+            body: body,
+            bearerToken: binding?.bearerToken
+        )
+    }
+
+    static func handleHTTPRequest(headers: String, body: Data, bearerToken: String?) -> Data {
         guard headers.hasPrefix("POST "),
               headers.lowercased().contains("authorization: bearer "),
-              let binding,
-              headers.lowercased().contains(binding.bearerToken.lowercased()) else {
+              let bearerToken,
+              headers.lowercased().contains(bearerToken.lowercased()) else {
             return Self.httpResponse(status: 401, body: Data(#"{"error":"unauthorized"}"#.utf8))
         }
         guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
@@ -157,12 +165,7 @@ public actor KanamePreviewMCPHTTPServer {
                 let data = (try? JSONSerialization.data(withJSONObject: errorBody)) ?? Data()
                 return Self.httpResponse(status: 200, body: data)
             }
-            result = [
-                "content": [
-                    ["type": "text", "text": "Kaname curated tool \(name) acknowledged (desktop preview broker)."],
-                ],
-                "isError": false,
-            ] as [String: Any]
+            result = Self.unsupportedToolResult(name: name)
         default:
             let errorBody: [String: Any] = [
                 "jsonrpc": "2.0",
@@ -176,6 +179,18 @@ public actor KanamePreviewMCPHTTPServer {
         if let id { payload["id"] = id }
         let data = (try? JSONSerialization.data(withJSONObject: payload)) ?? Data(#"{"jsonrpc":"2.0","result":{}}"#.utf8)
         return Self.httpResponse(status: 200, body: data)
+    }
+
+    static func unsupportedToolResult(name: String) -> [String: Any] {
+        [
+            "content": [
+                [
+                    "type": "text",
+                    "text": "Tool \(name) is not yet wired to the desktop preview. No action was performed.",
+                ],
+            ],
+            "isError": true,
+        ]
     }
 
     private static func contentLength(in headers: String) -> Int? {
