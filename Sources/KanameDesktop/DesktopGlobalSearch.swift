@@ -278,11 +278,19 @@ public struct DesktopGlobalSearchQuery: Equatable, Sendable {
     public let rawValue: String
     public let normalizedValue: String
     public let tokens: [String]
+    let indexableTokens: [String]
+    let indexableValue: String
+    let linearTokens: [String]
+    let linearValue: String
 
     public init(_ rawValue: String) {
         self.rawValue = rawValue
         normalizedValue = DesktopGlobalSearch.normalized(rawValue)
         tokens = normalizedValue.split(whereSeparator: \Character.isWhitespace).map(String.init)
+        indexableTokens = tokens.flatMap(DesktopGlobalSearchFTS.unicode61Tokens)
+        indexableValue = indexableTokens.joined(separator: " ")
+        linearTokens = indexableTokens.isEmpty ? tokens : indexableTokens
+        linearValue = indexableTokens.isEmpty ? normalizedValue : indexableValue
     }
 
     public var isEmpty: Bool { normalizedValue.isEmpty }
@@ -327,6 +335,23 @@ public struct DesktopGlobalSearchSection: Equatable, Identifiable, Sendable {
     public var title: String { domain.label }
 }
 
+public struct DesktopGlobalSearchOutput: Equatable, Sendable {
+    public let sections: [DesktopGlobalSearchSection]
+    public let fullTextResult: DesktopGlobalSearchFTS.MatchResult
+
+    public init(
+        sections: [DesktopGlobalSearchSection],
+        fullTextResult: DesktopGlobalSearchFTS.MatchResult
+    ) {
+        self.sections = sections
+        self.fullTextResult = fullTextResult
+    }
+
+    public var statusLine: String? {
+        fullTextResult.failure?.statusLine
+    }
+}
+
 public typealias DesktopGlobalSearchSelectionDirection = DesktopCyclicSelectionDirection
 
 public struct DesktopGlobalSearchSelectionState: Equatable, Sendable {
@@ -365,11 +390,13 @@ public struct DesktopGlobalSearchSelectionState: Equatable, Sendable {
 public enum DesktopGlobalSearchLocalIndex {
     public static func corpus(
         from snapshot: DesktopAppSnapshot,
-        capturedAtUnixMillis: Int64? = nil
+        capturedAtUnixMillis: Int64? = nil,
+        supplementalRows suppliedSupplementalRows: [DesktopGlobalSearchFTS.IndexedRow]? = nil
     ) -> DesktopGlobalSearchLocalCorpus {
         let capturedAt = capturedAtUnixMillis ?? snapshot.lastSavedAtUnixMillis
         let projects = Dictionary(uniqueKeysWithValues: snapshot.projects.map { ($0.id, $0.name) })
         let accounts = Dictionary(uniqueKeysWithValues: snapshot.domains.accounts.map { ($0.id, $0.displayName) })
+        let supplementalRows = suppliedSupplementalRows ?? DesktopGlobalSearchFTS.supplementalRows(from: snapshot)
         var documents: [DesktopGlobalSearchDocument] = []
 
         for thread in snapshot.threads {
@@ -586,7 +613,8 @@ public enum DesktopGlobalSearchLocalIndex {
         }
 
         documents.append(contentsOf: DesktopGlobalSearchFTS.supplementalDocuments(
-            from: snapshot,
+            from: supplementalRows,
+            projectNamesByID: projects,
             capturedAtUnixMillis: capturedAt
         ))
 
@@ -639,16 +667,48 @@ public enum DesktopGlobalSearch {
         limit: Int = 50,
         ftsRows: [DesktopGlobalSearchFTS.IndexedRow] = []
     ) -> [DesktopGlobalSearchSection] {
-        guard !query.isEmpty, limit > 0 else { return [] }
+        searchOutput(query: query, in: corpus, limit: limit, ftsRows: ftsRows).sections
+    }
+
+    public static func searchOutput(
+        query: DesktopGlobalSearchQuery,
+        in corpus: DesktopGlobalSearchLocalCorpus,
+        limit: Int = 50,
+        ftsRows: [DesktopGlobalSearchFTS.IndexedRow] = []
+    ) -> DesktopGlobalSearchOutput {
+        let boundedLimit = min(max(0, limit), maximumResults)
+        let fullTextResult = DesktopGlobalSearchFTS.matchingDocumentIDs(
+            query: query,
+            rows: ftsRows,
+            limit: boundedLimit
+        )
+        return searchOutput(
+            query: query,
+            in: corpus,
+            limit: limit,
+            fullTextResult: fullTextResult
+        )
+    }
+
+    static func searchOutput(
+        query: DesktopGlobalSearchQuery,
+        in corpus: DesktopGlobalSearchLocalCorpus,
+        limit: Int = 50,
+        fullTextResult: DesktopGlobalSearchFTS.MatchResult
+    ) -> DesktopGlobalSearchOutput {
+        guard !query.isEmpty, limit > 0 else {
+            return DesktopGlobalSearchOutput(sections: [], fullTextResult: .matches([]))
+        }
+        if case .cancelled = fullTextResult {
+            return DesktopGlobalSearchOutput(sections: [], fullTextResult: .cancelled)
+        }
         let boundedLimit = min(limit, maximumResults)
         var bestByTarget: [String: DesktopGlobalSearchCandidate] = [:]
-        let ftsRank = Dictionary(
-            uniqueKeysWithValues: DesktopGlobalSearchFTS.matchingDocumentIDs(
-                query: query,
-                rows: ftsRows,
-                limit: boundedLimit
-            ).enumerated().map { ($1, $0) }
-        )
+        var ftsRank: [String: Int] = [:]
+        for (order, documentID) in fullTextResult.documentIDs.enumerated()
+        where ftsRank[documentID] == nil {
+            ftsRank[documentID] = order
+        }
 
         for indexedDocument in corpus.indexedDocuments {
             guard var candidate = result(for: indexedDocument, query: query) else { continue }
@@ -672,10 +732,11 @@ public enum DesktopGlobalSearch {
 
         let selected = bestByTarget.values.sorted(by: resultPrecedes).prefix(boundedLimit).map(\.result)
         let grouped = Dictionary(grouping: selected, by: \.domain)
-        return DesktopGlobalSearchDomain.allCases.compactMap { domain in
+        let sections: [DesktopGlobalSearchSection] = DesktopGlobalSearchDomain.allCases.compactMap { domain in
             guard let results = grouped[domain], !results.isEmpty else { return nil }
             return DesktopGlobalSearchSection(domain: domain, results: results)
         }
+        return DesktopGlobalSearchOutput(sections: sections, fullTextResult: fullTextResult)
     }
 
     public static func normalized(_ value: String) -> String {
@@ -692,40 +753,40 @@ public enum DesktopGlobalSearch {
         for indexedDocument: DesktopGlobalSearchIndexedDocument,
         query: DesktopGlobalSearchQuery
     ) -> DesktopGlobalSearchCandidate? {
-        guard query.tokens.allSatisfy(indexedDocument.searchableText.contains) else { return nil }
+        guard query.linearTokens.allSatisfy(indexedDocument.searchableText.contains) else { return nil }
 
         var score = 0
         var matchedTitle = false
         var matchedSummary = false
         var matchedKeywords = false
         var matchedProvenance = false
-        if indexedDocument.normalizedTitle == query.normalizedValue {
+        if indexedDocument.normalizedTitle == query.linearValue {
             score += 1_200
             matchedTitle = true
-        } else if indexedDocument.normalizedTitle.hasPrefix(query.normalizedValue) {
+        } else if indexedDocument.normalizedTitle.hasPrefix(query.linearValue) {
             score += 900
             matchedTitle = true
-        } else if indexedDocument.normalizedTitle.contains(query.normalizedValue) {
+        } else if indexedDocument.normalizedTitle.contains(query.linearValue) {
             score += 700
             matchedTitle = true
         }
-        if indexedDocument.normalizedSummary.contains(query.normalizedValue) {
+        if indexedDocument.normalizedSummary.contains(query.linearValue) {
             score += 350
             matchedSummary = true
         }
-        if indexedDocument.normalizedKeywords.contains(query.normalizedValue) {
+        if indexedDocument.normalizedKeywords.contains(query.linearValue) {
             score += 500
             matchedKeywords = true
-        } else if indexedDocument.normalizedKeywords.contains(where: { $0.contains(query.normalizedValue) }) {
+        } else if indexedDocument.normalizedKeywords.contains(where: { $0.contains(query.linearValue) }) {
             score += 250
             matchedKeywords = true
         }
-        if indexedDocument.normalizedProvenance.contains(query.normalizedValue) {
+        if indexedDocument.normalizedProvenance.contains(query.linearValue) {
             score += 180
             matchedProvenance = true
         }
 
-        for token in query.tokens {
+        for token in query.linearTokens {
             if indexedDocument.titleWords.contains(token) {
                 score += 160
                 matchedTitle = true
@@ -819,5 +880,61 @@ public struct DesktopGlobalSearchGenerationGate: Equatable, Sendable {
 
     public func accepts(_ generation: UInt64) -> Bool {
         isActive && generation == latestGeneration
+    }
+}
+
+/// Keeps the palette's reusable linear corpus and its FTS rows on one immutable
+/// snapshot generation. Request generations independently reject delayed work.
+public struct DesktopGlobalSearchSnapshotCoordinator: Sendable {
+    public struct Schedule: Sendable {
+        public let requestGeneration: UInt64
+        public let snapshotGeneration: DesktopGlobalSearchFTS.SnapshotGeneration
+        public let snapshotSavedAtUnixMillis: Int64
+        public let cachedCorpus: DesktopGlobalSearchLocalCorpus?
+    }
+
+    private struct CachedCorpus: Sendable {
+        let generation: DesktopGlobalSearchFTS.SnapshotGeneration
+        let snapshotSavedAtUnixMillis: Int64
+        let corpus: DesktopGlobalSearchLocalCorpus
+    }
+
+    private var gate = DesktopGlobalSearchGenerationGate()
+    private var cachedCorpus: CachedCorpus?
+
+    public init() {}
+
+    public var latestRequestGeneration: UInt64 { gate.latestGeneration }
+
+    public mutating func schedule(snapshot: DesktopAppSnapshot) -> Schedule {
+        let snapshotGeneration = DesktopGlobalSearchFTS.snapshotGeneration(from: snapshot)
+        return Schedule(
+            requestGeneration: gate.schedule(),
+            snapshotGeneration: snapshotGeneration,
+            snapshotSavedAtUnixMillis: snapshot.lastSavedAtUnixMillis,
+            cachedCorpus: cachedCorpus.flatMap {
+                $0.generation == snapshotGeneration
+                    && $0.snapshotSavedAtUnixMillis == snapshot.lastSavedAtUnixMillis
+                    ? $0.corpus
+                    : nil
+            }
+        )
+    }
+
+    public mutating func apply(
+        corpus: DesktopGlobalSearchLocalCorpus,
+        for schedule: Schedule
+    ) -> Bool {
+        guard gate.accepts(schedule.requestGeneration) else { return false }
+        cachedCorpus = CachedCorpus(
+            generation: schedule.snapshotGeneration,
+            snapshotSavedAtUnixMillis: schedule.snapshotSavedAtUnixMillis,
+            corpus: corpus
+        )
+        return true
+    }
+
+    public mutating func cancel() {
+        gate.cancel()
     }
 }

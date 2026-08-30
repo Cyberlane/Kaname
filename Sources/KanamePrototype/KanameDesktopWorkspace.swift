@@ -1699,21 +1699,15 @@ private func restoreDesktopResponder(_ responder: NSResponder?) {
 
 #endif
 
-private enum DesktopGlobalSearchScheduledSource: Sendable {
-    case cached(DesktopGlobalSearchLocalCorpus)
-    case snapshot(DesktopAppSnapshot)
-}
-
 private struct DesktopGlobalSearchScheduledRequest: Sendable {
-    let generation: UInt64
+    let schedule: DesktopGlobalSearchSnapshotCoordinator.Schedule
     let query: DesktopGlobalSearchQuery
-    let source: DesktopGlobalSearchScheduledSource
-    let ftsRows: [DesktopGlobalSearchFTS.IndexedRow]
+    let snapshot: DesktopAppSnapshot
 }
 
 private struct DesktopGlobalSearchScheduledOutput: Sendable {
     let corpus: DesktopGlobalSearchLocalCorpus
-    let sections: [DesktopGlobalSearchSection]
+    let search: DesktopGlobalSearchOutput
 }
 
 private struct DesktopGlobalSearchPalette: View {
@@ -1726,10 +1720,11 @@ private struct DesktopGlobalSearchPalette: View {
     @State private var query = ""
     @State private var selection = DesktopGlobalSearchSelectionState()
     @State private var sections: [DesktopGlobalSearchSection] = []
-    @State private var cachedCorpus: DesktopGlobalSearchLocalCorpus?
-    @State private var generationGate = DesktopGlobalSearchGenerationGate()
+    @State private var ftsRowCache = DesktopGlobalSearchFTS.IndexedRowCache()
+    @State private var searchCoordinator = DesktopGlobalSearchSnapshotCoordinator()
     @State private var scheduledRequest: DesktopGlobalSearchScheduledRequest?
     @State private var isSearching = false
+    @State private var searchStatusLine: String?
     @State private var selectedCommandIndex = 0
     @FocusState private var queryFocused: Bool
 
@@ -1846,6 +1841,22 @@ private struct DesktopGlobalSearchPalette: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
+            if let searchStatusLine {
+                Divider()
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                    Text(searchStatusLine)
+                        .lineLimit(2)
+                    Spacer(minLength: 0)
+                }
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .padding(.horizontal, 18)
+                .padding(.vertical, 8)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(searchStatusLine)
+            }
+
             Divider()
             HStack(spacing: 14) {
                 Label("Local actions and snapshots", systemImage: "lock.shield")
@@ -1876,17 +1887,20 @@ private struct DesktopGlobalSearchPalette: View {
             selectedCommandIndex = 0
             scheduleSearch()
         }
-        .onChange(of: snapshot.lastSavedAtUnixMillis) { _ in
-            cachedCorpus = nil
+        .onChange(of: DesktopGlobalSearchFTS.snapshotGeneration(from: snapshot)) { _ in
             scheduleSearch()
         }
-        .task(id: generationGate.latestGeneration) {
+        .onChange(of: snapshot.lastSavedAtUnixMillis) { _ in
+            scheduleSearch()
+        }
+        .task(id: searchCoordinator.latestRequestGeneration) {
             await runScheduledSearch(scheduledRequest)
         }
         .onDisappear {
-            generationGate.cancel()
+            searchCoordinator.cancel()
             scheduledRequest = nil
             isSearching = false
+            searchStatusLine = nil
         }
         .onMoveCommand { direction in
             guard !isSearching else { return }
@@ -1911,12 +1925,13 @@ private struct DesktopGlobalSearchPalette: View {
     }
 
     private func scheduleSearch() {
-        let generation = generationGate.schedule()
+        let schedule = searchCoordinator.schedule(snapshot: snapshot)
         if showsCommands {
             sections = []
             selection.reconcile(with: [])
             scheduledRequest = nil
             isSearching = false
+            searchStatusLine = nil
             return
         }
         let searchQuery = DesktopGlobalSearchQuery(query)
@@ -1925,15 +1940,15 @@ private struct DesktopGlobalSearchPalette: View {
             selection.reconcile(with: [])
             scheduledRequest = nil
             isSearching = false
+            searchStatusLine = nil
             return
         }
         isSearching = true
+        searchStatusLine = nil
         scheduledRequest = DesktopGlobalSearchScheduledRequest(
-            generation: generation,
+            schedule: schedule,
             query: searchQuery,
-            source: cachedCorpus.map(DesktopGlobalSearchScheduledSource.cached)
-                ?? .snapshot(snapshot),
-            ftsRows: DesktopGlobalSearchFTS.supplementalRows(from: snapshot)
+            snapshot: snapshot
         )
     }
 
@@ -1946,23 +1961,24 @@ private struct DesktopGlobalSearchPalette: View {
         }
         guard !_Concurrency.Task<Never, Never>.isCancelled else { return }
 
+        let rowCache = ftsRowCache
         let worker = _Concurrency.Task<DesktopGlobalSearchScheduledOutput?, Never>.detached(priority: .userInitiated) {
             guard !_Concurrency.Task<Never, Never>.isCancelled else { return nil }
-            let corpus: DesktopGlobalSearchLocalCorpus
-            switch request.source {
-            case let .cached(value):
-                corpus = value
-            case let .snapshot(value):
-                corpus = DesktopGlobalSearchLocalIndex.corpus(from: value)
-            }
+            let ftsRows = await rowCache.rows(for: request.snapshot)
             guard !_Concurrency.Task<Never, Never>.isCancelled else { return nil }
-            let sections = DesktopGlobalSearch.search(
+            let corpus = request.schedule.cachedCorpus
+                ?? DesktopGlobalSearchLocalIndex.corpus(
+                    from: request.snapshot,
+                    supplementalRows: ftsRows
+                )
+            guard !_Concurrency.Task<Never, Never>.isCancelled else { return nil }
+            let search = DesktopGlobalSearch.searchOutput(
                 query: request.query,
                 in: corpus,
-                ftsRows: request.ftsRows
+                ftsRows: ftsRows
             )
             guard !_Concurrency.Task<Never, Never>.isCancelled else { return nil }
-            return DesktopGlobalSearchScheduledOutput(corpus: corpus, sections: sections)
+            return DesktopGlobalSearchScheduledOutput(corpus: corpus, search: search)
         }
         let output = await withTaskCancellationHandler {
             await worker.value
@@ -1971,12 +1987,12 @@ private struct DesktopGlobalSearchPalette: View {
         }
         guard !_Concurrency.Task<Never, Never>.isCancelled,
               let output,
-              generationGate.accepts(request.generation),
-              scheduledRequest?.generation == request.generation else { return }
-        cachedCorpus = output.corpus
-        sections = output.sections
+              scheduledRequest?.schedule.requestGeneration == request.schedule.requestGeneration,
+              searchCoordinator.apply(corpus: output.corpus, for: request.schedule) else { return }
+        sections = output.search.sections
+        searchStatusLine = output.search.statusLine
         isSearching = false
-        selection.reconcile(with: output.sections)
+        selection.reconcile(with: output.search.sections)
     }
 
     private var commandPrompt: some View {

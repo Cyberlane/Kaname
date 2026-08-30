@@ -297,6 +297,84 @@ struct DesktopGlobalSearchTests {
     }
 
     @Test
+    func snapshotCoordinatorKeepsStreamingRowsAndCorpusAtomicAndRejectsOlderOutput() {
+        var snapshot = DesktopAppSnapshot.starter(now: 1_000)
+        snapshot.operations.worktrees = []
+        snapshot.threads = [snapshot.threads[0]]
+        let threadID = snapshot.threads[0].id
+        let unchangedThreadTimestamp = snapshot.threads[0].updatedAtUnixMillis
+        let unchangedSavedTimestamp = snapshot.lastSavedAtUnixMillis
+        var coordinator = DesktopGlobalSearchSnapshotCoordinator()
+
+        func replacingAssistantBody(_ body: String) -> DesktopAppSnapshot {
+            var replacement = snapshot
+            replacement.threads[0].messages = [DesktopMessage(
+                id: "streaming-route",
+                role: .assistant,
+                body: body,
+                createdAtUnixMillis: 2_000
+            )]
+            return replacement
+        }
+
+        func output(
+            for value: DesktopAppSnapshot,
+            schedule: DesktopGlobalSearchSnapshotCoordinator.Schedule,
+            term: String
+        ) -> (DesktopGlobalSearchLocalCorpus, DesktopGlobalSearchOutput) {
+            let rows = DesktopGlobalSearchFTS.supplementalRows(from: value)
+            let corpus = schedule.cachedCorpus ?? DesktopGlobalSearchLocalIndex.corpus(
+                from: value,
+                supplementalRows: rows
+            )
+            return (
+                corpus,
+                DesktopGlobalSearch.searchOutput(
+                    query: DesktopGlobalSearchQuery(term),
+                    in: corpus,
+                    ftsRows: rows
+                )
+            )
+        }
+
+        let firstSnapshot = replacingAssistantBody("alpha streaming evidence")
+        let firstSchedule = coordinator.schedule(snapshot: firstSnapshot)
+        let first = output(for: firstSnapshot, schedule: firstSchedule, term: "alpha")
+        let acceptedFirst = coordinator.apply(corpus: first.0, for: firstSchedule)
+        #expect(acceptedFirst)
+        #expect(first.1.sections.flatMap(\.results).contains {
+            $0.id == "conversation-message:\(threadID):streaming-route"
+        })
+
+        let delayedSnapshot = replacingAssistantBody("beta streaming evidence")
+        let delayedSchedule = coordinator.schedule(snapshot: delayedSnapshot)
+        #expect(delayedSchedule.cachedCorpus == nil)
+        let delayed = output(for: delayedSnapshot, schedule: delayedSchedule, term: "beta")
+
+        let newestSnapshot = replacingAssistantBody("gamma streaming evidence")
+        let newestSchedule = coordinator.schedule(snapshot: newestSnapshot)
+        #expect(newestSchedule.cachedCorpus == nil)
+        let newest = output(for: newestSnapshot, schedule: newestSchedule, term: "gamma")
+
+        let acceptedDelayed = coordinator.apply(corpus: delayed.0, for: delayedSchedule)
+        let acceptedNewest = coordinator.apply(corpus: newest.0, for: newestSchedule)
+        #expect(!acceptedDelayed)
+        #expect(acceptedNewest)
+        #expect(newest.1.sections.flatMap(\.results).contains {
+            $0.id == "conversation-message:\(threadID):streaming-route"
+        })
+        #expect(DesktopGlobalSearch.search(
+            query: DesktopGlobalSearchQuery("beta"),
+            in: newest.0,
+            ftsRows: DesktopGlobalSearchFTS.supplementalRows(from: newestSnapshot)
+        ).flatMap(\.results).allSatisfy {
+            $0.id != "conversation-message:\(threadID):streaming-route"
+        })
+        #expect(newestSnapshot.threads[0].updatedAtUnixMillis == unchangedThreadTimestamp)
+        #expect(newestSnapshot.lastSavedAtUnixMillis == unchangedSavedTimestamp)
+    }
+
+    @Test
     func everyQueryTokenMustMatchAndLimitsAreBounded() {
         let matching = document(
             id: "matching",
@@ -335,6 +413,100 @@ struct DesktopGlobalSearchTests {
             in: corpus,
             limit: 0
         ).isEmpty)
+    }
+
+    @Test
+    func ftsErrorSurfacedNotSwallowed() throws {
+        let local = document(
+            id: "local-checkpoint",
+            domain: .knowledge,
+            title: "Checkpoint recovery",
+            summary: "Linear local snapshot result",
+            target: .init(kind: .knowledgeDocument, itemID: "checkpoint-note"),
+            updatedAt: 1_000,
+            source: .obsidianSnapshot
+        )
+        let failure = DesktopGlobalSearchFTS.Failure(
+            stage: .queryExecution,
+            reason: "simulated ranking failure"
+        )
+
+        let output = DesktopGlobalSearch.searchOutput(
+            query: DesktopGlobalSearchQuery("checkpoint"),
+            in: .init(documents: [local], capturedAtUnixMillis: 2_000),
+            fullTextResult: .failure(failure)
+        )
+
+        #expect(output.sections.flatMap(\.results).map(\.id) == ["local-checkpoint"])
+        #expect(output.fullTextResult == .failure(failure))
+        #expect(output.statusLine == "Full-text ranking unavailable: simulated ranking failure")
+        #expect(try #require(output.sections.first?.results.first).matchedFields.contains(.title))
+    }
+
+    @Test
+    func fullTextNoMatchHasNoDegradationStatus() {
+        let output = DesktopGlobalSearch.searchOutput(
+            query: DesktopGlobalSearchQuery("missing"),
+            in: .init(documents: [], capturedAtUnixMillis: 1_000),
+            fullTextResult: .matches([])
+        )
+
+        #expect(output.sections.isEmpty)
+        #expect(output.fullTextResult == .matches([]))
+        #expect(output.statusLine == nil)
+    }
+
+    @Test
+    func cancelledFullTextWorkHasNoResultsOrDegradationStatus() {
+        let output = DesktopGlobalSearch.searchOutput(
+            query: DesktopGlobalSearchQuery("checkpoint"),
+            in: .init(
+                documents: [document(
+                    id: "checkpoint",
+                    domain: .knowledge,
+                    title: "Checkpoint recovery",
+                    summary: "Local snapshot",
+                    target: .init(kind: .knowledgeDocument, itemID: "checkpoint"),
+                    updatedAt: 1_000
+                )],
+                capturedAtUnixMillis: 2_000
+            ),
+            fullTextResult: .cancelled
+        )
+
+        #expect(output.sections.isEmpty)
+        #expect(output.fullTextResult == .cancelled)
+        #expect(output.statusLine == nil)
+    }
+
+    @Test
+    func punctuationOnlyTokensDoNotSuppressLinearResults() {
+        let local = document(
+            id: "secure-checkpoint",
+            domain: .knowledge,
+            title: "Checkpoint 🔒",
+            summary: "Local snapshot",
+            target: .init(kind: .knowledgeDocument, itemID: "secure-checkpoint"),
+            updatedAt: 1_000,
+            source: .obsidianSnapshot
+        )
+        let corpus = DesktopGlobalSearchLocalCorpus(
+            documents: [local],
+            capturedAtUnixMillis: 2_000
+        )
+
+        let results = DesktopGlobalSearch.search(
+            query: DesktopGlobalSearchQuery("checkpoint!!!"),
+            in: corpus
+        ).flatMap(\.results)
+        let emojiResults = DesktopGlobalSearch.search(
+            query: DesktopGlobalSearchQuery("🔒"),
+            in: corpus
+        ).flatMap(\.results)
+
+        #expect(results.map(\.id) == ["secure-checkpoint"])
+        #expect(emojiResults.map(\.id) == ["secure-checkpoint"])
+        #expect(!DesktopGlobalSearchQuery("!!! … 🔒").isEmpty)
     }
 
     @Test
