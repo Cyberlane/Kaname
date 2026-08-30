@@ -34,9 +34,25 @@ struct DesktopComposerSkillPickerTests {
 
     @Test
     func selectedSkillNamesFindsInlineTokens() {
+        let availableNames = Set(["mori-review", "obsidian-cli"])
         #expect(
-            DesktopComposerSkillPicker.selectedSkillNames(in: "Try $mori-review and $obsidian-cli here")
+            DesktopComposerSkillPicker.selectedSkillNames(
+                in: "Try $mori-review and $obsidian-cli here",
+                resolving: { availableNames.contains($0) ? $0 : nil }
+            )
                 == ["mori-review", "obsidian-cli"]
+        )
+    }
+
+    @Test
+    func unmatchedTokensIgnored() {
+        let availableNames = Set(["mori-review-similarity"])
+
+        #expect(
+            DesktopComposerSkillPicker.selectedSkillNames(
+                in: "Keep $HOME and $100 as text; load $mori-review-similarity",
+                resolving: { availableNames.contains($0) ? $0 : nil }
+            ) == ["mori-review-similarity"]
         )
     }
 }

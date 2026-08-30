@@ -1545,15 +1545,21 @@ final class DesktopConversationRuntime: ObservableObject {
     private func skillContextSources(for thread: DesktopThread, userMessage: String) -> [CodingContextSource] {
         let project = model.project(id: thread.projectID)
         let workspaceRoot = project?.path.flatMap { URL(fileURLWithPath: $0, isDirectory: true) }
-        var identifiers = project?.context.skillIDs ?? []
-        identifiers.append(contentsOf: DesktopComposerSkillPicker.selectedSkillNames(in: userMessage))
-        let catalogNames = Dictionary(
-            uniqueKeysWithValues: model.snapshot.domains.skills.map { ($0.id, $0.name) }
+        let registry = SkillRegistryLoader.loadRegistry(workspaceRoot: workspaceRoot)
+        let inlineRegistryNames = DesktopComposerSkillPicker.selectedSkillNames(in: userMessage) { token in
+            SkillRegistryLoader.resolveExactName(token, in: registry)?.name
+        }
+        let catalogRegistryNames = Dictionary(
+            uniqueKeysWithValues: model.snapshot.domains.skills.compactMap { skill in
+                skill.registryName.map { (skill.id, $0) }
+            }
         )
         return SkillRegistryLoader.loadContextSources(
-            identifiers: Array(Set(identifiers)).sorted(),
-            catalogNamesByID: catalogNames,
-            workspaceRoot: workspaceRoot
+            registryNames: inlineRegistryNames,
+            catalogIDs: project?.context.skillIDs ?? [],
+            catalogRegistryNamesByID: catalogRegistryNames,
+            workspaceRoot: workspaceRoot,
+            registry: registry
         )
     }
 

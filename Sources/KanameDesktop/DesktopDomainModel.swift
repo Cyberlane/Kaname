@@ -63,7 +63,9 @@ public struct DesktopSkillRecord: Codable, Equatable, Identifiable, Sendable {
     }
 
     public let id: String
+    /// Human-facing catalogue label. Runtime loading uses `registryName` only.
     public var name: String
+    public var registryName: String? = nil
     public var kind: Kind
     public var scope: String
     public var source: String
@@ -364,6 +366,7 @@ public struct DesktopDomainSnapshot: Codable, Equatable, Sendable {
                 DesktopSkillRecord(
                     id: "skill-mori-review",
                     name: "Mori structural review",
+                    registryName: "mori-review-similarity",
                     kind: .hook,
                     scope: "Kaname repository",
                     source: "Cyberlane/mori",
@@ -374,6 +377,7 @@ public struct DesktopDomainSnapshot: Codable, Equatable, Sendable {
                 DesktopSkillRecord(
                     id: "skill-obsidian",
                     name: "Obsidian knowledge",
+                    registryName: "obsidian-cli",
                     kind: .skill,
                     scope: "Explicit vault paths",
                     source: "Local skill catalogue",
@@ -438,10 +442,18 @@ public struct DesktopDomainSnapshot: Codable, Equatable, Sendable {
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        var skills = try container.decode([DesktopSkillRecord].self, forKey: .skills)
+        for index in skills.indices where skills[index].registryName == nil {
+            skills[index].registryName = switch skills[index].id {
+            case "skill-mori-review": "mori-review-similarity"
+            case "skill-obsidian": "obsidian-cli"
+            default: nil
+            }
+        }
         self.init(
             research: try container.decode([DesktopResearchRecord].self, forKey: .research),
             knowledgeSources: try container.decode([DesktopKnowledgeSource].self, forKey: .knowledgeSources),
-            skills: try container.decode([DesktopSkillRecord].self, forKey: .skills),
+            skills: skills,
             accounts: try container.decode([DesktopAccountRecord].self, forKey: .accounts),
             calendarSources: try container.decodeIfPresent([DesktopCalendarSourceRecord].self, forKey: .calendarSources) ?? [],
             emailDrafts: try container.decode([DesktopEmailDraft].self, forKey: .emailDrafts),
