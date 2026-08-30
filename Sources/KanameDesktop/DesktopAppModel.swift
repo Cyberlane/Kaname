@@ -1918,6 +1918,10 @@ public final class DesktopAppModel: ObservableObject {
 
     public var isRecoveryReadOnly: Bool { recoveryStatus != nil }
 
+    public var requiresArchiveConfirmation: Bool {
+        snapshot.preferences.confirmBeforeArchiving
+    }
+
     public var activeThreads: [DesktopThread] {
         snapshot.threads
             .filter { $0.attention != .archived }

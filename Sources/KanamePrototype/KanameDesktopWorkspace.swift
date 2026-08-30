@@ -263,6 +263,7 @@ struct KanameDesktopWorkspace: View {
     @State private var searchFallbackNotice: DesktopSearchFallbackNotice?
     @State private var dismissedUpdateIdentity: String?
     @State private var showsUpdateInstallConfirmation = false
+    @State private var pendingThreadArchiveID: String?
 #if os(macOS)
     @State private var searchPreviousResponder: NSResponder?
     @State private var modalPreviousResponder: NSResponder?
@@ -543,6 +544,23 @@ struct KanameDesktopWorkspace: View {
             Button("Install and relaunch") { updates.switchAndRelaunch(model: model) }
         } message: {
             Text("Kaname will checkpoint the current UI, install the verified staged build, and relaunch. An active approval or a workspace persistence error blocks the switch, and a failed health check automatically restores the previous app.")
+        }
+        .confirmationDialog(
+            threadArchiveConfirmationTitle,
+            isPresented: Binding(
+                get: { pendingThreadArchiveID != nil },
+                set: { if !$0 { pendingThreadArchiveID = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Archive conversation", role: .destructive) {
+                confirmThreadArchive()
+            }
+            Button("Cancel", role: .cancel) {
+                pendingThreadArchiveID = nil
+            }
+        } message: {
+            Text("The conversation will leave active views. Archiving does not mark it complete.")
         }
     }
 
@@ -985,6 +1003,7 @@ struct KanameDesktopWorkspace: View {
                     model: model,
                     searchText: searchText,
                     openThread: { openThread($0) },
+                    requestArchive: requestThreadArchive,
                     openDestination: navigate,
                     startConversation: { beginConversation(projectID: inheritedProjectID) }
                 )
@@ -999,6 +1018,7 @@ struct KanameDesktopWorkspace: View {
                     selectedRunID: $selectedThreadRunID,
                     conversationAnchorID: $selectedConversationAnchorID,
                     composerFocusRequest: composerFocusRequest,
+                    requestArchive: requestThreadArchive,
                     showsDirectory: $showsThreadDirectory
                 )
             case .inbox:
@@ -1006,7 +1026,8 @@ struct KanameDesktopWorkspace: View {
                     model: model,
                     searchText: searchText,
                     filter: $inboxFilter,
-                    selectedThreadID: threadSelection
+                    selectedThreadID: threadSelection,
+                    requestArchive: requestThreadArchive
                 )
             case .projects:
                 if let project = model.project(id: selectedProjectID) {
@@ -1087,7 +1108,8 @@ struct KanameDesktopWorkspace: View {
                 model: model,
                 thread: thread,
                 selectedRunID: $selectedThreadRunID,
-                conversationAnchorID: $selectedConversationAnchorID
+                conversationAnchorID: $selectedConversationAnchorID,
+                requestArchive: requestThreadArchive
             )
         } else {
             DesktopContextInspector(destination: destination, model: model)
@@ -1151,6 +1173,28 @@ struct KanameDesktopWorkspace: View {
     private func openProject(_ projectID: String) {
         guard acceptsNonRecoveryCommands else { return }
         visit(DesktopNavigationLocation(destination: .projects, selectedThreadID: nil, selectedProjectID: projectID))
+    }
+
+    private var threadArchiveConfirmationTitle: String {
+        guard let thread = model.thread(id: pendingThreadArchiveID) else {
+            return "Archive conversation?"
+        }
+        return "Archive \(thread.title)?"
+    }
+
+    private func requestThreadArchive(_ threadID: String) {
+        guard let thread = model.thread(id: threadID), thread.attention != .archived else { return }
+        if model.requiresArchiveConfirmation {
+            pendingThreadArchiveID = threadID
+        } else {
+            model.setAttention(threadID: threadID, attention: .archived)
+        }
+    }
+
+    private func confirmThreadArchive() {
+        guard let threadID = pendingThreadArchiveID else { return }
+        pendingThreadArchiveID = nil
+        model.setAttention(threadID: threadID, attention: .archived)
     }
 
     private var inheritedProjectID: String? {
@@ -2335,6 +2379,7 @@ private struct DesktopHomeView: View {
     @ObservedObject var model: DesktopAppModel
     let searchText: String
     let openThread: (String) -> Void
+    let requestArchive: (String) -> Void
     let openDestination: (DesktopDestination) -> Void
     let startConversation: () -> Void
 
@@ -2415,6 +2460,7 @@ private struct DesktopHomeView: View {
                     ) {
                         ForEach(attentionThreads) { thread in
                             ThreadCard(thread: thread) { openThread(thread.id) }
+                                .contextMenu { threadActions(thread) }
                         }
                     }
                 }
@@ -2498,7 +2544,21 @@ private struct DesktopHomeView: View {
             SectionHeading(title: "Recent work", detail: "Durable local threads, newest first.")
             ForEach(model.threads(matching: searchText).prefix(5)) { thread in
                 ThreadRow(thread: thread) { openThread(thread.id) }
+                    .contextMenu { threadActions(thread) }
             }
+        }
+    }
+
+    @ViewBuilder
+    private func threadActions(_ thread: DesktopThread) -> some View {
+        Button(thread.attention == .completed ? "Mark active" : "Mark complete") {
+            model.setAttention(
+                threadID: thread.id,
+                attention: thread.attention == .completed ? .needsResponse : .completed
+            )
+        }
+        Button("Archive", role: .destructive) {
+            requestArchive(thread.id)
         }
     }
 
@@ -2543,6 +2603,7 @@ private struct DesktopThreadsView: View {
     @Binding var selectedRunID: String?
     @Binding var conversationAnchorID: String?
     let composerFocusRequest: DesktopComposerFocusRequest?
+    let requestArchive: (String) -> Void
     @Binding var showsDirectory: Bool
 
     var body: some View {
@@ -2614,8 +2675,8 @@ private struct DesktopThreadsView: View {
                     attention: thread.attention == .completed ? .needsResponse : .completed
                 )
             }
-            Button("Archive") {
-                model.setAttention(threadID: thread.id, attention: .archived)
+            Button("Archive", role: .destructive) {
+                requestArchive(thread.id)
             }
         }
     }
@@ -2626,6 +2687,7 @@ private struct DesktopInboxView: View {
     let searchText: String
     @Binding var filter: DesktopAttention?
     @Binding var selectedThreadID: String?
+    let requestArchive: (String) -> Void
 
     private var threads: [DesktopThread] {
         model.threads(matching: searchText, attention: filter)
@@ -2674,6 +2736,9 @@ private struct DesktopInboxView: View {
                         InboxThreadLabel(thread: thread)
                             .tag(thread.id as String?)
                             .swipeActions(edge: .trailing) {
+                                Button("Archive", role: .destructive) {
+                                    requestArchive(thread.id)
+                                }
                                 Button("Complete") {
                                     model.setAttention(threadID: thread.id, attention: .completed)
                                 }
@@ -13250,6 +13315,7 @@ private struct DesktopThreadInspector: View {
     let thread: DesktopThread
     @Binding var selectedRunID: String?
     @Binding var conversationAnchorID: String?
+    let requestArchive: (String) -> Void
     @State private var panel: Panel = .outline
     @State private var activityPanel: ActivityPanel = .summary
     @State private var activitySearch = ""
@@ -13449,7 +13515,7 @@ private struct DesktopThreadInspector: View {
             Button("Mark complete") { model.setAttention(threadID: thread.id, attention: .completed) }
                 .disabled(thread.attention == .completed)
             Button("Archive", role: .destructive) {
-                model.setAttention(threadID: thread.id, attention: .archived)
+                requestArchive(thread.id)
             }
         }
         .panelStyle()
