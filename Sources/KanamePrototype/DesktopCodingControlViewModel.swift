@@ -203,8 +203,14 @@ final class DesktopCodingControlViewModel: ObservableObject {
                 && $0.exactTarget == exactTarget
                 && $0.title == "Revert implementation turn"
                 && $0.state == .approved
-        }), model.isApprovalGranted(id: approval.id, exactTarget: exactTarget) else {
+        }) else {
             message = "Approve the exact checkpoint revert in Inbox first."
+            return
+        }
+        guard model.exactEffectIsAuthorized(approvalID: approval.id, target: exactTarget) else {
+            message = model.snapshot.preferences.safeMode
+                ? "Checkpoint revert is unavailable while Safe Mode is on."
+                : "Approve the exact checkpoint revert in Inbox first."
             return
         }
         perform(
