@@ -118,6 +118,8 @@ public enum DesktopAutomaticBackupError: Error, Equatable, LocalizedError {
     case unsafeBundle
     case transportFailure(Int)
     case integrityMismatch
+    case staleRestorePlan
+    case unsupportedRestoreSchema
     case noRemoteBackup
     case destinationExists
     case keychainFailure(Int32)
@@ -130,6 +132,8 @@ public enum DesktopAutomaticBackupError: Error, Equatable, LocalizedError {
         case .unsafeBundle: "The backup bundle contains an unsafe, oversized, or unexpected entry."
         case .transportFailure(let status): "The backup destination returned HTTP \(status)."
         case .integrityMismatch: "The uploaded or downloaded backup did not match its expected SHA-256 digest."
+        case .staleRestorePlan: "The verified backup changed after its restore plan was created."
+        case .unsupportedRestoreSchema: "The backup state schema is not supported by this restore plan."
         case .noRemoteBackup: "No encrypted Kaname backup exists at this destination."
         case .destinationExists: "The selected restore destination already exists."
         case .keychainFailure(let status): "The backup credential could not be accessed securely (Keychain status \(status))."
@@ -265,6 +269,207 @@ public struct DesktopEncryptedBackupArtifact: Equatable, Sendable {
     public let createdAtUnixMillis: Int64
     public let data: Data
     public let sha256: String
+}
+
+public enum DesktopBackupRestoreAction: String, Codable, Equatable, Sendable {
+    case restoreCurrentSchema
+    case migrateThenRestore
+    case rejectUnsupportedOlderSchema
+    case rejectUnsupportedNewerSchema
+}
+
+public enum DesktopBackupRestoreTerminalState: String, Codable, Equatable, Sendable {
+    case passphraseUnavailable
+}
+
+public enum DesktopBackupRestorePlanningResult: Equatable, Sendable {
+    case ready(DesktopBackupRestorePlan)
+    case terminal(DesktopBackupRestoreTerminalState)
+
+    public var plan: DesktopBackupRestorePlan? {
+        guard case .ready(let plan) = self else { return nil }
+        return plan
+    }
+}
+
+public struct DesktopBackupRestorePlan: Codable, Equatable, Sendable {
+    public static let currentSchemaVersion = 1
+
+    public let schemaVersion: Int
+    public let backupID: UUID
+    public let manifestSHA256: String
+    public let backupStateSchemaVersion: Int
+    public let targetStateSchemaVersion: Int
+    public let oldestMigratableStateSchemaVersion: Int
+    public let artifactCount: Int
+    public let verifiedByteCount: Int64
+    public let action: DesktopBackupRestoreAction
+
+    public var canRestore: Bool {
+        action == .restoreCurrentSchema || action == .migrateThenRestore
+    }
+
+    public var requiresMigration: Bool {
+        action == .migrateThenRestore
+    }
+}
+
+public enum DesktopBackupRestorePlanner {
+    public static func plan(
+        forVerifiedBundleAt bundleURL: URL,
+        currentStateSchemaVersion: Int,
+        oldestMigratableStateSchemaVersion: Int = 1
+    ) throws -> DesktopBackupRestorePlan {
+        guard oldestMigratableStateSchemaVersion > 0,
+              currentStateSchemaVersion >= oldestMigratableStateSchemaVersion else {
+            throw DesktopAutomaticBackupError.invalidConfiguration
+        }
+
+        let manifest = try DesktopRecoveryService().validateBackup(at: bundleURL)
+        let action: DesktopBackupRestoreAction
+        if manifest.stateSchemaVersion == currentStateSchemaVersion {
+            action = .restoreCurrentSchema
+        } else if (oldestMigratableStateSchemaVersion..<currentStateSchemaVersion)
+            .contains(manifest.stateSchemaVersion) {
+            action = .migrateThenRestore
+        } else if manifest.stateSchemaVersion < oldestMigratableStateSchemaVersion {
+            action = .rejectUnsupportedOlderSchema
+        } else {
+            action = .rejectUnsupportedNewerSchema
+        }
+
+        let manifestData = try Data(
+            contentsOf: bundleURL.appendingPathComponent(DesktopRecoveryService.manifestFileName),
+            options: [.mappedIfSafe]
+        )
+        guard try JSONDecoder().decode(DesktopBackupManifest.self, from: manifestData) == manifest else {
+            throw DesktopAutomaticBackupError.integrityMismatch
+        }
+
+        var verifiedByteCount: Int64 = 0
+        for artifact in manifest.artifacts {
+            let (next, overflow) = verifiedByteCount.addingReportingOverflow(artifact.byteCount)
+            guard !overflow else { throw DesktopAutomaticBackupError.unsafeBundle }
+            verifiedByteCount = next
+        }
+        return DesktopBackupRestorePlan(
+            schemaVersion: DesktopBackupRestorePlan.currentSchemaVersion,
+            backupID: manifest.backupID,
+            manifestSHA256: DesktopRecoveryService.sha256(manifestData),
+            backupStateSchemaVersion: manifest.stateSchemaVersion,
+            targetStateSchemaVersion: currentStateSchemaVersion,
+            oldestMigratableStateSchemaVersion: oldestMigratableStateSchemaVersion,
+            artifactCount: manifest.artifacts.count,
+            verifiedByteCount: verifiedByteCount,
+            action: action
+        )
+    }
+}
+
+public enum DesktopSyntheticBackupRestoreDrill {
+    public static func planEncryptedBackup(
+        _ data: Data,
+        passphrase: String?,
+        verifiedBundleDestination: URL,
+        currentStateSchemaVersion: Int,
+        oldestMigratableStateSchemaVersion: Int = 1
+    ) throws -> DesktopBackupRestorePlanningResult {
+        guard let passphrase,
+              !passphrase.precomposedStringWithCompatibilityMapping.isEmpty else {
+            return .terminal(.passphraseUnavailable)
+        }
+        try DesktopEncryptedBackupBundleCodec.open(
+            data,
+            passphrase: passphrase,
+            destination: verifiedBundleDestination
+        )
+        return .ready(try DesktopBackupRestorePlanner.plan(
+            forVerifiedBundleAt: verifiedBundleDestination,
+            currentStateSchemaVersion: currentStateSchemaVersion,
+            oldestMigratableStateSchemaVersion: oldestMigratableStateSchemaVersion
+        ))
+    }
+
+    @discardableResult
+    public static func stageRestore(
+        using plan: DesktopBackupRestorePlan,
+        from bundleURL: URL,
+        at stagingURL: URL,
+        snapshotRoot: URL,
+        restoreID: UUID = UUID(),
+        stagedAtUnixMillis: Int64,
+        afterSnapshotValidated: (() throws -> Void)? = nil
+    ) throws -> DesktopRestoreReceipt {
+        try withValidatedSnapshot(
+            of: bundleURL,
+            boundTo: plan,
+            at: snapshotRoot,
+            afterValidation: afterSnapshotValidated
+        ) { snapshotURL in
+            guard plan.canRestore else { throw DesktopAutomaticBackupError.unsupportedRestoreSchema }
+            return try DesktopRecoveryService().stageRestore(
+                from: snapshotURL,
+                at: stagingURL,
+                restoreID: restoreID,
+                stagedAtUnixMillis: stagedAtUnixMillis
+            )
+        }
+    }
+
+    public static func activateRuntimeRestore(
+        using plan: DesktopBackupRestorePlan,
+        from bundleURL: URL,
+        store: FileDesktopStateStore,
+        snapshotRoot: URL,
+        restoreID: UUID,
+        afterSnapshotValidated: (() throws -> Void)? = nil
+    ) throws -> DesktopRuntimeRestoreTransaction {
+        try withValidatedSnapshot(
+            of: bundleURL,
+            boundTo: plan,
+            at: snapshotRoot,
+            afterValidation: afterSnapshotValidated
+        ) { snapshotURL in
+            guard plan.canRestore else { throw DesktopAutomaticBackupError.unsupportedRestoreSchema }
+            return try store.activateVerifiedRuntimeRestore(from: snapshotURL, restoreID: restoreID)
+        }
+    }
+
+    private static func withValidatedSnapshot<Result>(
+        of bundleURL: URL,
+        boundTo plan: DesktopBackupRestorePlan,
+        at snapshotRoot: URL,
+        afterValidation: (() throws -> Void)?,
+        operation: (URL) throws -> Result
+    ) throws -> Result {
+        let source = bundleURL.resolvingSymlinksInPath().standardizedFileURL
+        let root = snapshotRoot.resolvingSymlinksInPath().standardizedFileURL
+        guard source.isFileURL,
+              root.isFileURL,
+              source != root,
+              !root.path.hasPrefix(source.path + "/"),
+              !FileManager.default.fileExists(atPath: root.path) else {
+            throw DesktopAutomaticBackupError.unsafeBundle
+        }
+
+        try FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let snapshotURL = root.appendingPathComponent("verified.kanamebackup", isDirectory: true)
+        try FileManager.default.copyItem(at: source, to: snapshotURL)
+        let snapshotPlan = try DesktopBackupRestorePlanner.plan(
+            forVerifiedBundleAt: snapshotURL,
+            currentStateSchemaVersion: plan.targetStateSchemaVersion,
+            oldestMigratableStateSchemaVersion: plan.oldestMigratableStateSchemaVersion
+        )
+        guard snapshotPlan == plan else { throw DesktopAutomaticBackupError.staleRestorePlan }
+        try afterValidation?()
+        return try operation(snapshotURL)
+    }
 }
 
 public enum DesktopEncryptedBackupBundleCodec {
