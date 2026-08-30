@@ -15,9 +15,15 @@ struct DesktopGlobalSearchPerformanceTests {
     @Test
     func representativeLargeLocalCorpusSearchStaysWithinRetainedLatencyBudgets() {
         let corpus = Self.representativeCorpus()
+        let ftsRows = Self.representativeFTSRows(from: corpus)
         let query = DesktopGlobalSearchQuery("atlas recovery")
         for _ in 0..<3 {
-            _ = DesktopGlobalSearch.search(query: query, in: corpus, limit: DesktopGlobalSearch.maximumResults)
+            _ = DesktopGlobalSearch.search(
+                query: query,
+                in: corpus,
+                limit: DesktopGlobalSearch.maximumResults,
+                ftsRows: ftsRows
+            )
         }
 
         var samples: [UInt64] = []
@@ -28,7 +34,8 @@ struct DesktopGlobalSearchPerformanceTests {
             let sections = DesktopGlobalSearch.search(
                 query: query,
                 in: corpus,
-                limit: DesktopGlobalSearch.maximumResults
+                limit: DesktopGlobalSearch.maximumResults,
+                ftsRows: ftsRows
             )
             let ended = DispatchTime.now().uptimeNanoseconds
             observedResultCount = sections.reduce(0) { $0 + $1.results.count }
@@ -41,6 +48,7 @@ struct DesktopGlobalSearchPerformanceTests {
         let observedMaximum = sorted.last ?? .max
         print("MEASURE: DesktopGlobalSearch 5500-documents n=20 p95=\(retainedP95)ns max=\(observedMaximum)ns")
         #expect(corpus.documents.count == Self.documentCount)
+        #expect(ftsRows.count == Self.documentCount)
         #expect(Set(corpus.documents.map(\.domain)) == Set(DesktopGlobalSearchDomain.allCases))
         #expect(observedResultCount == DesktopGlobalSearch.maximumResults)
         #expect(retainedP95 <= Self.p95BudgetNanoseconds)
@@ -50,10 +58,12 @@ struct DesktopGlobalSearchPerformanceTests {
     @Test
     func publicSearchResultMemoryContractRemainsBoundedForAnUnboundedRequestedLimit() {
         let corpus = Self.representativeCorpus()
+        let ftsRows = Self.representativeFTSRows(from: corpus)
         let sections = DesktopGlobalSearch.search(
             query: DesktopGlobalSearchQuery("atlas recovery"),
             in: corpus,
-            limit: .max
+            limit: .max,
+            ftsRows: ftsRows
         )
         let results = sections.flatMap(\.results)
 
@@ -61,6 +71,44 @@ struct DesktopGlobalSearchPerformanceTests {
         #expect(sections.count <= DesktopGlobalSearchDomain.allCases.count)
         #expect(Set(results.map(\.id)).count == results.count)
         #expect(results.allSatisfy { $0.provenance.source != .providerSnapshot })
+    }
+
+    @Test
+    func rowsBuiltOncePerSnapshotGeneration() async {
+        var snapshot = DesktopAppSnapshot.starter(now: 1_000)
+        snapshot.threads[0].messages.append(
+            DesktopMessage(
+                id: "cache-generation-message",
+                role: .assistant,
+                body: "Atlas recovery checkpoint evidence",
+                createdAtUnixMillis: 2_000
+            )
+        )
+        snapshot.threads[0].updatedAtUnixMillis = 2_000
+        let firstGeneration = snapshot
+        let cache = DesktopGlobalSearchFTS.IndexedRowCache()
+
+        async let first = cache.rows(for: firstGeneration)
+        async let second = cache.rows(for: firstGeneration)
+        async let third = cache.rows(for: firstGeneration)
+        let (firstRows, secondRows, thirdRows) = await (first, second, third)
+        let coalesced = await cache.statistics()
+
+        #expect(firstRows == secondRows)
+        #expect(secondRows == thirdRows)
+        #expect(coalesced.rowsBuildCount == 1)
+        #expect(coalesced.cachedRowCount == firstRows.count)
+
+        snapshot.lastSavedAtUnixMillis += 1
+        _ = await cache.rows(for: snapshot)
+        let unchanged = await cache.statistics()
+        #expect(unchanged.rowsBuildCount == 1)
+
+        snapshot.threads[0].updatedAtUnixMillis += 1
+        _ = await cache.rows(for: snapshot)
+        let rebuilt = await cache.statistics()
+        #expect(rebuilt.rowsBuildCount == 2)
+        #expect(rebuilt.generation == DesktopGlobalSearchFTS.snapshotGeneration(from: snapshot))
     }
 
     private static func representativeCorpus() -> DesktopGlobalSearchLocalCorpus {
@@ -107,6 +155,24 @@ struct DesktopGlobalSearchPerformanceTests {
             )
         }
         return DesktopGlobalSearchLocalCorpus(documents: documents, capturedAtUnixMillis: 20_000)
+    }
+
+    private static func representativeFTSRows(
+        from corpus: DesktopGlobalSearchLocalCorpus
+    ) -> [DesktopGlobalSearchFTS.IndexedRow] {
+        corpus.documents.map { document in
+            DesktopGlobalSearchFTS.IndexedRow(
+                documentID: document.id,
+                domain: document.domain,
+                title: document.title,
+                body: document.summary,
+                keywords: document.keywords,
+                target: document.navigationTarget,
+                threadID: nil,
+                projectID: document.provenance.projectID,
+                updatedAtUnixMillis: document.updatedAtUnixMillis
+            )
+        }
     }
 
     private static func navigationKind(
