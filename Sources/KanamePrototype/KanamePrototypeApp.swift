@@ -25,7 +25,7 @@ struct KanamePrototypeApp: App {
 
     var body: some Scene {
         Window(kanameDesktopWindowTitle, id: "main") {
-            KanameDesktopWorkspace()
+            KanameDesktopWorkspace(gitControl: appDelegate.gitControl)
                 .tint(Nord.frost2)
                 .preferredColorScheme(.dark)
         }
@@ -113,6 +113,9 @@ struct KanamePrototypeApp: App {
 #if os(macOS)
 @MainActor
 final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
+    let gitControl = DesktopGitControlService(
+        managedRoot: KanameDesktopEnvironment.current.worktreeDirectory
+    )
     private var fallbackWindow: NSWindow?
     private var postedMouseBackEvent = false
     private var activationObserver: NSObjectProtocol?
@@ -274,7 +277,7 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
         }
         guard allowCreation else { return false }
         let controller = NSHostingController(
-            rootView: KanameDesktopWorkspace()
+            rootView: KanameDesktopWorkspace(gitControl: gitControl)
                 .tint(Nord.frost2)
                 .preferredColorScheme(.dark)
         )

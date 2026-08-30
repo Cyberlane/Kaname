@@ -15,8 +15,8 @@ final class DesktopThreadChangesViewModel: ObservableObject {
     private var loadedWorktreePath: String?
     private var requestGeneration = 0
 
-    init(environment: KanameDesktopEnvironment = .current) {
-        service = DesktopGitControlService(managedRoot: environment.worktreeDirectory)
+    init(service: DesktopGitControlService) {
+        self.service = service
     }
 
     var filteredPaths: [String] {

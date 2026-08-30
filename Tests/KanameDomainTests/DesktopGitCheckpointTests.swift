@@ -4,6 +4,147 @@ import Testing
 
 struct DesktopGitCheckpointTests {
     @Test
+    func sharedServiceSerializesConcurrentCaptureAndRevertAtTheTransactionBoundary() async throws {
+        let fixture = try await Fixture.make()
+        defer { try? FileManager.default.removeItem(at: fixture.sandbox) }
+
+        try fixture.write("tracked.txt", "before tracked\n")
+        try fixture.write("staged.txt", "before staged\n")
+        try await fixture.git(["add", "staged.txt"])
+        try fixture.write("before-only.txt", "before untracked\n")
+        let before = try await fixture.service.createCheckpointBefore(
+            worktree: fixture.repository,
+            threadID: "shared-service",
+            turnID: "revert-target"
+        )
+
+        try fixture.write("tracked.txt", "after tracked\n")
+        try fixture.write("staged.txt", "after staged\n")
+        try FileManager.default.removeItem(at: fixture.url("before-only.txt"))
+        try fixture.write("after-only.txt", "after untracked\n")
+        let bracket = try await fixture.service.createCheckpointAfter(
+            worktree: fixture.repository,
+            threadID: "shared-service",
+            turnID: "revert-target",
+            before: before
+        )
+        let aliasedRepository = fixture.managedRoot.appending(
+            path: "repository-alias",
+            directoryHint: .isDirectory
+        )
+        try FileManager.default.createSymbolicLink(
+            at: aliasedRepository,
+            withDestinationURL: fixture.repository
+        )
+        let target = GitCheckpointRestoreTarget(
+            checkpointID: "checkpoint-shared-service",
+            worktreePath: aliasedRepository.path,
+            before: before,
+            after: bracket.after
+        )
+
+        let gate = DesktopGitCheckpointTransactionGate()
+        let barrier = GitProcessBarrier()
+        let service = fixture.controlledService(gate: gate, barrier: barrier)
+        await barrier.blockNextProcess()
+        let concurrentCapture = Task {
+            try await service.createCheckpointBefore(
+                worktree: fixture.repository,
+                threadID: "shared-service",
+                turnID: "concurrent-capture"
+            )
+        }
+        await barrier.waitUntilBlocked()
+
+        let revert = Task {
+            try await service.revertToCheckpoint(
+                worktree: aliasedRepository,
+                target: target,
+                grant: LocalGitMutationGrant(
+                    approvalID: "approved-shared-service",
+                    kind: .revertCheckpoint,
+                    exactTarget: target.approvalExactTarget
+                )
+            )
+        }
+        await gate.waitUntilQueued(worktreePath: fixture.repository.standardizedFileURL.path)
+
+        #expect(await barrier.processCount == 1)
+        await barrier.releaseBlockedProcess()
+        let captured = try await concurrentCapture.value
+        _ = try await revert.value
+
+        #expect(captured.fingerprint == bracket.after.fingerprint)
+        #expect(try fixture.read("tracked.txt") == "before tracked\n")
+        #expect(try fixture.read("staged.txt") == "before staged\n")
+        #expect(try fixture.read("before-only.txt") == "before untracked\n")
+        #expect(!FileManager.default.fileExists(atPath: fixture.url("after-only.txt").path))
+        let status = try await fixture.git(["status", "--porcelain=v1", "--untracked-files=all"])
+        #expect(status.contains(" M tracked.txt"))
+        #expect(status.contains("M  staged.txt"))
+        #expect(status.contains("?? before-only.txt"))
+        #expect(!status.contains("after-only.txt"))
+    }
+
+    @Test
+    func checkpointTransactionCancellationAndFailureReleaseTheNextWaiter() async throws {
+        let fixture = try await Fixture.make()
+        defer { try? FileManager.default.removeItem(at: fixture.sandbox) }
+        let gate = DesktopGitCheckpointTransactionGate()
+        let barrier = GitProcessBarrier()
+        let service = fixture.controlledService(gate: gate, barrier: barrier)
+        let path = fixture.repository.standardizedFileURL.path
+
+        await barrier.blockNextProcess()
+        let active = Task {
+            try await service.createCheckpointBefore(
+                worktree: fixture.repository,
+                threadID: "shared-service",
+                turnID: "active"
+            )
+        }
+        await barrier.waitUntilBlocked()
+
+        let cancelled = Task {
+            try await service.createCheckpointBefore(
+                worktree: fixture.repository,
+                threadID: "shared-service",
+                turnID: "cancelled"
+            )
+        }
+        await gate.waitUntilQueued(worktreePath: path)
+        cancelled.cancel()
+        await #expect(throws: (any Error).self) { try await cancelled.value }
+
+        let successor = Task {
+            try await service.createCheckpointBefore(
+                worktree: fixture.repository,
+                threadID: "shared-service",
+                turnID: "successor"
+            )
+        }
+        await gate.waitUntilQueued(worktreePath: path)
+        #expect(await barrier.processCount == 1)
+        active.cancel()
+        await #expect(throws: (any Error).self) { try await active.value }
+        _ = try await successor.value
+
+        await barrier.failNextProcess()
+        await #expect(throws: (any Error).self) {
+            try await service.createCheckpointBefore(
+                worktree: fixture.repository,
+                threadID: "shared-service",
+                turnID: "failure"
+            )
+        }
+        _ = try await service.createCheckpointBefore(
+            worktree: fixture.repository,
+            threadID: "shared-service",
+            turnID: "after-failure"
+        )
+    }
+
+    @Test
     func checkpointRestoresTrackedStagedUnstagedAndUntrackedStateWithoutDeletingIgnoredFiles() async throws {
         let fixture = try await Fixture.make()
         defer { try? FileManager.default.removeItem(at: fixture.sandbox) }
@@ -226,6 +367,7 @@ struct DesktopGitCheckpointTests {
 
     private struct Fixture {
         let sandbox: URL
+        let managedRoot: URL
         let repository: URL
         let service: DesktopGitControlService
 
@@ -237,6 +379,7 @@ struct DesktopGitCheckpointTests {
             try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
             let fixture = Fixture(
                 sandbox: sandbox,
+                managedRoot: managedRoot,
                 repository: repository,
                 service: DesktopGitControlService(managedRoot: managedRoot, timeout: .seconds(10))
             )
@@ -247,6 +390,20 @@ struct DesktopGitCheckpointTests {
             try await fixture.git(["add", ".gitignore", "tracked.txt", "staged.txt"])
             try await fixture.commit("initial")
             return fixture
+        }
+
+        func controlledService(
+            gate: DesktopGitCheckpointTransactionGate,
+            barrier: GitProcessBarrier
+        ) -> DesktopGitControlService {
+            DesktopGitControlService(
+                managedRoot: managedRoot,
+                timeout: .seconds(10),
+                checkpointTransactions: gate,
+                beforeGitProcess: { invocation in
+                    try await barrier.intercept(invocation)
+                }
+            )
         }
 
         func url(_ path: String) -> URL { repository.appending(path: path) }
@@ -299,6 +456,63 @@ struct DesktopGitCheckpointTests {
                     exactTarget: target.approvalExactTarget
                 )
             )
+        }
+    }
+
+    private actor GitProcessBarrier {
+        enum InjectedFailure: Error { case requested }
+
+        private var shouldBlockNextProcess = false
+        private var shouldFailNextProcess = false
+        private var blockedContinuation: CheckedContinuation<Bool, Never>?
+        private var blockedObservers: [CheckedContinuation<Void, Never>] = []
+        private(set) var processCount = 0
+
+        func blockNextProcess() {
+            shouldBlockNextProcess = true
+        }
+
+        func failNextProcess() {
+            shouldFailNextProcess = true
+        }
+
+        func intercept(_ invocation: DesktopGitProcessInvocation) async throws {
+            _ = invocation
+            processCount += 1
+            if shouldFailNextProcess {
+                shouldFailNextProcess = false
+                throw InjectedFailure.requested
+            }
+            guard shouldBlockNextProcess else { return }
+            shouldBlockNextProcess = false
+            let shouldContinue = await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation in
+                    blockedContinuation = continuation
+                    let observers = blockedObservers
+                    blockedObservers.removeAll()
+                    observers.forEach { $0.resume() }
+                }
+            } onCancel: {
+                Task { await self.cancelBlockedProcess() }
+            }
+            guard shouldContinue else { throw CancellationError() }
+        }
+
+        func waitUntilBlocked() async {
+            if blockedContinuation != nil { return }
+            await withCheckedContinuation { blockedObservers.append($0) }
+        }
+
+        func releaseBlockedProcess() {
+            let continuation = blockedContinuation
+            blockedContinuation = nil
+            continuation?.resume(returning: true)
+        }
+
+        private func cancelBlockedProcess() {
+            let continuation = blockedContinuation
+            blockedContinuation = nil
+            continuation?.resume(returning: false)
         }
     }
 }

@@ -125,17 +125,126 @@ public enum DesktopGitControlError: Error, Equatable, LocalizedError, Sendable {
     }
 }
 
+struct DesktopGitProcessInvocation: Sendable {
+    let arguments: [String]
+    let workingDirectory: URL
+}
+
+actor DesktopGitCheckpointTransactionGate {
+    struct Lease: Sendable {
+        fileprivate let id: UUID
+        fileprivate let worktreePath: String
+    }
+
+    private struct Waiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Bool, Never>
+    }
+
+    private var activeLeaseIDByWorktreePath: [String: UUID] = [:]
+    private var waitersByWorktreePath: [String: [Waiter]] = [:]
+    private var queueObserversByWorktreePath: [String: [CheckedContinuation<Void, Never>]] = [:]
+
+    func acquire(worktreePath: String) async throws -> Lease {
+        let id = UUID()
+        if activeLeaseIDByWorktreePath[worktreePath] == nil {
+            activeLeaseIDByWorktreePath[worktreePath] = id
+            if Task.isCancelled {
+                release(Lease(id: id, worktreePath: worktreePath))
+                throw CancellationError()
+            }
+            return Lease(id: id, worktreePath: worktreePath)
+        }
+
+        let acquired = await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                waitersByWorktreePath[worktreePath, default: []].append(
+                    Waiter(id: id, continuation: continuation)
+                )
+                let observers = queueObserversByWorktreePath.removeValue(forKey: worktreePath) ?? []
+                observers.forEach { $0.resume() }
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(id: id, worktreePath: worktreePath) }
+        }
+
+        guard acquired else { throw CancellationError() }
+        let lease = Lease(id: id, worktreePath: worktreePath)
+        if Task.isCancelled {
+            release(lease)
+            throw CancellationError()
+        }
+        return lease
+    }
+
+    func release(_ lease: Lease) {
+        guard activeLeaseIDByWorktreePath[lease.worktreePath] == lease.id else { return }
+        guard var waiters = waitersByWorktreePath[lease.worktreePath], !waiters.isEmpty else {
+            activeLeaseIDByWorktreePath.removeValue(forKey: lease.worktreePath)
+            waitersByWorktreePath.removeValue(forKey: lease.worktreePath)
+            return
+        }
+        let next = waiters.removeFirst()
+        if waiters.isEmpty {
+            waitersByWorktreePath.removeValue(forKey: lease.worktreePath)
+        } else {
+            waitersByWorktreePath[lease.worktreePath] = waiters
+        }
+        activeLeaseIDByWorktreePath[lease.worktreePath] = next.id
+        next.continuation.resume(returning: true)
+    }
+
+    func waitUntilQueued(worktreePath: String) async {
+        if !(waitersByWorktreePath[worktreePath]?.isEmpty ?? true) { return }
+        await withCheckedContinuation { continuation in
+            queueObserversByWorktreePath[worktreePath, default: []].append(continuation)
+        }
+    }
+
+    private func cancelWaiter(id: UUID, worktreePath: String) {
+        guard var waiters = waitersByWorktreePath[worktreePath],
+              let index = waiters.firstIndex(where: { $0.id == id }) else { return }
+        let waiter = waiters.remove(at: index)
+        if waiters.isEmpty {
+            waitersByWorktreePath.removeValue(forKey: worktreePath)
+        } else {
+            waitersByWorktreePath[worktreePath] = waiters
+        }
+        waiter.continuation.resume(returning: false)
+    }
+}
+
 public actor DesktopGitControlService {
     private let managedRoot: URL
     private let timeout: Duration
+    private let checkpointTransactions: DesktopGitCheckpointTransactionGate
+    private let beforeGitProcess: @Sendable (DesktopGitProcessInvocation) async throws -> Void
 
     public init(managedRoot: URL, timeout: Duration = .seconds(120)) {
         self.managedRoot = managedRoot.standardizedFileURL
         self.timeout = timeout
+        checkpointTransactions = DesktopGitCheckpointTransactionGate()
+        beforeGitProcess = { _ in }
+    }
+
+    init(
+        managedRoot: URL,
+        timeout: Duration = .seconds(120),
+        checkpointTransactions: DesktopGitCheckpointTransactionGate,
+        beforeGitProcess: @escaping @Sendable (DesktopGitProcessInvocation) async throws -> Void
+    ) {
+        self.managedRoot = managedRoot.standardizedFileURL
+        self.timeout = timeout
+        self.checkpointTransactions = checkpointTransactions
+        self.beforeGitProcess = beforeGitProcess
     }
 
     public func inspect(worktree: URL, rootRepository: URL? = nil) async throws -> GitWorktreeSnapshot {
         let path = worktree.standardizedFileURL
+        return try await inspectUngated(worktree: path, rootRepository: rootRepository)
+    }
+
+    private func inspectUngated(worktree path: URL, rootRepository: URL? = nil) async throws -> GitWorktreeSnapshot {
         let hasGitMarker = FileManager.default.fileExists(atPath: path.appending(path: ".git").path)
         let isWorktree: Bool
         if hasGitMarker {
@@ -296,6 +405,16 @@ public actor DesktopGitControlService {
         turnID: String
     ) async throws -> GitCheckpointSnapshot {
         let path = worktree.standardizedFileURL
+        return try await withCheckpointTransaction(at: path) {
+            try await self.createCheckpointBeforeUngated(path: path, threadID: threadID, turnID: turnID)
+        }
+    }
+
+    private func createCheckpointBeforeUngated(
+        path: URL,
+        threadID: String,
+        turnID: String
+    ) async throws -> GitCheckpointSnapshot {
         guard (try? await git(["rev-parse", "--is-inside-work-tree"], at: path)) == "true" else {
             throw DesktopGitControlError.invalidRepository
         }
@@ -311,6 +430,22 @@ public actor DesktopGitControlService {
         before: GitCheckpointSnapshot
     ) async throws -> GitCheckpointBracket {
         let path = worktree.standardizedFileURL
+        return try await withCheckpointTransaction(at: path) {
+            try await self.createCheckpointAfterUngated(
+                path: path,
+                threadID: threadID,
+                turnID: turnID,
+                before: before
+            )
+        }
+    }
+
+    private func createCheckpointAfterUngated(
+        path: URL,
+        threadID: String,
+        turnID: String,
+        before: GitCheckpointSnapshot
+    ) async throws -> GitCheckpointBracket {
         guard (try? await git(["rev-parse", "--is-inside-work-tree"], at: path)) == "true" else {
             throw DesktopGitControlError.invalidRepository
         }
@@ -354,6 +489,16 @@ public actor DesktopGitControlService {
         grant: LocalGitMutationGrant
     ) async throws -> GitWorktreeSnapshot {
         let path = worktree.standardizedFileURL
+        return try await withCheckpointTransaction(at: path) {
+            try await self.revertToCheckpointUngated(path: path, target: target, grant: grant)
+        }
+    }
+
+    private func revertToCheckpointUngated(
+        path: URL,
+        target: GitCheckpointRestoreTarget,
+        grant: LocalGitMutationGrant
+    ) async throws -> GitWorktreeSnapshot {
         try validateManagedTarget(path)
         guard grant.kind == .revertCheckpoint,
               path.path == target.worktreePath,
@@ -430,7 +575,25 @@ public actor DesktopGitControlService {
                 "Checkpoint restore failed; Kaname restored the captured after-state. \(error.localizedDescription)"
             )
         }
-        return try await inspect(worktree: path)
+        return try await inspectUngated(worktree: path)
+    }
+
+    private func withCheckpointTransaction<T: Sendable>(
+        at path: URL,
+        operation: () async throws -> T
+    ) async throws -> T {
+        // Actor isolation alone is reentrant at every awaited subprocess. Hold
+        // one path-scoped lease across the complete multi-command transaction.
+        let canonicalPath = path.resolvingSymlinksInPath().standardizedFileURL.path
+        let lease = try await checkpointTransactions.acquire(worktreePath: canonicalPath)
+        do {
+            let result = try await operation()
+            await checkpointTransactions.release(lease)
+            return result
+        } catch {
+            await checkpointTransactions.release(lease)
+            throw error
+        }
     }
 
     private func restoreSnapshot(
@@ -560,6 +723,10 @@ public actor DesktopGitControlService {
         environmentOverrides: [String: String] = [:]
     ) async throws -> String {
         do {
+            try await beforeGitProcess(DesktopGitProcessInvocation(
+                arguments: arguments,
+                workingDirectory: directory.standardizedFileURL
+            ))
             let output = try await LocalProcess.capture(
                 executable: "git",
                 arguments: arguments,
