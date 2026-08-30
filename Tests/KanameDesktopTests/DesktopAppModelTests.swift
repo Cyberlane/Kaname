@@ -1092,6 +1092,32 @@ struct DesktopAppModelTests {
     }
 
     @Test
+    func archiveConfirmationPredicateTracksPreferenceWithoutChangingOtherAttentionTransitions() throws {
+        let store = MemoryDesktopStateStore()
+        let model = DesktopAppModel(store: store, now: { 1_000 })
+        let threadID = try #require(
+            model.createThread(title: "Keep transitions distinct", kind: .planning, projectID: nil)
+        )
+
+        #expect(model.requiresArchiveConfirmation)
+
+        model.setAttention(threadID: threadID, attention: .completed)
+        #expect(model.thread(id: threadID)?.attention == .completed)
+
+        model.setAttention(threadID: threadID, attention: .needsResponse)
+        #expect(model.thread(id: threadID)?.attention == .needsResponse)
+
+        var preferences = model.snapshot.preferences
+        preferences.confirmBeforeArchiving = false
+        model.updatePreferences(preferences)
+        #expect(!model.requiresArchiveConfirmation)
+
+        let restored = DesktopAppModel(store: store, now: { 2_000 })
+        #expect(!restored.requiresArchiveConfirmation)
+        #expect(restored.thread(id: threadID)?.attention == .needsResponse)
+    }
+
+    @Test
     func redactedDiagnosticsContainCountsButNoPrivateContent() throws {
         let store = MemoryDesktopStateStore()
         let model = DesktopAppModel(store: store, now: { 7_000 })
