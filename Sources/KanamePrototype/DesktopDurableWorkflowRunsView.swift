@@ -48,6 +48,45 @@ final class DesktopDurableWorkflowRunsViewModel: ObservableObject {
         runnableWorkflows = (items ?? []).filter { $0.activeRevisionID != nil }
     }
 
+    /// Records the owner's decision for a proposed effect, then continues the
+    /// run so the executor can dispatch (or settle the rejection).
+    func decideEffect(_ effect: DesktopWorkflowProjectedEffectAuthority, run: DesktopDurableWorkflowRun, approve: Bool) async {
+        guard let runner, !isStarting else { return }
+        isStarting = true
+        defer { isStarting = false }
+        do {
+            let decision = try await runner.authorizeWorkflowEffect(
+                effectID: effect.effectID,
+                approvalID: effect.approvalID,
+                approvalFingerprint: effect.approvalFingerprint,
+                approve: approve
+            )
+            let continued = try await runner.startWorkflowRun(
+                workflowID: run.workflowID,
+                revisionID: run.revisionID,
+                runID: run.runID
+            )
+            startMessage = "Effect \(effect.effectID.suffix(8)) \(decision.status); run \(continued.outcome) after \(continued.eventCount) events."
+        } catch {
+            startMessage = "Effect decision failed: \(error.localizedDescription)"
+        }
+        await reload()
+    }
+
+    /// Re-issues the run command so a waiting or retrying run advances.
+    func continueRun(_ run: DesktopDurableWorkflowRun) async {
+        guard let runner, !isStarting else { return }
+        isStarting = true
+        defer { isStarting = false }
+        do {
+            let continued = try await runner.startWorkflowRun(workflowID: run.workflowID, revisionID: run.revisionID, runID: run.runID)
+            startMessage = "Run \(run.runID.suffix(8)) \(continued.outcome) after \(continued.eventCount) events."
+        } catch {
+            startMessage = "Continue failed: \(error.localizedDescription)"
+        }
+        await reload()
+    }
+
     /// Starts a manual run on the Rust executor and refreshes history.
     func startRun(_ item: DesktopWorkflowV2PortfolioItem) async {
         guard let runner, let revisionID = item.activeRevisionID, !isStarting else { return }
@@ -724,7 +763,7 @@ struct DesktopDurableWorkflowRunsView: View {
                 }
             }
         case .effect:
-            effectInspector(run.effects(for: node.id))
+            effectInspector(run.effects(for: node.id), run: run)
         case .subflow:
             subflowInspector(run.subflows.filter { $0.nodeID == node.id })
         case .capability:
@@ -768,7 +807,7 @@ struct DesktopDurableWorkflowRunsView: View {
     }
 
     @ViewBuilder
-    private func effectInspector(_ effects: [DesktopWorkflowProjectedEffectAuthority]) -> some View {
+    private func effectInspector(_ effects: [DesktopWorkflowProjectedEffectAuthority], run: DesktopDurableWorkflowRun) -> some View {
         if effects.isEmpty {
             explainedEmpty("This node has no proposed or executed effect evidence.")
         } else {
@@ -778,6 +817,28 @@ struct DesktopDurableWorkflowRunsView: View {
                         title: DesktopWorkflowEffectLifecyclePresentation.title(for: effect.status),
                         detail: "Effect \(effect.effectID)\nAction \(effect.action) · connector \(effect.connectorClass)\nNext action: \(DesktopWorkflowEffectLifecyclePresentation.nextAction(for: effect.status))"
                     )
+                    if effect.status == "proposed" {
+                        HStack(spacing: 8) {
+                            Button("Approve and dispatch", systemImage: "checkmark.shield") {
+                                Task { await viewModel.decideEffect(effect, run: run, approve: true) }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                            Button("Reject", role: .destructive) {
+                                Task { await viewModel.decideEffect(effect, run: run, approve: false) }
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
+                        .disabled(viewModel.isStarting)
+                    } else if ["authorized", "dispatching", "outcome_unknown"].contains(effect.status) {
+                        Button("Continue run", systemImage: "play.fill") {
+                            Task { await viewModel.continueRun(run) }
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .disabled(viewModel.isStarting)
+                    }
                     let dispatchEvidence = effect.dispatch?.receipt?.evidenceDigest ?? "no dispatch receipt"
                     let reconciliationEvidence = effect.reconciliation?.receipt.evidenceDigest
                         ?? "no reconciliation receipt"

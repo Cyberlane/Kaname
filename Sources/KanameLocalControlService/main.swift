@@ -207,10 +207,29 @@ private final class LocalControlService: NSObject, LocalCoreControlService {
         let projection = applicationSupportRoot
             .appendingPathComponent("Workflows", isDirectory: true)
             .appendingPathComponent("workflow-run-projection.sqlite")
+        // Runs may wait on model calls and connectors; the run itself is
+        // durable, so a long deadline here only bounds this one attempt.
         runWireOperation(
             "workflow-run-start",
             request: request,
             extraArguments: [projection.path, applicationSupportRoot.path],
+            permissionTarget: projection,
+            timeout: 600,
+            reply: reply
+        )
+    }
+
+    func authorizeWorkflowEffect(_ request: Data, reply: @escaping (Data?, String) -> Void) {
+        let applicationSupportRoot = journalDirectory
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let projection = applicationSupportRoot
+            .appendingPathComponent("Workflows", isDirectory: true)
+            .appendingPathComponent("workflow-run-projection.sqlite")
+        runWireOperation(
+            "workflow-effect-authorize",
+            request: request,
+            extraArguments: [projection.path],
             permissionTarget: projection,
             reply: reply
         )
@@ -300,6 +319,7 @@ private final class LocalControlService: NSObject, LocalCoreControlService {
         maximumRequestBytes: Int = LocalCoreRunner.maximumResponseBytes,
         storageArgument: URL? = nil,
         permissionTarget: URL? = nil,
+        timeout: TimeInterval = 5,
         reply: @escaping (Data?, String) -> Void
     ) {
         guard !request.isEmpty, request.count <= maximumRequestBytes else {
@@ -317,7 +337,7 @@ private final class LocalControlService: NSObject, LocalCoreControlService {
                 journal: journal,
                 permissionTarget: permissionTarget ?? journal,
                 standardInput: request,
-                timeout: 5
+                timeout: timeout
             )
             guard let wire = Self.decodeHexResponse(response) else {
                 reply(nil, "core_failed")
@@ -395,6 +415,10 @@ private final class LocalControlService: NSObject, LocalCoreControlService {
         let capabilityHost = executable.deletingLastPathComponent().appendingPathComponent("KanameWorkflowCapabilityHost")
         if FileManager.default.isExecutableFile(atPath: capabilityHost.path) {
             environment["KANAME_WORKFLOW_CAPABILITY_COMMAND"] = capabilityHost.path
+        }
+        let connectorHost = executable.deletingLastPathComponent().appendingPathComponent("KanameWorkflowConnectorHost")
+        if FileManager.default.isExecutableFile(atPath: connectorHost.path) {
+            environment["KANAME_WORKFLOW_EFFECT_COMMAND"] = connectorHost.path
         }
         process.environment = environment
         let timedOut = LockedFlag()

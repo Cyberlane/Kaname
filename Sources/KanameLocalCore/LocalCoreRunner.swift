@@ -71,6 +71,7 @@ public protocol LocalCoreControlService {
     func beginWorkflowConnectorObservation(_ request: Data, reply: @escaping (Data?, String) -> Void)
     func settleWorkflowConnectorObservation(_ request: Data, reply: @escaping (Data?, String) -> Void)
     func startWorkflowRun(_ request: Data, reply: @escaping (Data?, String) -> Void)
+    func authorizeWorkflowEffect(_ request: Data, reply: @escaping (Data?, String) -> Void)
 }
 #endif
 
@@ -262,6 +263,9 @@ public struct LocalCoreRunner: Sendable {
         public let outcome: String
         public let eventCount: Int
         public let nextAttemptAtUnixMillis: Int64?
+        public let llmHost: String?
+        public let capabilityHost: String?
+        public let effectHost: String?
 
         enum CodingKeys: String, CodingKey {
             case requestID = "request_id"
@@ -270,23 +274,70 @@ public struct LocalCoreRunner: Sendable {
             case outcome
             case eventCount = "event_count"
             case nextAttemptAtUnixMillis = "next_attempt_at_unix_millis"
+            case llmHost = "llm_host"
+            case capabilityHost = "capability_host"
+            case effectHost = "effect_host"
         }
+    }
+
+    public struct WorkflowEffectAuthorizeResult: Decodable, Equatable, Sendable {
+        public let requestID: String
+        public let effectID: String
+        public let status: String
+        public let duplicate: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case requestID = "request_id"
+            case effectID = "effect_id"
+            case status
+            case duplicate
+        }
+    }
+
+    /// Records the owner's decision for a proposed workflow effect. The run
+    /// continues on its next start; nothing is dispatched here.
+    public func authorizeWorkflowEffect(
+        effectID: String,
+        approvalID: String,
+        approvalFingerprint: Data,
+        approve: Bool,
+        timeout: TimeInterval = 10
+    ) async throws -> WorkflowEffectAuthorizeResult {
+        let requestID = "workflow-effect:\(UUID().uuidString.lowercased())"
+        let request: [String: Any] = [
+            "request_id": requestID,
+            "effect_id": effectID,
+            "approval_id": approvalID,
+            "fingerprint_hex": approvalFingerprint.map { String(format: "%02x", $0) }.joined(),
+            "decision": approve ? "approve" : "reject",
+            "actor_id": "local-owner",
+        ]
+        let data = try JSONSerialization.data(withJSONObject: request, options: [.sortedKeys])
+        let output = try await serviceResponse(request: data, timeout: timeout, operation: .authorizeWorkflowEffect)
+        guard output.count <= Self.maximumResponseBytes,
+              let result = try? JSONDecoder().decode(WorkflowEffectAuthorizeResult.self, from: output),
+              result.requestID == requestID else {
+            throw LocalCoreRunnerError.malformedReport
+        }
+        return result
     }
 
     /// Starts a manual run of an active, executable workflow revision.
     public func startWorkflowRun(
         workflowID: String,
         revisionID: String,
+        runID: String? = nil,
         inputs: [String: Any] = [:],
-        timeout: TimeInterval = 60
+        timeout: TimeInterval = 600
     ) async throws -> WorkflowRunStartResult {
         let requestID = "workflow-run:\(UUID().uuidString.lowercased())"
-        let request: [String: Any] = [
+        var request: [String: Any] = [
             "request_id": requestID,
             "workflow_id": workflowID,
             "revision_id": revisionID,
             "inputs": inputs,
         ]
+        if let runID { request["run_id"] = runID }
         let data = try JSONSerialization.data(withJSONObject: request, options: [.sortedKeys])
         let output = try await serviceResponse(request: data, timeout: timeout, operation: .startWorkflowRun)
         guard output.count <= Self.maximumResponseBytes,
@@ -494,6 +545,7 @@ private enum LocalCoreServiceOperation {
     case beginWorkflowConnectorObservation
     case settleWorkflowConnectorObservation
     case startWorkflowRun
+    case authorizeWorkflowEffect
 
     var maximumResponseBytes: Int {
         switch self {
@@ -561,6 +613,8 @@ private func runBoundedService(
         service.settleWorkflowConnectorObservation(request, reply: reply)
     case .startWorkflowRun:
         service.startWorkflowRun(request, reply: reply)
+    case .authorizeWorkflowEffect:
+        service.authorizeWorkflowEffect(request, reply: reply)
     }
     guard completion.wait(timeout: .now() + timeout) == .success else {
         connection.invalidate()

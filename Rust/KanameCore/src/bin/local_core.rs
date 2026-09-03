@@ -101,6 +101,9 @@ fn main() {
         {
             workflow_run_start(journal_path, projection_path, application_support)
         }
+        [operation, journal_path, projection_path] if operation == "workflow-effect-authorize" => {
+            workflow_effect_authorize(journal_path, projection_path)
+        }
         _ => Err("usage: kaname-local-core scenario <F-01..F-14> | scenario-store <F-01..F-14> <journal-path> | append-event <journal-path> < event-envelope.bin | authorize-action <journal-path> < approval-command.bin | record-review <journal-path> < command-envelope.bin | replay <journal-path> < replay-request.bin | mobile-propose <journal-path> < enrollment-challenge.bin | mobile-decide <journal-path> < enrollment-decision.bin | mobile-admit <journal-path> <recipient-device-id> <recipient-key-id> < encrypted-envelope.bin | scale <S-01..S-04> | workflow-schema-check < request.json | workflow-canonicalize < value.json | workflow-compile < compile-request.bin | workflow-library-query <application-support-root> < query-request.bin | workflow-library-activate <application-support-root> < activation-request.bin | workflow-library-import-frozen <application-support-root> < import-request.bin | workflow-run-inspect <journal-path> <projection-path> < query.bin | workflow-connector-observation-begin <journal-path> <projection-path> < request.bin | workflow-connector-observation-settle <journal-path> <projection-path> < request.bin | workflow-run-purge <journal-path> <projection-path> <application-support-root> < request.bin | workflow-run-start <journal-path> <projection-path> <application-support-root> < request.json".to_owned()),
     };
     match result {
@@ -133,6 +136,7 @@ struct WorkflowRunStartResponse {
     next_attempt_at_unix_millis: Option<i64>,
     llm_host: String,
     capability_host: String,
+    effect_host: String,
 }
 
 /// Starts (or resumes) a durable run of an active, executable revision from a
@@ -199,12 +203,22 @@ fn workflow_run_start(
         episode_kind: String::new(),
         prior_episode_id: String::new(),
     };
+    // The journal admits one command per idempotency key and requires an
+    // identical envelope to re-issue it, so everything here derives from the
+    // run ID. Re-running the same run (after an effect approval, for example)
+    // then continues from the journaled state instead of being rejected.
+    let stable_submitted_at = {
+        use sha2::Digest as _;
+        let digest = Sha256::digest(run_id.as_bytes());
+        let seed = u64::from_be_bytes(digest[..8].try_into().unwrap_or([0; 8]));
+        1_780_000_000_000_i64 + (seed % 86_400_000_000) as i64
+    };
     let envelope = v1::CommandEnvelope {
         schema_version: Some(v1::SchemaVersion {
             major: kaname_core::SCHEMA_MAJOR,
             minor: 0,
         }),
-        command_id: format!("command-{run_id}-{now}"),
+        command_id: format!("command-{run_id}"),
         idempotency_key: format!("idempotency-{run_id}"),
         kind: kaname_core::workflow_runtime::WORKFLOW_RUN_REQUEST_KIND.into(),
         payload: Some(v1::OpaqueTypedPayload {
@@ -223,8 +237,9 @@ fn workflow_run_start(
         }),
         actor_id: "local-owner".into(),
         expected_revision: 0,
-        submitted_at_unix_millis: now,
+        submitted_at_unix_millis: stable_submitted_at,
     };
+    let _ = now;
     let mut journal = Journal::open(journal_path, &CURSOR_KEY)
         .map_err(|_| "workflow_run_journal_unavailable".to_owned())?;
     // Use the process LLM host when the service configured one; otherwise the
@@ -245,11 +260,22 @@ fn workflow_run_start(
             capabilities.unavailable_reason().unwrap_or("unknown")
         )
     };
+    let mut effects = kaname_core::workflow_effect_process::ProcessWorkflowEffectHost::from_environment(
+        journal_path,
+        projection_path,
+        CURSOR_KEY,
+    );
+    let effect_host = if effects.is_available() {
+        format!("available:{}", effects.registered_connectors().len())
+    } else {
+        format!("unavailable:{}", effects.unavailable_reason().unwrap_or("unknown"))
+    };
     let result = kaname_core::workflow_executor::execute_with_hosts(
         &mut journal,
         &store,
         &mut capabilities,
         &mut llm,
+        &mut effects,
         &envelope,
     )
     .map_err(|error| format!("workflow_run_start_failed:{error:?}"))?;
@@ -264,8 +290,78 @@ fn workflow_run_start(
         next_attempt_at_unix_millis: result.next_attempt_at_unix_millis,
         llm_host,
         capability_host,
+        effect_host,
     };
     let json = serde_json::to_vec(&response).map_err(|_| "workflow_run_start_encode_failed".to_owned())?;
+    Ok(hex::encode(json))
+}
+
+#[derive(Deserialize)]
+struct WorkflowEffectAuthorizeRequest {
+    request_id: String,
+    effect_id: String,
+    approval_id: String,
+    /// Hex of the approval request fingerprint the owner saw.
+    fingerprint_hex: String,
+    /// "approve" or "reject".
+    decision: String,
+    #[serde(default)]
+    actor_id: String,
+    #[serde(default)]
+    device_id: String,
+}
+
+#[derive(Serialize)]
+struct WorkflowEffectAuthorizeResponse {
+    request_id: String,
+    effect_id: String,
+    status: String,
+    duplicate: bool,
+}
+
+/// Records the owner's decision for a proposed effect. The executor picks the
+/// resolution up on its next transition; nothing is dispatched here.
+fn workflow_effect_authorize(journal_path: &str, projection_path: &str) -> Result<String, String> {
+    let wire = read_standard_input()?;
+    let request: WorkflowEffectAuthorizeRequest =
+        serde_json::from_slice(&wire).map_err(|_| "workflow_effect_authorize_rejected".to_owned())?;
+    let fingerprint = hex::decode(&request.fingerprint_hex)
+        .map_err(|_| "workflow_effect_authorize_rejected:fingerprint".to_owned())?;
+    let decision = match request.decision.as_str() {
+        "approve" => v1::ApprovalDecision::Approve,
+        "reject" => v1::ApprovalDecision::Reject,
+        _ => return Err("workflow_effect_authorize_rejected:decision".to_owned()),
+    };
+    let mut journal = Journal::open(journal_path, &CURSOR_KEY)
+        .map_err(|_| "workflow_run_journal_unavailable".to_owned())?;
+    let (mut projection, _) = WorkflowRunProjection::open_or_rebuild(projection_path, &journal)
+        .map_err(|_| "workflow_run_projection_unavailable".to_owned())?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or_default();
+    let admission = kaname_core::workflow_effect_authority::authorize_workflow_effect(
+        &mut journal,
+        &mut projection,
+        &request.effect_id,
+        v1::ApprovalResolution {
+            approval_id: request.approval_id,
+            decision: decision as i32,
+            expected_fingerprint: fingerprint,
+            actor_id: if request.actor_id.is_empty() { "local-owner".into() } else { request.actor_id },
+            device_id: request.device_id,
+            standing_rule_reference: String::new(),
+        },
+        now,
+    )
+    .map_err(|error| format!("workflow_effect_authorize_failed:{error:?}"))?;
+    let json = serde_json::to_vec(&WorkflowEffectAuthorizeResponse {
+        request_id: request.request_id,
+        effect_id: request.effect_id,
+        status: admission.authority.status,
+        duplicate: admission.duplicate,
+    })
+    .map_err(|_| "workflow_effect_authorize_encode_failed".to_owned())?;
     Ok(hex::encode(json))
 }
 

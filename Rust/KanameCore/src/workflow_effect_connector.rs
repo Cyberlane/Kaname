@@ -85,6 +85,9 @@ pub struct WorkflowEffectConnectorRequest {
     pub authorization: v1::WorkflowEffectAuthorized,
     pub dispatch: v1::WorkflowEffectDispatchStarted,
     pub prior_receipt: Option<v1::WorkflowEffectReceipt>,
+    /// The mapped effect input whose digest the intent pins. Real connectors
+    /// need the payload itself, not only its digest.
+    pub input: Option<v1::WorkflowValueReference>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -389,6 +392,7 @@ pub fn dispatch_workflow_effect(
         authorization: authorization.clone(),
         dispatch: dispatch.clone(),
         prior_receipt: None,
+        input: None,
     };
     let settled = dispatch_result_payload(&request, connector.dispatch(&request));
     append_effect_event(
@@ -466,6 +470,7 @@ pub fn reconcile_workflow_effect(
         proposal: proposal.clone(),
         authorization: authorization.clone(),
         dispatch: dispatch.clone(),
+        input: None,
         prior_receipt: authority
             .dispatch_settled
             .as_ref()

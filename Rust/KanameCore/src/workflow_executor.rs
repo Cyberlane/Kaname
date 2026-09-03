@@ -754,9 +754,9 @@ pub fn execute_with_hosts(
     library: &WorkflowLibraryStore,
     capabilities: &mut dyn WorkflowCapabilityHost,
     llm: &mut dyn WorkflowLlmProvider,
+    effects: &mut dyn WorkflowEffectHost,
     command: &v1::CommandEnvelope,
 ) -> Result<WorkflowExecutionResult> {
-    let mut effects = UnavailableWorkflowEffectHost;
     execute_internal(
         journal,
         library,
@@ -764,7 +764,7 @@ pub fn execute_with_hosts(
         None,
         capabilities,
         llm,
-        &mut effects,
+        effects,
         command,
         current_unix_millis(),
         None,
@@ -7319,6 +7319,7 @@ enum EffectPreparation {
 struct PreparedEffect {
     proposal: v1::WorkflowEffectProposed,
     effect_id: String,
+    input: v1::WorkflowValueReference,
 }
 
 /// Builds the exact proposal one attempt would record. The result is derived
@@ -7411,6 +7412,7 @@ fn prepare_effect(
     Ok(EffectPreparation::Ready(Box::new(PreparedEffect {
         proposal,
         effect_id,
+        input,
     })))
 }
 
@@ -7548,6 +7550,7 @@ fn pending_effect_event_sequence(
         authorization: authorization.clone(),
         dispatch: dispatch.clone(),
         prior_receipt: None,
+        input: Some(prepared.input.clone()),
     };
     let Some(settled) = recorded.dispatch_settled.as_ref() else {
         let result =
