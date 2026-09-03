@@ -387,12 +387,16 @@ private final class LocalControlService: NSObject, LocalCoreControlService {
         process.standardInput = input
         // The workflow LLM host ships beside the core; the executor only uses it
         // when this variable names an executable that describes a model class.
+        var environment = ProcessInfo.processInfo.environment
         let llmHost = executable.deletingLastPathComponent().appendingPathComponent("KanameWorkflowLlmHost")
         if FileManager.default.isExecutableFile(atPath: llmHost.path) {
-            var environment = ProcessInfo.processInfo.environment
             environment["KANAME_WORKFLOW_LLM_COMMAND"] = llmHost.path
-            process.environment = environment
         }
+        let capabilityHost = executable.deletingLastPathComponent().appendingPathComponent("KanameWorkflowCapabilityHost")
+        if FileManager.default.isExecutableFile(atPath: capabilityHost.path) {
+            environment["KANAME_WORKFLOW_CAPABILITY_COMMAND"] = capabilityHost.path
+        }
+        process.environment = environment
         let timedOut = LockedFlag()
         let timer = DispatchSource.makeTimerSource(queue: .global(qos: .userInitiated))
         timer.schedule(deadline: .now() + timeout)

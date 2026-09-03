@@ -746,6 +746,33 @@ pub fn execute_with_storage(
     )
 }
 
+/// Runs a revision with both injectable hosts the desktop can supply today:
+/// an external capability host and an external LLM provider. Effects remain
+/// unavailable until a connector host exists.
+pub fn execute_with_hosts(
+    journal: &mut Journal,
+    library: &WorkflowLibraryStore,
+    capabilities: &mut dyn WorkflowCapabilityHost,
+    llm: &mut dyn WorkflowLlmProvider,
+    command: &v1::CommandEnvelope,
+) -> Result<WorkflowExecutionResult> {
+    let mut effects = UnavailableWorkflowEffectHost;
+    execute_internal(
+        journal,
+        library,
+        None,
+        None,
+        capabilities,
+        llm,
+        &mut effects,
+        command,
+        current_unix_millis(),
+        None,
+        0,
+        None,
+    )
+}
+
 pub fn execute_with_capabilities(
     journal: &mut Journal,
     library: &WorkflowLibraryStore,

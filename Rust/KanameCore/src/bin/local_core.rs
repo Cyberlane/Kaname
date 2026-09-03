@@ -132,6 +132,7 @@ struct WorkflowRunStartResponse {
     event_count: usize,
     next_attempt_at_unix_millis: Option<i64>,
     llm_host: String,
+    capability_host: String,
 }
 
 /// Starts (or resumes) a durable run of an active, executable revision from a
@@ -234,11 +235,23 @@ fn workflow_run_start(
     } else {
         format!("unavailable:{}", llm.unavailable_reason().unwrap_or("unknown"))
     };
-    let result = if llm.is_available() {
-        kaname_core::workflow_executor::execute_with_llm(&mut journal, &store, &mut llm, &envelope)
+    let mut capabilities =
+        kaname_core::workflow_capabilities::ProcessWorkflowCapabilityHost::from_environment();
+    let capability_host = if capabilities.is_available() {
+        format!("available:{}", capabilities.registered_capabilities().len())
     } else {
-        kaname_core::workflow_executor::execute(&mut journal, &store, &envelope)
-    }
+        format!(
+            "unavailable:{}",
+            capabilities.unavailable_reason().unwrap_or("unknown")
+        )
+    };
+    let result = kaname_core::workflow_executor::execute_with_hosts(
+        &mut journal,
+        &store,
+        &mut capabilities,
+        &mut llm,
+        &envelope,
+    )
     .map_err(|error| format!("workflow_run_start_failed:{error:?}"))?;
     // Keep the projection warm so Run history shows the run immediately.
     let _ = WorkflowRunProjection::open_or_rebuild(projection_path, &journal);
@@ -250,6 +263,7 @@ fn workflow_run_start(
         event_count: result.event_count,
         next_attempt_at_unix_millis: result.next_attempt_at_unix_millis,
         llm_host,
+        capability_host,
     };
     let json = serde_json::to_vec(&response).map_err(|_| "workflow_run_start_encode_failed".to_owned())?;
     Ok(hex::encode(json))
