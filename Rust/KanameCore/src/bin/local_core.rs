@@ -96,7 +96,12 @@ fn main() {
         {
             workflow_run_purge(journal_path, projection_path, application_support)
         }
-        _ => Err("usage: kaname-local-core scenario <F-01..F-14> | scenario-store <F-01..F-14> <journal-path> | append-event <journal-path> < event-envelope.bin | authorize-action <journal-path> < approval-command.bin | record-review <journal-path> < command-envelope.bin | replay <journal-path> < replay-request.bin | mobile-propose <journal-path> < enrollment-challenge.bin | mobile-decide <journal-path> < enrollment-decision.bin | mobile-admit <journal-path> <recipient-device-id> <recipient-key-id> < encrypted-envelope.bin | scale <S-01..S-04> | workflow-schema-check < request.json | workflow-canonicalize < value.json | workflow-compile < compile-request.bin | workflow-library-query <application-support-root> < query-request.bin | workflow-library-activate <application-support-root> < activation-request.bin | workflow-library-import-frozen <application-support-root> < import-request.bin | workflow-run-inspect <journal-path> <projection-path> < query.bin | workflow-connector-observation-begin <journal-path> <projection-path> < request.bin | workflow-connector-observation-settle <journal-path> <projection-path> < request.bin | workflow-run-purge <journal-path> <projection-path> <application-support-root> < request.bin".to_owned()),
+        [operation, journal_path, projection_path, application_support]
+            if operation == "workflow-run-start" =>
+        {
+            workflow_run_start(journal_path, projection_path, application_support)
+        }
+        _ => Err("usage: kaname-local-core scenario <F-01..F-14> | scenario-store <F-01..F-14> <journal-path> | append-event <journal-path> < event-envelope.bin | authorize-action <journal-path> < approval-command.bin | record-review <journal-path> < command-envelope.bin | replay <journal-path> < replay-request.bin | mobile-propose <journal-path> < enrollment-challenge.bin | mobile-decide <journal-path> < enrollment-decision.bin | mobile-admit <journal-path> <recipient-device-id> <recipient-key-id> < encrypted-envelope.bin | scale <S-01..S-04> | workflow-schema-check < request.json | workflow-canonicalize < value.json | workflow-compile < compile-request.bin | workflow-library-query <application-support-root> < query-request.bin | workflow-library-activate <application-support-root> < activation-request.bin | workflow-library-import-frozen <application-support-root> < import-request.bin | workflow-run-inspect <journal-path> <projection-path> < query.bin | workflow-connector-observation-begin <journal-path> <projection-path> < request.bin | workflow-connector-observation-settle <journal-path> <projection-path> < request.bin | workflow-run-purge <journal-path> <projection-path> <application-support-root> < request.bin | workflow-run-start <journal-path> <projection-path> <application-support-root> < request.json".to_owned()),
     };
     match result {
         Ok(json) => println!("{json}"),
@@ -105,6 +110,135 @@ fn main() {
             std::process::exit(64);
         }
     }
+}
+
+#[derive(Deserialize)]
+struct WorkflowRunStartRequest {
+    request_id: String,
+    #[serde(default)]
+    run_id: String,
+    workflow_id: String,
+    revision_id: String,
+    #[serde(default)]
+    inputs: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Serialize)]
+struct WorkflowRunStartResponse {
+    request_id: String,
+    run_id: String,
+    run_token_id: String,
+    outcome: String,
+    event_count: usize,
+    next_attempt_at_unix_millis: Option<i64>,
+}
+
+/// Starts (or resumes) a durable run of an active, executable revision from a
+/// small JSON request and returns the settled or waiting outcome. This is the
+/// first desktop-callable path into the Rust executor.
+fn workflow_run_start(
+    journal_path: &str,
+    projection_path: &str,
+    application_support: &str,
+) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    let wire = read_standard_input()?;
+    let request: WorkflowRunStartRequest =
+        serde_json::from_slice(&wire).map_err(|_| "workflow_run_start_rejected".to_owned())?;
+    if request.request_id.is_empty() || request.workflow_id.is_empty() || request.revision_id.is_empty() {
+        return Err("workflow_run_start_rejected".to_owned());
+    }
+    let store = open_workflow_library(application_support)
+        .map_err(|_| "workflow_library_unavailable".to_owned())?;
+    let revision = store
+        .load_workflow_revision(&request.revision_id, "active")
+        .map_err(|error| format!("workflow_revision_unavailable:{error:?}"))?;
+    if revision.summary.workflow_id != request.workflow_id {
+        return Err("workflow_run_start_rejected:revision_workflow_mismatch".to_owned());
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or_default();
+    let run_id = if request.run_id.is_empty() {
+        format!("run-{}", &request.request_id)
+    } else {
+        request.run_id.clone()
+    };
+    let inputs = request
+        .inputs
+        .iter()
+        .map(|(port_id, value)| {
+            let bytes = serde_json_canonicalizer::to_vec(value).unwrap_or_default();
+            v1::WorkflowInputBinding {
+                port_id: port_id.clone(),
+                value: Some(v1::WorkflowValueReference {
+                    value_id: format!("value-{run_id}-{port_id}"),
+                    content_type: "application/json".into(),
+                    byte_count: bytes.len() as u64,
+                    sha256: hex::encode(Sha256::digest(&bytes)),
+                    inline_canonical_json: bytes,
+                    ..Default::default()
+                }),
+            }
+        })
+        .collect();
+    let payload = v1::RequestWorkflowRun {
+        run_id: run_id.clone(),
+        workflow_id: request.workflow_id.clone(),
+        revision_id: request.revision_id.clone(),
+        package_digest: revision.summary.package_digest.clone(),
+        trigger_kind: "manual".into(),
+        trigger_event_id: String::new(),
+        inputs,
+        installation_id: String::new(),
+        case_id: String::new(),
+        episode_id: String::new(),
+        episode_kind: String::new(),
+        prior_episode_id: String::new(),
+    };
+    let envelope = v1::CommandEnvelope {
+        schema_version: Some(v1::SchemaVersion {
+            major: kaname_core::SCHEMA_MAJOR,
+            minor: 0,
+        }),
+        command_id: format!("command-{run_id}-{now}"),
+        idempotency_key: format!("idempotency-{run_id}"),
+        kind: kaname_core::workflow_runtime::WORKFLOW_RUN_REQUEST_KIND.into(),
+        payload: Some(v1::OpaqueTypedPayload {
+            type_url: kaname_core::workflow_runtime::WORKFLOW_RUN_REQUEST_TYPE.into(),
+            content_type: "application/x-protobuf".into(),
+            value: payload.encode_to_vec(),
+            payload_version: 1,
+        }),
+        scope: Some(v1::Scope {
+            project_id: "project-kaname".into(),
+            workspace_id: "workspace-local".into(),
+            account_id: String::new(),
+            authority_id: String::new(),
+            egress_class: String::new(),
+            destination_digest: String::new(),
+        }),
+        actor_id: "local-owner".into(),
+        expected_revision: 0,
+        submitted_at_unix_millis: now,
+    };
+    let mut journal = Journal::open(journal_path, &CURSOR_KEY)
+        .map_err(|_| "workflow_run_journal_unavailable".to_owned())?;
+    let result = kaname_core::workflow_executor::execute(&mut journal, &store, &envelope)
+        .map_err(|error| format!("workflow_run_start_failed:{error:?}"))?;
+    // Keep the projection warm so Run history shows the run immediately.
+    let _ = WorkflowRunProjection::open_or_rebuild(projection_path, &journal);
+    let response = WorkflowRunStartResponse {
+        request_id: request.request_id,
+        run_id: result.run_id,
+        run_token_id: result.run_token_id,
+        outcome: format!("{:?}", result.outcome).to_lowercase(),
+        event_count: result.event_count,
+        next_attempt_at_unix_millis: result.next_attempt_at_unix_millis,
+    };
+    let json = serde_json::to_vec(&response).map_err(|_| "workflow_run_start_encode_failed".to_owned())?;
+    Ok(hex::encode(json))
 }
 
 fn workflow_run_inspect(journal_path: &str, projection_path: &str) -> Result<String, String> {

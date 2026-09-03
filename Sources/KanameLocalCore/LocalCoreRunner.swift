@@ -70,6 +70,7 @@ public protocol LocalCoreControlService {
     func purgeWorkflowRun(_ request: Data, reply: @escaping (Data?, String) -> Void)
     func beginWorkflowConnectorObservation(_ request: Data, reply: @escaping (Data?, String) -> Void)
     func settleWorkflowConnectorObservation(_ request: Data, reply: @escaping (Data?, String) -> Void)
+    func startWorkflowRun(_ request: Data, reply: @escaping (Data?, String) -> Void)
 }
 #endif
 
@@ -251,6 +252,49 @@ public struct LocalCoreRunner: Sendable {
             operation: .inspectWorkflowRuns,
             as: Kaname_V1_WorkflowRunInspectionResponse.self
         )
+    }
+
+    /// Result of starting a durable workflow run on the Rust executor.
+    public struct WorkflowRunStartResult: Decodable, Equatable, Sendable {
+        public let requestID: String
+        public let runID: String
+        public let runTokenID: String
+        public let outcome: String
+        public let eventCount: Int
+        public let nextAttemptAtUnixMillis: Int64?
+
+        enum CodingKeys: String, CodingKey {
+            case requestID = "request_id"
+            case runID = "run_id"
+            case runTokenID = "run_token_id"
+            case outcome
+            case eventCount = "event_count"
+            case nextAttemptAtUnixMillis = "next_attempt_at_unix_millis"
+        }
+    }
+
+    /// Starts a manual run of an active, executable workflow revision.
+    public func startWorkflowRun(
+        workflowID: String,
+        revisionID: String,
+        inputs: [String: Any] = [:],
+        timeout: TimeInterval = 60
+    ) async throws -> WorkflowRunStartResult {
+        let requestID = "workflow-run:\(UUID().uuidString.lowercased())"
+        let request: [String: Any] = [
+            "request_id": requestID,
+            "workflow_id": workflowID,
+            "revision_id": revisionID,
+            "inputs": inputs,
+        ]
+        let data = try JSONSerialization.data(withJSONObject: request, options: [.sortedKeys])
+        let output = try await serviceResponse(request: data, timeout: timeout, operation: .startWorkflowRun)
+        guard output.count <= Self.maximumResponseBytes,
+              let result = try? JSONDecoder().decode(WorkflowRunStartResult.self, from: output),
+              result.requestID == requestID else {
+            throw LocalCoreRunnerError.malformedReport
+        }
+        return result
     }
 
     public func purgeWorkflowRun(
@@ -449,6 +493,7 @@ private enum LocalCoreServiceOperation {
     case purgeWorkflowRun
     case beginWorkflowConnectorObservation
     case settleWorkflowConnectorObservation
+    case startWorkflowRun
 
     var maximumResponseBytes: Int {
         switch self {
@@ -514,6 +559,8 @@ private func runBoundedService(
         service.beginWorkflowConnectorObservation(request, reply: reply)
     case .settleWorkflowConnectorObservation:
         service.settleWorkflowConnectorObservation(request, reply: reply)
+    case .startWorkflowRun:
+        service.startWorkflowRun(request, reply: reply)
     }
     guard completion.wait(timeout: .now() + timeout) == .success else {
         connection.invalidate()

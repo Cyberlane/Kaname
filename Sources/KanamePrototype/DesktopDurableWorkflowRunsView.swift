@@ -14,14 +14,22 @@ final class DesktopDurableWorkflowRunsViewModel: ObservableObject {
     }
 
     @Published private(set) var state: State = .idle
+    @Published private(set) var runnableWorkflows: [DesktopWorkflowV2PortfolioItem] = []
+    @Published private(set) var startMessage: String?
+    @Published private(set) var isStarting = false
     private let loader: DesktopWorkflowRunHistoryLoader?
     private let purgeClient: DesktopWorkflowRunPurgeClient?
+    private let runner: LocalCoreRunner?
+    private let library: DesktopWorkflowV2LibraryClient?
 
     init(runner: LocalCoreRunner) {
+        self.runner = runner
         purgeClient = DesktopWorkflowRunPurgeClient(transport: runner)
+        let library = DesktopWorkflowV2LibraryClient(transport: runner)
+        self.library = library
         loader = DesktopWorkflowRunHistoryLoader(
             inspection: DesktopWorkflowRunInspectionClient(transport: runner),
-            library: DesktopWorkflowV2LibraryClient(transport: runner)
+            library: library
         )
     }
 
@@ -29,6 +37,29 @@ final class DesktopDurableWorkflowRunsViewModel: ObservableObject {
         state = .loaded(snapshot)
         loader = nil
         purgeClient = nil
+        runner = nil
+        library = nil
+    }
+
+    /// Active revisions the Rust executor can run right now.
+    func loadRunnableWorkflows() async {
+        guard let library else { return }
+        let items = try? await library.portfolio(requestID: "workflow-runnable:\(UUID().uuidString.lowercased())")
+        runnableWorkflows = (items ?? []).filter { $0.activeRevisionID != nil }
+    }
+
+    /// Starts a manual run on the Rust executor and refreshes history.
+    func startRun(_ item: DesktopWorkflowV2PortfolioItem) async {
+        guard let runner, let revisionID = item.activeRevisionID, !isStarting else { return }
+        isStarting = true
+        defer { isStarting = false }
+        do {
+            let result = try await runner.startWorkflowRun(workflowID: item.workflowID, revisionID: revisionID)
+            startMessage = "\(item.name): run \(result.runID.suffix(8)) \(result.outcome) after \(result.eventCount) events."
+        } catch {
+            startMessage = "\(item.name) did not start: \(error.localizedDescription)"
+        }
+        await reload()
     }
 
     func load() async {
@@ -121,7 +152,10 @@ struct DesktopDurableWorkflowRunsView: View {
                 loaded(snapshot)
             }
         }
-        .task { await viewModel.load() }
+        .task {
+            await viewModel.load()
+            await viewModel.loadRunnableWorkflows()
+        }
     }
 
     @ViewBuilder
@@ -135,7 +169,13 @@ struct DesktopDurableWorkflowRunsView: View {
                     ? "This run was not found or its retained history has been purged."
                     : "Published workflows will appear here after their first local run.")
                     .font(.caption).foregroundStyle(.secondary)
-                Button("Refresh", systemImage: "arrow.clockwise") { Task { await viewModel.reload() } }
+                HStack {
+                    runWorkflowMenu
+                    Button("Refresh", systemImage: "arrow.clockwise") { Task { await viewModel.reload() } }
+                }
+                if let message = viewModel.startMessage {
+                    Text(message).font(.caption).foregroundStyle(.secondary)
+                }
             }
             .frame(maxWidth: .infinity, minHeight: 240)
             .panelStyle()
@@ -170,9 +210,31 @@ struct DesktopDurableWorkflowRunsView: View {
         }
     }
 
+    /// Manual trigger for any active, executable revision on the Rust executor.
+    @ViewBuilder private var runWorkflowMenu: some View {
+        if viewModel.runnableWorkflows.isEmpty {
+            Button("Run workflow", systemImage: "play.fill") {}
+                .disabled(true)
+                .help("Activate an executable workflow revision first")
+        } else {
+            Menu {
+                ForEach(viewModel.runnableWorkflows) { item in
+                    Button(item.name) { Task { await viewModel.startRun(item) } }
+                }
+            } label: {
+                Label(viewModel.isStarting ? "Starting…" : "Run workflow", systemImage: "play.fill")
+            }
+            .disabled(viewModel.isStarting)
+        }
+    }
+
     private func runList(_ history: DesktopWorkflowRunHistorySnapshot) -> some View {
         VStack(alignment: .leading, spacing: 8) {
+            if let message = viewModel.startMessage {
+                Text(message).font(.caption).foregroundStyle(.secondary)
+            }
             HStack {
+                runWorkflowMenu
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Workflow run history").font(.headline)
                     Text("Journal position \(history.projectionHighWaterMark)")

@@ -200,6 +200,22 @@ private final class LocalControlService: NSObject, LocalCoreControlService {
         )
     }
 
+    func startWorkflowRun(_ request: Data, reply: @escaping (Data?, String) -> Void) {
+        let applicationSupportRoot = journalDirectory
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let projection = applicationSupportRoot
+            .appendingPathComponent("Workflows", isDirectory: true)
+            .appendingPathComponent("workflow-run-projection.sqlite")
+        runWireOperation(
+            "workflow-run-start",
+            request: request,
+            extraArguments: [projection.path, applicationSupportRoot.path],
+            permissionTarget: projection,
+            reply: reply
+        )
+    }
+
     func purgeWorkflowRun(_ request: Data, reply: @escaping (Data?, String) -> Void) {
         let applicationSupportRoot = journalDirectory
             .deletingLastPathComponent()
