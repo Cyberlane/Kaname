@@ -112,6 +112,11 @@ fn main() {
         [operation, _journal_path, application_support] if operation == "workflow-library-publish" => {
             workflow_library_publish(application_support)
         }
+        [operation, journal_path, projection_path, application_support]
+            if operation == "workflow-event-fanout" =>
+        {
+            workflow_event_fanout(journal_path, projection_path, application_support)
+        }
         _ => Err("usage: kaname-local-core scenario <F-01..F-14> | scenario-store <F-01..F-14> <journal-path> | append-event <journal-path> < event-envelope.bin | authorize-action <journal-path> < approval-command.bin | record-review <journal-path> < command-envelope.bin | replay <journal-path> < replay-request.bin | mobile-propose <journal-path> < enrollment-challenge.bin | mobile-decide <journal-path> < enrollment-decision.bin | mobile-admit <journal-path> <recipient-device-id> <recipient-key-id> < encrypted-envelope.bin | scale <S-01..S-04> | workflow-schema-check < request.json | workflow-canonicalize < value.json | workflow-compile < compile-request.bin | workflow-library-query <application-support-root> < query-request.bin | workflow-library-activate <application-support-root> < activation-request.bin | workflow-library-import-frozen <application-support-root> < import-request.bin | workflow-run-inspect <journal-path> <projection-path> < query.bin | workflow-connector-observation-begin <journal-path> <projection-path> < request.bin | workflow-connector-observation-settle <journal-path> <projection-path> < request.bin | workflow-run-purge <journal-path> <projection-path> <application-support-root> < request.bin | workflow-run-start <journal-path> <projection-path> <application-support-root> < request.json".to_owned()),
     };
     match result {
@@ -510,6 +515,162 @@ fn workflow_schedule_tick(
     serde_json::to_vec(&response)
         .map(hex::encode)
         .map_err(|_| "workflow_schedule_tick_encode_failed".to_owned())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowEventFanoutRequest {
+    request_id: String,
+    event_contract: String,
+    event_id: String,
+    #[serde(default)]
+    contract_key: String,
+    #[serde(default)]
+    input: serde_json::Value,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowEventFanoutReceipt {
+    workflow_id: String,
+    revision_id: String,
+    run_id: String,
+    admission: String,
+    outcome: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowEventFanoutResponse {
+    request_id: String,
+    matched: usize,
+    receipts: Vec<WorkflowEventFanoutReceipt>,
+    errors: Vec<String>,
+}
+
+/// Offers one external event to every active, executable revision whose
+/// entrypoint is `trigger.event` with a matching event contract. The executor
+/// deduplicates by event ID or contract key, so re-offering the same event
+/// appends nothing.
+fn workflow_event_fanout(
+    journal_path: &str,
+    projection_path: &str,
+    application_support: &str,
+) -> Result<String, String> {
+    let wire = read_standard_input()?;
+    let request: WorkflowEventFanoutRequest =
+        serde_json::from_slice(&wire).map_err(|_| "workflow_event_fanout_rejected".to_owned())?;
+    if request.request_id.is_empty() || request.event_contract.is_empty() || request.event_id.is_empty() {
+        return Err("workflow_event_fanout_rejected".to_owned());
+    }
+    let store = open_workflow_library(application_support)
+        .map_err(|_| "workflow_library_unavailable".to_owned())?;
+    let portfolio = store
+        .workflow_portfolio("active")
+        .map_err(|_| "workflow_portfolio_unavailable".to_owned())?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or_default();
+    let mut response = WorkflowEventFanoutResponse {
+        request_id: request.request_id.clone(),
+        matched: 0,
+        receipts: Vec::new(),
+        errors: Vec::new(),
+    };
+    let mut journal: Option<Journal> = None;
+    let mut llm = kaname_core::workflow_llm::ProcessWorkflowLlmProvider::from_environment();
+    let mut capabilities =
+        kaname_core::workflow_capabilities::ProcessWorkflowCapabilityHost::from_environment();
+    let mut effects = kaname_core::workflow_effect_process::ProcessWorkflowEffectHost::from_environment(
+        journal_path,
+        projection_path,
+        CURSOR_KEY,
+    );
+    let input_bytes = serde_json_canonicalizer::to_vec(&request.input).unwrap_or_default();
+    let input_sha = {
+        use sha2::Digest as _;
+        hex::encode(sha2::Sha256::digest(&input_bytes))
+    };
+    for item in portfolio {
+        let Some(revision_id) = item.active_revision_id.clone() else { continue };
+        let Ok(revision) = store.load_workflow_revision(&revision_id, "active") else { continue };
+        let Ok(compiled) = serde_json::from_slice::<serde_json::Value>(&revision.compiled_source) else { continue };
+        let entry_node_id = compiled["entrypoints"][0]["nodeId"].as_str().unwrap_or_default();
+        let Some(entry) = compiled["nodes"].as_array().and_then(|nodes| {
+            nodes.iter().find(|node| node["id"].as_str() == Some(entry_node_id))
+        }) else { continue };
+        if entry["type"].as_str() != Some("trigger.event")
+            || entry["config"]["eventContract"].as_str() != Some(request.event_contract.as_str())
+        {
+            continue;
+        }
+        response.matched += 1;
+        if journal.is_none() {
+            journal = Some(
+                Journal::open(journal_path, &CURSOR_KEY)
+                    .map_err(|_| "workflow_run_journal_unavailable".to_owned())?,
+            );
+        }
+        let Some(journal) = journal.as_mut() else { continue };
+        let binding = kaname_core::workflow_executor::WorkflowTriggerRunBinding {
+            workflow_id: item.workflow_id.clone(),
+            revision_id: revision_id.clone(),
+            package_digest: revision.summary.package_digest.clone(),
+            installation_id: String::new(),
+            case_id: String::new(),
+            input: v1::WorkflowValueReference {
+                value_id: format!("value-event-{}", request.event_id),
+                content_type: "application/json".into(),
+                byte_count: input_bytes.len() as u64,
+                sha256: input_sha.clone(),
+                inline_canonical_json: input_bytes.clone(),
+                ..Default::default()
+            },
+            scope: v1::Scope {
+                project_id: "project-kaname".into(),
+                workspace_id: "workspace-local".into(),
+                account_id: String::new(),
+                authority_id: String::new(),
+                egress_class: String::new(),
+                destination_digest: String::new(),
+            },
+            actor_id: "kaname-event-source".into(),
+            observed_at_unix_millis: now,
+        };
+        let trigger = kaname_core::workflow_executor::WorkflowEventTrigger {
+            event_id: request.event_id.clone(),
+            contract_key: if request.contract_key.is_empty() { request.event_id.clone() } else { request.contract_key.clone() },
+        };
+        match kaname_core::workflow_executor::execute_event_trigger_with_hosts(
+            journal,
+            &store,
+            &binding,
+            &trigger,
+            &mut capabilities,
+            &mut llm,
+            &mut effects,
+        ) {
+            Ok(receipt) => response.receipts.push(WorkflowEventFanoutReceipt {
+                workflow_id: item.workflow_id.clone(),
+                revision_id: revision_id.clone(),
+                run_id: receipt.run_id,
+                admission: format!("{:?}", receipt.admission).to_lowercase(),
+                outcome: receipt
+                    .result
+                    .as_ref()
+                    .map(|result| format!("{:?}", result.outcome).to_lowercase())
+                    .unwrap_or_default(),
+            }),
+            Err(error) => response.errors.push(format!("{}:{error:?}", item.workflow_id)),
+        }
+    }
+    if let Some(journal) = journal.as_ref() {
+        let _ = WorkflowRunProjection::open_or_rebuild(projection_path, journal);
+    }
+    serde_json::to_vec(&response)
+        .map(hex::encode)
+        .map_err(|_| "workflow_event_fanout_encode_failed".to_owned())
 }
 
 #[derive(Deserialize)]

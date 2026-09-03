@@ -73,6 +73,7 @@ public protocol LocalCoreControlService {
     func startWorkflowRun(_ request: Data, reply: @escaping (Data?, String) -> Void)
     func authorizeWorkflowEffect(_ request: Data, reply: @escaping (Data?, String) -> Void)
     func publishWorkflow(_ request: Data, reply: @escaping (Data?, String) -> Void)
+    func fanOutWorkflowEvent(_ request: Data, reply: @escaping (Data?, String) -> Void)
 }
 #endif
 
@@ -295,6 +296,56 @@ public struct LocalCoreRunner: Sendable {
         }
     }
 
+    public struct WorkflowEventFanoutReceipt: Decodable, Equatable, Sendable {
+        public let workflowID: String
+        public let revisionID: String
+        public let runID: String
+        public let admission: String
+        public let outcome: String
+
+        enum CodingKeys: String, CodingKey {
+            case workflowID = "workflowId", revisionID = "revisionId", runID = "runId", admission, outcome
+        }
+    }
+
+    public struct WorkflowEventFanoutResult: Decodable, Equatable, Sendable {
+        public let requestID: String
+        public let matched: Int
+        public let receipts: [WorkflowEventFanoutReceipt]
+        public let errors: [String]
+
+        enum CodingKeys: String, CodingKey {
+            case requestID = "requestId", matched, receipts, errors
+        }
+    }
+
+    /// Offers one external event to every active workflow whose entrypoint is
+    /// `trigger.event` with this contract. Deduplicated by the executor.
+    public func fanOutWorkflowEvent(
+        contract: String,
+        eventID: String,
+        contractKey: String,
+        input: [String: Any],
+        timeout: TimeInterval = 600
+    ) async throws -> WorkflowEventFanoutResult {
+        let requestID = "workflow-event-\(UUID().uuidString.lowercased())"
+        let request: [String: Any] = [
+            "requestId": requestID,
+            "eventContract": contract,
+            "eventId": eventID,
+            "contractKey": contractKey,
+            "input": input,
+        ]
+        let data = try JSONSerialization.data(withJSONObject: request, options: [.sortedKeys])
+        let output = try await serviceResponse(request: data, timeout: timeout, operation: .fanOutWorkflowEvent)
+        guard output.count <= Self.maximumWorkflowLibraryResponseBytes,
+              let result = try? JSONDecoder().decode(WorkflowEventFanoutResult.self, from: output),
+              result.requestID == requestID else {
+            throw LocalCoreRunnerError.malformedReport
+        }
+        return result
+    }
+
     public struct WorkflowPublishResult: Decodable, Equatable, Sendable {
         public let requestID: String
         public let workflowID: String
@@ -303,6 +354,11 @@ public struct LocalCoreRunner: Sendable {
         public let executionSupport: String
         public let activated: Bool
         public let activationGeneration: Int64
+
+        enum CodingKeys: String, CodingKey {
+            case requestID = "requestId", workflowID = "workflowId", revisionID = "revisionId"
+            case packageDigest, executionSupport, activated, activationGeneration
+        }
     }
 
     /// Publishes a complete v1 workflow document into the Rust library as a new
@@ -591,6 +647,7 @@ private enum LocalCoreServiceOperation {
     case startWorkflowRun
     case authorizeWorkflowEffect
     case publishWorkflow
+    case fanOutWorkflowEvent
 
     var maximumResponseBytes: Int {
         switch self {
@@ -662,6 +719,8 @@ private func runBoundedService(
         service.authorizeWorkflowEffect(request, reply: reply)
     case .publishWorkflow:
         service.publishWorkflow(request, reply: reply)
+    case .fanOutWorkflowEvent:
+        service.fanOutWorkflowEvent(request, reply: reply)
     }
     guard completion.wait(timeout: .now() + timeout) == .success else {
         connection.invalidate()

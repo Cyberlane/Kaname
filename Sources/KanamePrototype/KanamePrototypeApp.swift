@@ -137,6 +137,8 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
         // Workflow effects reach Gmail through this app-owned bridge; the Rust
         // executor's connector host forwards to it over a local socket.
         DesktopWorkflowConnectorBridge.shared.start(environment: KanameDesktopEnvironment.current)
+        // New Gmail messages become trigger.event occurrences for active workflows.
+        DesktopMailEventPoller.shared.start(environment: KanameDesktopEnvironment.current)
         KanameDevelopmentRuntimeLogger.shared.record(.applicationStarted)
         mouseBackMonitor = NSEvent.addLocalMonitorForEvents(matching: .otherMouseUp) { event in
             guard event.buttonNumber == 3 else { return event }

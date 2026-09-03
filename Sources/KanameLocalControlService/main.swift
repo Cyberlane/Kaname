@@ -219,6 +219,23 @@ private final class LocalControlService: NSObject, LocalCoreControlService {
         )
     }
 
+    func fanOutWorkflowEvent(_ request: Data, reply: @escaping (Data?, String) -> Void) {
+        let applicationSupportRoot = journalDirectory
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let projection = applicationSupportRoot
+            .appendingPathComponent("Workflows", isDirectory: true)
+            .appendingPathComponent("workflow-run-projection.sqlite")
+        runWireOperation(
+            "workflow-event-fanout",
+            request: request,
+            extraArguments: [projection.path, applicationSupportRoot.path],
+            permissionTarget: projection,
+            timeout: 600,
+            reply: reply
+        )
+    }
+
     func publishWorkflow(_ request: Data, reply: @escaping (Data?, String) -> Void) {
         let applicationSupportRoot = journalDirectory
             .deletingLastPathComponent()
