@@ -2648,21 +2648,21 @@ private struct DesktopHomeView: View {
                     MetricCard(
                         title: "Needs you",
                         value: "\(attentionThreads.count)",
-                        detail: attentionThreads.isEmpty ? "Nothing urgent" : "Review attention queue",
+                        detail: attentionThreads.isEmpty ? "Nothing waiting on you" : "Waiting for your decision",
                         symbol: "person.crop.circle.badge.exclamationmark",
                         tint: attentionThreads.isEmpty ? Nord.auroraGreen : Nord.auroraYellow
                     )
                     MetricCard(
                         title: "Active work",
                         value: "\(model.activeThreads.filter { $0.attention == .running || $0.attention == .queued }.count)",
-                        detail: "Running or queued locally",
+                        detail: "Running now",
                         symbol: "bolt.fill",
                         tint: Nord.frost0
                     )
                     MetricCard(
                         title: "Projects",
                         value: "\(model.snapshot.projects.count)",
-                        detail: "Deliberate context boundaries",
+                        detail: "Repositories you work in",
                         symbol: "folder.fill",
                         tint: Nord.frost2
                     )
@@ -2676,14 +2676,14 @@ private struct DesktopHomeView: View {
                     MetricCard(
                         title: "Research",
                         value: "\(model.snapshot.domains.research.count)",
-                        detail: "Durable questions",
+                        detail: "Open questions",
                         symbol: DesktopDestination.research.symbol,
                         tint: Nord.frost1
                     )
                     MetricCard(
                         title: "Automations",
                         value: "\(model.snapshot.domains.automations.count)",
-                        detail: "Draft and paused rules",
+                        detail: "Workflows",
                         symbol: DesktopDestination.automations.symbol,
                         tint: Nord.auroraPurple
                     )
@@ -3403,7 +3403,7 @@ private struct DesktopThreadConversation: View {
                                     symbol: conversationSearch.isEmpty ? "text.bubble" : "magnifyingglass",
                                     title: conversationSearch.isEmpty ? "Start the conversation" : "Nothing matches",
                                     detail: conversationSearch.isEmpty
-                                        ? "Your first message is saved once, then sent through the project's provider and context boundary."
+                                        ? "Describe what you want to build or change. The plan takes shape as you talk."
                                         : "Search includes messages and the full recorded activity behind every run."
                                 )
                             } else {
@@ -4421,10 +4421,10 @@ private struct DesktopThreadChangesView: View {
             if isAwaitingReview {
                 Divider()
                 DesktopDecisionFooter(
-                    title: "Ready for independent checks",
-                    detail: "Review the isolated diff first. Starting checks does not accept, merge, push, or publish these changes."
+                    title: "Review the changes",
+                    detail: "When the diff looks right, run the project's checks. Nothing is merged or pushed."
                 ) {
-                    Button("Review changes & run checks", systemImage: "checkmark.shield", action: beginReview)
+                    Button("Run checks", systemImage: "checkmark.shield", action: beginReview)
                         .buttonStyle(.borderedProminent)
                         .accessibilityHint("Starts independent checks for the isolated changes")
                 }
@@ -4446,9 +4446,26 @@ private struct DesktopThreadChangesView: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(worktree.state == .failed ? Nord.auroraRed : Nord.frost1)
                 Button {
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: worktree.worktreePath, isDirectory: true)])
+                } label: {
+                    Label("Reveal worktree", systemImage: "folder")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help(worktree.worktreePath)
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(changes.patch, forType: .string)
+                } label: {
+                    Label("Copy patch", systemImage: "doc.on.clipboard")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(changes.patch.isEmpty)
+                Button {
                     changes.load(worktree: worktree, force: true)
                 } label: {
-                    Label("Refresh diff", systemImage: "arrow.clockwise")
+                    Label("Refresh", systemImage: "arrow.clockwise")
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -16116,7 +16133,7 @@ private struct ThreadPlanView: View {
         EmptyPanel(
             symbol: "list.bullet.clipboard",
             title: "No plan yet",
-            detail: "A provider plan remains separate from write approval. Request or revise it in Chat."
+            detail: "Talk in Chat. The plan appears here as it forms."
         )
     }
 
@@ -16462,8 +16479,8 @@ private struct ThreadEvidenceView: View {
             if isAwaitingReview {
                 Divider()
                 DesktopDecisionFooter(
-                    title: "Decide from independent evidence",
-                    detail: "Acceptance records a local decision only. It does not merge, push, publish, or update durable knowledge."
+                    title: "Accept or reject",
+                    detail: "Accepting marks this work done locally and starts the knowledge update. Nothing is merged or pushed."
                 ) {
                     evidenceReviewActions
                 }

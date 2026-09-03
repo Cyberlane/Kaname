@@ -2676,7 +2676,7 @@ public final class DesktopAppModel: ObservableObject {
                 switch snapshot.operations.providerRuns[index].purpose {
                 case .codingPlan:
                     attention = .needsApproval
-                    threadSummary = "Plan ready for review. No implementation authority has been granted."
+                    threadSummary = "Plan ready. Approve it to start implementing, or keep refining in Chat."
                     Self.setCodingWorkflow(
                         in: &snapshot,
                         threadID: threadID ?? "",
@@ -2686,7 +2686,7 @@ public final class DesktopAppModel: ObservableObject {
                     )
                 case .codingImplementation:
                     attention = .needsApproval
-                    threadSummary = "Implementation finished. Review the isolated changes before Kaname runs independent checks."
+                    threadSummary = "Implementation turn finished. Review Changes, run checks, or keep steering in Chat."
                     Self.setCodingWorkflow(
                         in: &snapshot,
                         threadID: threadID ?? "",
@@ -2944,7 +2944,7 @@ public final class DesktopAppModel: ObservableObject {
         mutate { snapshot in
             guard let index = snapshot.threads.firstIndex(where: { $0.id == threadID }) else { return }
             snapshot.threads[index].attention = .failed
-            snapshot.threads[index].summary = "The planning turn completed without a readable plan. No implementation authority was granted."
+            snapshot.threads[index].summary = "The planning turn ended without a readable plan. Ask again or rephrase."
             snapshot.threads[index].updatedAtUnixMillis = timestamp
             Self.setCodingWorkflow(
                 in: &snapshot,
@@ -3099,7 +3099,7 @@ public final class DesktopAppModel: ObservableObject {
             snapshot.operations.worktrees[worktreeIndex].updatedAtUnixMillis = timestamp
             snapshot.threads[threadIndex].attention = accepted ? .needsApproval : .needsResponse
             snapshot.threads[threadIndex].summary = accepted
-                ? "Implementation accepted locally. Knowledge disposition is pending; nothing was pushed or published."
+                ? "Accepted. Drafting the knowledge update; nothing was pushed."
                 : "Implementation rejected. The isolated changes remain available for revision."
             snapshot.threads[threadIndex].unread = false
             snapshot.threads[threadIndex].updatedAtUnixMillis = timestamp

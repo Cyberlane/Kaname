@@ -2097,9 +2097,9 @@ final class DesktopConversationRuntime: ObservableObject {
         case .providerCompleted:
             switch purpose {
             case .codingPlan:
-                (.status, "Plan ready", "Review the structured Plan tab. No implementation authority has been granted.")
+                (.status, "Plan ready", "Open the Plan tab to review and approve, or keep refining in Chat.")
             case .codingImplementation:
-                (.status, "Implementation turn complete", "Kaname is collecting independent evidence before asking you to accept or reject the result.")
+                (.status, "Implementation turn complete", "Review Changes, run checks, or send another message to keep going.")
             case .codingKnowledge:
                 (.status, "Knowledge draft ready", "Review the proposed notes in the Knowledge tab; nothing is written until you approve.")
             case .conversation:
