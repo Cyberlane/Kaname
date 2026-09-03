@@ -1570,6 +1570,36 @@ final class DesktopConversationRuntime: ObservableObject {
         purpose: DesktopProviderRunPurpose,
         codingContextSources: [CodingContextSource]
     ) -> String {
+        let body = providerPromptBody(
+            thread: thread,
+            userMessage: userMessage,
+            includeProjectContext: includeProjectContext,
+            runtimeMode: runtimeMode,
+            networkAccess: networkAccess,
+            purpose: purpose,
+            codingContextSources: codingContextSources
+        )
+        guard let compaction = thread.compaction, purpose != .codingKnowledge else { return body }
+        let digest = KanameTextBounds.utf8Prefix(compaction.summary, maximumBytes: 8 * 1_024)
+        return """
+        Compacted thread history (the user compacted this conversation after \(compaction.messageCount) messages; this digest replaces the earlier provider session, so treat it as what you already know):
+        \(digest)
+
+        ---
+
+        \(body)
+        """
+    }
+
+    private func providerPromptBody(
+        thread: DesktopThread,
+        userMessage: String,
+        includeProjectContext: Bool,
+        runtimeMode: ConversationRuntimeMode,
+        networkAccess: Bool,
+        purpose: DesktopProviderRunPurpose,
+        codingContextSources: [CodingContextSource]
+    ) -> String {
         let boundary = authorityBoundary(
             provider: thread.provider,
             runtimeMode: runtimeMode,

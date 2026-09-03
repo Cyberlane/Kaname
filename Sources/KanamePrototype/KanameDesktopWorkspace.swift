@@ -2837,6 +2837,11 @@ private struct DesktopHomeView: View {
                 attention: thread.attention == .completed ? .needsResponse : .completed
             )
         }
+        if thread.messages.count >= 2 {
+            Button("Compact thread") {
+                model.compactThread(threadID: thread.id)
+            }
+        }
         Button("Archive", role: .destructive) {
             requestArchive(thread.id)
         }
@@ -3072,6 +3077,7 @@ private struct DesktopThreadConversation: View {
     @State private var runtimeNetworkAccess = false
     @State private var narrativeRowLimit = DesktopConversationNarrativePresentation.defaultMaximumRows
     @State private var conversationSearch = ""
+    @State private var showsCompactedHistory = false
     @State private var showsConversationSearch = false
     @State private var followsLatest = true
     @State private var hasNewNarrativeContent = false
@@ -3377,9 +3383,23 @@ private struct DesktopThreadConversation: View {
         runtime.approvePlanAndImplement(threadID: thread.id)
     }
 
+    /// Messages shown in Chat. After a compaction only the messages sent since
+    /// the cut are listed, unless the user asks for the earlier history.
+    private var visibleMessages: [DesktopMessage] {
+        guard let compaction = thread.compaction, !showsCompactedHistory, conversationSearch.isEmpty,
+              let cut = thread.messages.firstIndex(where: { $0.id == compaction.throughMessageID }) else {
+            return thread.messages
+        }
+        return Array(thread.messages[(cut + 1)...])
+    }
+
+    private var conversationByteCount: Int {
+        thread.messages.reduce(0) { $0 + $1.body.utf8.count }
+    }
+
     private var narrativePage: DesktopConversationNarrativePage {
         DesktopConversationNarrativePresentation.page(
-            messages: thread.messages,
+            messages: visibleMessages,
             runs: model.providerRuns(threadID: thread.id),
             events: model.providerEvents(threadID: thread.id),
             maximumRows: narrativeRowLimit,
@@ -3388,6 +3408,55 @@ private struct DesktopThreadConversation: View {
     }
 
     private var narrative: [DesktopConversationNarrativeRow] { narrativePage.rows }
+
+    /// Thread size and the compaction control. Compacting keeps every message
+    /// but starts the provider on a fresh session seeded with a digest.
+    @ViewBuilder
+    private var conversationCompactionBar: some View {
+        let kilobytes = max(1, conversationByteCount / 1_024)
+        let isLarge = conversationByteCount > 48 * 1_024 || thread.messages.count > 40
+        if let compaction = thread.compaction {
+            HStack(spacing: 10) {
+                Image(systemName: "arrow.down.right.and.arrow.up.left")
+                    .foregroundStyle(KanameColor.accent)
+                Text("Compacted \(compaction.messageCount) earlier messages. The provider continues from a digest.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button(showsCompactedHistory ? "Hide earlier" : "Show earlier") {
+                    showsCompactedHistory.toggle()
+                }
+                .buttonStyle(.borderless)
+                .font(.caption)
+                if thread.messages.count > compaction.messageCount + 6 {
+                    Button("Compact again") { model.compactThread(threadID: thread.id) }
+                        .buttonStyle(.borderless)
+                        .font(.caption)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 7)
+            .background(KanameColor.surface)
+            Divider()
+        } else if isLarge {
+            HStack(spacing: 10) {
+                Image(systemName: "gauge.with.dots.needle.67percent")
+                    .foregroundStyle(KanameColor.warning)
+                Text("Long thread: \(thread.messages.count) messages, about \(kilobytes) KB. Compact to keep the provider fast and focused.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Compact thread") { model.compactThread(threadID: thread.id) }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("Keeps every message, starts the provider on a fresh session seeded with a digest of the thread so far")
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 7)
+            .background(KanameColor.surface)
+            Divider()
+        }
+    }
 
     private var narrativeActivityCount: Int {
         thread.messages.reduce(0) { $0 + $1.body.utf8.count + 1 }
@@ -3432,6 +3501,8 @@ private struct DesktopThreadConversation: View {
 
                 Divider()
             }
+
+            conversationCompactionBar
 
             ScrollViewReader { proxy in
                 ZStack(alignment: .bottomTrailing) {

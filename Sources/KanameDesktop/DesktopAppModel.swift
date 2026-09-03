@@ -180,6 +180,20 @@ public struct DesktopFinding: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+public struct DesktopThreadCompaction: Codable, Equatable, Sendable {
+    public var summary: String
+    public var throughMessageID: String
+    public var messageCount: Int
+    public var createdAtUnixMillis: Int64
+
+    public init(summary: String, throughMessageID: String, messageCount: Int, createdAtUnixMillis: Int64) {
+        self.summary = summary
+        self.throughMessageID = throughMessageID
+        self.messageCount = messageCount
+        self.createdAtUnixMillis = createdAtUnixMillis
+    }
+}
+
 public struct DesktopThread: Codable, Equatable, Identifiable, Sendable {
     public let id: String
     public var projectID: String?
@@ -201,6 +215,9 @@ public struct DesktopThread: Codable, Equatable, Identifiable, Sendable {
     public var planBody: String?
     public var findings: [DesktopFinding]?
     public var evidence: [DesktopEvidence]
+    /// Set when the user compacted this thread: earlier messages stay stored but
+    /// providers start a fresh native session seeded with this digest.
+    public var compaction: DesktopThreadCompaction?
 
     public init(
         id: String = UUID().uuidString.lowercased(),
@@ -221,7 +238,8 @@ public struct DesktopThread: Codable, Equatable, Identifiable, Sendable {
         messages: [DesktopMessage] = [],
         plan: [DesktopPlanItem] = [],
         planBody: String? = nil,
-        evidence: [DesktopEvidence] = []
+        evidence: [DesktopEvidence] = [],
+        compaction: DesktopThreadCompaction? = nil
     ) {
         self.id = id
         self.projectID = projectID
@@ -242,6 +260,7 @@ public struct DesktopThread: Codable, Equatable, Identifiable, Sendable {
         self.plan = plan
         self.planBody = planBody
         self.evidence = evidence
+        self.compaction = compaction
     }
 
     public init(from decoder: any Decoder) throws {
@@ -2101,6 +2120,55 @@ public final class DesktopAppModel: ObservableObject {
         )
     }
 
+    /// Compacts a thread: keeps every message on disk, but marks a cut so that
+    /// providers start a fresh native session seeded with a bounded digest of the
+    /// conversation so far. Provider-neutral and instant (no LLM call).
+    @discardableResult
+    public func compactThread(threadID: String) -> Bool {
+        guard let thread = thread(id: threadID), thread.messages.count >= 2,
+              let lastMessage = thread.messages.last else { return false }
+        let digest = Self.compactionDigest(thread: thread)
+        let compaction = DesktopThreadCompaction(
+            summary: digest,
+            throughMessageID: lastMessage.id,
+            messageCount: thread.messages.count,
+            createdAtUnixMillis: now()
+        )
+        mutate { snapshot in
+            guard let index = snapshot.threads.firstIndex(where: { $0.id == threadID }) else { return }
+            snapshot.threads[index].compaction = compaction
+            snapshot.threads[index].updatedAtUnixMillis = compaction.createdAtUnixMillis
+        }
+        return persistenceError == nil
+    }
+
+    static func compactionDigest(thread: DesktopThread) -> String {
+        func clip(_ text: String, _ bytes: Int) -> String {
+            let flat = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return KanameTextBounds.utf8Prefix(flat, maximumBytes: bytes) + (flat.utf8.count > bytes ? "…" : "")
+        }
+        var parts: [String] = []
+        if let first = thread.messages.first(where: { $0.role == .user }) {
+            parts.append("Original request:\n" + clip(first.body, 1_200))
+        }
+        if let plan = thread.planBody, !plan.isEmpty {
+            parts.append("Current plan:\n" + clip(plan, 2_400))
+        } else if !thread.plan.isEmpty {
+            parts.append("Current plan:\n" + thread.plan.enumerated().map { "\($0.offset + 1). \($0.element.title)" }.joined(separator: "\n"))
+        }
+        if let findings = thread.findings, !findings.isEmpty {
+            parts.append("Findings so far:\n" + findings.suffix(12).map { "- " + clip($0.detail, 240) }.joined(separator: "\n"))
+        }
+        let recent = thread.messages.suffix(8).filter { $0.role != .system }
+        if !recent.isEmpty {
+            parts.append("Most recent exchange:\n" + recent.map { "\($0.role == .user ? "User" : "Assistant"): " + clip($0.body, 600) }.joined(separator: "\n\n"))
+        }
+        if let previous = thread.compaction?.summary, !previous.isEmpty {
+            parts.append("Earlier compaction digest:\n" + clip(previous, 1_500))
+        }
+        return parts.joined(separator: "\n\n")
+    }
+
     /// Appends a Kaname-authored note to a thread (for example a pull request link).
     @discardableResult
     public func appendSystemMessage(threadID: String, body: String) -> String? {
@@ -2548,9 +2616,11 @@ public final class DesktopAppModel: ObservableObject {
         workspacePathOverride: String?,
         matchWorkspace: Bool = true
     ) -> String? {
-        snapshot.operations.providerRuns
+        let compactedAt = thread(id: threadID)?.compaction?.createdAtUnixMillis
+        return snapshot.operations.providerRuns
             .filter {
                 guard $0.threadID == threadID, $0.nativeThreadID != nil else { return false }
+                if let compactedAt = compactedAt, $0.startedAtUnixMillis < compactedAt { return false }
                 if matchWorkspace, $0.workspacePathOverride != workspacePathOverride { return false }
                 guard let provider else { return true }
                 return $0.provider.caseInsensitiveCompare(provider) == .orderedSame
