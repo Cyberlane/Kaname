@@ -441,21 +441,68 @@ struct DesktopCodingPreviewPanel: View {
             .max { $0.updatedAtUnixMillis < $1.updatedAtUnixMillis }
     }
 
+    /// Local ports seen in provider command output or shell scrollback, so the
+    /// dev server the agent just started is one click away.
+    private var detectedPorts: [Int] {
+        var texts = DesktopCodingProcessProjection.processes(from: model.providerEvents(threadID: thread.id)).map(\.output)
+        texts += model.snapshot.operations.codingTerminals
+            .filter { $0.threadID == thread.id }
+            .map(\.scrollbackExcerpt)
+        var ports: [Int] = model.snapshot.operations.codingTerminals
+            .filter { $0.threadID == thread.id }
+            .flatMap(\.discoveredPreviewPorts)
+            .map(Int.init)
+        let pattern = #"(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\]):(\d{2,5})"#
+        for text in texts {
+            for match in text.matches(of: try! Regex(pattern)) {
+                if let range = match.output[1].range, let port = Int(text[range]), (1_024...65_535).contains(port) {
+                    ports.append(port)
+                }
+            }
+        }
+        var seen = Set<Int>()
+        return ports.filter { seen.insert($0).inserted }.suffix(6).reversed()
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                Label("Preview", systemImage: "safari")
+                Label("Browser", systemImage: "safari")
                     .font(.caption.weight(.semibold))
-                TextField("Local URL", text: $urlDraft)
+                TextField("http://localhost:port", text: $urlDraft)
                     .textFieldStyle(.roundedBorder)
+                    .onSubmit { openPreview() }
                 Button("Open") { openPreview() }
-                Button("Refresh") { openPreview() }
+                Button("Reload", systemImage: "arrow.clockwise") { openPreview() }
+                    .labelStyle(.iconOnly)
                     .disabled(tab == nil)
-                Button("Request MCP grant") { requestPreviewMCPGrant() }
-                    .disabled(worktree == nil)
+                Menu("More") {
+                    Button("Request MCP grant") { requestPreviewMCPGrant() }
+                        .disabled(worktree == nil)
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
             }
             .padding(12)
             .background(Nord.polarNight1)
+            if !detectedPorts.isEmpty {
+                HStack(spacing: 6) {
+                    Text("Detected").font(.caption2).foregroundStyle(.secondary)
+                    ForEach(detectedPorts, id: \.self) { port in
+                        Button(":\(port)") {
+                            urlDraft = "http://127.0.0.1:\(port)"
+                            openPreview()
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .font(.caption.monospaced())
+                    }
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+                .padding(.bottom, 8)
+                .background(Nord.polarNight1)
+            }
 
             Divider()
 
@@ -471,8 +518,8 @@ struct DesktopCodingPreviewPanel: View {
             } else {
                 EmptyPanel(
                     symbol: "safari",
-                    title: "No preview open",
-                    detail: "Open a localhost or 127.0.0.1 URL. Curated MCP automation stays blocked until an explicit coding.preview_mcp_grant approval."
+                    title: "No page open",
+                    detail: "Enter a localhost URL or pick a detected port once the agent starts a dev server."
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }

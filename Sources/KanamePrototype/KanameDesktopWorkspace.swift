@@ -973,6 +973,10 @@ struct KanameDesktopWorkspace: View {
         .kanameMinimumInteractiveTarget()
     }
 
+    /// Focus mode keeps the sidebar to the daily surfaces. The remaining
+    /// destinations still exist and open from the Advanced section.
+    @AppStorage("kaname.sidebar.showAdvancedDestinations") private var showAdvancedDestinations = false
+
     private var sidebar: some View {
         VStack(spacing: 0) {
             List {
@@ -993,28 +997,42 @@ struct KanameDesktopWorkspace: View {
                     )
                 }
 
-                Section("Organize") {
+                Section("Coding") {
                     destinationButton(.projects, count: model.snapshot.projects.count)
-                    destinationButton(.research, count: model.snapshot.domains.research.count)
+                    destinationButton(.skills, count: model.snapshot.domains.skills.filter(\.enabled).count)
+                }
+
+                Section("Automations") {
+                    destinationButton(.automations, count: model.snapshot.domains.automations.count)
+                }
+
+                Section("Knowledge") {
                     destinationButton(.knowledge, count: model.snapshot.domains.knowledgeSources.count)
                 }
 
-                Section("Services") {
-                    destinationButton(.email, count: model.snapshot.domains.emailDrafts.count)
-                    destinationButton(.calendar, count: model.snapshot.domains.calendarProposals.count)
-                    destinationButton(.automations, count: model.snapshot.domains.automations.count)
-                    destinationButton(.github, count: model.snapshot.domains.gitWorkspaces.count)
-                }
-
-                Section("Build") {
-                    destinationButton(.skills, count: model.snapshot.domains.skills.filter(\.enabled).count)
-                    destinationButton(.liveCodex)
-                    destinationButton(.localCore)
-                }
-
-                Section("System") {
-                    destinationButton(.devices)
+                Section("Collaboration") {
                     destinationButton(.links, count: link.pendingDeviceCount)
+                }
+
+                if showAdvancedDestinations {
+                    Section("Advanced") {
+                        destinationButton(.research, count: model.snapshot.domains.research.count)
+                        destinationButton(.email, count: model.snapshot.domains.emailDrafts.count)
+                        destinationButton(.calendar, count: model.snapshot.domains.calendarProposals.count)
+                        destinationButton(.github, count: model.snapshot.domains.gitWorkspaces.count)
+                        destinationButton(.liveCodex)
+                        destinationButton(.localCore)
+                        destinationButton(.devices)
+                    }
+                }
+
+                Section {
+                    Toggle("Show advanced destinations", isOn: $showAdvancedDestinations)
+                        .toggleStyle(.switch)
+                        .controlSize(.mini)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .listRowBackground(Color.clear)
                 }
             }
             .scrollContentBackground(.hidden)
