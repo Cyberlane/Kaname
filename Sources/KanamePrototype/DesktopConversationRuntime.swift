@@ -1786,29 +1786,202 @@ final class DesktopConversationRuntime: ObservableObject {
             provider: provider,
             purpose: model.providerRun(id: runID)?.purpose ?? .conversation
         )
+        let payloadObject = event.payload.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let enriched = Self.enrichedPresentation(for: event, payload: payloadObject, fallback: presentation)
+        // Raw provider evidence is sealed separately by the worker. The
+        // workspace keeps full bytes only for answerable questions, and a
+        // bounded excerpt for tool calls so the Processes tab and Timeline
+        // can show what ran and what came back.
+        let retainedPayload: Data? = switch event.kind {
+        case .questionRequested: event.payload
+        case .toolActivity: Self.compactToolPayload(event: event, payload: payloadObject)
+        default: nil
+        }
         return DesktopProviderEventRecord(
             id: id,
             threadID: threadID,
             runID: runID,
             turnID: model.providerRun(id: runID)?.turnID,
-            kind: presentation.kind,
-            title: presentation.title,
-            detail: String((event.text ?? presentation.detail).prefix(65_536)),
+            kind: enriched.kind,
+            title: enriched.title,
+            detail: String(enriched.detail.prefix(65_536)),
             nativeType: event.nativeType,
             nativeThreadID: event.threadID,
             nativeTurnID: event.turnID,
             approvalID: event.approvalID,
             toolObservation: event.toolObservation,
             agentActivity: event.agentActivity,
-            // Raw provider evidence is sealed separately by the worker. The
-            // workspace needs payload bytes only while a question can still be
-            // answered after its service event has been acknowledged.
-            rawPayloadBase64: event.kind == .questionRequested
-                ? event.payload?.base64EncodedString()
-                : nil,
+            rawPayloadBase64: retainedPayload?.base64EncodedString(),
             payloadWasTruncated: event.payloadWasTruncated,
             createdAtUnixMillis: createdAtUnixMillis
         )
+    }
+
+    // MARK: Event enrichment
+
+    private static let toolPayloadTextLimit = 4_000
+
+    /// Finds the Claude content block for this call (tool_use by `id`,
+    /// tool_result by `tool_use_id`) anywhere in the payload.
+    private static func claudeBlock(callID: String, in payload: Any?) -> [String: Any]? {
+        func search(_ value: Any) -> [String: Any]? {
+            if let dictionary = value as? [String: Any] {
+                if (dictionary["id"] as? String) == callID || (dictionary["tool_use_id"] as? String) == callID {
+                    return dictionary
+                }
+                for child in dictionary.values { if let found = search(child) { return found } }
+            } else if let array = value as? [Any] {
+                for child in array { if let found = search(child) { return found } }
+            }
+            return nil
+        }
+        return payload.flatMap(search)
+    }
+
+    private static func boundedText(_ value: Any?, limit: Int = toolPayloadTextLimit) -> String? {
+        switch value {
+        case let text as String: return String(text.prefix(limit))
+        case let parts as [[String: Any]]:
+            let joined = parts.compactMap { $0["text"] as? String }.joined(separator: "\n")
+            return joined.isEmpty ? nil : String(joined.prefix(limit))
+        case let parts as [Any]:
+            let joined = parts.compactMap { $0 as? String }.joined(separator: " ")
+            return joined.isEmpty ? nil : String(joined.prefix(limit))
+        default: return nil
+        }
+    }
+
+    /// A small payload that keeps only what the UI needs for one tool call.
+    private static func compactToolPayload(event: CodexRunEvent, payload: [String: Any]?) -> Data? {
+        guard let payload, let callID = event.toolObservation?.callID else { return nil }
+        var compact: [String: Any] = [:]
+        if var block = claudeBlock(callID: callID, in: payload) {
+            if let content = block["content"] { block["content"] = boundedText(content) ?? "" }
+            if var input = block["input"] as? [String: Any] {
+                for (key, value) in input {
+                    if let text = value as? String, text.count > toolPayloadTextLimit {
+                        input[key] = String(text.prefix(toolPayloadTextLimit))
+                    }
+                }
+                block["input"] = input
+            }
+            compact["message"] = ["content": [block]]
+        }
+        if var item = payload["item"] as? [String: Any] {
+            for key in ["aggregatedOutput", "aggregated_output", "output"] {
+                if let text = item[key] as? String { item[key] = String(text.prefix(toolPayloadTextLimit)) }
+            }
+            item.removeValue(forKey: "changes")
+            compact["item"] = item
+        }
+        if let delta = payload["delta"] as? String { compact["delta"] = String(delta.prefix(toolPayloadTextLimit)) }
+        guard !compact.isEmpty, JSONSerialization.isValidJSONObject(compact) else { return nil }
+        return try? JSONSerialization.data(withJSONObject: compact, options: [.sortedKeys])
+    }
+
+    private static func firstLine(_ text: String, limit: Int = 200) -> String {
+        let line = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? text
+        return line.count > limit ? String(line.prefix(limit)) + "…" : line
+    }
+
+    /// Replaces generic titles such as "Provider event stream_event" with what
+    /// actually happened, using the native payload when one is available.
+    private static func enrichedPresentation(
+        for event: CodexRunEvent,
+        payload: [String: Any]?,
+        fallback: (kind: DesktopProviderEventKind, title: String, detail: String)
+    ) -> (kind: DesktopProviderEventKind, title: String, detail: String) {
+        switch event.kind {
+        case .toolActivity:
+            guard let observation = event.toolObservation else { return fallback }
+            let name = observation.name ?? observation.kind.rawValue
+            var title = name
+            var detail = fallback.detail
+            if let block = claudeBlock(callID: observation.callID, in: payload) {
+                if let input = block["input"] as? [String: Any] {
+                    if let command = boundedText(input["command"]) {
+                        title = "$ \(firstLine(command))"
+                        detail = [input["description"] as? String, command.contains("\n") ? command : nil]
+                            .compactMap { $0 }.joined(separator: "\n")
+                    } else if let path = input["file_path"] as? String ?? input["path"] as? String ?? input["notebook_path"] as? String {
+                        title = "\(name) \(path)"
+                        detail = (input["pattern"] as? String).map { "pattern \($0)" } ?? ""
+                    } else if let pattern = input["pattern"] as? String {
+                        title = "\(name) \(pattern)"
+                        detail = (input["glob"] as? String) ?? ""
+                    } else if let url = input["url"] as? String {
+                        title = "\(name) \(url)"
+                    } else if let description = input["description"] as? String ?? input["prompt"] as? String {
+                        title = name
+                        detail = firstLine(description, limit: 400)
+                    } else if let query = input["query"] as? String {
+                        title = "\(name) \(query)"
+                    } else if !input.isEmpty, let data = try? JSONSerialization.data(withJSONObject: input, options: [.sortedKeys]) {
+                        detail = String(decoding: data.prefix(400), as: UTF8.self)
+                    }
+                    if detail.isEmpty { detail = "started" }
+                } else if block["tool_use_id"] != nil {
+                    let failed = block["is_error"] as? Bool == true
+                    let output = boundedText(block["content"], limit: 600) ?? ""
+                    title = "\(name) \(failed ? "failed" : "finished")"
+                    detail = output.isEmpty ? (failed ? "error" : "no output") : output
+                }
+            } else if let item = payload?["item"] as? [String: Any] {
+                if let command = boundedText(item["command"]) {
+                    title = "$ \(firstLine(command))"
+                    let output = boundedText(item["aggregatedOutput"] ?? item["aggregated_output"], limit: 600) ?? ""
+                    let exit = (item["exitCode"] as? Int) ?? (item["exit_code"] as? Int)
+                    detail = [exit.map { "exit \($0)" }, output.isEmpty ? nil : output].compactMap { $0 }.joined(separator: "\n")
+                    if detail.isEmpty { detail = observation.state.rawValue }
+                } else if let path = item["path"] as? String ?? item["file"] as? String {
+                    title = "\(name) \(path)"
+                } else {
+                    detail = "\(observation.state.rawValue) · \(event.nativeType)"
+                }
+            } else if let agent = event.agentActivity {
+                title = "Subagent \(agent.activity.rawValue)"
+                detail = agent.agentPath ?? agent.taskType ?? event.nativeType
+            } else {
+                detail = "\(observation.state.rawValue) · \(event.nativeType)"
+            }
+            return (.tool, title, detail)
+        case .nativeProviderEvent:
+            let type = event.nativeType
+            switch type {
+            case "system":
+                var parts: [String] = []
+                if let model = payload?["model"] as? String { parts.append(model) }
+                if let mode = payload?["permissionMode"] as? String { parts.append("mode \(mode)") }
+                if let tools = payload?["tools"] as? [Any] { parts.append("\(tools.count) tools") }
+                if let cwd = payload?["cwd"] as? String { parts.append("cwd \(cwd)") }
+                return (.status, "Session started", parts.isEmpty ? "Provider session initialised." : parts.joined(separator: " · "))
+            case "result":
+                var parts: [String] = []
+                if let cost = payload?["total_cost_usd"] as? Double { parts.append(String(format: "$%.3f", cost)) }
+                if let duration = payload?["duration_ms"] as? Int { parts.append("\(duration / 1_000)s") }
+                if let turns = payload?["num_turns"] as? Int { parts.append("\(turns) turns") }
+                if let subtype = payload?["subtype"] as? String, subtype != "success" { parts.append(subtype) }
+                return (.usage, "Turn result", parts.isEmpty ? fallback.detail : parts.joined(separator: " · "))
+            case "stream_event":
+                let inner = payload?["event"] as? [String: Any]
+                let innerType = inner?["type"] as? String ?? "delta"
+                let deltaType = (inner?["delta"] as? [String: Any])?["type"] as? String
+                return (.native, "Stream", [innerType, deltaType].compactMap { $0 }.joined(separator: " · "))
+            case "rate_limit_event":
+                return (.status, "Rate limit", boundedText(payload?["rate_limit_info"].flatMap { try? JSONSerialization.data(withJSONObject: $0) }.map { String(decoding: $0, as: UTF8.self) }, limit: 300) ?? fallback.detail)
+            case "user":
+                return (.native, "Tool results delivered", "Provider received tool output.")
+            default:
+                return fallback
+            }
+        case .messageDelta:
+            return (.assistantText, "Response", firstLine(event.text ?? "", limit: 120))
+        default:
+            if let text = event.text, !text.isEmpty, event.kind != .planUpdated {
+                return (fallback.kind, fallback.title, text)
+            }
+            return fallback
+        }
     }
 
     private static func presentation(

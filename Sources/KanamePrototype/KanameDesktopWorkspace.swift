@@ -3449,6 +3449,7 @@ private struct DesktopThreadConversation: View {
                         }
                         .padding(22)
                     }
+                    .defaultScrollAnchor(.bottom)
 
                     if hasNewNarrativeContent {
                         Button {
@@ -3482,8 +3483,12 @@ private struct DesktopThreadConversation: View {
                     conversationAnchorID = nil
                 }
                 .onAppear {
+                    followsLatest = true
                     DispatchQueue.main.async {
                         proxy.scrollTo("narrative-bottom", anchor: .bottom)
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                        if followsLatest { proxy.scrollTo("narrative-bottom", anchor: .bottom) }
                     }
                 }
             }
@@ -13944,11 +13949,67 @@ private struct DesktopThreadInspector: View {
                     .buttonStyle(.bordered)
                     .frame(maxWidth: .infinity)
                 }
-                ForEach(visible) { event in
-                    DesktopInspectorProviderEventRow(event: event)
+                ForEach(Self.groupedTimelineEvents(visible)) { group in
+                    if group.events.count == 1, let event = group.events.first {
+                        DesktopInspectorProviderEventRow(event: event)
+                    } else {
+                        DesktopInspectorEventGroupRow(group: group)
+                    }
                 }
             }
         }
+    }
+
+    /// Consecutive low-signal events of the same kind (stream deltas, response
+    /// fragments, tool-result deliveries) collapse into one expandable row.
+    fileprivate struct TimelineEventGroup: Identifiable {
+        let id: String
+        let title: String
+        let symbol: String
+        let events: [DesktopProviderEventRecord]
+    }
+
+    private static func groupKey(_ event: DesktopProviderEventRecord) -> String? {
+        switch event.kind {
+        case .assistantText: "text"
+        case .native: "native:\(event.nativeType)"
+        case .reasoning: "reasoning"
+        default: nil
+        }
+    }
+
+    fileprivate static func groupedTimelineEvents(_ events: [DesktopProviderEventRecord]) -> [TimelineEventGroup] {
+        var groups: [TimelineEventGroup] = []
+        var pending: [DesktopProviderEventRecord] = []
+        var pendingKey: String?
+        func flush() {
+            guard let first = pending.first else { return }
+            let title: String = switch first.kind {
+            case .assistantText: "Response fragments"
+            case .reasoning: "Reasoning updates"
+            default: first.title
+            }
+            groups.append(TimelineEventGroup(
+                id: "group-\(first.id)-\(pending.count)",
+                title: title,
+                symbol: first.kind.timelineSymbol,
+                events: pending
+            ))
+            pending = []
+            pendingKey = nil
+        }
+        for event in events {
+            let key = groupKey(event)
+            if let key, key == pendingKey {
+                pending.append(event)
+                continue
+            }
+            flush()
+            pending = [event]
+            pendingKey = key
+        }
+        flush()
+        return groups
     }
 
     @ViewBuilder private func runRawEvidence(_ summary: DesktopConversationRunSummary) -> some View {
@@ -13997,6 +14058,41 @@ private struct DesktopThreadInspector: View {
             }
         }
         .panelStyle()
+    }
+}
+
+private struct DesktopInspectorEventGroupRow: View {
+    let group: DesktopThreadInspector.TimelineEventGroup
+    @State private var isExpanded = false
+
+    private var timeSpan: String {
+        guard let first = group.events.first, let last = group.events.last, last.createdAtUnixMillis > first.createdAtUnixMillis else { return "" }
+        let seconds = (last.createdAtUnixMillis - first.createdAtUnixMillis) / 1_000
+        return seconds < 60 ? "\(seconds)s" : "\(seconds / 60)m \(seconds % 60)s"
+    }
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $isExpanded) {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(group.events) { event in
+                    DesktopInspectorProviderEventRow(event: event)
+                }
+            }
+            .padding(.top, 4)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: group.symbol).foregroundStyle(.secondary).frame(width: 18)
+                Text("\(group.events.count) × \(group.title)")
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                if !timeSpan.isEmpty {
+                    Text(timeSpan).font(.caption2).foregroundStyle(.tertiary)
+                }
+            }
+        }
+        .padding(8)
+        .background(Nord.polarNight1.opacity(0.6), in: RoundedRectangle(cornerRadius: 8))
+        .accessibilityLabel("\(group.events.count) \(group.title)")
     }
 }
 
@@ -16275,9 +16371,13 @@ private struct DesktopMessageBubble: View {
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
-                Text(message.body)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
+                if message.role == .user {
+                    Text(message.body)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    ThreadPlanBodyView(markdown: message.body)
+                }
                 if !message.attachments.isEmpty {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
