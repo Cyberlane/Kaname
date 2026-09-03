@@ -365,6 +365,18 @@ public struct CodexPlanUpdate: Equatable, Sendable {
 }
 
 public extension CodexRunEvent {
+    /// Full Markdown plan body when the provider supplied one (Claude `ExitPlanMode`).
+    var planText: String? {
+        guard kind == .planUpdated,
+              let payload,
+              let object = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
+              let text = object["planText"] as? String else { return nil }
+        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return clean.isEmpty ? nil : String(clean.prefix(64 * 1_024))
+    }
+}
+
+public extension CodexRunEvent {
     var planUpdate: CodexPlanUpdate? {
         guard kind == .planUpdated,
               let payload,

@@ -183,6 +183,7 @@ public struct DesktopThread: Codable, Equatable, Identifiable, Sendable {
     public var unread: Bool
     public var messages: [DesktopMessage]
     public var plan: [DesktopPlanItem]
+    public var planBody: String?
     public var evidence: [DesktopEvidence]
 
     public init(
@@ -203,6 +204,7 @@ public struct DesktopThread: Codable, Equatable, Identifiable, Sendable {
         unread: Bool = false,
         messages: [DesktopMessage] = [],
         plan: [DesktopPlanItem] = [],
+        planBody: String? = nil,
         evidence: [DesktopEvidence] = []
     ) {
         self.id = id
@@ -222,6 +224,7 @@ public struct DesktopThread: Codable, Equatable, Identifiable, Sendable {
         self.unread = unread
         self.messages = messages
         self.plan = plan
+        self.planBody = planBody
         self.evidence = evidence
     }
 
@@ -2388,9 +2391,15 @@ public final class DesktopAppModel: ObservableObject {
                     snapshot.operations.codingKnowledgeLanes[laneIndex].writeID = nil
                     snapshot.operations.codingKnowledgeLanes[laneIndex].updatedAtUnixMillis = now()
                 }
-                snapshot.threads[index].plan.removeAll()
+                // A planning turn refines the existing plan; only a fresh cycle
+                // after completion, rejection, or failure starts from nothing.
+                let previousState = snapshot.operations.codingWorkflows.first(where: { $0.threadID == threadID })?.state
+                if [.completed, .rejected, .failed].contains(previousState ?? .discussing) {
+                    snapshot.threads[index].plan.removeAll()
+                    snapshot.threads[index].planBody = nil
+                }
                 snapshot.threads[index].evidence.removeAll()
-                snapshot.threads[index].summary = "Creating a read-only implementation plan…"
+                snapshot.threads[index].summary = "Planning…"
                 Self.setCodingWorkflow(
                     in: &snapshot,
                     threadID: threadID,
@@ -2495,9 +2504,22 @@ public final class DesktopAppModel: ObservableObject {
     }
 
     public func latestNativeThreadID(threadID: String, provider: String? = nil) -> String? {
+        latestNativeThreadID(threadID: threadID, provider: provider, workspacePathOverride: nil, matchWorkspace: false)
+    }
+
+    /// Native provider sessions are bound to the directory they started in
+    /// (Claude Code stores them per project path), so a run only resumes a
+    /// session that was started in the same workspace.
+    public func latestNativeThreadID(
+        threadID: String,
+        provider: String?,
+        workspacePathOverride: String?,
+        matchWorkspace: Bool = true
+    ) -> String? {
         snapshot.operations.providerRuns
             .filter {
                 guard $0.threadID == threadID, $0.nativeThreadID != nil else { return false }
+                if matchWorkspace, $0.workspacePathOverride != workspacePathOverride { return false }
                 guard let provider else { return true }
                 return $0.provider.caseInsensitiveCompare(provider) == .orderedSame
             }
@@ -2794,6 +2816,16 @@ public final class DesktopAppModel: ObservableObject {
             } else {
                 snapshot.threads[index].plan.append(item)
             }
+        }
+    }
+
+    /// Stores the full Markdown plan body shown above the step outline.
+    public func setProviderPlanBody(threadID: String, text: String?) {
+        let clean = text.map(Self.normalized) ?? ""
+        mutate { snapshot in
+            guard let index = snapshot.threads.firstIndex(where: { $0.id == threadID }) else { return }
+            snapshot.threads[index].planBody = clean.isEmpty ? nil : String(clean.prefix(64 * 1_024))
+            snapshot.threads[index].updatedAtUnixMillis = now()
         }
     }
 

@@ -29,3 +29,6 @@
 !.agents/skills/
 !.agents/skills/mori-review-similarity/
 !.agents/skills/mori-review-similarity/**
+
+# Local editable SwiftPM dependencies (swift package edit)
+/Packages/

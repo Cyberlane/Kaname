@@ -26,17 +26,17 @@ public enum DesktopPlanPhase: Equatable, Sendable {
     public var detail: String {
         switch self {
         case .notStarted:
-            "Request a plan in Chat. Planning cannot write code."
+            "Describe what you want in Chat. The plan builds up as you talk; nothing is coded yet."
         case .saved:
             "This plan is preserved for reference and has no active implementation authority."
         case .drafting:
-            "The provider is preparing these steps without write authority or network access."
+            "The provider is drafting the plan read-only. Keep talking to shape it."
         case .awaitingApproval:
-            "Review every step. Implementation remains blocked until you explicitly approve this exact plan."
+            "Read the plan. Ask for changes in Chat to revise it. Nothing is implemented until you approve."
         case .implementing:
-            "The approved work is running once, with network denied, inside an isolated worktree."
+            "The approved plan is being implemented inside an isolated worktree. Send a message to steer it."
         case .reviewingResult:
-            "Review the resulting changes and independent evidence in their dedicated tabs."
+            "Review Changes and Evidence. Send another message to keep implementing in the same worktree."
         case .completed:
             "The implementation was accepted locally; no push, publish, or merge happened automatically."
         case .stopped:

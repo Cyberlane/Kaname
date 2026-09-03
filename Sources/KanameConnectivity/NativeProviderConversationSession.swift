@@ -166,7 +166,7 @@ public actor NativeProviderConversationSession {
                 "--verbose",
                 "--include-partial-messages",
                 "--permission-mode", permissionMode,
-                "--max-budget-usd", "2",
+                "--max-budget-usd", "25",
                 "--effort", request.reasoningEffort,
             ]
             let directories = Set(request.attachmentPaths.map { URL(fileURLWithPath: $0).deletingLastPathComponent().path })
@@ -449,6 +449,14 @@ struct NativeProviderStreamParser {
                         payload: retained,
                         truncated: truncated
                     ))
+                    if driver == .claude,
+                       let planEvent = claudePlanUpdateEvent(
+                           toolName: name,
+                           input: block["input"] as? [String: Any],
+                           nativeType: nativeType
+                       ) {
+                        events.append(planEvent)
+                    }
                 case "tool_result":
                     guard let callID = block["tool_use_id"] as? String else { continue }
                     let context = toolsByCallID[callID]
@@ -653,6 +661,63 @@ struct NativeProviderStreamParser {
             ?? .unknown
     }
 
+    /// Claude Code has no native plan channel. Its `TodoWrite` tool carries the
+    /// working step list and `ExitPlanMode` carries the Markdown plan body, so
+    /// both are projected onto the shared `planUpdated` event shape that Codex
+    /// already uses (`{"plan": [{"step", "status"}], "planText"?}`).
+    private func claudePlanUpdateEvent(
+        toolName: String,
+        input: [String: Any]?,
+        nativeType: String
+    ) -> CodexRunEvent? {
+        guard let input else { return nil }
+        var entries: [[String: String]] = []
+        var planText: String?
+        switch toolName.lowercased() {
+        case "todowrite":
+            guard let todos = input["todos"] as? [[String: Any]] else { return nil }
+            for todo in todos {
+                guard let raw = todo["content"] as? String else { continue }
+                let content = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !content.isEmpty else { continue }
+                let status = (todo["status"] as? String ?? "pending").lowercased()
+                entries.append(["step": String(content.prefix(2_000)), "status": status])
+            }
+        case "exitplanmode":
+            guard let plan = input["plan"] as? String,
+                  !plan.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            planText = plan
+            entries = Self.planSteps(fromMarkdown: plan).map { ["step": $0, "status": "pending"] }
+        case "write":
+            // Plan mode lets Claude write only its plan file under ~/.claude/plans/.
+            guard let path = input["file_path"] as? String,
+                  path.contains("/.claude/plans/"),
+                  let content = input["content"] as? String,
+                  !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            planText = content
+            entries = Self.planSteps(fromMarkdown: content).map { ["step": $0, "status": "pending"] }
+        default:
+            return nil
+        }
+        guard !entries.isEmpty || planText != nil else { return nil }
+        var object: [String: Any] = ["plan": entries]
+        if let planText { object["planText"] = planText }
+        guard let payload = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else {
+            return nil
+        }
+        return event(
+            .planUpdated,
+            nativeType: "\(nativeType)/\(toolName)",
+            text: planText,
+            payload: payload,
+            truncated: false
+        )
+    }
+
+    static func planSteps(fromMarkdown markdown: String) -> [String] {
+        ProviderPlanMarkdown.steps(fromMarkdown: markdown)
+    }
+
     private func claudeToolKind(_ name: String) -> ProviderToolKind {
         nativeToolKind(name, providerAliases: Self.claudeToolAliases)
     }
@@ -716,5 +781,27 @@ struct NativeProviderStreamParser {
             }
         }
         return nil
+    }
+}
+
+/// Provider-neutral extraction of plan steps from Markdown text. Used for
+/// Claude's `ExitPlanMode` plan body and as the fallback when a planning turn
+/// ends with prose instead of a structured plan update.
+public enum ProviderPlanMarkdown {
+    /// Ordered or bulleted list lines (optionally with a `[ ]` checkbox) become steps.
+    public static func steps(fromMarkdown markdown: String) -> [String] {
+        var steps: [String] = []
+        for rawLine in markdown.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard let range = line.range(
+                of: #"^(\d+[.)]|[-*+])\s+(\[[ xX]\]\s+)?"#,
+                options: .regularExpression
+            ) else { continue }
+            let step = line[range.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !step.isEmpty else { continue }
+            steps.append(String(step.prefix(2_000)))
+            if steps.count >= 128 { break }
+        }
+        return steps
     }
 }

@@ -118,8 +118,61 @@ final class DesktopConversationRuntime: ObservableObject {
         attachments: [ConversationImageAttachment] = []
     ) -> String? {
         guard let runID = prepareEnqueue(threadID: threadID, body: body, attachments: attachments) else { return nil }
-        resumePrepared(runID: runID)
+        if model.providerRun(id: runID)?.purpose == .codingImplementation {
+            submitImplementationFollowUp(runID: runID)
+        } else {
+            resumePrepared(runID: runID)
+        }
         return runID
+    }
+
+    /// Continues an approved implementation with another provider turn inside
+    /// the same isolated worktree. Mirrors the authorization performed by
+    /// `approvePlanAndImplement` so Codex receives a fresh workspace-write grant.
+    private func submitImplementationFollowUp(runID: String) {
+        guard let run = model.providerRun(id: runID),
+              let threadID = run.threadID,
+              let thread = model.thread(id: threadID),
+              let projectID = thread.projectID,
+              let path = run.workspacePathOverride,
+              let sourceMessageID = run.sourceMessageID,
+              let message = model.message(threadID: threadID, id: sourceMessageID),
+              let runner = LocalCoreRunner.bundled() else {
+            model.stopProviderRun(
+                id: runID,
+                interrupted: false,
+                error: "Kaname could not continue the implementation because the isolated worktree or the local journal service is unavailable."
+            )
+            return
+        }
+        codingWorkflowErrors.removeValue(forKey: threadID)
+        _Concurrency.Task { [weak self] in
+            guard let self else { return }
+            do {
+                let isolated = try await CodingWorkspaceInspector.inspect(
+                    workspaceURL: URL(fileURLWithPath: path, isDirectory: true)
+                )
+                let request = CodexCodingRequest(
+                    prompt: implementationPrompt(thread: thread, userMessage: message.body),
+                    model: resolvedModel(provider: thread.provider, value: thread.model),
+                    reasoningEffort: thread.reasoningEffort,
+                    sandbox: .workspaceWrite,
+                    networkAccess: run.networkAccess
+                )
+                let authorization = try await Phase2ControlPlane.authorizeWorkspaceWrite(
+                    runner: runner,
+                    projectID: projectID,
+                    threadID: threadID,
+                    workspace: isolated,
+                    request: request
+                )
+                pollCandidateThreadIDs.insert(threadID)
+                submit(runID: runID, authorization: authorization)
+            } catch {
+                codingWorkflowErrors[threadID] = error.localizedDescription
+                model.stopProviderRun(id: runID, interrupted: false, error: error.localizedDescription)
+            }
+        }
     }
 
     func prepareEnqueue(
@@ -138,22 +191,33 @@ final class DesktopConversationRuntime: ObservableObject {
             codingWorkflowErrors[threadID] = "\(thread.provider) does not have a Kaname image adapter. Remove the images or choose Codex, Claude, or OpenCode."
             return nil
         }
-        if thread.kind == .coding,
-           [.planning, .preparing, .implementing, .implementationReview, .evidenceReview, .knowledgeReview]
-            .contains(codingStage(threadID: threadID)) {
-            codingWorkflowErrors[threadID] = "Finish the current Coding stage before starting another plan."
+        let stage = codingStage(threadID: threadID)
+        if thread.kind == .coding, [.planning, .preparing, .implementing].contains(stage) {
+            codingWorkflowErrors[threadID] = "Wait for the current turn to finish before sending another message."
             return nil
         }
-        let purpose: DesktopProviderRunPurpose = thread.kind == .coding ? .codingPlan : .conversation
+        // After approval the conversation continues inside the isolated worktree:
+        // every further message is another implementation turn on the same branch.
+        let implementationWorktree = thread.kind == .coding
+            && [.implementationReview, .evidenceReview, .knowledgeReview].contains(stage)
+            ? latestCodingWorktree(threadID: threadID)
+            : nil
+        let purpose: DesktopProviderRunPurpose = thread.kind == .coding
+            ? (implementationWorktree == nil ? .codingPlan : .codingImplementation)
+            : .conversation
         guard let messageID = model.appendUserMessage(threadID: threadID, body: body, attachments: attachments),
               let runID = model.enqueueProviderRun(
                 threadID: threadID,
                 sourceMessageID: messageID,
                 usesProjectContext: usesProjectContext,
-                workspacePathOverride: workspacePathOverride,
+                workspacePathOverride: implementationWorktree?.worktreePath ?? workspacePathOverride,
                 purpose: purpose,
-                runtimeModeOverride: purpose == .codingPlan ? .approvalRequired : nil,
-                networkAccessOverride: purpose == .codingPlan ? false : nil
+                runtimeModeOverride: purpose == .codingPlan
+                    ? .approvalRequired
+                    : (implementationWorktree == nil ? nil : Self.implementationRuntimeMode(provider: thread.provider)),
+                networkAccessOverride: purpose == .codingPlan
+                    ? false
+                    : (implementationWorktree == nil ? nil : thread.networkAccess)
               ) else { return nil }
         codingWorkflowErrors.removeValue(forKey: threadID)
         pollCandidateThreadIDs.insert(threadID)
@@ -281,16 +345,15 @@ final class DesktopConversationRuntime: ObservableObject {
                 switch worktree?.state {
                 case .accepted: return .completed
                 case .review: return .evidenceReview
-                case .dirty: return .rejected
+                case .dirty, .ready: return .implementationReview
                 case .failed: return .failed
-                case .ready: return .implementationReview
                 default: return .preparing
                 }
             }
         }
         if worktree?.state == .accepted { return .completed }
         if worktree?.state == .review { return .evidenceReview }
-        if worktree?.state == .dirty { return .rejected }
+        if worktree?.state == .dirty { return .implementationReview }
         if worktree?.state == .failed { return .failed }
         return .discuss
     }
@@ -303,7 +366,7 @@ final class DesktopConversationRuntime: ObservableObject {
         guard !codingWorkflowBusyThreadIDs.contains(threadID),
               let thread = model.thread(id: threadID),
               thread.kind == .coding,
-              thread.provider.caseInsensitiveCompare("Codex") == .orderedSame,
+              Self.supportsIsolatedImplementation(provider: thread.provider),
               !thread.plan.isEmpty,
               let projectID = thread.projectID,
               let root = model.workspaceURL(threadID: threadID),
@@ -312,7 +375,7 @@ final class DesktopConversationRuntime: ObservableObject {
               })?.sourceMessageID,
               let sourceMessage = model.message(threadID: threadID, id: sourceMessageID),
               let runner = LocalCoreRunner.bundled() else {
-            codingWorkflowErrors[threadID] = "Coding implementation requires a Codex project conversation with a valid repository and the signed local journal service."
+            codingWorkflowErrors[threadID] = "Coding implementation requires a project conversation with a provider adapter, a valid repository, and the signed local journal service."
             return
         }
         codingWorkflowBusyThreadIDs.insert(threadID)
@@ -339,8 +402,8 @@ final class DesktopConversationRuntime: ObservableObject {
                     threadID: threadID,
                     title: "Implement approved plan",
                     exactTarget: target.path,
-                    consequence: "Create branch \(branch) from \(rootSnapshot.head), then allow one network-denied Codex implementation turn only inside that isolated worktree. Approved plan digest: \(CodingWorkspaceInspector.digest(Data(planText.utf8))).",
-                    dataLeavingDevice: "The approved prompt is sent to Codex; network tools remain disabled.",
+                    consequence: "Create branch \(branch) from \(rootSnapshot.head), then allow \(thread.provider) implementation turns only inside that isolated worktree. Approved plan digest: \(CodingWorkspaceInspector.digest(Data(planText.utf8))).",
+                    dataLeavingDevice: "The approved prompt is sent to \(thread.provider).",
                     reversible: true,
                     expiresAtUnixMillis: Int64(Date().addingTimeInterval(15 * 60).timeIntervalSince1970 * 1_000)
                 ) else {
@@ -407,8 +470,8 @@ final class DesktopConversationRuntime: ObservableObject {
                     sourceMessageID: sourceMessageID,
                     workspacePathOverride: target.path,
                     purpose: .codingImplementation,
-                    runtimeModeOverride: .autoAcceptEdits,
-                    networkAccessOverride: false
+                    runtimeModeOverride: Self.implementationRuntimeMode(provider: thread.provider),
+                    networkAccessOverride: thread.networkAccess
                 ) else {
                     throw CodingWorkspaceInspectorError.unavailable("Kaname could not persist the approved implementation run.")
                 }
@@ -438,7 +501,7 @@ final class DesktopConversationRuntime: ObservableObject {
               }),
               let path = completedRun.workspacePathOverride,
               let worktree = latestCodingWorktree(threadID: threadID),
-              worktree.state == .ready,
+              [.ready, .dirty].contains(worktree.state),
               URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
                 == URL(fileURLWithPath: worktree.worktreePath, isDirectory: true).standardizedFileURL else { return }
         codingWorkflowErrors.removeValue(forKey: threadID)
@@ -633,7 +696,11 @@ final class DesktopConversationRuntime: ObservableObject {
             attachments: message.attachments,
             workspacePath: workspace.path,
             providerStatePath: environment.providerStateDirectory.path,
-            resumableNativeThreadID: model.latestNativeThreadID(threadID: threadID, provider: run.provider),
+            resumableNativeThreadID: model.latestNativeThreadID(
+                threadID: threadID,
+                provider: run.provider,
+                workspacePathOverride: run.workspacePathOverride
+            ),
             localCoreMachService: machService,
             localCoreRequirement: requirement,
             workspaceAuthorization: authorization,
@@ -895,6 +962,10 @@ final class DesktopConversationRuntime: ObservableObject {
             return true
         }
         guard let event = prepared.providerEvent else { return true }
+        if event.kind == .planUpdated, let planText = event.planText {
+            model.setProviderPlanBody(threadID: serviceEvent.threadID, text: planText)
+            guard model.persistenceError == nil else { return false }
+        }
         if event.kind == .planUpdated, let update = event.planUpdate {
             model.replaceProviderPlan(
                 threadID: serviceEvent.threadID,
@@ -930,11 +1001,27 @@ final class DesktopConversationRuntime: ObservableObject {
         case .providerCompleted:
             let completedRun = model.providerRun(id: serviceEvent.runID)
             if completedRun?.purpose == .codingPlan,
-               model.thread(id: serviceEvent.threadID)?.plan.isEmpty == true,
                let fallback = model.thread(id: serviceEvent.threadID)?.messages.last(where: { $0.role == .assistant })?.body,
                !fallback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                model.addProviderPlan(threadID: serviceEvent.threadID, text: fallback, completed: true)
-                guard model.persistenceError == nil else { return false }
+                // The final planning message is the readable plan body unless the
+                // provider already supplied one through a structured plan update.
+                if model.thread(id: serviceEvent.threadID)?.planBody == nil {
+                    model.setProviderPlanBody(threadID: serviceEvent.threadID, text: fallback)
+                    guard model.persistenceError == nil else { return false }
+                }
+                if model.thread(id: serviceEvent.threadID)?.plan.isEmpty == true {
+                    let steps = ProviderPlanMarkdown.steps(fromMarkdown: fallback)
+                    if steps.isEmpty {
+                        model.addProviderPlan(threadID: serviceEvent.threadID, text: fallback, completed: true)
+                    } else {
+                        model.replaceProviderPlan(
+                            threadID: serviceEvent.threadID,
+                            steps: steps.map { ($0, "pending") },
+                            explanation: nil
+                        )
+                    }
+                    guard model.persistenceError == nil else { return false }
+                }
             }
             if completedRun?.purpose == .codingPlan,
                model.thread(id: serviceEvent.threadID)?.plan.isEmpty == false {
@@ -1385,10 +1472,24 @@ final class DesktopConversationRuntime: ObservableObject {
             mode: "DISCUSS AND PLAN ONLY",
             skillSources: loadedSkills
         )
+        let planMechanism: String = switch thread.provider.lowercased() {
+        case "codex":
+            "Use the structured plan-update mechanism so every step appears in Kaname's Plan tab."
+        case "claude":
+            "Finish your reply with the complete plan as Markdown under a '## Plan' heading using a numbered list of steps. If plan mode offers a plan file, write the same plan there. Do not search for TodoWrite or ExitPlanMode."
+        default:
+            "Finish your reply with the complete plan as Markdown under a '## Plan' heading using a numbered list of steps."
+        }
+        let currentPlan = thread.plan.isEmpty
+            ? "No plan yet. Discuss the idea with the user and draft the first version."
+            : "This is a revision. Take the user's message as feedback on the current plan below, then re-emit the whole revised plan, not just the changed steps.\n\nCurrent plan:\n"
+                + thread.plan.enumerated().map { "\($0.offset + 1). \($0.element.title)" }.joined(separator: "\n")
         return """
         Kaname Coding stage: DISCUSS AND PLAN ONLY.
 
-        Inspect the selected repository read-only as needed, then propose a concrete implementation plan. Use the provider's structured plan-update mechanism so every step appears in Kaname's Plan tab. The structured entries must describe future implementation work, not the planning work you are doing, and should remain pending. Do not edit files, create commits, run destructive commands, access the network, or begin implementation. End after the plan and wait for explicit user approval.
+        You are in an ongoing planning conversation. Inspect the selected repository read-only as needed, answer the user, and keep one concrete implementation plan up to date. \(planMechanism) The plan steps must describe future implementation work, not the planning work you are doing, and stay pending. Do not edit files, create commits, run destructive commands, access the network, or begin implementation. Nothing is implemented until the user explicitly approves the plan in Kaname.
+
+        \(currentPlan)
 
         Project: \(project?.name ?? "Standalone")
         Selected instruction references: \(instructions)
@@ -1409,10 +1510,10 @@ final class DesktopConversationRuntime: ObservableObject {
         return """
         Kaname Coding stage: APPROVED ISOLATED IMPLEMENTATION.
 
-        Implement only the approved plan below inside the selected linked Git worktree. Do not access the network or write outside the worktree. Run the relevant local verification, report changed files and not-run boundaries, and do not commit, push, publish, merge, or update external knowledge. After this turn Kaname must wait for the user to begin independent review; provider completion is never evidence review, acceptance, or knowledge-update authority.
+        Implement the approved plan below inside the selected linked Git worktree, following the user's latest message. This is an ongoing conversation: the user may send follow-up instructions and you continue in the same worktree. Do not write outside the worktree. Run the relevant local verification, report changed files and anything not run, and do not commit, push, publish, or merge. Provider completion is never acceptance; the user reviews Changes and Evidence in Kaname.
 
         Project: \(project?.name ?? "Standalone")
-        Original request:
+        User message:
         \(userMessage)
 
         Approved plan:
@@ -1784,6 +1885,21 @@ final class DesktopConversationRuntime: ObservableObject {
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let questions = object["questions"] as? [[String: Any]] else { return [] }
         return questions.compactMap { $0["id"] as? String }.filter { !$0.isEmpty }
+    }
+
+    /// Whichever provider the user selected for the thread plans and implements.
+    /// The only requirement is that Kaname has a conversation adapter for it.
+    static func supportsIsolatedImplementation(provider: String) -> Bool {
+        provider.caseInsensitiveCompare("Codex") == .orderedSame
+            || NativeConversationDriver(providerName: provider) != nil
+    }
+
+    /// Codex enforces the write boundary through its sandbox grant, so it keeps
+    /// accept-edits semantics. Claude and OpenCode run non-interactively inside
+    /// the isolated worktree, where prompts cannot be answered, so they use the
+    /// provider's auto mode instead of stalling on every shell command.
+    static func implementationRuntimeMode(provider: String) -> ConversationRuntimeMode {
+        provider.lowercased() == "codex" ? .autoAcceptEdits : .auto
     }
 
     static func supportsImageAttachments(provider: String) -> Bool {

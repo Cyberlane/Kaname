@@ -3088,6 +3088,7 @@ private struct DesktopThreadConversation: View {
             case .plan:
                 ThreadPlanView(
                     items: thread.plan,
+                    planBody: thread.planBody,
                     phase: codingStage.planPhase(hasSavedPlan: !thread.plan.isEmpty),
                     provider: thread.provider,
                     requestChanges: requestPlanChanges,
@@ -4133,9 +4134,7 @@ private struct DesktopThreadConversation: View {
 
     private var canSendMessage: Bool {
         guard thread.kind == .coding else { return true }
-        return ![.planning, .preparing, .implementing, .implementationReview, .evidenceReview, .knowledgeReview].contains(
-            runtime.codingStage(threadID: thread.id)
-        )
+        return ![.planning, .preparing, .implementing].contains(runtime.codingStage(threadID: thread.id))
     }
 
     private var availablePanels: [DesktopThreadPanel] {
@@ -15710,6 +15709,7 @@ private struct DesktopDecisionFooter<Actions: View>: View {
 
 private struct ThreadPlanView: View {
     let items: [DesktopPlanItem]
+    let planBody: String?
     let phase: DesktopPlanPhase
     let provider: String
     let requestChanges: () -> Void
@@ -15741,11 +15741,16 @@ private struct ThreadPlanView: View {
 
     private var planScrollContent: some View {
         VStack(alignment: .leading, spacing: 22) {
-            if presentation.rows.isEmpty {
+            if presentation.rows.isEmpty, planBody == nil {
                 emptyPlan
             } else {
                 planHeader
-                planOutline
+                if let planBody, !planBody.isEmpty {
+                    ThreadPlanBodyView(markdown: planBody)
+                }
+                if !presentation.rows.isEmpty {
+                    planOutline
+                }
             }
         }
         .padding(.horizontal, 22)
@@ -15843,7 +15848,7 @@ private struct ThreadPlanView: View {
     private var planReviewFooter: some View {
         DesktopDecisionFooter(
             title: "Ready for your decision",
-            detail: "Changes start another read-only plan. Approval authorizes one network-denied implementation turn in an isolated worktree."
+            detail: "Ask for changes in Chat to revise this plan. Approve to create an isolated worktree and start implementing."
         ) {
             reviewActions
         }
@@ -15882,14 +15887,116 @@ private struct ThreadPlanView: View {
     }
 
     private var providerSupportsImplementation: Bool {
-        provider.caseInsensitiveCompare("Codex") == .orderedSame
+        DesktopConversationRuntime.supportsIsolatedImplementation(provider: provider)
     }
 
     private var approvalHelp: String {
         if items.isEmpty { return "Wait for a readable plan before approving implementation" }
         return providerSupportsImplementation
-            ? "Create an isolated worktree and authorize one network-denied implementation turn"
-            : "Choose Codex to use Kaname's signed isolated implementation flow"
+            ? "Create an isolated worktree and start implementing the approved plan"
+            : "\(provider) has no Kaname conversation adapter, so it cannot implement here"
+    }
+}
+
+/// Lightweight Markdown rendering for the living plan body: headings, lists,
+/// paragraphs, and fenced code. Inline emphasis and links use AttributedString.
+private struct ThreadPlanBodyView: View {
+    let markdown: String
+
+    private enum Block: Identifiable {
+        case heading(Int, String)
+        case paragraph(String)
+        case listItem(String)
+        case code(String)
+
+        var id: String {
+            switch self {
+            case let .heading(level, text): "h\(level)-\(text)"
+            case let .paragraph(text): "p-\(text.prefix(80))-\(text.count)"
+            case let .listItem(text): "li-\(text.prefix(80))-\(text.count)"
+            case let .code(text): "code-\(text.prefix(80))-\(text.count)"
+            }
+        }
+    }
+
+    private var blocks: [Block] {
+        var blocks: [Block] = []
+        var paragraph: [String] = []
+        var code: [String]?
+        func flushParagraph() {
+            let text = paragraph.joined(separator: " ").trimmingCharacters(in: .whitespaces)
+            if !text.isEmpty { blocks.append(.paragraph(text)) }
+            paragraph = []
+        }
+        for rawLine in markdown.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("```") {
+                if let open = code {
+                    blocks.append(.code(open.joined(separator: "\n")))
+                    code = nil
+                } else {
+                    flushParagraph()
+                    code = []
+                }
+                continue
+            }
+            if code != nil {
+                code?.append(rawLine)
+                continue
+            }
+            if line.isEmpty {
+                flushParagraph()
+            } else if let range = line.range(of: #"^#{1,6}\s+"#, options: .regularExpression) {
+                flushParagraph()
+                let level = line[range].filter { $0 == "#" }.count
+                blocks.append(.heading(level, String(line[range.upperBound...])))
+            } else if let range = line.range(of: #"^(\d+[.)]|[-*+])\s+(\[[ xX]\]\s+)?"#, options: .regularExpression) {
+                flushParagraph()
+                blocks.append(.listItem(String(line[range.upperBound...])))
+            } else {
+                paragraph.append(line)
+            }
+        }
+        if let code { blocks.append(.code(code.joined(separator: "\n"))) }
+        flushParagraph()
+        return blocks
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                switch block {
+                case let .heading(level, text):
+                    inline(text)
+                        .font(level <= 2 ? .title3.weight(.semibold) : .headline)
+                        .padding(.top, 6)
+                case let .paragraph(text):
+                    inline(text)
+                        .font(.body)
+                case let .listItem(text):
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text("•").foregroundStyle(.secondary)
+                        inline(text).font(.body)
+                    }
+                    .padding(.leading, 6)
+                case let .code(text):
+                    Text(text)
+                        .font(.system(.callout, design: .monospaced))
+                        .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .textSelection(.enabled)
+        .accessibilityLabel("Plan")
+    }
+
+    private func inline(_ text: String) -> Text {
+        var options = AttributedString.MarkdownParsingOptions()
+        options.interpretedSyntax = .inlineOnlyPreservingWhitespace
+        return Text((try? AttributedString(markdown: text, options: options)) ?? AttributedString(text))
     }
 }
 
