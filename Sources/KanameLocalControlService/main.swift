@@ -235,6 +235,29 @@ private final class LocalControlService: NSObject, LocalCoreControlService {
         )
     }
 
+    /// Fires due interval schedules. Called by the host timer; the core
+    /// derives every run identity from the scheduled instant, so a repeated
+    /// tick is idempotent.
+    func runScheduleTick() {
+        let applicationSupportRoot = journalDirectory
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let projection = applicationSupportRoot
+            .appendingPathComponent("Workflows", isDirectory: true)
+            .appendingPathComponent("workflow-run-projection.sqlite")
+        let schedules = applicationSupportRoot
+            .appendingPathComponent("Workflows", isDirectory: true)
+            .appendingPathComponent("schedules.json")
+        guard FileManager.default.fileExists(atPath: schedules.path) else { return }
+        runWireOperation(
+            "workflow-schedule-tick",
+            request: Data("{}".utf8),
+            extraArguments: [projection.path, applicationSupportRoot.path],
+            permissionTarget: projection,
+            timeout: 600
+        ) { _, _ in }
+    }
+
     func purgeWorkflowRun(_ request: Data, reply: @escaping (Data?, String) -> Void) {
         let applicationSupportRoot = journalDirectory
             .deletingLastPathComponent()
@@ -477,16 +500,23 @@ private enum KanameLocalControlServiceMain {
             switch arguments.mode {
             case .host:
                 let listener = NSXPCListener(machServiceName: arguments.machService)
-                let delegate = ListenerDelegate(service: LocalControlService(
+                let service = LocalControlService(
                     coreExecutable: arguments.coreExecutable,
                     journalDirectory: arguments.journalDirectory,
                     localDeviceID: arguments.localDeviceID,
                     localKeyID: arguments.localKeyID
-                ))
+                )
+                let delegate = ListenerDelegate(service: service)
                 listener.delegate = delegate
                 listener.setConnectionCodeSigningRequirement(arguments.requirement)
                 listener.activate()
-                withExtendedLifetime(delegate) { dispatchMain() }
+                // Scheduled workflows run from this long-lived agent, so they
+                // fire even when the desktop app is closed.
+                let scheduler = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "com.cyberlane.kaname.scheduler"))
+                scheduler.schedule(deadline: .now() + 30, repeating: 60)
+                scheduler.setEventHandler { service.runScheduleTick() }
+                scheduler.resume()
+                withExtendedLifetime((delegate, scheduler)) { dispatchMain() }
             case .install:
                 try LaunchAgent.install(arguments)
             }

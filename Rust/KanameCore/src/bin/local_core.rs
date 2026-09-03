@@ -104,6 +104,11 @@ fn main() {
         [operation, journal_path, projection_path] if operation == "workflow-effect-authorize" => {
             workflow_effect_authorize(journal_path, projection_path)
         }
+        [operation, journal_path, projection_path, application_support]
+            if operation == "workflow-schedule-tick" =>
+        {
+            workflow_schedule_tick(journal_path, projection_path, application_support)
+        }
         _ => Err("usage: kaname-local-core scenario <F-01..F-14> | scenario-store <F-01..F-14> <journal-path> | append-event <journal-path> < event-envelope.bin | authorize-action <journal-path> < approval-command.bin | record-review <journal-path> < command-envelope.bin | replay <journal-path> < replay-request.bin | mobile-propose <journal-path> < enrollment-challenge.bin | mobile-decide <journal-path> < enrollment-decision.bin | mobile-admit <journal-path> <recipient-device-id> <recipient-key-id> < encrypted-envelope.bin | scale <S-01..S-04> | workflow-schema-check < request.json | workflow-canonicalize < value.json | workflow-compile < compile-request.bin | workflow-library-query <application-support-root> < query-request.bin | workflow-library-activate <application-support-root> < activation-request.bin | workflow-library-import-frozen <application-support-root> < import-request.bin | workflow-run-inspect <journal-path> <projection-path> < query.bin | workflow-connector-observation-begin <journal-path> <projection-path> < request.bin | workflow-connector-observation-settle <journal-path> <projection-path> < request.bin | workflow-run-purge <journal-path> <projection-path> <application-support-root> < request.bin | workflow-run-start <journal-path> <projection-path> <application-support-root> < request.json".to_owned()),
     };
     match result {
@@ -294,6 +299,214 @@ fn workflow_run_start(
     };
     let json = serde_json::to_vec(&response).map_err(|_| "workflow_run_start_encode_failed".to_owned())?;
     Ok(hex::encode(json))
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowSchedule {
+    workflow_id: String,
+    interval_seconds: i64,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    last_scheduled_for_unix_millis: i64,
+    #[serde(default)]
+    last_run_id: String,
+    #[serde(default)]
+    last_outcome: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowScheduleFile {
+    #[serde(default)]
+    schedules: Vec<WorkflowSchedule>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowScheduleTickResponse {
+    checked: usize,
+    admitted: Vec<String>,
+    skipped: Vec<String>,
+    errors: Vec<String>,
+}
+
+/// Fires due interval schedules for active, executable revisions whose
+/// entrypoint is `trigger.schedule`. The schedule cadence is host state kept in
+/// `Workflows/schedules.json`; the executor derives the run identity from the
+/// scheduled instant, so a repeated tick over the same instant appends nothing.
+fn workflow_schedule_tick(
+    journal_path: &str,
+    projection_path: &str,
+    application_support: &str,
+) -> Result<String, String> {
+    let schedules_path = std::path::Path::new(application_support)
+        .join("Workflows")
+        .join("schedules.json");
+    let mut file: WorkflowScheduleFile = std::fs::read(&schedules_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    let mut response = WorkflowScheduleTickResponse {
+        checked: file.schedules.len(),
+        admitted: Vec::new(),
+        skipped: Vec::new(),
+        errors: Vec::new(),
+    };
+    if file.schedules.is_empty() {
+        return serde_json::to_vec(&response)
+            .map(hex::encode)
+            .map_err(|_| "workflow_schedule_tick_encode_failed".to_owned());
+    }
+    let store = open_workflow_library(application_support)
+        .map_err(|_| "workflow_library_unavailable".to_owned())?;
+    let portfolio = store
+        .workflow_portfolio("active")
+        .map_err(|_| "workflow_portfolio_unavailable".to_owned())?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or_default();
+    let mut journal = Journal::open(journal_path, &CURSOR_KEY)
+        .map_err(|_| "workflow_run_journal_unavailable".to_owned())?;
+    let mut llm = kaname_core::workflow_llm::ProcessWorkflowLlmProvider::from_environment();
+    let mut capabilities =
+        kaname_core::workflow_capabilities::ProcessWorkflowCapabilityHost::from_environment();
+    let mut effects = kaname_core::workflow_effect_process::ProcessWorkflowEffectHost::from_environment(
+        journal_path,
+        projection_path,
+        CURSOR_KEY,
+    );
+    let mut changed = false;
+    for schedule in file.schedules.iter_mut() {
+        if !schedule.enabled || schedule.interval_seconds < 60 {
+            response.skipped.push(format!("{}:disabled", schedule.workflow_id));
+            continue;
+        }
+        let Some(item) = portfolio.iter().find(|item| item.workflow_id == schedule.workflow_id) else {
+            response.skipped.push(format!("{}:not_in_portfolio", schedule.workflow_id));
+            continue;
+        };
+        let Some(revision_id) = item.active_revision_id.clone() else {
+            response.skipped.push(format!("{}:no_active_revision", schedule.workflow_id));
+            continue;
+        };
+        let revision = match store.load_workflow_revision(&revision_id, "active") {
+            Ok(revision) => revision,
+            Err(error) => {
+                response.errors.push(format!("{}:{error:?}", schedule.workflow_id));
+                continue;
+            }
+        };
+        let compiled: serde_json::Value = match serde_json::from_slice(&revision.compiled_source) {
+            Ok(value) => value,
+            Err(_) => {
+                response.errors.push(format!("{}:compiled_unreadable", schedule.workflow_id));
+                continue;
+            }
+        };
+        let entry_node_id = compiled["entrypoints"][0]["nodeId"].as_str().unwrap_or_default().to_owned();
+        let is_schedule_entry = compiled["nodes"]
+            .as_array()
+            .map(|nodes| {
+                nodes.iter().any(|node| {
+                    node["id"].as_str() == Some(entry_node_id.as_str())
+                        && node["type"].as_str() == Some("trigger.schedule")
+                })
+            })
+            .unwrap_or(false);
+        if !is_schedule_entry {
+            response.skipped.push(format!("{}:entrypoint_not_schedule", schedule.workflow_id));
+            continue;
+        }
+        let interval_millis = schedule.interval_seconds * 1_000;
+        // First tick anchors the cadence at now; later ticks catch up one
+        // occurrence per tick so a long sleep does not fan out into a burst.
+        let due = if schedule.last_scheduled_for_unix_millis <= 0 {
+            now
+        } else {
+            schedule.last_scheduled_for_unix_millis + interval_millis
+        };
+        if due > now {
+            response.skipped.push(format!("{}:not_due", schedule.workflow_id));
+            continue;
+        }
+        let scheduled_for = if now - due > interval_millis { now - ((now - due) % interval_millis) } else { due };
+        let empty_input = serde_json_canonicalizer::to_vec(&serde_json::json!({})).unwrap_or_default();
+        let binding = kaname_core::workflow_executor::WorkflowTriggerRunBinding {
+            workflow_id: schedule.workflow_id.clone(),
+            revision_id: revision_id.clone(),
+            package_digest: revision.summary.package_digest.clone(),
+            installation_id: String::new(),
+            case_id: String::new(),
+            input: v1::WorkflowValueReference {
+                value_id: format!("value-schedule-{}-{scheduled_for}", schedule.workflow_id),
+                content_type: "application/json".into(),
+                byte_count: empty_input.len() as u64,
+                sha256: {
+                    use sha2::Digest as _;
+                    hex::encode(sha2::Sha256::digest(&empty_input))
+                },
+                inline_canonical_json: empty_input,
+                ..Default::default()
+            },
+            scope: v1::Scope {
+                project_id: "project-kaname".into(),
+                workspace_id: "workspace-local".into(),
+                account_id: String::new(),
+                authority_id: String::new(),
+                egress_class: String::new(),
+                destination_digest: String::new(),
+            },
+            actor_id: "kaname-scheduler".into(),
+            observed_at_unix_millis: now,
+        };
+        let trigger = kaname_core::workflow_executor::WorkflowScheduleTrigger {
+            scheduled_for_unix_millis: scheduled_for,
+            misfire_grace_millis: interval_millis,
+        };
+        match kaname_core::workflow_executor::execute_schedule_trigger_with_hosts(
+            &mut journal,
+            &store,
+            &binding,
+            &trigger,
+            &mut capabilities,
+            &mut llm,
+            &mut effects,
+        ) {
+            Ok(receipt) => {
+                schedule.last_scheduled_for_unix_millis = scheduled_for;
+                schedule.last_run_id = receipt.run_id.clone();
+                schedule.last_outcome = receipt
+                    .result
+                    .as_ref()
+                    .map(|result| format!("{:?}", result.outcome).to_lowercase())
+                    .unwrap_or_else(|| "misfired".into());
+                changed = true;
+                response.admitted.push(format!("{}:{}:{}", schedule.workflow_id, receipt.run_id, schedule.last_outcome));
+            }
+            Err(error) => {
+                schedule.last_scheduled_for_unix_millis = scheduled_for;
+                schedule.last_outcome = format!("error:{error:?}");
+                changed = true;
+                response.errors.push(format!("{}:{error:?}", schedule.workflow_id));
+            }
+        }
+    }
+    if changed {
+        if let Ok(bytes) = serde_json::to_vec_pretty(&file) {
+            let _ = std::fs::write(&schedules_path, bytes);
+        }
+    }
+    let _ = WorkflowRunProjection::open_or_rebuild(projection_path, &journal);
+    serde_json::to_vec(&response)
+        .map(hex::encode)
+        .map_err(|_| "workflow_schedule_tick_encode_failed".to_owned())
 }
 
 #[derive(Deserialize)]

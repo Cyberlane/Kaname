@@ -1280,6 +1280,31 @@ pub fn execute_event_trigger(
     binding: &WorkflowTriggerRunBinding,
     trigger: &WorkflowEventTrigger,
 ) -> Result<WorkflowTriggerRunReceipt> {
+    let mut capabilities = UnavailableWorkflowCapabilityHost;
+    let mut llm = UnavailableWorkflowLlmProvider;
+    let mut effects = UnavailableWorkflowEffectHost;
+    execute_event_trigger_with_hosts(
+        journal,
+        library,
+        binding,
+        trigger,
+        &mut capabilities,
+        &mut llm,
+        &mut effects,
+    )
+}
+
+/// `execute_event_trigger` with the injectable hosts a desktop run supplies.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_event_trigger_with_hosts(
+    journal: &mut Journal,
+    library: &WorkflowLibraryStore,
+    binding: &WorkflowTriggerRunBinding,
+    trigger: &WorkflowEventTrigger,
+    capabilities: &mut dyn WorkflowCapabilityHost,
+    llm: &mut dyn WorkflowLlmProvider,
+    effects: &mut dyn WorkflowEffectHost,
+) -> Result<WorkflowTriggerRunReceipt> {
     let compiled = load_trigger_revision(library, binding)?;
     let entrypoint = compiled_node(&compiled, &compiled.entrypoints[0].node_id)?;
     if entrypoint.node_type != "trigger.event" {
@@ -1301,7 +1326,16 @@ pub fn execute_event_trigger(
         "event",
         &[&config.event_contract, &config.deduplication, key],
     );
-    admit_trigger_run(journal, library, binding, EVENT_TRIGGER_KIND, &occurrence)
+    admit_trigger_run_with_hosts(
+        journal,
+        library,
+        binding,
+        EVENT_TRIGGER_KIND,
+        &occurrence,
+        capabilities,
+        llm,
+        effects,
+    )
 }
 
 /// Admits one `trigger.schedule` occurrence as a durable run, honouring the
@@ -1318,6 +1352,31 @@ pub fn execute_schedule_trigger(
     library: &WorkflowLibraryStore,
     binding: &WorkflowTriggerRunBinding,
     trigger: &WorkflowScheduleTrigger,
+) -> Result<WorkflowTriggerRunReceipt> {
+    let mut capabilities = UnavailableWorkflowCapabilityHost;
+    let mut llm = UnavailableWorkflowLlmProvider;
+    let mut effects = UnavailableWorkflowEffectHost;
+    execute_schedule_trigger_with_hosts(
+        journal,
+        library,
+        binding,
+        trigger,
+        &mut capabilities,
+        &mut llm,
+        &mut effects,
+    )
+}
+
+/// `execute_schedule_trigger` with the injectable hosts a desktop run supplies.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_schedule_trigger_with_hosts(
+    journal: &mut Journal,
+    library: &WorkflowLibraryStore,
+    binding: &WorkflowTriggerRunBinding,
+    trigger: &WorkflowScheduleTrigger,
+    capabilities: &mut dyn WorkflowCapabilityHost,
+    llm: &mut dyn WorkflowLlmProvider,
+    effects: &mut dyn WorkflowEffectHost,
 ) -> Result<WorkflowTriggerRunReceipt> {
     let compiled = load_trigger_revision(library, binding)?;
     let entrypoint = compiled_node(&compiled, &compiled.entrypoints[0].node_id)?;
@@ -1353,21 +1412,28 @@ pub fn execute_schedule_trigger(
             result: None,
         });
     }
-    admit_trigger_run(
+    admit_trigger_run_with_hosts(
         journal,
         library,
         binding,
         SCHEDULE_TRIGGER_KIND,
         &occurrence,
+        capabilities,
+        llm,
+        effects,
     )
 }
 
-fn admit_trigger_run(
+#[allow(clippy::too_many_arguments)]
+fn admit_trigger_run_with_hosts(
     journal: &mut Journal,
     library: &WorkflowLibraryStore,
     binding: &WorkflowTriggerRunBinding,
     trigger_kind: &str,
     occurrence: &str,
+    capabilities: &mut dyn WorkflowCapabilityHost,
+    llm: &mut dyn WorkflowLlmProvider,
+    effects: &mut dyn WorkflowEffectHost,
 ) -> Result<WorkflowTriggerRunReceipt> {
     let run_id = trigger_run_id(binding, occurrence);
     let command = trigger_run_command(binding, trigger_kind, occurrence, &run_id);
@@ -1392,17 +1458,14 @@ fn admit_trigger_run(
             }),
         });
     }
-    let mut capabilities = UnavailableWorkflowCapabilityHost;
-    let mut llm = UnavailableWorkflowLlmProvider;
-    let mut effects = UnavailableWorkflowEffectHost;
     let result = execute_internal(
         journal,
         library,
         None,
         None,
-        &mut capabilities,
-        &mut llm,
-        &mut effects,
+        capabilities,
+        llm,
+        effects,
         &command,
         binding.observed_at_unix_millis,
         None,

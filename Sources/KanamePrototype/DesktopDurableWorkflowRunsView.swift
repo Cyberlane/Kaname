@@ -1,4 +1,5 @@
 import Foundation
+import KanameConnectivity
 import KanameDesktop
 import KanameLocalCore
 import KanamePrototypeUI
@@ -46,6 +47,63 @@ final class DesktopDurableWorkflowRunsViewModel: ObservableObject {
         guard let library else { return }
         let items = try? await library.portfolio(requestID: "workflow-runnable:\(UUID().uuidString.lowercased())")
         runnableWorkflows = (items ?? []).filter { $0.activeRevisionID != nil }
+        loadSchedules()
+    }
+
+    // MARK: Interval schedules (host state read by the control service's tick)
+
+    @Published private(set) var scheduleSeconds: [String: Int] = [:]
+
+    static let scheduleChoices: [(label: String, seconds: Int)] = [
+        ("Off", 0), ("Every 15 minutes", 900), ("Every hour", 3_600), ("Every 6 hours", 21_600), ("Daily", 86_400),
+    ]
+
+    private var schedulesURL: URL {
+        KanameDesktopEnvironment.current.applicationSupportRoot
+            .appendingPathComponent("Workflows", isDirectory: true)
+            .appendingPathComponent("schedules.json")
+    }
+
+    func loadSchedules() {
+        guard let data = try? Data(contentsOf: schedulesURL),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let entries = object["schedules"] as? [[String: Any]] else {
+            scheduleSeconds = [:]
+            return
+        }
+        var seconds: [String: Int] = [:]
+        for entry in entries {
+            guard let id = entry["workflowId"] as? String, (entry["enabled"] as? Bool) ?? true else { continue }
+            seconds[id] = (entry["intervalSeconds"] as? Int) ?? 0
+        }
+        scheduleSeconds = seconds
+    }
+
+    func setSchedule(_ item: DesktopWorkflowV2PortfolioItem, seconds: Int) {
+        var entries: [[String: Any]] = []
+        if let data = try? Data(contentsOf: schedulesURL),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let existing = object["schedules"] as? [[String: Any]] {
+            entries = existing.filter { ($0["workflowId"] as? String) != item.workflowID }
+        }
+        if seconds > 0 {
+            entries.append([
+                "workflowId": item.workflowID,
+                "intervalSeconds": seconds,
+                "enabled": true,
+                "lastScheduledForUnixMillis": 0,
+            ])
+        }
+        let directory = schedulesURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        if let data = try? JSONSerialization.data(withJSONObject: ["schedules": entries], options: [.prettyPrinted, .sortedKeys]) {
+            try? data.write(to: schedulesURL, options: [.atomic])
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: schedulesURL.path)
+        }
+        loadSchedules()
+        startMessage = seconds > 0
+            ? "\(item.name) runs every \(seconds / 60) minutes while the Kaname service is running, even with the app closed."
+            : "\(item.name) schedule removed."
     }
 
     /// Records the owner's decision for a proposed effect, then continues the
@@ -257,14 +315,39 @@ struct DesktopDurableWorkflowRunsView: View {
                 .help("Activate an executable workflow revision first")
         } else {
             Menu {
-                ForEach(viewModel.runnableWorkflows) { item in
-                    Button(item.name) { Task { await viewModel.startRun(item) } }
+                Section("Run now") {
+                    ForEach(viewModel.runnableWorkflows) { item in
+                        Button(item.name) { Task { await viewModel.startRun(item) } }
+                    }
+                }
+                Section("Schedule") {
+                    ForEach(viewModel.runnableWorkflows) { item in
+                        Menu(scheduleLabel(item)) {
+                            ForEach(DesktopDurableWorkflowRunsViewModel.scheduleChoices, id: \.seconds) { choice in
+                                Button {
+                                    viewModel.setSchedule(item, seconds: choice.seconds)
+                                } label: {
+                                    if (viewModel.scheduleSeconds[item.workflowID] ?? 0) == choice.seconds {
+                                        Label(choice.label, systemImage: "checkmark")
+                                    } else {
+                                        Text(choice.label)
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             } label: {
                 Label(viewModel.isStarting ? "Starting…" : "Run workflow", systemImage: "play.fill")
             }
             .disabled(viewModel.isStarting)
         }
+    }
+
+    private func scheduleLabel(_ item: DesktopWorkflowV2PortfolioItem) -> String {
+        let seconds = viewModel.scheduleSeconds[item.workflowID] ?? 0
+        let choice = DesktopDurableWorkflowRunsViewModel.scheduleChoices.first { $0.seconds == seconds }?.label ?? "Every \(seconds / 60) min"
+        return seconds > 0 ? "\(item.name) · \(choice)" : item.name
     }
 
     private func runList(_ history: DesktopWorkflowRunHistorySnapshot) -> some View {
