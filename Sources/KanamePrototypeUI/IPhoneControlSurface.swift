@@ -57,7 +57,7 @@ public struct IPhoneControlSurface: View {
             set: { mobileShell.replaceQueuedCommands($0) }
         )
         ZStack {
-            Nord.polarNight0
+            KanameColor.canvas
                 .ignoresSafeArea()
 
             TabView(selection: $selectedTab) {
@@ -82,8 +82,8 @@ public struct IPhoneControlSurface: View {
                     Label("Home", systemImage: "rectangle.grid.2x2.fill")
                 }
                 .tag(IPhoneTab.home)
-                .background(Nord.polarNight0.ignoresSafeArea())
-                .toolbarBackground(Nord.polarNight0, for: .navigationBar, .tabBar)
+                .background(KanameColor.canvas.ignoresSafeArea())
+                .toolbarBackground(KanameColor.canvas, for: .navigationBar, .tabBar)
                 .toolbarBackground(.visible, for: .navigationBar, .tabBar)
 
                 NavigationStack {
@@ -101,8 +101,8 @@ public struct IPhoneControlSurface: View {
                     Label("Work", systemImage: "bubble.left.and.bubble.right.fill")
                 }
                 .tag(IPhoneTab.work)
-                .background(Nord.polarNight0.ignoresSafeArea())
-                .toolbarBackground(Nord.polarNight0, for: .navigationBar, .tabBar)
+                .background(KanameColor.canvas.ignoresSafeArea())
+                .toolbarBackground(KanameColor.canvas, for: .navigationBar, .tabBar)
                 .toolbarBackground(.visible, for: .navigationBar, .tabBar)
 
                 NavigationStack {
@@ -119,8 +119,8 @@ public struct IPhoneControlSurface: View {
                     Label("Projects", systemImage: "folder.fill")
                 }
                 .tag(IPhoneTab.projects)
-                .background(Nord.polarNight0.ignoresSafeArea())
-                .toolbarBackground(Nord.polarNight0, for: .navigationBar, .tabBar)
+                .background(KanameColor.canvas.ignoresSafeArea())
+                .toolbarBackground(KanameColor.canvas, for: .navigationBar, .tabBar)
                 .toolbarBackground(.visible, for: .navigationBar, .tabBar)
 
                 NavigationStack {
@@ -135,8 +135,8 @@ public struct IPhoneControlSurface: View {
                     Label("Operate", systemImage: "slider.horizontal.3")
                 }
                 .tag(IPhoneTab.operate)
-                .background(Nord.polarNight0.ignoresSafeArea())
-                .toolbarBackground(Nord.polarNight0, for: .navigationBar, .tabBar)
+                .background(KanameColor.canvas.ignoresSafeArea())
+                .toolbarBackground(KanameColor.canvas, for: .navigationBar, .tabBar)
                 .toolbarBackground(.visible, for: .navigationBar, .tabBar)
 
                 NavigationStack {
@@ -150,13 +150,13 @@ public struct IPhoneControlSurface: View {
                     Label("Library", systemImage: "books.vertical.fill")
                 }
                 .tag(IPhoneTab.library)
-                .background(Nord.polarNight0.ignoresSafeArea())
-                .toolbarBackground(Nord.polarNight0, for: .navigationBar, .tabBar)
+                .background(KanameColor.canvas.ignoresSafeArea())
+                .toolbarBackground(KanameColor.canvas, for: .navigationBar, .tabBar)
                 .toolbarBackground(.visible, for: .navigationBar, .tabBar)
             }
-            .tint(Nord.frost1)
-            .background(Nord.polarNight0.ignoresSafeArea())
-            .toolbarBackground(Nord.polarNight0, for: .navigationBar, .tabBar)
+            .tint(KanameColor.accent)
+            .background(KanameColor.canvas.ignoresSafeArea())
+            .toolbarBackground(KanameColor.canvas, for: .navigationBar, .tabBar)
             .toolbarBackground(.visible, for: .navigationBar, .tabBar)
             .simultaneousGesture(
                 DragGesture(minimumDistance: 24)
@@ -302,28 +302,28 @@ private struct IPhoneCommandCenter: View {
                         title: "Start work",
                         detail: "New project or task",
                         icon: "plus.circle.fill",
-                        tint: Nord.frost1,
+                        tint: KanameColor.accent,
                         action: startNewDraft
                     )
                     IPhoneActionTile(
                         title: "Ask an agent",
                         detail: "Open Work",
                         icon: "sparkles",
-                        tint: Nord.auroraPurple,
+                        tint: KanameColor.blocked,
                         action: { chooseTab(.work) }
                     )
                     IPhoneActionTile(
                         title: "Review changes",
                         detail: "Diffs and checks",
                         icon: "doc.text.magnifyingglass",
-                        tint: Nord.auroraGreen,
+                        tint: KanameColor.success,
                         action: { chooseTab(.projects) }
                     )
                     IPhoneActionTile(
                         title: "Run schedule",
                         detail: "Automations",
                         icon: "play.circle.fill",
-                        tint: Nord.auroraYellow,
+                        tint: KanameColor.warning,
                         action: { chooseTab(.operate) }
                     )
                 }
@@ -337,40 +337,40 @@ private struct IPhoneCommandCenter: View {
                     columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)],
                     spacing: 10
                 ) {
-                    IPhoneAreaTile("Projects", detail: "Worktrees & sessions", icon: "folder.fill", tint: Nord.frost1) {
+                    IPhoneAreaTile("Projects", detail: "Worktrees & sessions", icon: "folder.fill", tint: KanameColor.accent) {
                         chooseTab(.projects)
                     }
-                    IPhoneAreaTile("Work", detail: "Inbox & threads", icon: "bubble.left.and.bubble.right.fill", tint: Nord.auroraPurple) {
+                    IPhoneAreaTile("Work", detail: "Inbox & threads", icon: "bubble.left.and.bubble.right.fill", tint: KanameColor.blocked) {
                         chooseWorkProjection(.inbox)
                     }
-                    IPhoneAreaTile("GitHub & CI", detail: "Stack, runs & failures", icon: "arrow.triangle.branch", tint: Nord.auroraGreen) {
+                    IPhoneAreaTile("GitHub & CI", detail: "Stack, runs & failures", icon: "arrow.triangle.branch", tint: KanameColor.success) {
                         chooseTab(.projects)
                     }
-                    IPhoneAreaTile("Review & diffs", detail: "Syntax-highlighted", icon: "chevron.left.forwardslash.chevron.right", tint: Nord.frost0) {
+                    IPhoneAreaTile("Review & diffs", detail: "Syntax-highlighted", icon: "chevron.left.forwardslash.chevron.right", tint: KanameColor.active) {
                         chooseTab(.projects)
                     }
-                    IPhoneAreaTile("Agents", detail: "Sessions & providers", icon: "cpu", tint: Nord.auroraYellow) {
+                    IPhoneAreaTile("Agents", detail: "Sessions & providers", icon: "cpu", tint: KanameColor.warning) {
                         chooseTab(.operate)
                     }
-                    IPhoneAreaTile("Calendar", detail: "Events & approvals", icon: "calendar", tint: Nord.auroraOrange) {
+                    IPhoneAreaTile("Calendar", detail: "Events & approvals", icon: "calendar", tint: KanameColor.external) {
                         chooseTab(.operate)
                     }
-                    IPhoneAreaTile("Schedules", detail: "Cron & automation", icon: "clock.badge.checkmark", tint: Nord.auroraGreen) {
+                    IPhoneAreaTile("Schedules", detail: "Cron & automation", icon: "clock.badge.checkmark", tint: KanameColor.success) {
                         chooseTab(.operate)
                     }
-                    IPhoneAreaTile("Research", detail: "Evidence & sources", icon: "magnifyingglass", tint: Nord.frost3) {
+                    IPhoneAreaTile("Research", detail: "Evidence & sources", icon: "magnifyingglass", tint: KanameColor.accentStrong) {
                         chooseTab(.library)
                     }
-                    IPhoneAreaTile("Obsidian", detail: "Project memory", icon: "book.closed.fill", tint: Nord.auroraPurple) {
+                    IPhoneAreaTile("Obsidian", detail: "Project memory", icon: "book.closed.fill", tint: KanameColor.blocked) {
                         chooseTab(.library)
                     }
-                    IPhoneAreaTile("Email", detail: "Drafts & approval", icon: "envelope.fill", tint: Nord.auroraYellow) {
+                    IPhoneAreaTile("Email", detail: "Drafts & approval", icon: "envelope.fill", tint: KanameColor.warning) {
                         chooseWorkProjection(.mail)
                     }
-                    IPhoneAreaTile("Files", detail: "Workspace context", icon: "folder.badge.gearshape", tint: Nord.frost2) {
+                    IPhoneAreaTile("Files", detail: "Workspace context", icon: "folder.badge.gearshape", tint: KanameColor.accent) {
                         chooseTab(.projects)
                     }
-                    IPhoneAreaTile("Settings", detail: "Appearance & control", icon: "gearshape.fill", tint: Nord.polarNight3) {
+                    IPhoneAreaTile("Settings", detail: "Appearance & control", icon: "gearshape.fill", tint: KanameColor.separator) {
                         openSettings()
                     }
                 }
@@ -392,7 +392,7 @@ private struct IPhoneCommandCenter: View {
             .padding(.vertical, 12)
             .padding(.bottom, 12)
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .toolbar(.hidden, for: .navigationBar)
         .refreshable {
             await IPhoneFixtureRefresh.wait()
@@ -426,29 +426,29 @@ private struct IPhoneConnectionView: View {
                         label: "Device",
                         value: mobileShell.snapshot.deviceID,
                         icon: "iphone",
-                        tint: Nord.frost1
+                        tint: KanameColor.accent
                     )
                     IPhoneMetricRow(
                         label: "Reachability",
                         value: mobileShell.snapshot.reachability.displayName,
                         icon: "network",
-                        tint: mobileShell.isMacReachable ? Nord.auroraGreen : Nord.auroraYellow
+                        tint: mobileShell.isMacReachable ? KanameColor.success : KanameColor.warning
                     )
                     IPhoneMetricRow(
                         label: "Queued locally",
                         value: "\(queuedCommands.count)",
                         icon: "tray.full.fill",
-                        tint: Nord.frost2
+                        tint: KanameColor.accent
                     )
                 }
                 .padding(16)
-                .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
 
                 if let confirmationCode = mobileShell.confirmationCode {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Compare on both devices")
                             .font(.caption.weight(.semibold))
-                            .foregroundStyle(Nord.frost1)
+                            .foregroundStyle(KanameColor.accent)
                         Text(confirmationCode)
                             .font(.system(.title, design: .monospaced, weight: .bold))
                             .tracking(5)
@@ -460,7 +460,7 @@ private struct IPhoneConnectionView: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(16)
-                    .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                 }
 
                 VStack(spacing: 10) {
@@ -500,7 +500,7 @@ private struct IPhoneConnectionView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         Label("Current approval required", systemImage: "checkmark.shield.fill")
                             .font(.headline)
-                            .foregroundStyle(Nord.auroraYellow)
+                            .foregroundStyle(KanameColor.warning)
                         IPhoneApprovalDetailRow("Target", value: pending.targetID)
                         IPhoneApprovalDetailRow("Revision", value: pending.targetRevision)
                         IPhoneApprovalDetailRow("Consequence", value: pending.consequence)
@@ -519,7 +519,7 @@ private struct IPhoneConnectionView: View {
                         }
                     }
                     .padding(16)
-                    .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                 }
 
                 if let keychainStatus = mobileShell.keychainStatus {
@@ -550,7 +550,7 @@ private struct IPhoneConnectionView: View {
                         "Offline queue",
                         detail: "\(queuedCommands.count) editable items",
                         icon: "tray.full.fill",
-                        tint: Nord.frost2
+                        tint: KanameColor.accent
                     )
                 }
                 .buttonStyle(.plain)
@@ -564,19 +564,19 @@ private struct IPhoneConnectionView: View {
                         label: "Lost device",
                         value: "Mac revokes old key",
                         icon: "iphone.slash",
-                        tint: Nord.auroraRed
+                        tint: KanameColor.danger
                     )
                     IPhoneMetricRow(
                         label: "Key rotation",
                         value: "Old key retired after acceptance",
                         icon: "key.horizontal.fill",
-                        tint: Nord.auroraYellow
+                        tint: KanameColor.warning
                     )
                     IPhoneMetricRow(
                         label: "Backup recovery",
                         value: "Read-only replay first",
                         icon: "externaldrive.badge.timemachine",
-                        tint: Nord.frost1
+                        tint: KanameColor.accent
                     )
                     if !mobileShell.isLiveQualification {
                         Button(
@@ -595,7 +595,7 @@ private struct IPhoneConnectionView: View {
                 }
                 .padding(16)
                 .background(
-                    Nord.polarNight1,
+                    KanameColor.surface,
                     in: RoundedRectangle(cornerRadius: 18, style: .continuous)
                 )
 
@@ -609,7 +609,7 @@ private struct IPhoneConnectionView: View {
             .padding(16)
             .padding(.bottom, 20)
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .navigationTitle("Connection")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -666,7 +666,7 @@ private struct IPhoneWorkHub: View {
                         count: visibleFixtures.count,
                         detail: "Only work that needs a decision, review, or recovery",
                         icon: "tray.full.fill",
-                        tint: Nord.auroraYellow
+                        tint: KanameColor.warning
                     )
                 case .threads:
                     IPhoneWorkProjectionSummary(
@@ -674,7 +674,7 @@ private struct IPhoneWorkHub: View {
                         count: visibleFixtures.count,
                         detail: "Every conversation, including active work and history",
                         icon: "bubble.left.and.bubble.right.fill",
-                        tint: Nord.frost1
+                        tint: KanameColor.accent
                     )
                 case .mail:
                     IPhoneWorkProjectionSummary(
@@ -682,7 +682,7 @@ private struct IPhoneWorkHub: View {
                         count: visibleFixtures.count,
                         detail: "Drafts and approvals that need a deliberate response",
                         icon: "envelope.fill",
-                        tint: Nord.auroraYellow
+                        tint: KanameColor.warning
                     )
                 }
 
@@ -714,7 +714,7 @@ private struct IPhoneWorkHub: View {
             }
             .padding(14)
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .navigationTitle("Work")
         .navigationBarTitleDisplayMode(.inline)
         .animation(.easeInOut(duration: 0.18), value: projection)
@@ -806,7 +806,7 @@ private struct IPhoneProjectsHub: View {
             .padding(14)
             .padding(.bottom, 12)
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .navigationTitle("Projects")
         .navigationBarTitleDisplayMode(.inline)
         .refreshable {
@@ -843,40 +843,40 @@ private struct IPhoneOperationsHub: View {
                     NavigationLink {
                         IPhoneAgentsView()
                     } label: {
-                        IPhoneNavigationTile("Agents", detail: "2 sessions", icon: "cpu", tint: Nord.frost1)
+                        IPhoneNavigationTile("Agents", detail: "2 sessions", icon: "cpu", tint: KanameColor.accent)
                     }
                     .buttonStyle(.plain)
 
                     NavigationLink {
                         IPhoneSchedulesView()
                     } label: {
-                        IPhoneNavigationTile("Schedules", detail: "2 planned", icon: "clock.badge.checkmark", tint: Nord.auroraGreen)
+                        IPhoneNavigationTile("Schedules", detail: "2 planned", icon: "clock.badge.checkmark", tint: KanameColor.success)
                     }
                     .buttonStyle(.plain)
 
                     Button(action: openApproval) {
-                        IPhoneNavigationTile("Calendar", detail: "1 approval", icon: "calendar", tint: Nord.auroraOrange)
+                        IPhoneNavigationTile("Calendar", detail: "1 approval", icon: "calendar", tint: KanameColor.external)
                     }
                     .buttonStyle(.plain)
 
                     NavigationLink {
                         IPhoneAutomationsView()
                     } label: {
-                        IPhoneNavigationTile("Automations", detail: "4 workflows", icon: "bolt.badge.clock", tint: Nord.auroraPurple)
+                        IPhoneNavigationTile("Automations", detail: "4 workflows", icon: "bolt.badge.clock", tint: KanameColor.blocked)
                     }
                     .buttonStyle(.plain)
 
                     NavigationLink {
                         IPhoneIntegrationsView()
                     } label: {
-                        IPhoneNavigationTile("Integrations", detail: "5 connected", icon: "point.3.connected.trianglepath.dotted", tint: Nord.frost2)
+                        IPhoneNavigationTile("Integrations", detail: "5 connected", icon: "point.3.connected.trianglepath.dotted", tint: KanameColor.accent)
                     }
                     .buttonStyle(.plain)
 
                     NavigationLink {
                         IPhoneNotificationRoutesView()
                     } label: {
-                        IPhoneNavigationTile("Notifications", detail: "2 rules", icon: "bell.badge", tint: Nord.auroraYellow)
+                        IPhoneNavigationTile("Notifications", detail: "2 rules", icon: "bell.badge", tint: KanameColor.warning)
                     }
                     .buttonStyle(.plain)
                 }
@@ -894,7 +894,7 @@ private struct IPhoneOperationsHub: View {
             .padding(14)
             .padding(.bottom, 12)
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .navigationTitle("Operate")
         .navigationBarTitleDisplayMode(.inline)
         .refreshable {
@@ -933,19 +933,19 @@ private struct IPhoneLibraryHub: View {
                     spacing: 12
                 ) {
                     NavigationLink { IPhoneKnowledgeDetailView(collection: .research) } label: {
-                        IPhoneNavigationTile("Research", detail: "Sources & evidence", icon: "magnifyingglass", tint: Nord.frost1)
+                        IPhoneNavigationTile("Research", detail: "Sources & evidence", icon: "magnifyingglass", tint: KanameColor.accent)
                     }
                     .buttonStyle(.plain)
                     NavigationLink { IPhoneKnowledgeDetailView(collection: .projectMemory) } label: {
-                        IPhoneNavigationTile("Project memory", detail: "Notes & acceptance gates", icon: "book.closed.fill", tint: Nord.auroraPurple)
+                        IPhoneNavigationTile("Project memory", detail: "Notes & acceptance gates", icon: "book.closed.fill", tint: KanameColor.blocked)
                     }
                     .buttonStyle(.plain)
                     NavigationLink { IPhoneKnowledgeDetailView(collection: .decisions) } label: {
-                        IPhoneNavigationTile("Decisions", detail: "Accepted & proposed", icon: "checkmark.seal.fill", tint: Nord.auroraGreen)
+                        IPhoneNavigationTile("Decisions", detail: "Accepted & proposed", icon: "checkmark.seal.fill", tint: KanameColor.success)
                     }
                     .buttonStyle(.plain)
                     NavigationLink { IPhoneKnowledgeDetailView(collection: .sourceInbox) } label: {
-                        IPhoneNavigationTile("Source inbox", detail: "Capture & triage", icon: "tray.full.fill", tint: Nord.frost2)
+                        IPhoneNavigationTile("Source inbox", detail: "Capture & triage", icon: "tray.full.fill", tint: KanameColor.accent)
                     }
                     .buttonStyle(.plain)
                 }
@@ -956,7 +956,7 @@ private struct IPhoneLibraryHub: View {
             .padding(14)
             .padding(.bottom, 12)
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .navigationTitle("Library")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -1007,7 +1007,7 @@ private struct IPhoneProject: Identifiable {
         changedFiles: "3 files changed",
         checks: "4 checks passed",
         ciStatus: "1 failure",
-        tint: Nord.frost1,
+        tint: KanameColor.accent,
         icon: "square.grid.2x2.fill"
     )
 
@@ -1024,7 +1024,7 @@ private struct IPhoneProject: Identifiable {
             changedFiles: "1 documentation file",
             checks: "All checks passed",
             ciStatus: "Healthy",
-            tint: Nord.auroraGreen,
+            tint: KanameColor.success,
             icon: "leaf.fill"
         ),
         IPhoneProject(
@@ -1038,7 +1038,7 @@ private struct IPhoneProject: Identifiable {
             changedFiles: "No pending code changes",
             checks: "Planning boundary",
             ciStatus: "No run",
-            tint: Nord.auroraYellow,
+            tint: KanameColor.warning,
             icon: "play.rectangle.fill"
         ),
         IPhoneProject(
@@ -1052,7 +1052,7 @@ private struct IPhoneProject: Identifiable {
             changedFiles: "2 research notes",
             checks: "Gate review",
             ciStatus: "Not applicable",
-            tint: Nord.auroraPurple,
+            tint: KanameColor.blocked,
             icon: "cube.fill"
         ),
         IPhoneProject(
@@ -1066,7 +1066,7 @@ private struct IPhoneProject: Identifiable {
             changedFiles: "0 files changed",
             checks: "Last run passed",
             ciStatus: "Healthy",
-            tint: Nord.auroraOrange,
+            tint: KanameColor.external,
             icon: "character.book.closed.fill"
         ),
     ]
@@ -1078,27 +1078,27 @@ private struct IPhoneProjectSearchField: View {
     var body: some View {
         HStack(spacing: 9) {
             Image(systemName: "magnifyingglass")
-                .foregroundStyle(Nord.frost1)
+                .foregroundStyle(KanameColor.accent)
             TextField("Search projects", text: $text)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
-                .foregroundStyle(Nord.snowStorm0)
+                .foregroundStyle(KanameColor.textPrimary)
             if !text.isEmpty {
                 Button {
                     text = ""
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(Nord.snowStorm0.opacity(0.48))
+                        .foregroundStyle(KanameColor.textPrimary.opacity(0.48))
                 }
                 .accessibilityLabel("Clear project search")
             }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Nord.polarNight3.opacity(0.72), lineWidth: 1)
+                .stroke(KanameColor.separator.opacity(0.72), lineWidth: 1)
         }
     }
 }
@@ -1110,18 +1110,18 @@ private struct IPhoneProjectDirectorySummary: View {
     var body: some View {
         HStack(spacing: 9) {
             Image(systemName: "folder.fill")
-                .foregroundStyle(Nord.frost1)
+                .foregroundStyle(KanameColor.accent)
             Text("\(matchingCount) of \(totalCount) projects")
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(Nord.snowStorm0)
+                .foregroundStyle(KanameColor.textPrimary)
             Spacer()
             Text("Type to filter")
                 .font(.caption)
-                .foregroundStyle(Nord.snowStorm0.opacity(0.56))
+                .foregroundStyle(KanameColor.textPrimary.opacity(0.56))
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
-        .background(Nord.frost3.opacity(0.14), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .background(KanameColor.accentStrong.opacity(0.14), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
     }
 }
 
@@ -1138,7 +1138,7 @@ private struct IPhoneProjectDirectoryRow: View {
                 HStack {
                     Text(project.name)
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Nord.snowStorm0)
+                        .foregroundStyle(KanameColor.textPrimary)
                     Spacer(minLength: 4)
                     KanameStatusBadge(
                         IPhoneDeliveryStatus.presentation(for: project.deliveryState),
@@ -1147,19 +1147,19 @@ private struct IPhoneProjectDirectoryRow: View {
                 }
                 Text(project.summary)
                     .font(.caption)
-                    .foregroundStyle(Nord.snowStorm0.opacity(0.68))
+                    .foregroundStyle(KanameColor.textPrimary.opacity(0.68))
                     .lineLimit(1)
                 Text("\(project.kind) · \(project.branch)")
                     .font(.caption2.monospaced())
-                    .foregroundStyle(Nord.snowStorm0.opacity(0.46))
+                    .foregroundStyle(KanameColor.textPrimary.opacity(0.46))
                     .lineLimit(1)
             }
             Image(systemName: "chevron.right")
                 .font(.caption.weight(.bold))
-                .foregroundStyle(Nord.snowStorm0.opacity(0.38))
+                .foregroundStyle(KanameColor.textPrimary.opacity(0.38))
         }
         .padding(12)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }
 
@@ -1170,17 +1170,17 @@ private struct IPhoneEmptyProjectSearch: View {
         VStack(spacing: 8) {
             Image(systemName: "folder.badge.questionmark")
                 .font(.title3)
-                .foregroundStyle(Nord.frost1)
+                .foregroundStyle(KanameColor.accent)
             Text("No projects match “\(query)”")
                 .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Nord.snowStorm0)
+                .foregroundStyle(KanameColor.textPrimary)
             Text("Try a project name, branch, or project type.")
                 .font(.caption)
-                .foregroundStyle(Nord.snowStorm0.opacity(0.60))
+                .foregroundStyle(KanameColor.textPrimary.opacity(0.60))
         }
         .frame(maxWidth: .infinity)
         .padding(18)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }
 
@@ -1195,18 +1195,18 @@ private struct IPhoneControlTitle: View {
                 Text(eyebrow)
                     .font(.caption2.weight(.bold))
                     .tracking(1.2)
-                    .foregroundStyle(Nord.frost1)
+                    .foregroundStyle(KanameColor.accent)
                 Text(title)
                     .font(.system(size: 27, weight: .bold, design: .rounded))
-                    .foregroundStyle(Nord.snowStorm0)
+                    .foregroundStyle(KanameColor.textPrimary)
             }
             Spacer()
             Text(trailingLabel)
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(Nord.frost1)
+                .foregroundStyle(KanameColor.accent)
                 .padding(.horizontal, 9)
                 .padding(.vertical, 6)
-                .background(Nord.frost3.opacity(0.20), in: Capsule())
+                .background(KanameColor.accentStrong.opacity(0.20), in: Capsule())
         }
     }
 }
@@ -1219,10 +1219,10 @@ private struct IPhoneSectionHeader: View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title)
                 .font(.headline)
-                .foregroundStyle(Nord.snowStorm0)
+                .foregroundStyle(KanameColor.textPrimary)
             Text(detail)
                 .font(.caption)
-                .foregroundStyle(Nord.snowStorm0.opacity(0.62))
+                .foregroundStyle(KanameColor.textPrimary.opacity(0.62))
         }
     }
 }
@@ -1235,31 +1235,31 @@ private struct IPhoneReachabilityCard: View {
         HStack(alignment: .top, spacing: 13) {
             Image(systemName: isMacReachable ? "desktopcomputer.and.macbook" : "wifi.slash")
                 .font(.title3.weight(.semibold))
-                .foregroundStyle(isMacReachable ? Nord.auroraGreen : Nord.auroraOrange)
+                .foregroundStyle(isMacReachable ? KanameColor.success : KanameColor.external)
                 .frame(width: 36, height: 36)
-                .background((isMacReachable ? Nord.auroraGreen : Nord.auroraOrange).opacity(0.16), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                .background((isMacReachable ? KanameColor.success : KanameColor.external).opacity(0.16), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
             VStack(alignment: .leading, spacing: 4) {
                 Text(isMacReachable ? "Mac reachable" : "Mac unavailable")
                     .font(.headline)
-                    .foregroundStyle(Nord.snowStorm0)
+                    .foregroundStyle(KanameColor.textPrimary)
                 Text(isMacReachable
                     ? "Control is available. This fixture dispatches nothing."
                     : "\(queuedCount) local commands held locally. Tap to edit.")
                     .font(.caption)
-                    .foregroundStyle(Nord.snowStorm0.opacity(0.68))
+                    .foregroundStyle(KanameColor.textPrimary.opacity(0.68))
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 4)
             Image(systemName: "chevron.right")
                 .font(.caption.weight(.bold))
-                .foregroundStyle(Nord.snowStorm0.opacity(0.45))
+                .foregroundStyle(KanameColor.textPrimary.opacity(0.45))
                 .padding(.top, 5)
         }
         .padding(12)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(alignment: .leading) {
             Capsule()
-                .fill(isMacReachable ? Nord.auroraGreen : Nord.auroraOrange)
+                .fill(isMacReachable ? KanameColor.success : KanameColor.external)
                 .frame(width: 3)
                 .padding(.vertical, 12)
         }
@@ -1273,17 +1273,17 @@ private struct IPhoneReachabilityCompact: View {
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: isMacReachable ? "checkmark.circle.fill" : "wifi.slash")
-                .foregroundStyle(isMacReachable ? Nord.auroraGreen : Nord.auroraOrange)
+                .foregroundStyle(isMacReachable ? KanameColor.success : KanameColor.external)
             Text(isMacReachable ? "Mac reachable" : "Mac unavailable")
                 .font(.caption.weight(.semibold))
             Spacer()
             Text("Queue \(queuedCount)")
                 .font(.caption.weight(.medium))
-                .foregroundStyle(Nord.frost1)
+                .foregroundStyle(KanameColor.accent)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }
 
@@ -1303,16 +1303,16 @@ private struct IPhoneAttentionCard: View {
             }
             Text(fixture.thread.title)
                 .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Nord.snowStorm0)
+                .foregroundStyle(KanameColor.textPrimary)
                 .lineLimit(2)
                 .multilineTextAlignment(.leading)
             Text(fixture.thread.workspaceKind.displayName)
                 .font(.caption)
-                .foregroundStyle(Nord.snowStorm0.opacity(0.62))
+                .foregroundStyle(KanameColor.textPrimary.opacity(0.62))
         }
         .frame(width: 124, height: 86, alignment: .topLeading)
         .padding(10)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .stroke(attention.tint.opacity(0.30), lineWidth: 1)
@@ -1338,14 +1338,14 @@ private struct IPhoneActionTile: View {
                 Spacer(minLength: 2)
                 Text(title)
                     .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Nord.snowStorm0)
+                    .foregroundStyle(KanameColor.textPrimary)
                 Text(detail)
                     .font(.caption)
-                    .foregroundStyle(Nord.snowStorm0.opacity(0.62))
+                    .foregroundStyle(KanameColor.textPrimary.opacity(0.62))
             }
             .frame(maxWidth: .infinity, minHeight: 88, alignment: .leading)
             .padding(10)
-            .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+            .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
         }
         .buttonStyle(.plain)
     }
@@ -1377,18 +1377,18 @@ private struct IPhoneAreaTile: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(Nord.snowStorm0)
+                        .foregroundStyle(KanameColor.textPrimary)
                         .lineLimit(1)
                     Text(detail)
                         .font(.system(size: 10))
-                        .foregroundStyle(Nord.snowStorm0.opacity(0.60))
+                        .foregroundStyle(KanameColor.textPrimary.opacity(0.60))
                         .lineLimit(1)
                 }
                 Spacer(minLength: 0)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(10)
-            .background(Nord.polarNight1.opacity(0.82), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .background(KanameColor.surface.opacity(0.82), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
         .buttonStyle(.plain)
     }
@@ -1400,13 +1400,13 @@ private struct IPhoneNowCard: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            IPhoneMetricRow(label: "Coding session", value: "Implementing iPhone remote", icon: "hammer.fill", tint: Nord.frost1)
-            Divider().overlay(Nord.polarNight3)
-            IPhoneMetricRow(label: "Next schedule", value: "Context refresh · 20:00 JST", icon: "clock", tint: Nord.auroraGreen)
-            Divider().overlay(Nord.polarNight3)
-            IPhoneMetricRow(label: "Local queue", value: "\(queuedCount) pending · \(isMacReachable ? "reconciliation ready" : "Mac unavailable")", icon: "arrow.up.arrow.down", tint: Nord.auroraOrange)
+            IPhoneMetricRow(label: "Coding session", value: "Implementing iPhone remote", icon: "hammer.fill", tint: KanameColor.accent)
+            Divider().overlay(KanameColor.separator)
+            IPhoneMetricRow(label: "Next schedule", value: "Context refresh · 20:00 JST", icon: "clock", tint: KanameColor.success)
+            Divider().overlay(KanameColor.separator)
+            IPhoneMetricRow(label: "Local queue", value: "\(queuedCount) pending · \(isMacReachable ? "reconciliation ready" : "Mac unavailable")", icon: "arrow.up.arrow.down", tint: KanameColor.external)
         }
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 }
 
@@ -1424,10 +1424,10 @@ private struct IPhoneMetricRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(label)
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(Nord.snowStorm0)
+                    .foregroundStyle(KanameColor.textPrimary)
                 Text(value)
                     .font(.caption)
-                    .foregroundStyle(Nord.snowStorm0.opacity(0.62))
+                    .foregroundStyle(KanameColor.textPrimary.opacity(0.62))
             }
             Spacer()
         }
@@ -1448,7 +1448,7 @@ private struct IPhoneWorkRow: View {
                 HStack(alignment: .firstTextBaseline) {
                     Text(fixture.thread.title)
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Nord.snowStorm0)
+                        .foregroundStyle(KanameColor.textPrimary)
                         .lineLimit(2)
                     Spacer(minLength: 4)
                     Text(fixture.phoneAttention.displayName)
@@ -1457,20 +1457,20 @@ private struct IPhoneWorkRow: View {
                 }
                 Text("\(fixture.thread.workspaceKind.displayName) · \(fixture.providerSession.provider)")
                     .font(.caption)
-                    .foregroundStyle(Nord.snowStorm0.opacity(0.64))
+                    .foregroundStyle(KanameColor.textPrimary.opacity(0.64))
                     .lineLimit(1)
                 Text(fixture.phoneAgentSummary)
                     .font(.caption)
-                    .foregroundStyle(Nord.snowStorm0.opacity(0.52))
+                    .foregroundStyle(KanameColor.textPrimary.opacity(0.52))
                     .lineLimit(2)
             }
             Image(systemName: "chevron.right")
                 .font(.caption.weight(.bold))
-                .foregroundStyle(Nord.snowStorm0.opacity(0.38))
+                .foregroundStyle(KanameColor.textPrimary.opacity(0.38))
                 .padding(.top, 5)
         }
         .padding(13)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }
 
@@ -1490,16 +1490,16 @@ private struct IPhoneWorkProjectionSummary: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("\(title) · \(count)")
                     .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Nord.snowStorm0)
+                    .foregroundStyle(KanameColor.textPrimary)
                 Text(detail)
                     .font(.caption)
-                    .foregroundStyle(Nord.snowStorm0.opacity(0.62))
+                    .foregroundStyle(KanameColor.textPrimary.opacity(0.62))
                     .lineLimit(2)
             }
             Spacer()
         }
         .padding(11)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
     }
 }
 
@@ -1528,7 +1528,7 @@ private struct IPhoneThreadDirectoryRow: View {
                 HStack(alignment: .firstTextBaseline) {
                     Text(fixture.thread.title)
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Nord.snowStorm0)
+                        .foregroundStyle(KanameColor.textPrimary)
                         .lineLimit(1)
                     Spacer(minLength: 4)
                     Text(activityLabel)
@@ -1537,19 +1537,19 @@ private struct IPhoneThreadDirectoryRow: View {
                 }
                 Text("\(fixture.thread.workspaceKind.displayName) · \(fixture.providerSession.provider)")
                     .font(.caption)
-                    .foregroundStyle(Nord.snowStorm0.opacity(0.60))
+                    .foregroundStyle(KanameColor.textPrimary.opacity(0.60))
                 Text(fixture.phoneAgentSummary)
                     .font(.caption)
-                    .foregroundStyle(Nord.snowStorm0.opacity(0.48))
+                    .foregroundStyle(KanameColor.textPrimary.opacity(0.48))
                     .lineLimit(1)
             }
             Image(systemName: "chevron.right")
                 .font(.caption.weight(.bold))
-                .foregroundStyle(Nord.snowStorm0.opacity(0.36))
+                .foregroundStyle(KanameColor.textPrimary.opacity(0.36))
                 .padding(.top, 4)
         }
         .padding(11)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
     }
 }
 
@@ -1567,14 +1567,14 @@ private struct IPhoneProjectHeroCard: View {
                 Spacer()
                 Image(systemName: "chevron.right")
                     .font(.caption.weight(.bold))
-                    .foregroundStyle(Nord.snowStorm0.opacity(0.48))
+                    .foregroundStyle(KanameColor.textPrimary.opacity(0.48))
             }
             Text(project.name)
                 .font(.title2.weight(.bold))
-                .foregroundStyle(Nord.snowStorm0)
+                .foregroundStyle(KanameColor.textPrimary)
             Text(project.summary)
                 .font(.subheadline)
-                .foregroundStyle(Nord.snowStorm0.opacity(0.68))
+                .foregroundStyle(KanameColor.textPrimary.opacity(0.68))
             IPhoneAdaptiveBadgeRow {
                 let changedFiles = IPhoneMetadataKind.changedFiles.presentation(label: project.changedFiles)
                 KanameMetadataChip(
@@ -1597,7 +1597,7 @@ private struct IPhoneProjectHeroCard: View {
         .padding(17)
         .background(
             LinearGradient(
-                colors: [Nord.polarNight2, Nord.polarNight1],
+                colors: [KanameColor.raised, KanameColor.surface],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             ),
@@ -1668,10 +1668,10 @@ private struct IPhoneProjectControlRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
                     .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Nord.snowStorm0)
+                    .foregroundStyle(KanameColor.textPrimary)
                 Text(detail)
                     .font(.caption)
-                    .foregroundStyle(Nord.snowStorm0.opacity(0.62))
+                    .foregroundStyle(KanameColor.textPrimary.opacity(0.62))
                     .lineLimit(1)
             }
             Spacer(minLength: 2)
@@ -1679,11 +1679,11 @@ private struct IPhoneProjectControlRow: View {
                 badge.view
                 Image(systemName: "chevron.right")
                     .font(.caption.weight(.bold))
-                    .foregroundStyle(Nord.snowStorm0.opacity(0.40))
+                    .foregroundStyle(KanameColor.textPrimary.opacity(0.40))
             }
         }
         .padding(13)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
     }
 }
 
@@ -1693,13 +1693,13 @@ private struct IPhoneOperationsHeroCard: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            IPhoneOperationMetric(value: "2", label: "sessions", tint: Nord.frost1)
-            Divider().overlay(Nord.polarNight3).padding(.vertical, 14)
-            IPhoneOperationMetric(value: "2", label: "schedules", tint: Nord.auroraGreen)
-            Divider().overlay(Nord.polarNight3).padding(.vertical, 14)
-            IPhoneOperationMetric(value: "\(queuedCount)", label: isMacReachable ? "queued" : "held local", tint: Nord.auroraOrange)
+            IPhoneOperationMetric(value: "2", label: "sessions", tint: KanameColor.accent)
+            Divider().overlay(KanameColor.separator).padding(.vertical, 14)
+            IPhoneOperationMetric(value: "2", label: "schedules", tint: KanameColor.success)
+            Divider().overlay(KanameColor.separator).padding(.vertical, 14)
+            IPhoneOperationMetric(value: "\(queuedCount)", label: isMacReachable ? "queued" : "held local", tint: KanameColor.external)
         }
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 }
 
@@ -1715,7 +1715,7 @@ private struct IPhoneOperationMetric: View {
                 .foregroundStyle(tint)
             Text(label)
                 .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(Nord.snowStorm0.opacity(0.62))
+                .foregroundStyle(KanameColor.textPrimary.opacity(0.62))
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 14)
@@ -1745,26 +1745,26 @@ private struct IPhoneNavigationTile: View {
             Spacer(minLength: 1)
             Text(title)
                 .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Nord.snowStorm0)
+                .foregroundStyle(KanameColor.textPrimary)
             Text(detail)
                 .font(.caption)
-                .foregroundStyle(Nord.snowStorm0.opacity(0.62))
+                .foregroundStyle(KanameColor.textPrimary.opacity(0.62))
         }
         .frame(maxWidth: .infinity, minHeight: 84, alignment: .leading)
         .padding(10)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
     }
 }
 
 private struct IPhoneTimelineCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            IPhoneTimelineRow(time: "Now", title: "iPhone remote rebuild", detail: "Coding session active", tint: Nord.frost1)
-            IPhoneTimelineRow(time: "17:30", title: "Review current diff", detail: "3 files · checks green", tint: Nord.auroraGreen)
-            IPhoneTimelineRow(time: "20:00", title: "Project-context refresh", detail: "Scheduled · waits for Mac", tint: Nord.auroraOrange)
+            IPhoneTimelineRow(time: "Now", title: "iPhone remote rebuild", detail: "Coding session active", tint: KanameColor.accent)
+            IPhoneTimelineRow(time: "17:30", title: "Review current diff", detail: "3 files · checks green", tint: KanameColor.success)
+            IPhoneTimelineRow(time: "20:00", title: "Project-context refresh", detail: "Scheduled · waits for Mac", tint: KanameColor.external)
         }
         .padding(14)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 }
 
@@ -1787,10 +1787,10 @@ private struct IPhoneTimelineRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(Nord.snowStorm0)
+                    .foregroundStyle(KanameColor.textPrimary)
                 Text(detail)
                     .font(.caption2)
-                    .foregroundStyle(Nord.snowStorm0.opacity(0.60))
+                    .foregroundStyle(KanameColor.textPrimary.opacity(0.60))
             }
         }
     }
@@ -1803,19 +1803,19 @@ private struct IPhoneFixtureBoundaryCard: View {
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "checkmark.shield.fill")
-                .foregroundStyle(Nord.frost1)
+                .foregroundStyle(KanameColor.accent)
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
                     .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Nord.snowStorm0)
+                    .foregroundStyle(KanameColor.textPrimary)
                 Text(detail)
                     .font(.caption)
-                    .foregroundStyle(Nord.snowStorm0.opacity(0.62))
+                    .foregroundStyle(KanameColor.textPrimary.opacity(0.62))
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(13)
-        .background(Nord.frost3.opacity(0.15), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(KanameColor.accentStrong.opacity(0.15), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }
 
@@ -1825,10 +1825,10 @@ private struct IPhoneFixtureNotice: View {
     var body: some View {
         Label(text, systemImage: "checkmark.circle.fill")
             .font(.caption)
-            .foregroundStyle(Nord.frost1)
+            .foregroundStyle(KanameColor.accent)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(12)
-            .background(Nord.frost3.opacity(0.15), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .background(KanameColor.accentStrong.opacity(0.15), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }
 
@@ -1840,15 +1840,15 @@ private struct IPhoneFloatingNewAction: View {
             Image(systemName: "plus")
                 .font(.title3.weight(.bold))
                 .frame(width: 54, height: 54)
-                .background(Nord.frost2, in: Circle())
+                .background(KanameColor.accent, in: Circle())
                 .overlay {
                     Circle()
-                        .stroke(Nord.frost0.opacity(0.7), lineWidth: 1)
+                        .stroke(KanameColor.active.opacity(0.7), lineWidth: 1)
                 }
                 .shadow(color: .black.opacity(0.34), radius: 10, y: 5)
         }
         .buttonStyle(.plain)
-        .foregroundStyle(Nord.polarNight0)
+        .foregroundStyle(KanameColor.canvas)
         .accessibilityLabel("Start a new conversation or task")
         .accessibilityHint("Opens a new task or conversation draft")
     }
@@ -1865,15 +1865,15 @@ private struct IPhoneProjectFloatingAction: View {
             Image(systemName: "plus")
                 .font(.title3.weight(.bold))
                 .frame(width: 54, height: 54)
-                .background(Nord.frost2, in: Circle())
+                .background(KanameColor.accent, in: Circle())
                 .overlay {
                     Circle()
-                        .stroke(Nord.frost0.opacity(0.7), lineWidth: 1)
+                        .stroke(KanameColor.active.opacity(0.7), lineWidth: 1)
                 }
                 .shadow(color: .black.opacity(0.34), radius: 10, y: 5)
         }
         .buttonStyle(.plain)
-        .foregroundStyle(Nord.polarNight0)
+        .foregroundStyle(KanameColor.canvas)
         .contextMenu {
             Button(action: startTask) {
                 Label("Start task", systemImage: "plus")
@@ -1914,7 +1914,7 @@ private struct IPhoneProjectOverview: View {
                             title: "Work Review",
                             detail: "\(project.changedFiles) · \(project.checks)",
                             icon: "doc.text.magnifyingglass",
-                            tint: Nord.auroraGreen,
+                            tint: KanameColor.success,
                             badge: .status(IPhoneDeliveryStatus.presentation(for: project.deliveryState))
                         )
                     }
@@ -1928,7 +1928,7 @@ private struct IPhoneProjectOverview: View {
                             title: "GitHub & CI",
                             detail: project.ciStatus == "Healthy" ? "Checks are healthy" : project.ciStatus,
                             icon: "arrow.triangle.branch",
-                            tint: project.ciStatus == "Healthy" ? Nord.auroraGreen : Nord.auroraRed,
+                            tint: project.ciStatus == "Healthy" ? KanameColor.success : KanameColor.danger,
                             badge: .status(IPhoneCIStatus.presentation(for: project.ciStatus))
                         )
                     }
@@ -1942,7 +1942,7 @@ private struct IPhoneProjectOverview: View {
                             title: "Agent sessions",
                             detail: "\(project.name) context and provider runs",
                             icon: "cpu",
-                            tint: Nord.frost1,
+                            tint: KanameColor.accent,
                             badge: .metadata(IPhoneMetadataKind.sessions.presentation(label: "2"))
                         )
                     }
@@ -1956,7 +1956,7 @@ private struct IPhoneProjectOverview: View {
                             title: "Worktrees & files",
                             detail: project.branch,
                             icon: "folder.badge.gearshape",
-                            tint: Nord.auroraPurple,
+                            tint: KanameColor.blocked,
                             badge: .metadata(IPhoneMetadataKind.changedFiles.presentation(label: project.changedFiles))
                         )
                     }
@@ -1970,7 +1970,7 @@ private struct IPhoneProjectOverview: View {
             }
             .padding(16)
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .navigationTitle(project.name)
         .navigationBarTitleDisplayMode(.inline)
         .iPhoneFixtureRefreshable()
@@ -2016,14 +2016,14 @@ private struct IPhoneProjectStatusTable: View {
         let ci = IPhoneCIStatus.presentation(for: project.ciStatus)
         VStack(spacing: 0) {
             IPhoneMetricRow(label: "Branch", value: project.branch, icon: "arrow.triangle.branch", tint: project.tint)
-            Divider().overlay(Nord.polarNight3)
+            Divider().overlay(KanameColor.separator)
             IPhoneMetricRow(label: "Delivery", value: project.deliveryDetail, icon: delivery.symbolName, tint: delivery.tone.color)
-            Divider().overlay(Nord.polarNight3)
+            Divider().overlay(KanameColor.separator)
             IPhoneMetricRow(label: "Checks", value: project.checks, icon: checks.symbolName, tint: checks.tone.color)
-            Divider().overlay(Nord.polarNight3)
+            Divider().overlay(KanameColor.separator)
             IPhoneMetricRow(label: "CI / CD", value: project.ciStatus, icon: ci.symbolName, tint: ci.tone.color)
         }
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 }
 
@@ -2050,24 +2050,24 @@ private struct IPhoneMobileDiffView: View {
                 IPhoneSectionHeader(title: "Checks", detail: "Result from the local fixture")
                 VStack(spacing: 0) {
                     IPhoneCheckRow(name: "Swift tests", status: .passed)
-                    Divider().overlay(Nord.polarNight3)
+                    Divider().overlay(KanameColor.separator)
                     IPhoneCheckRow(name: "iOS simulator build", status: .passed)
-                    Divider().overlay(Nord.polarNight3)
+                    Divider().overlay(KanameColor.separator)
                     IPhoneCheckRow(name: "GitHub CI", status: .oneFailed)
                 }
-                .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
 
                 HStack(spacing: 10) {
                     Button("Request changes") {
                         reviewNotice = "Local fixture review request saved. No GitHub comment was created."
                     }
                     .buttonStyle(.bordered)
-                    .tint(Nord.auroraYellow)
+                    .tint(KanameColor.warning)
                     Button("Approve review") {
                         reviewNotice = "Local fixture approval recorded. A real merge would require current checks and explicit authority."
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(Nord.frost3)
+                    .tint(KanameColor.accentStrong)
                 }
                 .frame(maxWidth: .infinity)
 
@@ -2077,7 +2077,7 @@ private struct IPhoneMobileDiffView: View {
             }
             .padding(16)
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .navigationTitle("Work Review")
         .navigationBarTitleDisplayMode(.inline)
         .iPhoneFixtureRefreshable()
@@ -2110,17 +2110,17 @@ private struct IPhoneDiffLine: View {
 
     private var markerTint: Color {
         switch kind {
-        case .context: Nord.polarNight3
-        case .addition: Nord.auroraGreen
-        case .removal: Nord.auroraRed
+        case .context: KanameColor.separator
+        case .addition: KanameColor.success
+        case .removal: KanameColor.danger
         }
     }
 
     private var background: Color {
         switch kind {
         case .context: .clear
-        case .addition: Nord.auroraGreen.opacity(0.10)
-        case .removal: Nord.auroraRed.opacity(0.10)
+        case .addition: KanameColor.success.opacity(0.10)
+        case .removal: KanameColor.danger.opacity(0.10)
         }
     }
 
@@ -2133,7 +2133,7 @@ private struct IPhoneDiffLine: View {
     var body: some View {
         HStack(alignment: .top, spacing: 7) {
             Text(number)
-                .foregroundStyle(Nord.polarNight3)
+                .foregroundStyle(KanameColor.separator)
                 .frame(width: 22, alignment: .trailing)
             Text(marker)
                 .foregroundStyle(markerTint)
@@ -2155,22 +2155,22 @@ private struct IPhoneDiffCard: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            IPhoneDiffLine(kind: .context, number: "24", tokens: [token("private enum ", Nord.auroraPurple), token("IPhoneTab", Nord.frost1), token(": String {", Nord.snowStorm0)])
-            IPhoneDiffLine(kind: .removal, number: "25", tokens: [token("    case ", Nord.auroraRed), token("activity", Nord.snowStorm0)])
-            IPhoneDiffLine(kind: .removal, number: "26", tokens: [token("    case ", Nord.auroraRed), token("inbox", Nord.snowStorm0)])
-            IPhoneDiffLine(kind: .removal, number: "27", tokens: [token("    case ", Nord.auroraRed), token("threads", Nord.snowStorm0)])
-            IPhoneDiffLine(kind: .addition, number: "25", tokens: [token("    case ", Nord.auroraGreen), token("home", Nord.frost1)])
-            IPhoneDiffLine(kind: .addition, number: "26", tokens: [token("    case ", Nord.auroraGreen), token("work", Nord.frost1)])
-            IPhoneDiffLine(kind: .addition, number: "27", tokens: [token("    case ", Nord.auroraGreen), token("projects", Nord.frost1)])
-            IPhoneDiffLine(kind: .addition, number: "28", tokens: [token("    case ", Nord.auroraGreen), token("operate", Nord.frost1)])
-            IPhoneDiffLine(kind: .addition, number: "29", tokens: [token("    case ", Nord.auroraGreen), token("spaces", Nord.frost1)])
-            IPhoneDiffLine(kind: .context, number: "30", tokens: [token("}", Nord.snowStorm0)])
+            IPhoneDiffLine(kind: .context, number: "24", tokens: [token("private enum ", KanameColor.blocked), token("IPhoneTab", KanameColor.accent), token(": String {", KanameColor.textPrimary)])
+            IPhoneDiffLine(kind: .removal, number: "25", tokens: [token("    case ", KanameColor.danger), token("activity", KanameColor.textPrimary)])
+            IPhoneDiffLine(kind: .removal, number: "26", tokens: [token("    case ", KanameColor.danger), token("inbox", KanameColor.textPrimary)])
+            IPhoneDiffLine(kind: .removal, number: "27", tokens: [token("    case ", KanameColor.danger), token("threads", KanameColor.textPrimary)])
+            IPhoneDiffLine(kind: .addition, number: "25", tokens: [token("    case ", KanameColor.success), token("home", KanameColor.accent)])
+            IPhoneDiffLine(kind: .addition, number: "26", tokens: [token("    case ", KanameColor.success), token("work", KanameColor.accent)])
+            IPhoneDiffLine(kind: .addition, number: "27", tokens: [token("    case ", KanameColor.success), token("projects", KanameColor.accent)])
+            IPhoneDiffLine(kind: .addition, number: "28", tokens: [token("    case ", KanameColor.success), token("operate", KanameColor.accent)])
+            IPhoneDiffLine(kind: .addition, number: "29", tokens: [token("    case ", KanameColor.success), token("spaces", KanameColor.accent)])
+            IPhoneDiffLine(kind: .context, number: "30", tokens: [token("}", KanameColor.textPrimary)])
         }
         .padding(.vertical, 8)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(Nord.polarNight3.opacity(0.75), lineWidth: 1)
+                .stroke(KanameColor.separator.opacity(0.75), lineWidth: 1)
         }
     }
 }
@@ -2183,7 +2183,7 @@ private struct IPhoneCheckRow: View {
         HStack {
             Text(name)
                 .font(.subheadline.weight(.medium))
-                .foregroundStyle(Nord.snowStorm0)
+                .foregroundStyle(KanameColor.textPrimary)
             Spacer()
             KanameStatusBadge(status.presentation, density: .compact)
         }
@@ -2224,7 +2224,7 @@ private struct IPhoneGitHubStackView: View {
                         title: "Project delivery baseline",
                         branch: "main",
                         status: IPhoneCheckStatus.presentation(for: project.checks),
-                        accent: Nord.auroraGreen
+                        accent: KanameColor.success
                     )
                 }
                 IPhoneSectionHeader(title: "CI / CD", detail: "Errors belong beside the action that can resolve them")
@@ -2236,7 +2236,7 @@ private struct IPhoneGitHubStackView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(Nord.frost3)
+                .tint(KanameColor.accentStrong)
                 .kanameMinimumInteractiveTarget()
                 if let notice {
                     IPhoneFixtureNotice(text: notice)
@@ -2244,7 +2244,7 @@ private struct IPhoneGitHubStackView: View {
             }
             .padding(16)
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .navigationTitle("\(project.name) GitHub")
         .navigationBarTitleDisplayMode(.inline)
         .iPhoneFixtureRefreshable()
@@ -2258,24 +2258,24 @@ private struct IPhoneGitHubStatusSummary: View {
         VStack(alignment: .leading, spacing: 12) {
             Label("GitHub status summary", systemImage: "checklist")
                 .font(.headline)
-                .foregroundStyle(Nord.snowStorm0)
+                .foregroundStyle(KanameColor.textPrimary)
             VStack(spacing: 0) {
                 IPhoneGitHubStatusSummaryRow(
                     label: "Pull request #18",
                     status: IPhoneDeliveryStatus.presentation(for: project.deliveryState)
                 )
-                Divider().overlay(Nord.polarNight3)
+                Divider().overlay(KanameColor.separator)
                 IPhoneGitHubStatusSummaryRow(
                     label: "Baseline checks",
                     status: IPhoneCheckStatus.presentation(for: project.checks)
                 )
-                Divider().overlay(Nord.polarNight3)
+                Divider().overlay(KanameColor.separator)
                 IPhoneGitHubStatusSummaryRow(
                     label: "CI retry",
                     status: project.ciRetryStatus.presentation
                 )
             }
-            .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+            .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
         }
     }
 }
@@ -2288,7 +2288,7 @@ private struct IPhoneGitHubStatusSummaryRow: View {
         VStack(alignment: .leading, spacing: 7) {
             Text(label)
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(Nord.snowStorm0.opacity(0.72))
+                .foregroundStyle(KanameColor.textPrimary.opacity(0.72))
             KanameStatusBadge(status, density: .compact)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -2314,14 +2314,14 @@ private struct IPhonePullRequestCard: View {
             }
             Text(title)
                 .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Nord.snowStorm0)
+                .foregroundStyle(KanameColor.textPrimary)
             Text(branch)
                 .font(.caption.monospaced())
-                .foregroundStyle(Nord.snowStorm0.opacity(0.60))
+                .foregroundStyle(KanameColor.textPrimary.opacity(0.60))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(14)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
     }
 }
 
@@ -2340,13 +2340,13 @@ private struct IPhoneCIFailureCard: View {
                 Spacer()
                 Text(isHealthy ? "last run passed" : "needs triage")
                     .font(.caption)
-                    .foregroundStyle(Nord.snowStorm0.opacity(0.55))
+                    .foregroundStyle(KanameColor.textPrimary.opacity(0.55))
             }
             Text(isHealthy
                  ? "The fixture reports no blocking CI issue for this project."
                  : "SwiftLint · IPhoneControlSurface.swift: tab label exceeds the configured length")
                 .font(.caption)
-                .foregroundStyle(Nord.snowStorm0.opacity(0.72))
+                .foregroundStyle(KanameColor.textPrimary.opacity(0.72))
                 .fixedSize(horizontal: false, vertical: true)
             IPhoneAdaptiveBadgeRow {
                 let logs = IPhoneMetadataKind.logs.presentation(label: "Logs")
@@ -2389,7 +2389,7 @@ private struct IPhoneProjectSessionsView: View {
             }
         }
         .scrollContentBackground(.hidden)
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .navigationTitle("Agent sessions")
         .iPhoneFixtureRefreshable()
     }
@@ -2429,7 +2429,7 @@ private struct IPhoneWorktreeView: View {
             }
         }
         .scrollContentBackground(.hidden)
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .navigationTitle("Worktrees & files")
         .iPhoneFixtureRefreshable()
     }
@@ -2448,28 +2448,28 @@ private struct IPhoneAgentsView: View {
                     title: "Codex",
                     detail: "1 active coding session · tools available",
                     icon: "cpu",
-                    tint: Nord.frost1,
+                    tint: KanameColor.accent,
                     badge: .status(IPhoneDeliveryStatus.ready.presentation)
                 )
                 IPhoneProjectControlRow(
                     title: "OpenCode",
                     detail: "1 paused research session",
                     icon: "sparkles",
-                    tint: Nord.auroraPurple,
+                    tint: KanameColor.blocked,
                     badge: .status(IPhoneDeliveryStatus.paused.presentation)
                 )
                 Button("Start a local agent task") {
                     notice = "Local agent-task draft created. No provider was contacted."
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(Nord.frost3)
+                .tint(KanameColor.accentStrong)
                 .frame(maxWidth: .infinity)
                 .kanameMinimumInteractiveTarget()
                 if let notice { IPhoneFixtureNotice(text: notice) }
             }
             .padding(16)
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .navigationTitle("Agents")
         .navigationBarTitleDisplayMode(.inline)
         .iPhoneFixtureRefreshable()
@@ -2491,7 +2491,7 @@ private struct IPhoneSchedulesView: View {
             }
             .padding(16)
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .navigationTitle("Schedules")
         .navigationBarTitleDisplayMode(.inline)
         .iPhoneFixtureRefreshable()
@@ -2508,28 +2508,28 @@ private struct IPhoneScheduleCard: View {
         VStack(alignment: .leading, spacing: 11) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(title).font(.subheadline.weight(.semibold)).foregroundStyle(Nord.snowStorm0)
-                    Text(schedule).font(.caption).foregroundStyle(Nord.snowStorm0.opacity(0.60))
+                    Text(title).font(.subheadline.weight(.semibold)).foregroundStyle(KanameColor.textPrimary)
+                    Text(schedule).font(.caption).foregroundStyle(KanameColor.textPrimary.opacity(0.60))
                 }
                 Spacer()
                 Toggle(title, isOn: $enabled)
                     .labelsHidden()
-                    .tint(Nord.frost1)
+                    .tint(KanameColor.accent)
             }
             HStack {
                 Text(enabled ? "Next: today" : "Paused")
                     .font(.caption.weight(.medium))
-                    .foregroundStyle(enabled ? Nord.auroraGreen : Nord.auroraYellow)
+                    .foregroundStyle(enabled ? KanameColor.success : KanameColor.warning)
                 Spacer()
                 Button("Run now") {
                     notice = "Local run request recorded for \(title). No automation was dispatched."
                 }
                 .buttonStyle(.bordered)
-                .tint(Nord.frost1)
+                .tint(KanameColor.accent)
             }
         }
         .padding(14)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 }
 
@@ -2544,7 +2544,7 @@ private struct IPhoneAutomationsView: View {
             }
         }
         .scrollContentBackground(.hidden)
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .navigationTitle("Automations")
         .iPhoneFixtureRefreshable()
     }
@@ -2562,7 +2562,7 @@ private struct IPhoneIntegrationsView: View {
             }
         }
         .scrollContentBackground(.hidden)
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .navigationTitle("Integrations")
         .iPhoneFixtureRefreshable()
     }
@@ -2611,7 +2611,7 @@ private struct IPhoneNotificationRoutesView: View {
             }
         }
         .scrollContentBackground(.hidden)
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .navigationTitle("Notifications")
         .iPhoneFixtureRefreshable()
     }
@@ -2662,32 +2662,32 @@ private struct IPhoneKnowledgeDetailView: View {
             VStack(alignment: .leading, spacing: 18) {
                 Image(systemName: collection.icon)
                     .font(.title.weight(.semibold))
-                    .foregroundStyle(Nord.frost1)
+                    .foregroundStyle(KanameColor.accent)
                     .frame(width: 56, height: 56)
-                    .background(Nord.frost3.opacity(0.18), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .background(KanameColor.accentStrong.opacity(0.18), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                 Text(collection.detail)
                     .font(.body)
-                    .foregroundStyle(Nord.snowStorm0.opacity(0.78))
+                    .foregroundStyle(KanameColor.textPrimary.opacity(0.78))
                 IPhoneSectionHeader(title: "Fixture content", detail: "The destination is intentionally present, awaiting its live adapter")
                 VStack(spacing: 0) {
-                    IPhoneMetricRow(label: "Selected project", value: "Kaname", icon: "folder.fill", tint: Nord.frost1)
-                    Divider().overlay(Nord.polarNight3)
-                    IPhoneMetricRow(label: "Last update", value: "Just now · local fixture", icon: "clock", tint: Nord.auroraGreen)
-                    Divider().overlay(Nord.polarNight3)
-                    IPhoneMetricRow(label: "Authority", value: "No external service contacted", icon: "checkmark.shield", tint: Nord.auroraYellow)
+                    IPhoneMetricRow(label: "Selected project", value: "Kaname", icon: "folder.fill", tint: KanameColor.accent)
+                    Divider().overlay(KanameColor.separator)
+                    IPhoneMetricRow(label: "Last update", value: "Just now · local fixture", icon: "clock", tint: KanameColor.success)
+                    Divider().overlay(KanameColor.separator)
+                    IPhoneMetricRow(label: "Authority", value: "No external service contacted", icon: "checkmark.shield", tint: KanameColor.warning)
                 }
-                .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                 Button("Create local \(collection.title.lowercased()) draft") {
                     notice = "Local \(collection.title.lowercased()) draft created. No external state changed."
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(Nord.frost3)
+                .tint(KanameColor.accentStrong)
                 .frame(maxWidth: .infinity)
                 if let notice { IPhoneFixtureNotice(text: notice) }
             }
             .padding(16)
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .navigationTitle(collection.title)
         .navigationBarTitleDisplayMode(.inline)
         .iPhoneFixtureRefreshable()
@@ -2708,7 +2708,7 @@ private struct IPhoneSettingsControlSurface: View {
                     HStack(spacing: 12) {
                         Image(systemName: "person.crop.circle.fill")
                             .font(.title)
-                            .foregroundStyle(Nord.frost1)
+                            .foregroundStyle(KanameColor.accent)
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Justin’s Kaname")
                                 .font(.headline)
@@ -2757,7 +2757,7 @@ private struct IPhoneSettingsControlSurface: View {
                 }
             }
             .scrollContentBackground(.hidden)
-            .background(Nord.polarNight0)
+            .background(KanameColor.canvas)
             .navigationTitle("Settings")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -2765,7 +2765,7 @@ private struct IPhoneSettingsControlSurface: View {
                 }
             }
         }
-        .tint(Nord.frost1)
+        .tint(KanameColor.accent)
     }
 }
 
@@ -2789,11 +2789,11 @@ private struct IPhoneSettingsDetail: View {
                 IPhoneFixtureBoundaryCard(title: title, detail: detail)
                 Text("This dedicated settings path is deliberately separate from the working control surface.")
                     .font(.body)
-                    .foregroundStyle(Nord.snowStorm0.opacity(0.72))
+                    .foregroundStyle(KanameColor.textPrimary.opacity(0.72))
             }
             .padding(16)
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -2862,14 +2862,14 @@ private struct IPhoneActivityView: View {
                     )
                 }
             }
-            .listRowBackground(Nord.polarNight1)
+            .listRowBackground(KanameColor.surface)
 
             Section("From a notification") {
                 Button(action: openNotificationApproval) {
                     HStack(spacing: 12) {
                         Image(systemName: "calendar.badge.exclamationmark")
                             .font(.title3)
-                            .foregroundStyle(Nord.auroraYellow)
+                            .foregroundStyle(KanameColor.warning)
                         VStack(alignment: .leading, spacing: 3) {
                             Text("Approval required")
                                 .font(.subheadline.weight(.semibold))
@@ -2913,7 +2913,7 @@ private struct IPhoneActivityView: View {
                     }
                 } icon: {
                     Image(systemName: "clock.badge")
-                        .foregroundStyle(Nord.frost0)
+                        .foregroundStyle(KanameColor.active)
                 }
             }
 
@@ -2925,7 +2925,7 @@ private struct IPhoneActivityView: View {
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .navigationTitle("Activity")
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -2975,7 +2975,7 @@ private struct IPhoneInboxView: View {
                     queuedCount: queuedCommands.count
                 )
             }
-            .listRowBackground(Nord.polarNight1)
+            .listRowBackground(KanameColor.surface)
 
             Section("Attention projection") {
                 ForEach(inboxFixtures, id: \.name) { fixture in
@@ -2994,7 +2994,7 @@ private struct IPhoneInboxView: View {
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .navigationTitle("Inbox")
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -3031,7 +3031,7 @@ private struct IPhoneThreadsView: View {
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .navigationTitle("Threads")
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -3051,7 +3051,7 @@ private struct IPhoneReachabilityRow: View {
         HStack(spacing: 12) {
             Image(systemName: isMacReachable ? "desktopcomputer.and.macbook" : "wifi.slash")
                 .font(.title3)
-                .foregroundStyle(isMacReachable ? Nord.auroraGreen : Nord.auroraOrange)
+                .foregroundStyle(isMacReachable ? KanameColor.success : KanameColor.external)
             VStack(alignment: .leading, spacing: 3) {
                 Text(isMacReachable ? "Mac reachable" : "Mac unavailable")
                     .font(.subheadline.weight(.semibold))
@@ -3160,7 +3160,7 @@ private struct IPhoneThreadDetail: View {
             .padding(16)
             .padding(.bottom, 92)
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .navigationTitle(fixture.thread.title)
         .navigationBarTitleDisplayMode(.inline)
         .iPhoneFixtureRefreshable()
@@ -3221,7 +3221,7 @@ private struct IPhoneThreadStatusHeader: View {
                 Spacer()
                 Text(isMacReachable ? "Mac reachable" : "Offline queue enabled")
                     .font(.caption.weight(.medium))
-                    .foregroundStyle(isMacReachable ? Nord.auroraGreen : Nord.auroraOrange)
+                    .foregroundStyle(isMacReachable ? KanameColor.success : KanameColor.external)
             }
             Text("\(fixture.thread.workspaceKind.displayName) · \(fixture.providerSession.provider)")
                 .font(.caption)
@@ -3231,7 +3231,7 @@ private struct IPhoneThreadStatusHeader: View {
                 .foregroundStyle(.secondary)
         }
         .padding(14)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }
 
@@ -3243,17 +3243,17 @@ private struct IPhoneApprovalCallout: View {
         VStack(alignment: .leading, spacing: 8) {
             Label("Approval required", systemImage: "checkmark.shield.fill")
                 .font(.headline)
-                .foregroundStyle(Nord.auroraYellow)
+                .foregroundStyle(KanameColor.warning)
             Text(approval.consequence.capitalized)
                 .font(.subheadline)
-                .foregroundStyle(Nord.snowStorm0)
+                .foregroundStyle(KanameColor.textPrimary)
             Text(isMacReachable ? "Open the decision with its consequence and alternatives." : "Open the decision. A local fixture receipt is not an external calendar change.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(14)
-        .background(Nord.auroraYellow.opacity(0.12), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(KanameColor.warning.opacity(0.12), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }
 
@@ -3266,18 +3266,18 @@ private struct IPhoneCodingReviewSummary: View {
                 Spacer()
                 Image(systemName: "chevron.right")
                     .font(.caption.weight(.bold))
-                    .foregroundStyle(Nord.snowStorm0.opacity(0.45))
+                    .foregroundStyle(KanameColor.textPrimary.opacity(0.45))
             }
             Text("3 changed files · 4 checks passed · provider completion awaits review")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             Label("Open syntax-highlighted mobile diff", systemImage: "chevron.left.forwardslash.chevron.right")
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(Nord.frost1)
+                .foregroundStyle(KanameColor.accent)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(14)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }
 
@@ -3288,7 +3288,7 @@ private struct IPhoneFailureCallout: View {
         VStack(alignment: .leading, spacing: 8) {
             Label("Provider run failed", systemImage: "exclamationmark.triangle.fill")
                 .font(.headline)
-                .foregroundStyle(Nord.auroraRed)
+                .foregroundStyle(KanameColor.danger)
             Text("No research conclusion was accepted. Preserve the failure evidence and continue on Mac when ready.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
@@ -3299,7 +3299,7 @@ private struct IPhoneFailureCallout: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(14)
-        .background(Nord.auroraRed.opacity(0.10), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(KanameColor.danger.opacity(0.10), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }
 
@@ -3313,11 +3313,11 @@ private struct IPhoneConversationBubble: View {
             Image(systemName: icon)
                 .font(.caption.weight(.bold))
                 .frame(width: 28, height: 28)
-                .background(Nord.polarNight3, in: Circle())
+                .background(KanameColor.separator, in: Circle())
             VStack(alignment: .leading, spacing: 5) {
                 Text(author)
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(Nord.frost1)
+                    .foregroundStyle(KanameColor.accent)
                 Text(text)
                     .font(.subheadline)
                     .fixedSize(horizontal: false, vertical: true)
@@ -3325,7 +3325,7 @@ private struct IPhoneConversationBubble: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }
 
@@ -3374,12 +3374,12 @@ private struct IPhoneQueueView: View {
                     queuedCount: queuedCommands.count
                 )
             }
-            .listRowBackground(Nord.polarNight1)
+            .listRowBackground(KanameColor.surface)
 
             Section("Ordered pending commands") {
                 if queuedCommands.isEmpty {
                     Label("Nothing queued", systemImage: "checkmark.circle")
-                        .foregroundStyle(Nord.frost1)
+                        .foregroundStyle(KanameColor.accent)
                     Text("This local fixture has no pending outbound command.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -3389,9 +3389,9 @@ private struct IPhoneQueueView: View {
                             HStack {
                                 Text("\(queuedCommands[index].position)")
                                     .font(.caption.weight(.bold))
-                                    .foregroundStyle(Nord.frost1)
+                                    .foregroundStyle(KanameColor.accent)
                                     .frame(width: 22, height: 22)
-                                    .background(Nord.frost3.opacity(0.22), in: Circle())
+                                    .background(KanameColor.accentStrong.opacity(0.22), in: Circle())
                                 Text(queuedCommands[index].threadTitle)
                                     .font(.subheadline.weight(.semibold))
                                 Spacer()
@@ -3428,7 +3428,7 @@ private struct IPhoneQueueView: View {
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .navigationTitle("Offline queue")
         .iPhoneFixtureRefreshable()
         .toolbar {
@@ -3469,7 +3469,7 @@ private struct IPhoneApprovalSheet: View {
                 VStack(alignment: .leading, spacing: 20) {
                     Label("Approval required", systemImage: "checkmark.shield.fill")
                         .font(.title2.weight(.bold))
-                        .foregroundStyle(Nord.auroraYellow)
+                        .foregroundStyle(KanameColor.warning)
                     Text(fixture.thread.title)
                         .font(.title3.weight(.semibold))
 
@@ -3485,7 +3485,7 @@ private struct IPhoneApprovalSheet: View {
                             Divider()
                             IPhoneApprovalDetailRow("Freshness", value: "Current local fixture approval · expires in 15 minutes")
                         }
-                        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                     }
 
                     Text(isMacReachable
@@ -3514,7 +3514,7 @@ private struct IPhoneApprovalSheet: View {
                 }
                 .padding(20)
             }
-            .background(Nord.polarNight0)
+            .background(KanameColor.canvas)
             .navigationTitle("Review decision")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -3540,7 +3540,7 @@ private struct IPhoneApprovalDetailRow: View {
         VStack(alignment: .leading, spacing: 5) {
             Text(title)
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(Nord.frost1)
+                .foregroundStyle(KanameColor.accent)
             Text(value)
                 .font(.subheadline)
                 .fixedSize(horizontal: false, vertical: true)
@@ -3556,7 +3556,7 @@ private struct IPhoneReceiptRow: View {
     var body: some View {
         Label(text, systemImage: "checkmark.circle")
             .font(.subheadline)
-            .foregroundStyle(Nord.frost1)
+            .foregroundStyle(KanameColor.accent)
             .fixedSize(horizontal: false, vertical: true)
     }
 }
@@ -3600,7 +3600,7 @@ private struct IPhoneNewDraftSheet: View {
                 if created {
                     Section {
                         Label("Local \(selectedKind.lowercased()) draft created", systemImage: "checkmark.circle")
-                            .foregroundStyle(Nord.auroraGreen)
+                            .foregroundStyle(KanameColor.success)
                     }
                 }
             }
@@ -3650,7 +3650,7 @@ public struct IPhoneSyntheticScreenshotRoot: View {
             NavigationStack {
                 IPhoneGitHubStackView(project: .kaname)
             }
-            .tint(Nord.frost2)
+            .tint(KanameColor.accent)
         }
     }
 }

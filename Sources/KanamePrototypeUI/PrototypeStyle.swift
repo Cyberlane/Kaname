@@ -34,12 +34,12 @@ public extension AttentionState {
 
     var tint: Color {
         switch self {
-        case .none: Nord.polarNight3
-        case .queued: Nord.frost3
-        case .running: Nord.frost0
-        case .needsResponse, .needsReview: Nord.auroraYellow
-        case .failed: Nord.auroraRed
-        case .interrupted: Nord.auroraPurple
+        case .none: KanameColor.separator
+        case .queued: KanameColor.accentStrong
+        case .running: KanameColor.active
+        case .needsResponse, .needsReview: KanameColor.warning
+        case .failed: KanameColor.danger
+        case .interrupted: KanameColor.blocked
         }
     }
 }

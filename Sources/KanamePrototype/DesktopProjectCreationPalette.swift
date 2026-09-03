@@ -3,6 +3,7 @@ import KanameConnectivity
 import KanameDesktop
 import KanamePrototypeUI
 import SwiftUI
+import KanameDesignSystem
 
 private enum ProjectCreationSource: String, CaseIterable, Identifiable {
     case local
@@ -218,7 +219,7 @@ struct DesktopProjectCreationPalette: View {
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 17, style: .continuous)
-                .strokeBorder(Nord.polarNight3, lineWidth: 1)
+                .strokeBorder(KanameColor.separator, lineWidth: 1)
         }
         .shadow(color: .black.opacity(0.38), radius: 34, y: 16)
         .onAppear { DispatchQueue.main.async { searchFocused = true } }
@@ -280,7 +281,7 @@ struct DesktopProjectCreationPalette: View {
                     .buttonStyle(.plain)
                     .help("Back")
             } else {
-                Image(systemName: "magnifyingglass").foregroundStyle(Nord.frost1)
+                Image(systemName: "magnifyingglass").foregroundStyle(KanameColor.accent)
             }
 
             if activeSource == nil, intake.inspection == nil {
@@ -359,14 +360,14 @@ struct DesktopProjectCreationPalette: View {
                         .font(.caption2)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
-                        .background((selected ? Nord.polarNight0 : Nord.frost1).opacity(0.12), in: Capsule())
+                        .background((selected ? KanameColor.canvas : KanameColor.accent).opacity(0.12), in: Capsule())
                 }
             }
-            .foregroundStyle(selected ? Nord.polarNight0 : Nord.frost1)
+            .foregroundStyle(selected ? KanameColor.canvas : KanameColor.accent)
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
             .contentShape(Rectangle())
-            .background(selected ? Nord.frost1 : Color.clear, in: RoundedRectangle(cornerRadius: 10))
+            .background(selected ? KanameColor.accent : Color.clear, in: RoundedRectangle(cornerRadius: 10))
         }
         .buttonStyle(.plain)
         .onHover { hovering in if hovering { selectedSource = source } }
@@ -432,7 +433,7 @@ struct DesktopProjectCreationPalette: View {
             if let message = folderBrowser.errorMessage ?? intake.errorMessage {
                 Label(message, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
-                    .foregroundStyle(Nord.auroraRed)
+                    .foregroundStyle(KanameColor.danger)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 22)
@@ -494,12 +495,12 @@ struct DesktopProjectCreationPalette: View {
                         .opacity(0.72)
                 }
             }
-            .foregroundStyle(selected ? Nord.polarNight0 : Nord.frost1)
+            .foregroundStyle(selected ? KanameColor.canvas : KanameColor.accent)
             .padding(.horizontal, 12)
             .padding(.vertical, 9)
             .contentShape(Rectangle())
             .background(
-                selected ? Nord.frost1 : Nord.polarNight1.opacity(0.42),
+                selected ? KanameColor.accent : KanameColor.surface.opacity(0.42),
                 in: RoundedRectangle(cornerRadius: 8, style: .continuous)
             )
         }
@@ -538,7 +539,7 @@ struct DesktopProjectCreationPalette: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 12))
     }
 
     private func remoteEntry(_ source: ProjectCreationSource) -> some View {
@@ -552,7 +553,7 @@ struct DesktopProjectCreationPalette: View {
                         .onChange(of: remoteValue) { _ in validateRemote() }
                     if let reference = remoteReference {
                         Label(reference.displayName, systemImage: "checkmark.circle.fill")
-                            .font(.caption).foregroundStyle(Nord.auroraGreen)
+                            .font(.caption).foregroundStyle(KanameColor.success)
                     }
                 }
 
@@ -567,7 +568,7 @@ struct DesktopProjectCreationPalette: View {
                         Button("Choose…", action: chooseRemoteParent)
                     }
                     .padding(10)
-                    .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 10))
+                    .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 10))
                     if let reference = remoteReference, !remoteParentPath.isEmpty {
                         Text("Will clone to \(URL(fileURLWithPath: remoteParentPath).appending(path: reference.suggestedName).path)")
                             .font(.caption).foregroundStyle(.secondary)
@@ -611,7 +612,7 @@ struct DesktopProjectCreationPalette: View {
     private var footer: some View {
         HStack(spacing: 14) {
             Label(intake.inspection == nil ? "Explicit source selection" : "Review before saving", systemImage: "lock.shield")
-                .foregroundStyle(Nord.auroraGreen)
+                .foregroundStyle(KanameColor.success)
             Spacer()
             if intake.inspection != nil {
                 Button("Change folder", action: showLocalFolderBrowser)
@@ -652,7 +653,7 @@ struct DesktopProjectCreationPalette: View {
         if let message = intake.errorMessage ?? creationError {
             Label(message, systemImage: "exclamationmark.triangle.fill")
                 .font(.caption)
-                .foregroundStyle(Nord.auroraRed)
+                .foregroundStyle(KanameColor.danger)
                 .textSelection(.enabled)
         }
     }
@@ -667,7 +668,7 @@ struct DesktopProjectCreationPalette: View {
         .foregroundStyle(.secondary)
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Nord.polarNight1.opacity(0.72), in: RoundedRectangle(cornerRadius: 10))
+        .background(KanameColor.surface.opacity(0.72), in: RoundedRectangle(cornerRadius: 10))
     }
 
     private func choose(_ source: ProjectCreationSource) {

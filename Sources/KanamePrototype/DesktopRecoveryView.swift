@@ -97,7 +97,7 @@ struct DesktopRecoveryCenter: View {
 
     var body: some View {
         ZStack {
-            Nord.polarNight0.ignoresSafeArea()
+            KanameColor.canvas.ignoresSafeArea()
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     header
@@ -122,7 +122,7 @@ struct DesktopRecoveryCenter: View {
         VStack(alignment: .leading, spacing: 8) {
             Label("Recovery Center", systemImage: "externaldrive.badge.exclamationmark")
                 .font(.largeTitle.bold())
-                .foregroundStyle(Nord.snowStorm0)
+                .foregroundStyle(KanameColor.textPrimary)
             Text("Kaname preserved the workspace it could not safely open.\nEditing, providers, and connected services are paused; verified backup and diagnostics actions remain available.")
                 .font(.title3)
                 .foregroundStyle(.secondary)
@@ -134,12 +134,12 @@ struct DesktopRecoveryCenter: View {
         VStack(alignment: .leading, spacing: 10) {
             Label(reasonTitle, systemImage: "lock.shield")
                 .font(.headline)
-                .foregroundStyle(Nord.auroraYellow)
+                .foregroundStyle(KanameColor.warning)
             Text(reasonDetail)
                 .foregroundStyle(.secondary)
             if model.recoveryStatus?.quarantineCreated == true {
                 Label("The original bytes were copied into Kaname’s private Recovery folder.", systemImage: "checkmark.seal")
-                    .foregroundStyle(Nord.auroraGreen)
+                    .foregroundStyle(KanameColor.success)
             }
             if let message = recovery.message {
                 Text(message)
@@ -148,7 +148,7 @@ struct DesktopRecoveryCenter: View {
             }
         }
         .padding(18)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 14))
     }
 
     private var restoreActions: some View {
@@ -189,7 +189,7 @@ struct DesktopRecoveryCenter: View {
                 recovery.isShowingReset.toggle()
             }
             .buttonStyle(.plain)
-            .foregroundStyle(Nord.auroraRed)
+            .foregroundStyle(KanameColor.danger)
 
             if recovery.isShowingReset {
                 VStack(alignment: .leading, spacing: 12) {
@@ -215,7 +215,7 @@ struct DesktopRecoveryCenter: View {
                     .disabled(recovery.selectedResetBackup == nil || recovery.resetConfirmation != "RESET")
                 }
                 .padding(16)
-                .background(Nord.auroraRed.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+                .background(KanameColor.danger.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
             }
         }
     }

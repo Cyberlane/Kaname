@@ -6,6 +6,7 @@ import KanameLocalCore
 import KanamePrototypeUI
 #if os(macOS)
 import AppKit
+import KanameDesignSystem
 #endif
 
 @MainActor
@@ -363,19 +364,19 @@ struct CodexLiveWorkspace: View {
             }
             .padding(28)
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
     }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 8) {
             Label("Codex coding vertical slice", systemImage: "checkmark.shield.fill")
-                .font(.title2.weight(.bold)).foregroundStyle(Nord.snowStorm0)
+                .font(.title2.weight(.bold)).foregroundStyle(KanameColor.textPrimary)
             Text("Discuss → Plan → Approve → Implement → Review Evidence → Accept → Update Knowledge")
-                .foregroundStyle(Nord.snowStorm0.opacity(0.78))
+                .foregroundStyle(KanameColor.textPrimary.opacity(0.78))
             HStack(spacing: 8) {
                 badge(model.state.label, color: statusColor)
                 Text("GPT-5.6 Terra · Extra High · isolated worktree · network denied")
-                    .font(.caption.weight(.medium)).foregroundStyle(Nord.frost1)
+                    .font(.caption.weight(.medium)).foregroundStyle(KanameColor.accent)
             }
         }
     }
@@ -386,13 +387,13 @@ struct CodexLiveWorkspace: View {
                 .textFieldStyle(.roundedBorder)
             TextEditor(text: $model.task)
                 .frame(minHeight: 90).scrollContentBackground(.hidden)
-                .padding(8).background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+                .padding(8).background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 8))
             Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
                 GridRow { Text("Local search"); TextField("Search query", text: $model.searchQuery) }
                 GridRow { Text("Obsidian note"); TextField("Vault-relative note path", text: $model.obsidianNotePath) }
             }
             Button("Inspect without mutation", action: model.inspect)
-                .buttonStyle(.borderedProminent).tint(Nord.frost2)
+                .buttonStyle(.borderedProminent).tint(KanameColor.accent)
         }
     }
 
@@ -430,7 +431,7 @@ struct CodexLiveWorkspace: View {
         card("Workflow gate") {
             if model.state == .ready {
                 Button("Discuss and request read-only plan", action: model.startPlanning)
-                    .buttonStyle(.borderedProminent).tint(Nord.frost2)
+                    .buttonStyle(.borderedProminent).tint(KanameColor.accent)
             }
             if !model.planText.isEmpty {
                 Text("Proposed plan").font(.headline)
@@ -438,22 +439,22 @@ struct CodexLiveWorkspace: View {
             }
             if model.state == .planReady || model.state == .interrupted {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Approval consequence").font(.headline).foregroundStyle(Nord.auroraYellow)
+                    Text("Approval consequence").font(.headline).foregroundStyle(KanameColor.warning)
                     Text("One network-denied Codex turn may write only inside the exact linked worktree. The prompt, worktree revision, expiry, and reversible consequence are fingerprinted and journaled by the signed Rust control plane before dispatch.")
                     HStack {
                         Button("Approve isolated implementation", action: model.approveAndImplement)
-                            .buttonStyle(.borderedProminent).tint(Nord.auroraGreen)
+                            .buttonStyle(.borderedProminent).tint(KanameColor.success)
                         Text("No session-wide or network grant").font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                .padding(12).background(Nord.auroraYellow.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
+                .padding(12).background(KanameColor.warning.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
             }
             if model.state == .planning || model.state == .implementing {
                 HStack { ProgressView(); Text(model.state.label); Spacer(); Button("Interrupt", action: model.interrupt) }
             }
             if let question = model.pendingQuestion,
                model.state == .planning || model.state == .implementing {
-                Text(question.text ?? "Codex requested user input.").foregroundStyle(Nord.auroraYellow)
+                Text(question.text ?? "Codex requested user input.").foregroundStyle(KanameColor.warning)
                 HStack {
                     TextField("Non-secret answer", text: $model.questionAnswer)
                     Button("Answer", action: model.answerQuestion)
@@ -470,7 +471,7 @@ struct CodexLiveWorkspace: View {
                     HStack { Text(event.kind.rawValue).font(.subheadline.weight(.semibold)); Spacer(); Text(event.nativeType).font(.caption) }
                     if let text = event.text, !text.isEmpty { Text(text).font(.caption).lineLimit(5).textSelection(.enabled) }
                 }
-                .padding(10).background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+                .padding(10).background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 8))
             }
         }
     }
@@ -478,12 +479,12 @@ struct CodexLiveWorkspace: View {
     private func evidenceView(_ evidence: CodingEvidenceSnapshot) -> some View {
         card("Review evidence") {
             HStack {
-                badge(evidence.passed ? "Evidence passed" : "Evidence failed", color: evidence.passed ? Nord.auroraGreen : Nord.auroraRed)
+                badge(evidence.passed ? "Evidence passed" : "Evidence failed", color: evidence.passed ? KanameColor.success : KanameColor.danger)
                 Text(evidence.digest.prefix(16)).font(.caption.monospaced())
             }
             Text(evidence.diffStat.isEmpty ? "No diff was produced." : evidence.diffStat).textSelection(.enabled)
             Text("\(evidence.verificationCommand): exit \(evidence.verificationExitStatus) · diff check \(evidence.diffCheckPassed ? "pass" : "failed")")
-            if evidence.verificationOutputWasTruncated { Text("Verification output was bounded and truncated.").foregroundStyle(Nord.auroraYellow) }
+            if evidence.verificationOutputWasTruncated { Text("Verification output was bounded and truncated.").foregroundStyle(KanameColor.warning) }
             Text(evidence.verificationOutput).font(.caption.monospaced()).lineLimit(20).textSelection(.enabled)
             DisclosureGroup("Diff") {
                 ScrollView(.horizontal) { Text(evidence.diff).font(.caption.monospaced()).textSelection(.enabled) }
@@ -491,10 +492,10 @@ struct CodexLiveWorkspace: View {
             Text("Knowledge-update proposal").font(.headline)
             TextEditor(text: $model.knowledgeUpdateProposal)
                 .frame(minHeight: 80).scrollContentBackground(.hidden)
-                .padding(8).background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+                .padding(8).background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 8))
             HStack {
                 Button("Accept verified result", action: model.accept)
-                    .buttonStyle(.borderedProminent).tint(Nord.auroraGreen).disabled(!evidence.passed || model.state != .reviewing)
+                    .buttonStyle(.borderedProminent).tint(KanameColor.success).disabled(!evidence.passed || model.state != .reviewing)
                 Button("Reject result", action: model.reject)
                     .buttonStyle(.bordered).disabled(model.state != .reviewing)
                 if let position = model.reviewStorePosition {
@@ -506,11 +507,11 @@ struct CodexLiveWorkspace: View {
 
     private func card<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(title).font(.headline).foregroundStyle(Nord.snowStorm0)
+            Text(title).font(.headline).foregroundStyle(KanameColor.textPrimary)
             content()
         }
         .padding(18).frame(maxWidth: .infinity, alignment: .leading)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 16))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 16))
     }
 
     private func badge(_ text: String, color: Color) -> some View {
@@ -520,10 +521,10 @@ struct CodexLiveWorkspace: View {
 
     private var statusColor: Color {
         switch model.state {
-        case .idle, .ready, .accepted: Nord.auroraGreen
-        case .inspecting, .planning, .authorizing, .implementing, .reviewing: Nord.frost1
-        case .planReady, .interrupted: Nord.auroraYellow
-        case .rejected, .failed: Nord.auroraRed
+        case .idle, .ready, .accepted: KanameColor.success
+        case .inspecting, .planning, .authorizing, .implementing, .reviewing: KanameColor.accent
+        case .planReady, .interrupted: KanameColor.warning
+        case .rejected, .failed: KanameColor.danger
         }
     }
 

@@ -18,7 +18,7 @@ struct DesktopComposerPickerDrawerFrame<Content: View>: View {
             HStack(spacing: 8) {
                 Label(title, systemImage: systemImage)
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(Nord.frost1)
+                    .foregroundStyle(KanameColor.accent)
                 Spacer()
                 Text("\(matchCount) match\(matchCount == 1 ? "" : "es")")
                     .font(.caption2)
@@ -39,10 +39,10 @@ struct DesktopComposerPickerDrawerFrame<Content: View>: View {
                     .frame(maxHeight: maxHeight)
             }
         }
-        .background(Nord.polarNight2.opacity(0.98), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .background(KanameColor.raised.opacity(0.98), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .strokeBorder(Nord.polarNight3, lineWidth: 1)
+                .strokeBorder(KanameColor.separator, lineWidth: 1)
         }
         .shadow(color: .black.opacity(0.24), radius: 12, y: 6)
         .accessibilityElement(children: .contain)
@@ -68,20 +68,20 @@ struct DesktopComposerPickerRowChrome<Title: View, Detail: View>: View {
             HStack(alignment: .top, spacing: 9) {
                 Image(systemName: systemImage)
                     .frame(width: 18)
-                    .foregroundStyle(isEnabled ? Nord.frost1 : Color.secondary)
+                    .foregroundStyle(isEnabled ? KanameColor.accent : Color.secondary)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
                     title()
                     detail()
                         .font(.caption)
-                        .foregroundStyle(isEnabled ? Color.secondary : Nord.auroraYellow)
+                        .foregroundStyle(isEnabled ? Color.secondary : KanameColor.warning)
                         .lineLimit(2)
                 }
                 Spacer(minLength: 4)
                 if isSelected {
                     Image(systemName: "return")
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(Nord.polarNight1)
+                        .foregroundStyle(KanameColor.surface)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -89,10 +89,10 @@ struct DesktopComposerPickerRowChrome<Title: View, Detail: View>: View {
             .padding(.vertical, 7)
             .contentShape(Rectangle())
             .background(
-                isSelected ? Nord.frost1.opacity(isEnabled ? 1 : 0.62) : Color.clear,
+                isSelected ? KanameColor.accent.opacity(isEnabled ? 1 : 0.62) : Color.clear,
                 in: RoundedRectangle(cornerRadius: 8)
             )
-            .foregroundStyle(isSelected ? Nord.polarNight0 : Color.primary)
+            .foregroundStyle(isSelected ? KanameColor.canvas : Color.primary)
         }
         .buttonStyle(.plain)
         .focusable(false)

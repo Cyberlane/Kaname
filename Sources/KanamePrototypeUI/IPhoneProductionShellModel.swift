@@ -5,6 +5,7 @@ import Foundation
 import KanameMobileSync
 import KanameProtocol
 import SwiftUI
+import KanameDesignSystem
 
 @available(iOS 17.0, *)
 @MainActor
@@ -841,10 +842,10 @@ extension MobileEnrollmentPhase {
 
     var tint: Color {
         switch self {
-        case .active: Nord.auroraGreen
-        case .awaitingLocalConfirmation: Nord.auroraYellow
-        case .unenrolled: Nord.frost1
-        case .rejected, .revoked: Nord.auroraRed
+        case .active: KanameColor.success
+        case .awaitingLocalConfirmation: KanameColor.warning
+        case .unenrolled: KanameColor.accent
+        case .rejected, .revoked: KanameColor.danger
         }
     }
 }

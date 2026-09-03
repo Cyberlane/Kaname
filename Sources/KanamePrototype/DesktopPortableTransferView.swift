@@ -3,6 +3,7 @@ import KanameDesktop
 import KanamePrototypeUI
 import SwiftUI
 import UniformTypeIdentifiers
+import KanameDesignSystem
 
 struct DesktopImportReview: Identifiable {
     let id = UUID()
@@ -116,7 +117,7 @@ struct DesktopImportReviewSheet: View {
                         ForEach(review.preview.files) { file in
                             HStack(spacing: 12) {
                                 Image(systemName: "doc.text")
-                                    .foregroundStyle(Nord.frost1)
+                                    .foregroundStyle(KanameColor.accent)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(file.displayName).font(.body.weight(.semibold))
                                     Text("\(ByteCountFormatter.string(fromByteCount: Int64(file.byteCount), countStyle: .file)) · SHA-256 \(file.sha256.prefix(12))")
@@ -126,7 +127,7 @@ struct DesktopImportReviewSheet: View {
                                 Spacer()
                             }
                             .padding(10)
-                            .background(Nord.polarNight2.opacity(0.6), in: RoundedRectangle(cornerRadius: 9))
+                            .background(KanameColor.raised.opacity(0.6), in: RoundedRectangle(cornerRadius: 9))
                         }
                     }
                 }
@@ -134,7 +135,7 @@ struct DesktopImportReviewSheet: View {
 
                 Label("Adding files does not contact a provider. Sending the resulting composer draft remains a separate action.", systemImage: "lock.shield")
                     .font(.caption)
-                    .foregroundStyle(Nord.auroraGreen)
+                    .foregroundStyle(KanameColor.success)
 
                 HStack {
                     Text(ByteCountFormatter.string(fromByteCount: Int64(review.preview.totalByteCount), countStyle: .file))

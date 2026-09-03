@@ -427,7 +427,7 @@ struct DesktopLinkView: View {
                             }
                         }
                         .padding(.horizontal, 18)
-                        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 16))
+                        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 16))
                     }
                 } else {
                     EmptyPanel(
@@ -446,7 +446,7 @@ struct DesktopLinkView: View {
                 proxy.scrollTo("desktop-link-publication-statuses", anchor: .top)
             }
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .sheet(item: $invitationDraft, onDismiss: model.dismissInvitation) { draft in
             LinkInvitationSheet(model: model, draft: draft)
         }
@@ -486,7 +486,7 @@ private struct LinkInvitationSheet: View {
         }
         .padding(24)
         .frame(width: 540)
-        .background(Nord.polarNight1)
+        .background(KanameColor.surface)
         .onDisappear { model.dismissInvitation() }
     }
 
@@ -561,7 +561,7 @@ private struct LinkInvitationSheet: View {
     private func invitationResult(_ invitation: KanameLinkInvitationArtifact) -> some View {
         Label("Invitation ready", systemImage: "checkmark.shield.fill")
             .font(.title2.weight(.bold))
-            .foregroundStyle(Nord.auroraGreen)
+            .foregroundStyle(KanameColor.success)
         Text("The secret remains concealed on screen. Copy it only into the intended Kaname Link client, then close this sheet.")
             .font(.subheadline)
             .foregroundStyle(.secondary)
@@ -574,17 +574,17 @@ private struct LinkInvitationSheet: View {
             LinkFact(label: "Secret", value: "Concealed", monospaced: true)
         }
         .padding(14)
-        .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 12))
+        .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 12))
 
         if let copyConfirmation {
             Label(copyConfirmation, systemImage: "clipboard.fill")
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(Nord.auroraGreen)
+                .foregroundStyle(KanameColor.success)
         }
         if let copyFailure {
             Text(copyFailure)
                 .font(.caption)
-                .foregroundStyle(Nord.auroraRed)
+                .foregroundStyle(KanameColor.danger)
         }
 
         HStack {
@@ -681,17 +681,17 @@ private struct LinkReplyComposer: View {
                 .scrollContentBackground(.hidden)
                 .frame(minHeight: 84)
                 .padding(8)
-                .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 10))
+                .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 10))
                 .overlay {
                     RoundedRectangle(cornerRadius: 10)
-                        .stroke(Nord.polarNight3, lineWidth: 1)
+                        .stroke(KanameColor.separator, lineWidth: 1)
                 }
 
             HStack {
                 if let confirmation {
                     Text(confirmation)
                         .font(.caption)
-                        .foregroundStyle(Nord.auroraGreen)
+                        .foregroundStyle(KanameColor.success)
                 }
                 Spacer()
                 Text("\(normalizedBody.utf8.count) / \(KanameLinkSnapshotContract.maximumReplyBodyBytes) bytes")
@@ -862,14 +862,14 @@ private struct LinkPendingDeviceCard: View {
                     } else {
                         Text("Unavailable — approval is disabled")
                             .font(.caption.weight(.semibold))
-                            .foregroundStyle(Nord.auroraRed)
+                            .foregroundStyle(KanameColor.danger)
                     }
                 }
                 Spacer()
                 LinkRelativeTime(unixMillis: pending.requestedAtUnixMillis)
             }
             .padding(12)
-            .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 10))
+            .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 10))
 
             Text("Confirm these words with the named collaborator through a separate trusted channel before approving.")
                 .font(.caption)
@@ -918,7 +918,7 @@ private struct LinkExternalMessageCard: View {
             HStack {
                 Label("Data only — never executed", systemImage: "hand.raised.fill")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(Nord.auroraYellow)
+                    .foregroundStyle(KanameColor.warning)
                 Spacer()
                 LinkRelativeTime(unixMillis: message.receivedAtUnixMillis)
             }
@@ -950,14 +950,14 @@ private struct LinkPublicationPreviewCard: View {
             VStack(alignment: .leading, spacing: 5) {
                 Text("Collaborator-visible material")
                     .font(.caption.weight(.bold))
-                    .foregroundStyle(Nord.frost1)
+                    .foregroundStyle(KanameColor.accent)
                 Text(verbatim: preview.summary)
                     .font(.body)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 12))
+            .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 12))
 
             LinkFact(label: "Audience", value: preview.audienceDescription)
             LinkFact(label: "Revision", value: "\(preview.revision)")
@@ -987,7 +987,7 @@ private struct LinkReceiptRow: View {
                     .accessibilityHidden(true)
                 if !isLast {
                     Rectangle()
-                        .fill(Nord.polarNight3)
+                        .fill(KanameColor.separator)
                         .frame(width: 2, height: 62)
                 }
             }
@@ -1083,7 +1083,7 @@ private struct LinkFailureBanner: View {
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(Nord.auroraRed)
+                .foregroundStyle(KanameColor.danger)
             VStack(alignment: .leading, spacing: 4) {
                 Text("Link gateway unavailable")
                     .font(.headline)
@@ -1094,6 +1094,6 @@ private struct LinkFailureBanner: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Nord.auroraRed.opacity(0.09), in: RoundedRectangle(cornerRadius: 15))
+        .background(KanameColor.danger.opacity(0.09), in: RoundedRectangle(cornerRadius: 15))
     }
 }

@@ -26,8 +26,8 @@ struct KanamePrototypeApp: App {
     var body: some Scene {
         Window(kanameDesktopWindowTitle, id: "main") {
             KanameDesktopWorkspace(gitControl: appDelegate.gitControl)
-                .tint(Nord.frost2)
-                .preferredColorScheme(.dark)
+                .tint(KanameColor.accent)
+                .modifier(KanameAppearanceModifier())
         }
         .defaultSize(width: 1_520, height: 940)
         .commands {
@@ -103,8 +103,8 @@ struct KanamePrototypeApp: App {
     var body: some Scene {
         WindowGroup {
             IPhoneControlSurface()
-                .tint(Nord.frost2)
-                .preferredColorScheme(.dark)
+                .tint(KanameColor.accent)
+                .modifier(KanameAppearanceModifier())
         }
     }
 }
@@ -283,8 +283,8 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
         guard allowCreation else { return false }
         let controller = NSHostingController(
             rootView: KanameDesktopWorkspace(gitControl: gitControl)
-                .tint(Nord.frost2)
-                .preferredColorScheme(.dark)
+                .tint(KanameColor.accent)
+                .modifier(KanameAppearanceModifier())
         )
         let window = NSWindow(contentViewController: controller)
         window.title = kanameDesktopWindowTitle
@@ -786,7 +786,7 @@ private struct PrototypeWorkspace: View {
                     }
                 }
                 .scrollContentBackground(.hidden)
-                .background(Nord.polarNight1)
+                .background(KanameColor.surface)
                 .frame(maxHeight: .infinity)
 
                     Divider()
@@ -797,17 +797,17 @@ private struct PrototypeWorkspace: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .buttonStyle(.plain)
-                    .foregroundStyle(Nord.snowStorm0)
+                    .foregroundStyle(KanameColor.textPrimary)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 10)
             }
             .navigationTitle("Kaname")
-            .background(Nord.polarNight1)
+            .background(KanameColor.surface)
             .listStyle(.sidebar)
             .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 300)
             } content: {
             content
-                .background(Nord.polarNight0)
+                .background(KanameColor.canvas)
                 .navigationTitle(selectedSurface.title)
                 .navigationSplitViewColumnWidth(min: 520, ideal: 720)
                 .toolbar {
@@ -841,7 +841,7 @@ private struct PrototypeWorkspace: View {
                 }
             } detail: {
             inspector
-                .background(Nord.polarNight1)
+                .background(KanameColor.surface)
                 .navigationSplitViewColumnWidth(min: 280, ideal: 340, max: 440)
             }
             .navigationSplitViewStyle(.balanced)
@@ -1084,19 +1084,19 @@ private struct NewFlowSheet: View {
                         .foregroundStyle(.secondary)
                 }
                 .padding(14)
-                .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+                .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 14))
 
                 if drafted {
                     Label("Local starter draft created — no external action taken", systemImage: "checkmark.circle")
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Nord.auroraGreen)
+                        .foregroundStyle(KanameColor.success)
                 }
 
                 Spacer()
             }
             .padding(24)
             .frame(minWidth: 500, minHeight: 380, alignment: .topLeading)
-            .background(Nord.polarNight0)
+            .background(KanameColor.canvas)
             .navigationTitle("Start work")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -1110,8 +1110,8 @@ private struct NewFlowSheet: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)
-        .tint(Nord.frost2)
+        .modifier(KanameAppearanceModifier())
+        .tint(KanameColor.accent)
     }
 }
 
@@ -1176,7 +1176,7 @@ private struct DomainHomeView: View {
                         .buttonStyle(.borderedProminent)
                     }
                     .padding(18)
-                    .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 16))
+                    .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 16))
                 }
             }
             .padding(24)
@@ -1196,7 +1196,7 @@ private struct ScheduleFixtureCard: View {
                 Spacer()
                 Text("Fixture only")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(Nord.frost1)
+                    .foregroundStyle(KanameColor.accent)
             }
             LabeledContent("Next run", value: "Monday 09:00 JST")
             LabeledContent("Trigger", value: "Weekdays at 09:00 · human preview required")
@@ -1209,7 +1209,7 @@ private struct ScheduleFixtureCard: View {
                 .buttonStyle(.borderedProminent)
         }
         .padding(18)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 16))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 16))
     }
 }
 
@@ -1258,10 +1258,10 @@ private struct PhaseBanner: View {
     var body: some View {
         Label("Phase 0 validation — deterministic fixtures only", systemImage: "testtube.2")
             .font(.caption.weight(.semibold))
-            .foregroundStyle(Nord.frost1)
+            .foregroundStyle(KanameColor.accent)
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .background(Nord.polarNight2, in: Capsule())
+            .background(KanameColor.raised, in: Capsule())
     }
 }
 
@@ -1325,12 +1325,12 @@ private struct HealthSummary: View {
         VStack(alignment: .leading, spacing: 8) {
             Label("Local authority", systemImage: "desktopcomputer")
                 .font(.headline)
-            StatusLine(label: "Fixture provider", detail: "available", tint: Nord.auroraGreen)
-            StatusLine(label: "External accounts", detail: "not connected", tint: Nord.polarNight3)
-            StatusLine(label: "Mobile design", detail: "separate redesign pending", tint: Nord.frost2)
+            StatusLine(label: "Fixture provider", detail: "available", tint: KanameColor.success)
+            StatusLine(label: "External accounts", detail: "not connected", tint: KanameColor.separator)
+            StatusLine(label: "Mobile design", detail: "separate redesign pending", tint: KanameColor.accent)
         }
         .padding(14)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 14))
     }
 }
 
@@ -1386,7 +1386,7 @@ private struct AttentionCard: View {
             }
             .padding(16)
             .frame(maxWidth: .infinity, minHeight: 158, alignment: .topLeading)
-            .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 16))
+            .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 16))
         }
         .buttonStyle(.plain)
         .accessibilityHint("Open the thread for \(fixture.thread.title)")
@@ -1552,7 +1552,7 @@ private struct ThreadDirectoryRow: View {
                 .padding(.top, 8)
         }
         .padding(16)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 16))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 16))
     }
 }
 
@@ -1643,7 +1643,7 @@ private struct ThreadWorkspaceView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .onChange(of: fixture.name) { _ in
             selectedPanel = .conversation
         }
@@ -1693,7 +1693,7 @@ private struct ThreadConversationView: View {
                                 Spacer()
                                 Image(systemName: showsActivity ? "chevron.down" : "chevron.right")
                                     .font(.caption.weight(.bold))
-                                    .foregroundStyle(Nord.frost1)
+                                    .foregroundStyle(KanameColor.accent)
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .contentShape(Rectangle())
@@ -1711,7 +1711,7 @@ private struct ThreadConversationView: View {
                         }
                     }
                     .padding(14)
-                    .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+                    .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 14))
 
                     if !fixture.queueItems.isEmpty {
                         QueueCard(queueItems: fixture.queueItems)
@@ -1725,7 +1725,7 @@ private struct ThreadConversationView: View {
                                 Text(reply)
                                     .padding(10)
                                     .frame(maxWidth: .infinity, alignment: .leading)
-                                    .background(Nord.frost3.opacity(0.24), in: RoundedRectangle(cornerRadius: 10))
+                                    .background(KanameColor.accentStrong.opacity(0.24), in: RoundedRectangle(cornerRadius: 10))
                             }
                         }
                     }
@@ -1753,7 +1753,7 @@ private struct ThreadConversationView: View {
                     .foregroundStyle(.secondary)
             }
             .padding(16)
-            .background(Nord.polarNight1)
+            .background(KanameColor.surface)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
@@ -1791,7 +1791,7 @@ private struct ConversationBubble: View {
         }
         .padding(14)
         .background(
-            role == .user ? Nord.frost3.opacity(0.32) : Nord.polarNight1,
+            role == .user ? KanameColor.accentStrong.opacity(0.32) : KanameColor.surface,
             in: RoundedRectangle(cornerRadius: 16)
         )
     }
@@ -2101,7 +2101,7 @@ private struct CodeReviewView: View {
                             SyntaxHighlightedDiff(file: selectedFile)
                                 .padding(14)
                         }
-                        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+                        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 14))
                     }
 
                     ReviewEvidenceList()
@@ -2188,7 +2188,7 @@ private struct SyntaxHighlightedDiff: View {
             HStack {
                 Label("\(file.language) syntax", systemImage: "textformat")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(Nord.frost1)
+                    .foregroundStyle(KanameColor.accent)
                 Spacer()
                 Text("+ addition  − deletion")
                     .font(.caption)
@@ -2200,7 +2200,7 @@ private struct SyntaxHighlightedDiff: View {
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
                     Text("\(index + 1)")
                         .font(.caption2.monospacedDigit())
-                        .foregroundStyle(Nord.polarNight3)
+                        .foregroundStyle(KanameColor.separator)
                         .frame(width: 24, alignment: .trailing)
                     syntaxText(for: String(line))
                         .font(.system(.footnote, design: .monospaced))
@@ -2216,23 +2216,23 @@ private struct SyntaxHighlightedDiff: View {
 
     private func lineBackground(for line: String) -> Color {
         if line.hasPrefix("+") && !line.hasPrefix("+++") {
-            return Nord.auroraGreen.opacity(0.13)
+            return KanameColor.success.opacity(0.13)
         }
         if line.hasPrefix("-") && !line.hasPrefix("---") {
-            return Nord.auroraRed.opacity(0.13)
+            return KanameColor.danger.opacity(0.13)
         }
         return .clear
     }
 
     private func syntaxText(for line: String) -> Text {
         if line.hasPrefix("+++") || line.hasPrefix("---") || line.hasPrefix("@@") {
-            return Text(line).foregroundColor(Nord.frost1)
+            return Text(line).foregroundColor(KanameColor.accent)
         }
 
         let first = line.first.map(String.init) ?? ""
         let source = first == "+" || first == "-" ? String(line.dropFirst()) : line
-        let prefixColor = first == "+" ? Nord.auroraGreen : (first == "-" ? Nord.auroraRed : Nord.snowStorm0)
-        return Text(first).foregroundColor(prefixColor) + swiftTokens(source, baseColor: Nord.snowStorm0)
+        let prefixColor = first == "+" ? KanameColor.success : (first == "-" ? KanameColor.danger : KanameColor.textPrimary)
+        return Text(first).foregroundColor(prefixColor) + swiftTokens(source, baseColor: KanameColor.textPrimary)
     }
 
     private func swiftTokens(_ source: String, baseColor: Color) -> Text {
@@ -2244,11 +2244,11 @@ private struct SyntaxHighlightedDiff: View {
             let normalized = token.trimmingCharacters(in: .punctuationCharacters)
             let color: Color
             if keywords.contains(normalized) {
-                color = Nord.auroraPurple
+                color = KanameColor.blocked
             } else if token.contains("Search") || token.contains("Error") || token.contains("Page") {
-                color = Nord.frost1
+                color = KanameColor.accent
             } else if token.contains("\"") || token.allSatisfy({ $0.isNumber || $0 == "_" }) {
-                color = Nord.auroraYellow
+                color = KanameColor.warning
             } else {
                 color = baseColor
             }
@@ -2544,9 +2544,9 @@ private enum StackLayerStatus: String {
 
     var tint: Color {
         switch self {
-        case .ready: Nord.auroraGreen
-        case .review: Nord.auroraYellow
-        case .blocked: Nord.auroraRed
+        case .ready: KanameColor.success
+        case .review: KanameColor.warning
+        case .blocked: KanameColor.danger
         }
     }
 
@@ -2880,10 +2880,10 @@ private struct SettingsModal: View {
                 isPresented = false
             }
             .frame(maxWidth: 1_080, maxHeight: 720)
-            .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .stroke(Nord.polarNight3, lineWidth: 1)
+                    .stroke(KanameColor.separator, lineWidth: 1)
             }
             .shadow(color: .black.opacity(0.42), radius: 28, y: 12)
             .padding(40)
@@ -2920,7 +2920,7 @@ private struct SettingsPrototypeView: View {
                                 Label(category.title, systemImage: category.symbolName)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .font(selectedCategory == category ? .body.weight(.semibold) : .body)
-                                    .foregroundStyle(selectedCategory == category ? Nord.frost1 : Nord.snowStorm0)
+                                    .foregroundStyle(selectedCategory == category ? KanameColor.accent : KanameColor.textPrimary)
                             }
                             .buttonStyle(.plain)
                         }
@@ -2928,7 +2928,7 @@ private struct SettingsPrototypeView: View {
                 }
                 .listStyle(.sidebar)
                 .scrollContentBackground(.hidden)
-                .background(Nord.polarNight1)
+                .background(KanameColor.surface)
                 .frame(maxHeight: .infinity)
 
                 Divider()
@@ -2939,17 +2939,17 @@ private struct SettingsPrototypeView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(Nord.frost1)
+                .foregroundStyle(KanameColor.accent)
                 .padding(14)
             }
-            .background(Nord.polarNight1)
+            .background(KanameColor.surface)
             .frame(minWidth: 230, idealWidth: 250, maxWidth: 280)
 
             Divider()
 
             SettingsDetail(category: selectedCategory, close: close)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Nord.polarNight0)
+                .background(KanameColor.canvas)
         }
         .frame(minWidth: 900, minHeight: 640)
     }
@@ -2998,7 +2998,7 @@ private struct SettingsDetail: View {
                         .foregroundStyle(.secondary)
                     Text("Phase 0 controls affect local preview state only.")
                         .font(.caption)
-                        .foregroundStyle(Nord.frost1)
+                        .foregroundStyle(KanameColor.accent)
                 }
                 Spacer()
                 Button(action: close) {
@@ -3022,7 +3022,7 @@ private struct SettingsDetail: View {
             if let localNotice {
                 Text(localNotice)
                     .font(.caption)
-                    .foregroundStyle(Nord.frost1)
+                    .foregroundStyle(KanameColor.accent)
                     .padding(.horizontal, 28)
                     .padding(.bottom, 18)
             }
@@ -3289,11 +3289,11 @@ private extension EventKind {
 
     var tint: Color {
         switch self {
-        case .approvalRequested, .providerCompleted: Nord.auroraYellow
-        case .runFailed, .approvalRejected: Nord.auroraRed
-        case .workAccepted, .approvalApproved: Nord.auroraGreen
-        case .runCancelled, .runInterrupted: Nord.auroraPurple
-        default: Nord.polarNight3
+        case .approvalRequested, .providerCompleted: KanameColor.warning
+        case .runFailed, .approvalRejected: KanameColor.danger
+        case .workAccepted, .approvalApproved: KanameColor.success
+        case .runCancelled, .runInterrupted: KanameColor.blocked
+        default: KanameColor.separator
         }
     }
 }
@@ -3305,5 +3305,17 @@ private extension StackLayerStatus {
         case .review: .needsReview
         case .blocked: .failed
         }
+    }
+}
+
+
+/// Appearance preference: dark (the historical default), light, or follow the system.
+struct KanameAppearanceModifier: ViewModifier {
+    @AppStorage("kaname.appearance") private var appearance = "dark"
+
+    func body(content: Content) -> some View {
+        content.preferredColorScheme(
+            appearance == "light" ? .light : (appearance == "system" ? nil : .dark)
+        )
     }
 }

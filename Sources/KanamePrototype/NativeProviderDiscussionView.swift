@@ -2,6 +2,7 @@ import Foundation
 import KanameConnectivity
 import KanamePrototypeUI
 import SwiftUI
+import KanameDesignSystem
 
 @MainActor
 private final class NativeProviderDiscussionViewModel: ObservableObject {
@@ -66,7 +67,7 @@ struct NativeProviderDiscussionView: View {
                         .scrollContentBackground(.hidden)
                         .padding(8)
                         .frame(minHeight: 150)
-                        .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 10))
+                        .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 10))
                     HStack {
                         Text("Uses your current \(model.driver.displayName) CLI session; Kaname never receives its token.")
                             .font(.caption)
@@ -117,7 +118,7 @@ struct NativeProviderDiscussionView: View {
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
     }
 
     private var boundaryDetail: String {

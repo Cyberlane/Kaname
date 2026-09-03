@@ -1,6 +1,7 @@
 import KanameDesktop
 import KanamePrototypeUI
 import SwiftUI
+import KanameDesignSystem
 
 struct DesktopAutomaticBackupSettings: View {
     @ObservedObject var model: DesktopAppModel
@@ -27,7 +28,7 @@ struct DesktopAutomaticBackupSettings: View {
                     if backup.configuration.verifiedDestinationDigest == backup.configuration.destinationDigest {
                         Label("Verified", systemImage: "checkmark.seal.fill")
                             .font(.caption)
-                            .foregroundStyle(Nord.auroraGreen)
+                            .foregroundStyle(KanameColor.success)
                     } else {
                         Text("Test this exact destination before enabling backups.")
                             .font(.caption)
@@ -179,7 +180,7 @@ struct DesktopAutomaticBackupSettings: View {
         }
         if let failure = backup.configuration.lastFailureSummary {
             LabeledContent("Needs attention") {
-                Text(failure).foregroundStyle(Nord.auroraYellow).textSelection(.enabled)
+                Text(failure).foregroundStyle(KanameColor.warning).textSelection(.enabled)
             }
         }
     }

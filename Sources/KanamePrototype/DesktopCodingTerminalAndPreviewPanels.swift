@@ -31,7 +31,7 @@ struct DesktopCodingTerminalPanel: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
-            .background(Nord.polarNight1)
+            .background(KanameColor.surface)
             Divider()
             switch mode {
             case .processes: DesktopCodingProcessesPanel(model: model, thread: thread)
@@ -83,7 +83,7 @@ struct DesktopCodingProcessesPanel: View {
                 proxy.scrollTo("processes-bottom", anchor: .bottom)
             }
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
     }
 }
 
@@ -94,10 +94,10 @@ private struct DesktopCodingProcessCard: View {
 
     private var tint: Color {
         switch process.state {
-        case .running: Nord.frost1
-        case .completed: (process.exitCode ?? 0) == 0 ? Nord.auroraGreen : Nord.auroraRed
-        case .failed: Nord.auroraRed
-        case .declined, .interrupted: Nord.auroraYellow
+        case .running: KanameColor.accent
+        case .completed: (process.exitCode ?? 0) == 0 ? KanameColor.success : KanameColor.danger
+        case .failed: KanameColor.danger
+        case .declined, .interrupted: KanameColor.warning
         case .observed: Color.secondary
         }
     }
@@ -178,11 +178,11 @@ private struct DesktopCodingProcessCard: View {
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(10)
-                    .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
         }
         .padding(12)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .strokeBorder(tint.opacity(0.25), lineWidth: 1)
@@ -240,11 +240,11 @@ struct DesktopCodingShellPanel: View {
                 }
                 Text((terminal?.state ?? .idle).label)
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(Nord.frost1)
+                    .foregroundStyle(KanameColor.accent)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
-            .background(Nord.polarNight1)
+            .background(KanameColor.surface)
 
             Divider()
 
@@ -262,7 +262,7 @@ struct DesktopCodingShellPanel: View {
             if let ports = terminal?.discoveredPreviewPorts, !ports.isEmpty {
                 Text("Preview ports: \(ports.map(String.init).joined(separator: ", "))")
                     .font(.caption2.monospaced())
-                    .foregroundStyle(Nord.frost1)
+                    .foregroundStyle(KanameColor.accent)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 16)
                     .padding(.bottom, 6)
@@ -286,10 +286,10 @@ struct DesktopCodingShellPanel: View {
             }
             .padding(12)
             if let message {
-                Text(message).font(.caption2).foregroundStyle(Nord.auroraYellow).padding(.horizontal, 12).padding(.bottom, 8)
+                Text(message).font(.caption2).foregroundStyle(KanameColor.warning).padding(.horizontal, 12).padding(.bottom, 8)
             }
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .onAppear { ensureTerminal() }
     }
 
@@ -484,7 +484,7 @@ struct DesktopCodingPreviewPanel: View {
                 .fixedSize()
             }
             .padding(12)
-            .background(Nord.polarNight1)
+            .background(KanameColor.surface)
             if !detectedPorts.isEmpty {
                 HStack(spacing: 6) {
                     Text("Detected").font(.caption2).foregroundStyle(.secondary)
@@ -501,7 +501,7 @@ struct DesktopCodingPreviewPanel: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.bottom, 8)
-                .background(Nord.polarNight1)
+                .background(KanameColor.surface)
             }
 
             Divider()
@@ -526,11 +526,11 @@ struct DesktopCodingPreviewPanel: View {
             if let grantMessage {
                 Text(grantMessage)
                     .font(.caption2)
-                    .foregroundStyle(Nord.auroraYellow)
+                    .foregroundStyle(KanameColor.warning)
                     .padding(8)
             }
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
     }
 
     private func openPreview() {

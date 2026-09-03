@@ -4,6 +4,7 @@ import KanameDesktop
 import KanamePrototypeUI
 import SwiftUI
 import UniformTypeIdentifiers
+import KanameDesignSystem
 
 struct DesktopDiagnosticsInspector: View {
     let dismiss: () -> Void
@@ -61,7 +62,7 @@ struct DesktopDiagnosticsInspector: View {
                             systemImage: "exclamationmark.triangle.fill"
                         )
                         .font(.caption)
-                        .foregroundStyle(Nord.auroraRed)
+                        .foregroundStyle(KanameColor.danger)
                     }
                 }
             } label: {
@@ -75,7 +76,7 @@ struct DesktopDiagnosticsInspector: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(14)
             }
-            .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
+            .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 12))
             .accessibilityLabel("Complete redacted diagnostics report")
 
             if let feedback {
@@ -84,13 +85,13 @@ struct DesktopDiagnosticsInspector: View {
                     systemImage: feedback.isError ? "exclamationmark.triangle.fill" : "checkmark.circle"
                 )
                     .font(.caption)
-                    .foregroundStyle(feedback.isError ? Nord.auroraRed : Nord.auroraGreen)
+                    .foregroundStyle(feedback.isError ? KanameColor.danger : KanameColor.success)
             }
 
             HStack {
                 Label("Counts and health states only — no prompts, messages, paths, account names, tokens, or credentials.", systemImage: "lock.shield")
                     .font(.caption)
-                    .foregroundStyle(Nord.auroraGreen)
+                    .foregroundStyle(KanameColor.success)
                 Spacer()
                 Button("Copy") { copyReport() }
                     .disabled(!inspection.isValid)

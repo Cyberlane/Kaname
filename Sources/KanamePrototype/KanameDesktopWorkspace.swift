@@ -479,14 +479,14 @@ struct KanameDesktopWorkspace: View {
 
             if let developmentForkFailure {
                 ZStack {
-                    Nord.polarNight0.ignoresSafeArea()
+                    KanameColor.canvas.ignoresSafeArea()
                     ContentUnavailableView {
                         Label("Development data fork stopped safely", systemImage: "lock.shield.fill")
-                            .foregroundStyle(Nord.auroraYellow)
+                            .foregroundStyle(KanameColor.warning)
                     } description: {
                         Text(developmentForkFailure)
                         Text("The Stable workspace was not modified. Quit Development, resolve the reported condition, then relaunch it through the Dev launcher.")
-                            .foregroundStyle(Nord.frost1)
+                            .foregroundStyle(KanameColor.accent)
                     }
                     .frame(maxWidth: 620)
                 }
@@ -2090,7 +2090,7 @@ private struct DesktopGlobalSearchPalette: View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
                 Image(systemName: "magnifyingglass")
-                    .foregroundStyle(Nord.frost1)
+                    .foregroundStyle(KanameColor.accent)
                 TextField("Search Kaname or type > for actions", text: $query)
                     .textFieldStyle(.plain)
                     .font(.title3)
@@ -2158,7 +2158,7 @@ private struct DesktopGlobalSearchPalette: View {
             Divider()
             HStack(spacing: 14) {
                 Label("Local actions and snapshots", systemImage: "lock.shield")
-                    .foregroundStyle(Nord.auroraGreen)
+                    .foregroundStyle(KanameColor.success)
                 Text("No providers, accounts, credentials, or vaults are contacted")
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -2174,7 +2174,7 @@ private struct DesktopGlobalSearchPalette: View {
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(Nord.polarNight3, lineWidth: 1)
+                .strokeBorder(KanameColor.separator, lineWidth: 1)
         }
         .shadow(color: .black.opacity(0.34), radius: 30, y: 14)
         .onAppear {
@@ -2497,18 +2497,18 @@ private struct CommandCenterSelectableLabel: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(title)
                         .font(.body.weight(.semibold))
-                        .foregroundStyle(isSelected ? Nord.polarNight0 : .primary)
+                        .foregroundStyle(isSelected ? KanameColor.canvas : .primary)
                         .lineLimit(1)
                     if !detail.isEmpty {
                         Text(detail)
                             .font(.caption)
-                            .foregroundStyle(isSelected ? Nord.polarNight1 : .secondary)
+                            .foregroundStyle(isSelected ? KanameColor.surface : .secondary)
                             .lineLimit(1)
                     }
                     if let provenance {
                         Text(provenance)
                             .font(.caption2)
-                            .foregroundStyle(isSelected ? Nord.polarNight2 : Nord.frost1)
+                            .foregroundStyle(isSelected ? KanameColor.raised : KanameColor.accent)
                             .lineLimit(1)
                     }
                 }
@@ -2516,18 +2516,18 @@ private struct CommandCenterSelectableLabel: View {
                 if isSelected {
                     Image(systemName: "return")
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(Nord.polarNight1)
+                        .foregroundStyle(KanameColor.surface)
                 }
             }
         } icon: {
             Image(systemName: symbol)
-                .foregroundStyle(isSelected ? Nord.polarNight0 : Nord.frost1)
+                .foregroundStyle(isSelected ? KanameColor.canvas : KanameColor.accent)
                 .frame(width: 22)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .contentShape(Rectangle())
-        .background(isSelected ? Nord.frost1 : Color.clear, in: RoundedRectangle(cornerRadius: 10))
+        .background(isSelected ? KanameColor.accent : Color.clear, in: RoundedRectangle(cornerRadius: 10))
     }
 }
 
@@ -2606,14 +2606,14 @@ private struct KanameIdentityRow: View {
                 RoundedRectangle(cornerRadius: KanameRadius.control, style: .continuous)
                     .fill(
                         LinearGradient(
-                            colors: [Nord.frost1, Nord.frost3],
+                            colors: [KanameColor.accent, KanameColor.accentStrong],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         )
                     )
                 Text("要")
                     .kanameSemanticFont(.title2.weight(.bold))
-                    .foregroundStyle(Nord.polarNight0)
+                    .foregroundStyle(KanameColor.canvas)
             }
             .frame(width: 42, height: 42)
             .accessibilityHidden(true)
@@ -2653,42 +2653,42 @@ private struct DesktopHomeView: View {
                         value: "\(attentionThreads.count)",
                         detail: attentionThreads.isEmpty ? "Nothing waiting on you" : "Waiting for your decision",
                         symbol: "person.crop.circle.badge.exclamationmark",
-                        tint: attentionThreads.isEmpty ? Nord.auroraGreen : Nord.auroraYellow
+                        tint: attentionThreads.isEmpty ? KanameColor.success : KanameColor.warning
                     )
                     MetricCard(
                         title: "Active work",
                         value: "\(model.activeThreads.filter { $0.attention == .running || $0.attention == .queued }.count)",
                         detail: "Running now",
                         symbol: "bolt.fill",
-                        tint: Nord.frost0
+                        tint: KanameColor.active
                     )
                     MetricCard(
                         title: "Projects",
                         value: "\(model.snapshot.projects.count)",
                         detail: "Repositories you work in",
                         symbol: "folder.fill",
-                        tint: Nord.frost2
+                        tint: KanameColor.accent
                     )
                     MetricCard(
                         title: "Local drafts",
                         value: "\(model.snapshot.domains.emailDrafts.count + model.snapshot.domains.calendarProposals.count)",
                         detail: "Email and calendar proposals",
                         symbol: "doc.text.fill",
-                        tint: Nord.auroraPurple
+                        tint: KanameColor.blocked
                     )
                     MetricCard(
                         title: "Research",
                         value: "\(model.snapshot.domains.research.count)",
                         detail: "Open questions",
                         symbol: DesktopDestination.research.symbol,
-                        tint: Nord.frost1
+                        tint: KanameColor.accent
                     )
                     MetricCard(
                         title: "Automations",
                         value: "\(model.snapshot.domains.automations.count)",
                         detail: "Workflows",
                         symbol: DesktopDestination.automations.symbol,
-                        tint: Nord.auroraPurple
+                        tint: KanameColor.blocked
                     )
                 }
 
@@ -2720,7 +2720,7 @@ private struct DesktopHomeView: View {
             .padding(22)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .kanameSemanticFont(.body)
     }
 
@@ -2819,25 +2819,25 @@ private struct DesktopHomeView: View {
                 title: "Coding",
                 detail: "Inspect providers, use an isolated worktree, and review evidence before acceptance.",
                 symbol: DesktopDestination.liveCodex.symbol,
-                tint: Nord.frost1
+                tint: KanameColor.accent
             ) { openDestination(.liveCodex) }
             QuickActionCard(
                 title: "Research",
                 detail: "Start from a question and explicit source boundary.",
                 symbol: DesktopDestination.research.symbol,
-                tint: Nord.frost0
+                tint: KanameColor.active
             ) { openDestination(.research) }
             QuickActionCard(
                 title: "Calendar",
                 detail: "Draft a source-aware event proposal without changing a calendar.",
                 symbol: DesktopDestination.calendar.symbol,
-                tint: Nord.auroraPurple
+                tint: KanameColor.blocked
             ) { openDestination(.calendar) }
             QuickActionCard(
                 title: "Automations",
                 detail: "Define a disabled schedule with safe missed-run policy.",
                 symbol: DesktopDestination.automations.symbol,
-                tint: Nord.auroraYellow
+                tint: KanameColor.warning
             ) { openDestination(.automations) }
         }
     }
@@ -2905,7 +2905,7 @@ private struct DesktopThreadsView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .onChange(of: selectedThreadID) { _ in
             selectedRunID = nil
             conversationAnchorID = nil
@@ -2992,14 +2992,14 @@ private struct DesktopInboxView: View {
                                 Button("Complete") {
                                     model.setAttention(threadID: thread.id, attention: .completed)
                                 }
-                                .tint(Nord.auroraGreen)
+                                .tint(KanameColor.success)
                             }
                     }
                 }
                 .listStyle(.inset)
             }
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
     }
 }
 
@@ -3255,7 +3255,7 @@ private struct DesktopThreadConversation: View {
             )
             .frame(height: 42)
         }
-        .background(Nord.polarNight1)
+        .background(KanameColor.surface)
     }
 
     private var conversationSearchButton: some View {
@@ -3392,7 +3392,7 @@ private struct DesktopThreadConversation: View {
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 9)
-                .background(Nord.polarNight1)
+                .background(KanameColor.surface)
 
                 Divider()
             }
@@ -3502,7 +3502,7 @@ private struct DesktopThreadConversation: View {
                !runtime.isRunning(threadID: thread.id) {
                 HStack(spacing: 9) {
                     Image(systemName: "arrow.clockwise.circle")
-                        .foregroundStyle(Nord.auroraOrange)
+                        .foregroundStyle(KanameColor.external)
                     Text(run.errorSummary ?? "This turn stopped before completion.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -3552,7 +3552,7 @@ private struct DesktopThreadConversation: View {
                 if let attachmentError {
                     Label(attachmentError, systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)
-                        .foregroundStyle(Nord.auroraRed)
+                        .foregroundStyle(KanameColor.danger)
                         .lineLimit(2)
                         .padding(.horizontal, 12)
                         .padding(.top, 8)
@@ -3625,7 +3625,7 @@ private struct DesktopThreadConversation: View {
                 .padding(.bottom, 9)
             }
             .background(
-                Nord.polarNight1,
+                KanameColor.surface,
                 in: RoundedRectangle(cornerRadius: DesktopComposerPresentation.cornerRadius, style: .continuous)
             )
             .overlay {
@@ -3650,7 +3650,7 @@ private struct DesktopThreadConversation: View {
         .padding(.top, 10)
         .padding(.bottom, 11)
         .frame(maxWidth: .infinity)
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .onChange(of: runtime.isRunning(threadID: thread.id)) { isRunning in
             KanameAccessibilityAnnouncement.post(
                 isRunning ? "\(thread.provider) is responding" : "\(thread.provider) finished responding"
@@ -4123,7 +4123,7 @@ private struct DesktopThreadConversation: View {
                         .frame(width: 27, height: 27)
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(Nord.auroraRed)
+                .foregroundStyle(KanameColor.danger)
                 .help("Stop the current turn")
                 .accessibilityLabel("Stop current turn")
             }
@@ -4136,11 +4136,11 @@ private struct DesktopThreadConversation: View {
                 .font(.system(size: DesktopComposerPresentation.toolbarPointSize, weight: .semibold))
                 .padding(.horizontal, compact ? 8 : 10)
                 .frame(minWidth: 30, minHeight: 29)
-                .foregroundStyle(composerPrimaryAction.isEnabled ? Nord.polarNight0 : Color.secondary)
+                .foregroundStyle(composerPrimaryAction.isEnabled ? KanameColor.canvas : Color.secondary)
                 .background(
                     composerPrimaryAction.isEnabled
-                        ? (composerPrimaryAction.kind == .stop ? Nord.auroraRed : conversationAccent)
-                        : Nord.polarNight2,
+                        ? (composerPrimaryAction.kind == .stop ? KanameColor.danger : conversationAccent)
+                        : KanameColor.raised,
                     in: Capsule()
                 )
             }
@@ -4190,7 +4190,7 @@ private struct DesktopThreadConversation: View {
     }
 
     private var conversationAccent: Color {
-        codingStage?.tint ?? Nord.frost2
+        codingStage?.tint ?? KanameColor.accent
     }
 
     private var composerContextLabels: [String] {
@@ -4433,7 +4433,7 @@ private struct DesktopThreadChangesView: View {
                 }
             }
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
     }
 
     private func changesWorkspace(_ worktree: DesktopWorktreeRecord) -> some View {
@@ -4447,7 +4447,7 @@ private struct DesktopThreadChangesView: View {
                 Spacer()
                 Text(worktree.state.label)
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(worktree.state == .failed ? Nord.auroraRed : Nord.frost1)
+                    .foregroundStyle(worktree.state == .failed ? KanameColor.danger : KanameColor.accent)
                 Button {
                     NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: worktree.worktreePath, isDirectory: true)])
                 } label: {
@@ -4476,7 +4476,7 @@ private struct DesktopThreadChangesView: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
-            .background(Nord.polarNight1)
+            .background(KanameColor.surface)
 
             if !turnCheckpoints(worktree).isEmpty {
                 DisclosureGroup("Turn checkpoints") {
@@ -4515,7 +4515,7 @@ private struct DesktopThreadChangesView: View {
                 if let revertMessage {
                     Text(revertMessage)
                         .font(.caption2)
-                        .foregroundStyle(Nord.auroraYellow)
+                        .foregroundStyle(KanameColor.warning)
                         .padding(.horizontal, 16)
                         .padding(.bottom, 6)
                 }
@@ -4547,15 +4547,15 @@ private struct DesktopThreadChangesView: View {
                                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                                     Label(path, systemImage: "doc.text")
                                         .font(.system(.caption, design: .monospaced))
-                                        .foregroundStyle(Nord.frost1)
+                                        .foregroundStyle(KanameColor.accent)
                                         .lineLimit(2)
                                         .multilineTextAlignment(.leading)
                                         .frame(maxWidth: .infinity, alignment: .leading)
                                     if let stat = fileStat(path) {
                                         Text(stat.added > 0 ? "+\(stat.added)" : "")
-                                            .foregroundStyle(Nord.auroraGreen)
+                                            .foregroundStyle(KanameColor.success)
                                         Text(stat.removed > 0 ? "-\(stat.removed)" : "")
-                                            .foregroundStyle(Nord.auroraRed)
+                                            .foregroundStyle(KanameColor.danger)
                                     }
                                 }
                                 .font(.system(.caption2, design: .monospaced))
@@ -4563,7 +4563,7 @@ private struct DesktopThreadChangesView: View {
                             .buttonStyle(.plain)
                             .listRowBackground(
                                 changes.selectedPath == path
-                                    ? Nord.frost1.opacity(0.12)
+                                    ? KanameColor.accent.opacity(0.12)
                                     : Color.clear
                             )
                         }
@@ -4641,7 +4641,7 @@ private struct DesktopThreadChangesView: View {
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
-            .background(Nord.polarNight1)
+            .background(KanameColor.surface)
 
             Divider()
 
@@ -4672,16 +4672,16 @@ private struct DesktopUnifiedDiffLine: View {
     let text: String
 
     private var tint: Color {
-        if text.hasPrefix("+") && !text.hasPrefix("+++") { return Nord.auroraGreen }
-        if text.hasPrefix("-") && !text.hasPrefix("---") { return Nord.auroraRed }
-        if text.hasPrefix("@@") { return Nord.frost1 }
+        if text.hasPrefix("+") && !text.hasPrefix("+++") { return KanameColor.success }
+        if text.hasPrefix("-") && !text.hasPrefix("---") { return KanameColor.danger }
+        if text.hasPrefix("@@") { return KanameColor.accent }
         return .clear
     }
 
     var body: some View {
         Text(text.isEmpty ? " " : text)
             .font(.system(size: 11.5, design: .monospaced))
-            .foregroundStyle(text.hasPrefix("@@") ? Nord.frost1 : Color.primary)
+            .foregroundStyle(text.hasPrefix("@@") ? KanameColor.accent : Color.primary)
             .textSelection(.enabled)
             .padding(.horizontal, 10)
             .padding(.vertical, 1)
@@ -4729,7 +4729,7 @@ private struct DesktopThreadTabBar: View {
 
                 if isSelected {
                     Rectangle()
-                        .fill(Nord.frost1)
+                        .fill(KanameColor.accent)
                         .frame(height: 2)
                         .accessibilityHidden(true)
                 }
@@ -4739,7 +4739,7 @@ private struct DesktopThreadTabBar: View {
                 if needsAttention {
                     Image(systemName: "exclamationmark.circle.fill")
                         .font(.system(size: 8, weight: .bold))
-                        .foregroundStyle(Nord.auroraYellow)
+                        .foregroundStyle(KanameColor.warning)
                         .padding(.top, 7)
                         .padding(.trailing, 7)
                         .accessibilityHidden(true)
@@ -4749,7 +4749,7 @@ private struct DesktopThreadTabBar: View {
         .buttonStyle(.plain)
         .focused($focusedPanel, equals: panel)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(isSelected ? Nord.frost1.opacity(0.07) : Color.clear)
+        .background(isSelected ? KanameColor.accent.opacity(0.07) : Color.clear)
         .accessibilityLabel(needsAttention ? "\(panel.label), requires attention" : panel.label)
         .accessibilityHint("Shows the \(panel.label) section")
         .accessibilityAddTraits(isSelected ? .isSelected : [])
@@ -4785,7 +4785,7 @@ private struct DesktopCodingWorkflowStatusControl: View {
     }
 
     private var statusTint: Color {
-        error == nil ? stage.tint : Nord.auroraRed
+        error == nil ? stage.tint : KanameColor.danger
     }
 
     var body: some View {
@@ -4837,7 +4837,7 @@ private struct DesktopCodingWorkflowStatusControl: View {
             if let error {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
-                    .foregroundStyle(Nord.auroraRed)
+                    .foregroundStyle(KanameColor.danger)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -4939,7 +4939,7 @@ private struct DesktopConversationActivityStrip: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            .background(Nord.frost1.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .background(KanameColor.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             .accessibilityElement(children: .combine)
             .accessibilityLabel("\(run.provider) is working. \(latestActivity)")
         }
@@ -5030,7 +5030,7 @@ private struct DesktopConversationRunCapsuleDetails: View {
         if summary.payloadWasTruncated {
             Label("Evidence payload capped", systemImage: "exclamationmark.triangle")
                 .font(.caption2)
-                .foregroundStyle(Nord.auroraYellow)
+                .foregroundStyle(KanameColor.warning)
         }
     }
 }
@@ -5068,7 +5068,7 @@ private struct DesktopProviderEventGroupCard: View {
                         if group.containsTruncatedPayload {
                             Label("Some raw payloads exceeded the evidence limit", systemImage: "exclamationmark.triangle")
                                 .font(.caption2)
-                                .foregroundStyle(Nord.auroraYellow)
+                                .foregroundStyle(KanameColor.warning)
                         }
                     }
                     Image(systemName: "chevron.right")
@@ -5157,7 +5157,7 @@ private struct DesktopProviderEventCard: View {
                 if event.payloadWasTruncated {
                     Label("Raw payload exceeded the evidence limit", systemImage: "exclamationmark.triangle")
                         .font(.caption2)
-                        .foregroundStyle(Nord.auroraYellow)
+                        .foregroundStyle(KanameColor.warning)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -5187,11 +5187,11 @@ private extension DesktopProviderEventKind {
 
     var timelineTint: Color {
         switch self {
-        case .error: Nord.auroraRed
-        case .question, .approval: Nord.auroraYellow
-        case .diff: Nord.auroraPurple
-        case .tool, .reasoning: Nord.frost0
-        case .status, .usage, .native, .assistantText: Nord.frost1
+        case .error: KanameColor.danger
+        case .question, .approval: KanameColor.warning
+        case .diff: KanameColor.blocked
+        case .tool, .reasoning: KanameColor.active
+        case .status, .usage, .native, .assistantText: KanameColor.accent
         }
     }
 }
@@ -5287,7 +5287,7 @@ private struct DesktopConversationRuntimeSheet: View {
                 systemImage: stagedCoding ? "checkmark.shield.fill" : (runtimeMode == .fullAccess ? "exclamationmark.shield" : "lock.shield")
             )
                 .font(.caption)
-                .foregroundStyle(!stagedCoding && runtimeMode == .fullAccess ? Nord.auroraYellow : .secondary)
+                .foregroundStyle(!stagedCoding && runtimeMode == .fullAccess ? KanameColor.warning : .secondary)
             Spacer()
             Button("Cancel", action: cancel).keyboardShortcut(.cancelAction)
             Button("Save", action: save)
@@ -5436,9 +5436,9 @@ private struct DesktopComposerRuntimeControls: View {
 
     private var providerTint: Color {
         switch thread.provider.lowercased() {
-        case "codex": Nord.frost1
-        case "claude": Nord.auroraOrange
-        case "opencode", "open code": Nord.auroraPurple
+        case "codex": KanameColor.accent
+        case "claude": KanameColor.external
+        case "opencode", "open code": KanameColor.blocked
         default: .secondary
         }
     }
@@ -5663,7 +5663,7 @@ private struct DesktopComposerRuntimeControls: View {
                 title: currentAccess.title,
                 systemImage: currentAccess.systemImage,
                 showsChevron: true,
-                tint: currentAccess.isWarning ? Nord.auroraYellow : .secondary
+                tint: currentAccess.isWarning ? KanameColor.warning : .secondary
             )
         }
         .buttonStyle(.plain)
@@ -5723,7 +5723,7 @@ private struct DesktopComposerRuntimeControls: View {
                             .disabled(isLocked || thread.runtimeMode == .fullAccess)
                         if thread.runtimeMode == .fullAccess {
                             Label("Network is required by Full access", systemImage: "exclamationmark.triangle.fill")
-                                .foregroundStyle(Nord.auroraYellow)
+                                .foregroundStyle(KanameColor.warning)
                         }
                     } else {
                         Text("Network controlled by \(thread.provider)")
@@ -5757,7 +5757,7 @@ private struct DesktopComposerRuntimeControls: View {
 
     private var controlDivider: some View {
         Rectangle()
-            .fill(Nord.polarNight3.opacity(0.72))
+            .fill(KanameColor.separator.opacity(0.72))
             .frame(width: 1, height: 14)
             .padding(.horizontal, 2)
             .accessibilityHidden(true)
@@ -5792,7 +5792,7 @@ private struct ComposerRuntimeControlLabel: View {
         .padding(.horizontal, title == nil ? 7 : 8)
         .frame(height: 28)
         .background(
-            isHovering ? Nord.polarNight2.opacity(0.72) : Color.clear,
+            isHovering ? KanameColor.raised.opacity(0.72) : Color.clear,
             in: RoundedRectangle(cornerRadius: 7, style: .continuous)
         )
         .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
@@ -5894,7 +5894,7 @@ private struct DesktopComposerAccessPopover: View {
         }
         .padding(10)
         .frame(width: 350)
-        .background(Nord.polarNight1)
+        .background(KanameColor.surface)
     }
 }
 
@@ -5934,7 +5934,7 @@ private struct DesktopComposerAccessOptionButton: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(presentation.title)
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(presentation.isWarning ? Nord.auroraYellow : Color.primary)
+                        .foregroundStyle(presentation.isWarning ? KanameColor.warning : Color.primary)
                     Text(presentation.detail)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -5943,7 +5943,7 @@ private struct DesktopComposerAccessOptionButton: View {
             } icon: {
                 Image(systemName: presentation.systemImage)
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(presentation.isWarning ? Nord.auroraYellow : Nord.frost1)
+                    .foregroundStyle(presentation.isWarning ? KanameColor.warning : KanameColor.accent)
                     .frame(width: 18, height: 20)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -5951,7 +5951,7 @@ private struct DesktopComposerAccessOptionButton: View {
                 if isSelected {
                     Image(systemName: "checkmark")
                         .font(.caption.weight(.bold))
-                        .foregroundStyle(Nord.frost1)
+                        .foregroundStyle(KanameColor.accent)
                         .padding(.top, 3)
                 }
             }
@@ -5960,8 +5960,8 @@ private struct DesktopComposerAccessOptionButton: View {
             .padding(.vertical, 8)
             .background(
                 isSelected
-                    ? (presentation.isWarning ? Nord.auroraYellow.opacity(0.12) : Nord.frost1.opacity(0.12))
-                    : (isHovering ? Nord.polarNight2.opacity(0.72) : Color.clear),
+                    ? (presentation.isWarning ? KanameColor.warning.opacity(0.12) : KanameColor.accent.opacity(0.12))
+                    : (isHovering ? KanameColor.raised.opacity(0.72) : Color.clear),
                 in: RoundedRectangle(cornerRadius: 8, style: .continuous)
             )
             .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -6075,14 +6075,14 @@ private struct ConversationRuntimeEditor: View {
                 }
                 Text(DesktopComposerRuntimePresentation.access(runtimeMode).detail)
                     .font(.caption)
-                    .foregroundStyle(runtimeMode == .fullAccess ? Nord.auroraYellow : .secondary)
+                    .foregroundStyle(runtimeMode == .fullAccess ? KanameColor.warning : .secondary)
                 if ConversationRuntimeCatalog.managesNetwork(provider) {
                     Toggle("Allow network access", isOn: $networkAccess)
                         .disabled(runtimeMode == .fullAccess)
                     if runtimeMode == .fullAccess {
                         Text("Codex full access is unsandboxed, so network access is necessarily on.")
                             .font(.caption)
-                            .foregroundStyle(Nord.auroraYellow)
+                            .foregroundStyle(KanameColor.warning)
                     }
                 } else {
                     LabeledContent("Network", value: "Provider controlled")
@@ -6158,7 +6158,7 @@ private struct DesktopProjectsView: View {
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 9)
-                    .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 11))
+                    .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 11))
 
                     Picker("Project state", selection: $showsArchived) {
                         Text("Active").tag(false)
@@ -6194,7 +6194,7 @@ private struct DesktopProjectsView: View {
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
     }
 }
 
@@ -6279,10 +6279,10 @@ private struct DesktopProjectOverview: View {
                 }
 
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), spacing: 12)], spacing: 12) {
-                    ProjectMetric(title: "Conversations", value: "\(threads.count)", symbol: "bubble.left.and.bubble.right", tint: Nord.frost1)
-                    ProjectMetric(title: "Needs you", value: "\(attentionCount)", symbol: "person.crop.circle.badge.exclamationmark", tint: attentionCount == 0 ? Nord.auroraGreen : Nord.auroraYellow)
-                    ProjectMetric(title: "Provider runs", value: "\(runs.count)", symbol: "cpu", tint: Nord.frost2)
-                    ProjectMetric(title: "Artifacts", value: "\(artifacts.count)", symbol: "doc.on.doc", tint: Nord.auroraPurple)
+                    ProjectMetric(title: "Conversations", value: "\(threads.count)", symbol: "bubble.left.and.bubble.right", tint: KanameColor.accent)
+                    ProjectMetric(title: "Needs you", value: "\(attentionCount)", symbol: "person.crop.circle.badge.exclamationmark", tint: attentionCount == 0 ? KanameColor.success : KanameColor.warning)
+                    ProjectMetric(title: "Provider runs", value: "\(runs.count)", symbol: "cpu", tint: KanameColor.accent)
+                    ProjectMetric(title: "Artifacts", value: "\(artifacts.count)", symbol: "doc.on.doc", tint: KanameColor.blocked)
                 }
 
                 HStack(alignment: .top, spacing: 14) {
@@ -6382,7 +6382,7 @@ private struct DesktopProjectOverview: View {
                     Divider()
                     Button("Archive project", systemImage: "archivebox") { showsArchiveConfirmation = true }
                         .buttonStyle(.plain)
-                        .foregroundStyle(hasActiveRun ? .secondary : Nord.auroraRed)
+                        .foregroundStyle(hasActiveRun ? .secondary : KanameColor.danger)
                         .disabled(hasActiveRun)
                         .help(hasActiveRun ? "Finish or interrupt active runs before archiving" : "Archive this project and its conversations")
                 }
@@ -6390,7 +6390,7 @@ private struct DesktopProjectOverview: View {
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .sheet(isPresented: $showsEditor) {
             DesktopProjectEditor(model: model, project: project)
         }
@@ -6514,7 +6514,7 @@ private struct DesktopProjectEditor: View {
                         .foregroundStyle(.secondary)
                     if let saveError {
                         Label(saveError, systemImage: "exclamationmark.triangle.fill")
-                            .foregroundStyle(Nord.auroraRed)
+                            .foregroundStyle(KanameColor.danger)
                     }
                 }
             }
@@ -6580,7 +6580,7 @@ private struct DesktopProjectSection<Content: View>: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .topLeading)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 15))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 15))
     }
 }
 
@@ -6600,7 +6600,7 @@ private struct ProjectMetric: View {
             Spacer()
         }
         .padding(14)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 14))
     }
 }
 
@@ -6627,7 +6627,7 @@ private struct ProjectSourceRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: symbol).foregroundStyle(Nord.frost1).frame(width: 22)
+            Image(systemName: symbol).foregroundStyle(KanameColor.accent).frame(width: 22)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(.subheadline.weight(.medium)).lineLimit(1)
                 Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(2)
@@ -6685,7 +6685,7 @@ private struct DesktopResearchView: View {
                                 HStack(alignment: .top) {
                                     Image(systemName: "doc.text.magnifyingglass")
                                         .font(.title2)
-                                        .foregroundStyle(Nord.frost1)
+                                        .foregroundStyle(KanameColor.accent)
                                     Spacer()
                                     KanameStatusBadge(
                                         KanameDesktopStatusPresentation.record(record.status),
@@ -6724,7 +6724,7 @@ private struct DesktopResearchView: View {
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .sheet(isPresented: $showsNewResearch) {
             NewResearchSheet(model: model) { threadID in
                 openThread(threadID)
@@ -7682,7 +7682,7 @@ private struct DesktopCodingKnowledgeLaneView: View {
                                 Spacer()
                                 Text(candidate.category.label)
                                     .font(.caption2.weight(.semibold))
-                                    .foregroundStyle(Nord.frost1)
+                                    .foregroundStyle(KanameColor.accent)
                             }
                             Text(candidate.detail).font(.caption).foregroundStyle(.secondary)
                             if let digest = candidate.evidenceDigest {
@@ -7707,7 +7707,7 @@ private struct DesktopCodingKnowledgeLaneView: View {
             .padding(22)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .onAppear {
             if targetScopeID == nil { targetScopeID = writableScopes.first?.id }
             knowledge.resumeCodingProposal(model: model, threadID: thread.id)
@@ -7737,7 +7737,7 @@ private struct DesktopCodingKnowledgeLaneView: View {
                     row(item)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(10)
-                    .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 10))
+                    .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 10))
                 }
             }
         }
@@ -7787,7 +7787,7 @@ private struct DesktopCodingKnowledgeLaneView: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(10)
-                    .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 10))
+                    .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 10))
                 }
             }
         }
@@ -7868,7 +7868,7 @@ private struct DesktopCodingKnowledgeLaneView: View {
                     .scrollContentBackground(.hidden)
                     .padding(10)
                     .frame(minHeight: 230, maxHeight: 360)
-                    .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 10))
+                    .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 10))
                     .accessibilityLabel("Editable proposed knowledge note")
                     .disabled(!knowledgeReadyForDisposition)
                 HStack {
@@ -7897,7 +7897,7 @@ private struct DesktopCodingKnowledgeLaneView: View {
                     if writableScopes.isEmpty {
                         Text("Add a writable Obsidian scope in Knowledge before proposing an edit.")
                             .font(.caption)
-                            .foregroundStyle(Nord.auroraYellow)
+                            .foregroundStyle(KanameColor.warning)
                     }
                     TextField("Vault-relative Markdown note path", text: $targetPath)
                         .textFieldStyle(.roundedBorder)
@@ -7950,7 +7950,7 @@ private struct DesktopCodingKnowledgeLaneView: View {
                     lane.disposition == .reconciled ? "Durable update reconciled" : "No durable update recorded with an explicit reason",
                     systemImage: "checkmark.seal"
                 )
-                .foregroundStyle(Nord.auroraGreen)
+                .foregroundStyle(KanameColor.success)
             } else {
                 Divider()
                 Text("No durable update").font(.subheadline.weight(.semibold))
@@ -8024,7 +8024,7 @@ private struct DesktopKnowledgeView: View {
                     .frame(minWidth: 480, maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .onAppear {
             knowledge.seedDefaultScope(model: model)
             if !applySearchRequest() {
@@ -8071,7 +8071,7 @@ private struct DesktopKnowledgeView: View {
                 if let selectedScope {
                     Label(selectedScope.canWrite ? "Read & write" : "Read only", systemImage: selectedScope.canWrite ? "pencil.and.outline" : "eye")
                         .font(.caption2)
-                        .foregroundStyle(selectedScope.canWrite ? Nord.auroraYellow : Nord.frost1)
+                        .foregroundStyle(selectedScope.canWrite ? KanameColor.warning : KanameColor.accent)
                 }
             }
             Picker("Vault scope", selection: $selectedScopeID) {
@@ -8122,7 +8122,7 @@ private struct DesktopKnowledgeView: View {
                                 }
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(9)
-                                .background(selectedPath == result.path ? Nord.polarNight2 : Color.clear, in: RoundedRectangle(cornerRadius: 9))
+                                .background(selectedPath == result.path ? KanameColor.raised : Color.clear, in: RoundedRectangle(cornerRadius: 9))
                             }
                             .buttonStyle(.plain)
                         }
@@ -8187,7 +8187,7 @@ private struct DesktopKnowledgeView: View {
             }
         }
         .padding(18)
-        .background(Nord.polarNight1)
+        .background(KanameColor.surface)
     }
 
     @ViewBuilder
@@ -8219,14 +8219,14 @@ private struct DesktopKnowledgeView: View {
                             .scrollContentBackground(.hidden)
                             .padding(10)
                             .frame(minHeight: 440)
-                            .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
+                            .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 12))
                             .accessibilityLabel("Markdown editor for \(document.path)")
                     } else {
                         NativeObsidianMarkdown(content: knowledge.draft)
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(18)
-                            .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
+                            .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 12))
                     }
 
                     knowledgeMetadata(document: document)
@@ -8420,7 +8420,7 @@ private struct NativeObsidianMarkdown: View {
                         .textSelection(.enabled)
                         .padding(10)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Nord.polarNight2, in: RoundedRectangle(cornerRadius: 8))
+                        .background(KanameColor.raised, in: RoundedRectangle(cornerRadius: 8))
                 case let .table(header, rows):
                     tableView(header: header, rows: rows)
                 }
@@ -8446,7 +8446,7 @@ private struct NativeObsidianMarkdown: View {
                 }
             }
             .padding(10)
-            .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 8))
+            .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 8))
         }
     }
 
@@ -8459,7 +8459,7 @@ private struct NativeObsidianMarkdown: View {
             let checked = trimmed[range].contains("x") || trimmed[range].contains("X")
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Image(systemName: checked ? "checkmark.square.fill" : "square")
-                    .foregroundStyle(checked ? Nord.auroraGreen : .secondary)
+                    .foregroundStyle(checked ? KanameColor.success : .secondary)
                 Text(inline(String(trimmed[range.upperBound...])))
                     .strikethrough(checked, color: .secondary)
             }
@@ -8467,7 +8467,7 @@ private struct NativeObsidianMarkdown: View {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(String(trimmed[range]).trimmingCharacters(in: .whitespaces))
                     .font(.callout.monospacedDigit())
-                    .foregroundStyle(Nord.frost1)
+                    .foregroundStyle(KanameColor.accent)
                 Text(inline(String(trimmed[range.upperBound...])))
             }
         } else if trimmed.hasPrefix("#") {
@@ -8477,21 +8477,21 @@ private struct NativeObsidianMarkdown: View {
                 .padding(.top, level == 1 ? 7 : 3)
         } else if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text("•").foregroundStyle(Nord.frost1)
+                Text("•").foregroundStyle(KanameColor.accent)
                 Text(inline(String(trimmed.dropFirst(2))))
             }
         } else if trimmed.hasPrefix("> [!") {
             Label(calloutText(trimmed), systemImage: "info.circle.fill")
                 .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Nord.frost1)
+                .foregroundStyle(KanameColor.accent)
                 .padding(10)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Nord.polarNight2, in: RoundedRectangle(cornerRadius: 9))
+                .background(KanameColor.raised, in: RoundedRectangle(cornerRadius: 9))
         } else if trimmed.hasPrefix(">") {
             Text(inline(String(trimmed.dropFirst()).trimmingCharacters(in: .whitespaces)))
                 .italic()
                 .padding(.leading, 12)
-                .overlay(alignment: .leading) { Rectangle().fill(Nord.frost1).frame(width: 3) }
+                .overlay(alignment: .leading) { Rectangle().fill(KanameColor.accent).frame(width: 3) }
         } else {
             Text(inline(trimmed)).fixedSize(horizontal: false, vertical: true)
         }
@@ -8565,7 +8565,7 @@ private struct NewVaultScopeSheet: View {
             Toggle("Allow proposing writes inside this scope", isOn: $canWrite)
             if canWrite {
                 Label("Every write still needs an exact diff approval and current-revision check.", systemImage: "checkmark.shield")
-                    .font(.caption).foregroundStyle(Nord.auroraYellow)
+                    .font(.caption).foregroundStyle(KanameColor.warning)
             }
             HStack {
                 Spacer()
@@ -8714,7 +8714,7 @@ private struct DesktopEmailView: View {
 
     var body: some View {
         emailWorkspace
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .sheet(isPresented: $showsComposer) {
             NewEmailDraftSheet(model: model)
         }
@@ -8916,7 +8916,7 @@ private struct DesktopEmailView: View {
                 if let selection = mail.selectedLabel {
                     Text(selection.label.name)
                         .font(.caption)
-                        .foregroundStyle(Nord.frost1)
+                        .foregroundStyle(KanameColor.accent)
                         .lineLimit(1)
                     Button {
                         mail.clearLabelSelection()
@@ -8936,7 +8936,7 @@ private struct DesktopEmailView: View {
                         VStack(alignment: .leading, spacing: 6) {
                             Text(account.identity)
                                 .font(.caption.weight(.semibold))
-                                .foregroundStyle(Nord.frost1)
+                                .foregroundStyle(KanameColor.accent)
                                 .lineLimit(1)
                             if mail.labelLoadingAccountIDs.contains(account.id), mail.labels[account.id] == nil {
                                 ProgressView("Loading folders…").controlSize(.small)
@@ -8970,7 +8970,7 @@ private struct DesktopEmailView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .padding(.horizontal, 16)
     }
 
@@ -9004,7 +9004,7 @@ private struct DesktopEmailView: View {
                         .padding(.vertical, 5)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(
-                            isSelected ? Nord.frost1.opacity(0.28) : Nord.polarNight2,
+                            isSelected ? KanameColor.accent.opacity(0.28) : KanameColor.raised,
                             in: RoundedRectangle(cornerRadius: 7, style: .continuous)
                         )
                     }
@@ -9071,7 +9071,7 @@ private struct DesktopEmailView: View {
                     HStack(alignment: .top) {
                         VStack(alignment: .leading, spacing: 5) {
                             Text(thread.messages.last?.subject ?? "(No subject)").font(.title2.weight(.bold))
-                            Text(thread.accountIdentity).font(.caption).foregroundStyle(Nord.frost1)
+                            Text(thread.accountIdentity).font(.caption).foregroundStyle(KanameColor.accent)
                             Text("\(thread.messages.count) message(s) · \(thread.labels.joined(separator: ", "))")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
@@ -9195,7 +9195,7 @@ private struct DesktopEmailView: View {
                         LabeledContent("Recipients", value: draft.recipients.isEmpty ? "None" : draft.recipients)
                         Text(draft.body).foregroundStyle(.secondary).lineLimit(6)
                         if let account = googleAccount(for: draft) {
-                            Text("From \(account.identity)").font(.caption).foregroundStyle(Nord.frost1)
+                            Text("From \(account.identity)").font(.caption).foregroundStyle(KanameColor.accent)
                             HStack {
                                 Button("Review Gmail draft") {
                                     pendingOutboundDraftID = draft.id
@@ -9212,7 +9212,7 @@ private struct DesktopEmailView: View {
                             }
                         } else {
                             Label("Choose or reconnect the draft account before any Gmail action.", systemImage: "person.crop.circle.badge.exclamationmark")
-                                .font(.caption).foregroundStyle(Nord.auroraYellow)
+                                .font(.caption).foregroundStyle(KanameColor.warning)
                         }
                     }
                     .panelStyle()
@@ -9275,17 +9275,17 @@ private struct DesktopEmailView: View {
             VStack(alignment: .leading, spacing: 7) {
                 ForEach(health.filter { $0.state != .healthy && $0.state != .paused }) { record in
                     LabeledContent(record.errorSummary ?? record.state.label) {
-                        Text(record.state.label).foregroundStyle(record.state == .actionRequired ? Nord.auroraYellow : .secondary)
+                        Text(record.state.label).foregroundStyle(record.state == .actionRequired ? KanameColor.warning : .secondary)
                     }
                 }
                 ForEach(mail.workflowComponentIssues, id: \.self) { issue in
                     Label(issue, systemImage: "puzzlepiece.extension.fill")
-                        .font(.caption).foregroundStyle(Nord.auroraYellow)
+                        .font(.caption).foregroundStyle(KanameColor.warning)
                 }
                 ForEach(operational) { record in
                     Label(record.summary, systemImage: record.level == .actionRequired ? "exclamationmark.shield.fill" : "clock.badge.exclamationmark")
                         .font(.caption)
-                        .foregroundStyle(record.level == .actionRequired ? Nord.auroraYellow : .secondary)
+                        .foregroundStyle(record.level == .actionRequired ? KanameColor.warning : .secondary)
                 }
                 if health.isEmpty && mail.workflowComponentIssues.isEmpty && operational.isEmpty {
                     Text("Health appears after the first enabled trigger check. Manual-only workflows stay quiet here.")
@@ -9297,17 +9297,17 @@ private struct DesktopEmailView: View {
             HStack(spacing: 14) {
                 Label(actionRequired == 0 ? "No trigger action required" : "\(actionRequired) action required",
                       systemImage: actionRequired == 0 ? "checkmark.circle" : "exclamationmark.triangle.fill")
-                    .foregroundStyle(actionRequired == 0 ? Nord.auroraGreen : Nord.auroraYellow)
+                    .foregroundStyle(actionRequired == 0 ? KanameColor.success : KanameColor.warning)
                 if degraded > 0 { Text("\(degraded) retrying").foregroundStyle(.secondary) }
-                if waiting > 0 { Text("\(waiting) waiting").foregroundStyle(Nord.frost0) }
-                if operationalAction > 0 { Text("\(operationalAction) operation alert\(operationalAction == 1 ? "" : "s")").foregroundStyle(Nord.auroraYellow) }
+                if waiting > 0 { Text("\(waiting) waiting").foregroundStyle(KanameColor.active) }
+                if operationalAction > 0 { Text("\(operationalAction) operation alert\(operationalAction == 1 ? "" : "s")").foregroundStyle(KanameColor.warning) }
                 Spacer()
                 Text("Details").font(.caption).foregroundStyle(.secondary)
             }
             .font(.caption.weight(.semibold))
         }
         .padding(12)
-        .background(Nord.polarNight1.opacity(0.75), in: RoundedRectangle(cornerRadius: 12))
+        .background(KanameColor.surface.opacity(0.75), in: RoundedRectangle(cornerRadius: 12))
     }
 
     @ViewBuilder
@@ -9471,10 +9471,10 @@ private struct DesktopEmailView: View {
         ForEach(model.snapshot.operations.mailStandingRules) { rule in
             HStack(alignment: .top, spacing: 14) {
                 Image(systemName: rule.enabled ? "checkmark.shield.fill" : "pause.circle")
-                    .foregroundStyle(rule.enabled ? Nord.auroraGreen : .secondary)
+                    .foregroundStyle(rule.enabled ? KanameColor.success : .secondary)
                 VStack(alignment: .leading, spacing: 4) {
                     Text(rule.name).font(.headline)
-                    Text(rule.accountIdentity).font(.caption).foregroundStyle(Nord.frost1)
+                    Text(rule.accountIdentity).font(.caption).foregroundStyle(KanameColor.accent)
                     Text(rule.query).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
                     Text(rule.action.label).font(.caption).foregroundStyle(.secondary)
                 }
@@ -9514,11 +9514,11 @@ private struct DesktopEmailView: View {
                 ForEach(items) { item in
                     HStack(alignment: .top, spacing: 12) {
                         Image(systemName: "arrow.triangle.branch")
-                            .foregroundStyle(Nord.frost1)
+                            .foregroundStyle(KanameColor.accent)
                         VStack(alignment: .leading, spacing: 4) {
                             Text(item.title).font(.subheadline.weight(.semibold))
                             Text(item.nextAction).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                            Text(item.state.label).font(.caption2).foregroundStyle(Nord.frost0)
+                            Text(item.state.label).font(.caption2).foregroundStyle(KanameColor.active)
                         }
                         Spacer()
                         Button("Open in Automations") { openAutomations() }
@@ -9754,11 +9754,11 @@ private struct MailThreadRow: View {
             HStack {
                 Text(last?.sender ?? "Unknown sender").font(.subheadline.weight(.semibold)).lineLimit(1)
                 Spacer()
-                if thread.labels.contains("UNREAD") { Circle().fill(Nord.frost0).frame(width: 7, height: 7) }
+                if thread.labels.contains("UNREAD") { Circle().fill(KanameColor.active).frame(width: 7, height: 7) }
             }
             Text(subject(last)).font(.subheadline).lineLimit(1)
             Text(thread.snippet).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-            Text(thread.accountIdentity).font(.caption2).foregroundStyle(Nord.frost1)
+            Text(thread.accountIdentity).font(.caption2).foregroundStyle(KanameColor.accent)
         }
         .padding(.vertical, 5)
     }
@@ -9810,7 +9810,7 @@ private struct MailReaderBody: View {
                             : "shield.lefthalf.filled"
                     )
                         .font(.caption2)
-                        .foregroundStyle(loadsRemoteImagesDirectly ? Nord.auroraYellow : .secondary)
+                        .foregroundStyle(loadsRemoteImagesDirectly ? KanameColor.warning : .secondary)
                         .help(loadsRemoteImagesDirectly
                             ? directImageHelp
                             : "Scripts, forms, remote images, and other remote content are blocked.")
@@ -9868,7 +9868,7 @@ private struct MailReaderBody: View {
                     systemImage: loadsRemoteImagesDirectly ? "exclamationmark.triangle.fill" : "eye.slash"
                 )
                 .font(.caption2)
-                .foregroundStyle(loadsRemoteImagesDirectly ? Nord.auroraYellow : .secondary)
+                .foregroundStyle(loadsRemoteImagesDirectly ? KanameColor.warning : .secondary)
             }
         }
     }
@@ -10035,7 +10035,7 @@ private struct WorkflowWorkItemCard: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(item.title).font(.headline).foregroundStyle(.primary).lineLimit(2)
                         Text(definition?.name ?? item.workflowID)
-                            .font(.caption).foregroundStyle(Nord.frost1)
+                            .font(.caption).foregroundStyle(KanameColor.accent)
                         Text(item.nextAction).font(.caption).foregroundStyle(.secondary).lineLimit(2)
                     }
                     Spacer(minLength: 12)
@@ -10064,12 +10064,12 @@ private struct WorkflowWorkItemCard: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     WorkflowMetricsRow(metrics: [
-                        WorkflowMetricValue(label: "Episodes", value: "\(episodes.count)", tint: Nord.frost1),
-                        WorkflowMetricValue(label: "Verified", value: "\(activeFacts.count)", tint: Nord.auroraGreen),
+                        WorkflowMetricValue(label: "Episodes", value: "\(episodes.count)", tint: KanameColor.accent),
+                        WorkflowMetricValue(label: "Verified", value: "\(activeFacts.count)", tint: KanameColor.success),
                         WorkflowMetricValue(
                             label: proposedKnowledge.isEmpty ? "Artifacts" : "To review",
                             value: "\(proposedKnowledge.isEmpty ? artifactRoles.count : proposedKnowledge.count)",
-                            tint: proposedKnowledge.isEmpty ? Nord.frost1 : Nord.auroraYellow
+                            tint: proposedKnowledge.isEmpty ? KanameColor.accent : KanameColor.warning
                         )
                     ])
                     if !episodes.isEmpty {
@@ -10107,7 +10107,7 @@ private struct WorkflowWorkItemCard: View {
                                     } label: {
                                         Label(fact.key, systemImage: fact.state == .verified ? "checkmark.seal.fill" : "questionmark.circle")
                                             .font(.caption.weight(.semibold))
-                                            .foregroundStyle(fact.state == .verified ? Nord.auroraGreen : Nord.auroraYellow)
+                                            .foregroundStyle(fact.state == .verified ? KanameColor.success : KanameColor.warning)
                                     }
                                 }
                             }
@@ -10225,7 +10225,7 @@ private struct WorkflowWorkItemCard: View {
                                                         Text(receipt.standardOutput).textSelection(.enabled)
                                                     }
                                                     if !receipt.standardError.isEmpty {
-                                                        Text(receipt.standardError).foregroundStyle(Nord.auroraYellow).textSelection(.enabled)
+                                                        Text(receipt.standardError).foregroundStyle(KanameColor.warning).textSelection(.enabled)
                                                     }
                                                 }
                                                 .font(.caption2.monospaced()).padding(.top, 4)
@@ -10234,7 +10234,7 @@ private struct WorkflowWorkItemCard: View {
                                         }
                                     }
                                     .padding(9)
-                                    .background(Nord.polarNight1.opacity(0.7), in: RoundedRectangle(cornerRadius: 9))
+                                    .background(KanameColor.surface.opacity(0.7), in: RoundedRectangle(cornerRadius: 9))
                                 }
                             }
                             .padding(.top, 8)
@@ -10285,7 +10285,7 @@ private struct WorkflowWorkItemCard: View {
                                 }
                                 HStack(alignment: .top, spacing: 10) {
                                     Image(systemName: effect.kind == "gmail-send" ? "paperplane.fill" : "bolt.horizontal.circle")
-                                        .foregroundStyle(Nord.auroraYellow)
+                                        .foregroundStyle(KanameColor.warning)
                                         .frame(width: 20)
                                     VStack(alignment: .leading, spacing: 3) {
                                         Text(preview?.title ?? effect.kind)
@@ -10315,7 +10315,7 @@ private struct WorkflowWorkItemCard: View {
                                                 .buttonStyle(.borderedProminent)
                                                 .help("Re-read every frozen target without repeating the action")
                                         } else {
-                                            Text("Outcome unknown").font(.caption).foregroundStyle(Nord.auroraRed)
+                                            Text("Outcome unknown").font(.caption).foregroundStyle(KanameColor.danger)
                                         }
                                     } else if effect.state == .executing {
                                         ProgressView().controlSize(.small).accessibilityLabel("Applying email effect")
@@ -10327,7 +10327,7 @@ private struct WorkflowWorkItemCard: View {
                                     }
                                 }
                                 .padding(10)
-                                .background(Nord.polarNight1.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
+                                .background(KanameColor.surface.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
                             }
                         }
                     }
@@ -10532,7 +10532,7 @@ private struct WorkflowRunGraphProjectionView: View {
                                     }
                                     if node.state == .outcomeUnknown {
                                         Label("Reconcile this effect in Effects before retrying.", systemImage: "exclamationmark.arrow.triangle.2.circlepath")
-                                            .foregroundStyle(Nord.auroraRed)
+                                            .foregroundStyle(KanameColor.danger)
                                     }
                                 }
                                 .font(.caption2)
@@ -10550,7 +10550,7 @@ private struct WorkflowRunGraphProjectionView: View {
             }
         }
         .padding(10)
-        .background(Nord.polarNight1.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
+        .background(KanameColor.surface.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
     }
 
     private var revision: DesktopWorkflowRevisionRecord? {
@@ -10592,11 +10592,11 @@ private struct WorkflowRunGraphProjectionView: View {
 
     private func tint(_ state: DesktopWorkflowRunNodeState) -> Color {
         switch state {
-        case .succeeded: Nord.auroraGreen
-        case .failed, .outcomeUnknown: Nord.auroraRed
-        case .waiting, .retrying: Nord.auroraYellow
-        case .needsReview: Nord.auroraPurple
-        case .running, .queued: Nord.frost1
+        case .succeeded: KanameColor.success
+        case .failed, .outcomeUnknown: KanameColor.danger
+        case .waiting, .retrying: KanameColor.warning
+        case .needsReview: KanameColor.blocked
+        case .running, .queued: KanameColor.accent
         default: .secondary
         }
     }
@@ -10657,14 +10657,14 @@ private struct WorkflowEpisodeRow: View {
             WorkflowEpisodeMetrics(runs: runs, validations: validations)
             if episode.state == .superseded {
                 Text("Superseded by a later episode; retained as evidence and excluded from current truth by default.")
-                    .font(.caption2).foregroundStyle(Nord.auroraYellow)
+                    .font(.caption2).foregroundStyle(KanameColor.warning)
             }
             if !validations.isEmpty {
                 WorkflowValidationEvidence(validations: validations, reports: reports)
             }
         }
         .padding(10)
-        .background(Nord.polarNight1.opacity(0.72), in: RoundedRectangle(cornerRadius: 10))
+        .background(KanameColor.surface.opacity(0.72), in: RoundedRectangle(cornerRadius: 10))
     }
 }
 
@@ -10679,7 +10679,7 @@ private struct WorkflowEpisodeMetrics: View {
             let blocking = validations.filter { $0.severity == .blocking && $0.outcome != .passed }.count
             if blocking > 0 {
                 Label("\(blocking) blocking", systemImage: "exclamationmark.triangle")
-                    .foregroundStyle(Nord.auroraYellow)
+                    .foregroundStyle(KanameColor.warning)
             }
         }
         .font(.caption2).foregroundStyle(.secondary)
@@ -10698,7 +10698,7 @@ private struct WorkflowValidationEvidence: View {
                     VStack(alignment: .leading, spacing: 3) {
                         LabeledContent {
                             Text(validation.outcome.label)
-                                .foregroundStyle(validation.outcome == .passed ? Nord.auroraGreen : Nord.auroraYellow)
+                                .foregroundStyle(validation.outcome == .passed ? KanameColor.success : KanameColor.warning)
                         } label: {
                             Text(validation.validatorID).fontWeight(.semibold)
                         }
@@ -10803,9 +10803,9 @@ private struct WorkflowDefinitionCard: View {
             if let revision {
                 let readiness = model.workflowMigrationReadiness(workflowID: definition.id)
                 WorkflowMetricsRow(metrics: [
-                    WorkflowMetricValue(label: "Revision", value: revision.version, tint: Nord.frost0),
-                    WorkflowMetricValue(label: "Steps", value: "\(revision.steps.count)", tint: Nord.frost1),
-                    WorkflowMetricValue(label: "Permissions", value: "\(revision.permissions.permissions.count)", tint: Nord.auroraYellow)
+                    WorkflowMetricValue(label: "Revision", value: revision.version, tint: KanameColor.active),
+                    WorkflowMetricValue(label: "Steps", value: "\(revision.steps.count)", tint: KanameColor.accent),
+                    WorkflowMetricValue(label: "Permissions", value: "\(revision.permissions.permissions.count)", tint: KanameColor.warning)
                 ])
                 if revision.schemaVersion == 3 {
                     DisclosureGroup("Installations · \(model.workflowInstallations(workflowID: definition.id).count)") {
@@ -10813,7 +10813,7 @@ private struct WorkflowDefinitionCard: View {
                             ForEach(model.workflowInstallations(workflowID: definition.id)) { installation in
                                 HStack(alignment: .top, spacing: 10) {
                                     Image(systemName: installation.readinessIssues.isEmpty ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
-                                        .foregroundStyle(installation.readinessIssues.isEmpty ? Nord.auroraGreen : Nord.auroraYellow)
+                                        .foregroundStyle(installation.readinessIssues.isEmpty ? KanameColor.success : KanameColor.warning)
                                     VStack(alignment: .leading, spacing: 3) {
                                         Text(installation.name).font(.caption.weight(.semibold))
                                         Text(installation.readinessIssues.isEmpty
@@ -10864,7 +10864,7 @@ private struct WorkflowDefinitionCard: View {
                 } label: {
                     HStack {
                         Label("Host readiness", systemImage: readiness.isReady ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
-                            .foregroundStyle(readiness.isReady ? Nord.auroraGreen : Nord.auroraYellow)
+                            .foregroundStyle(readiness.isReady ? KanameColor.success : KanameColor.warning)
                         Spacer()
                         Text(readiness.isReady ? "Ready to configure" : "\(readiness.blockedCount) blocked")
                             .font(.caption).foregroundStyle(.secondary)
@@ -10874,7 +10874,7 @@ private struct WorkflowDefinitionCard: View {
                     VStack(alignment: .leading, spacing: 10) {
                         ForEach(revision.steps) { step in
                             HStack {
-                                Image(systemName: step.kind.symbol).foregroundStyle(Nord.frost1).frame(width: 22)
+                                Image(systemName: step.kind.symbol).foregroundStyle(KanameColor.accent).frame(width: 22)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(step.name).font(.caption.weight(.semibold))
                                     Text(step.kind.label + (step.capabilityID.map { " · \($0)" } ?? ""))
@@ -10890,15 +10890,15 @@ private struct WorkflowDefinitionCard: View {
                                             .font(.caption2).foregroundStyle(.secondary).lineLimit(2)
                                     }
                                     if step.reviewContract != nil {
-                                        Text("Schema-driven human decision").font(.caption2).foregroundStyle(Nord.auroraYellow)
+                                        Text("Schema-driven human decision").font(.caption2).foregroundStyle(KanameColor.warning)
                                     } else if step.waitContract != nil {
-                                        Text("Durable resumable subscription").font(.caption2).foregroundStyle(Nord.frost0)
+                                        Text("Durable resumable subscription").font(.caption2).foregroundStyle(KanameColor.active)
                                     } else if step.agentPolicy != nil {
-                                        Text("Bounded agent · no direct effects").font(.caption2).foregroundStyle(Nord.frost0)
+                                        Text("Bounded agent · no direct effects").font(.caption2).foregroundStyle(KanameColor.active)
                                     }
                                 }
                                 Spacer()
-                                if !step.isIdempotent { Text("No automatic retry").font(.caption2).foregroundStyle(Nord.auroraYellow) }
+                                if !step.isIdempotent { Text("No automatic retry").font(.caption2).foregroundStyle(KanameColor.warning) }
                             }
                         }
                         Divider()
@@ -11044,7 +11044,7 @@ private struct WorkflowDefinitionCard: View {
                             ForEach(schedules) { schedule in
                                 LabeledContent {
                                     Text(schedule.enabled ? "Enabled" : "Paused")
-                                        .font(.caption).foregroundStyle(schedule.enabled ? Nord.auroraGreen : .secondary)
+                                        .font(.caption).foregroundStyle(schedule.enabled ? KanameColor.success : .secondary)
                                 } label: {
                                     Text(DesktopScheduleEngine.humanSchedule(spec: schedule.spec, timeZoneIdentifier: schedule.timeZoneIdentifier))
                                         .font(.caption)
@@ -11100,7 +11100,7 @@ private struct WorkflowDefinitionCard: View {
                             .font(.caption2.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
                     }
                     ForEach(assessment.blockingFindings, id: \.self) { finding in
-                        Label(finding, systemImage: "xmark.octagon.fill").font(.caption).foregroundStyle(Nord.auroraYellow)
+                        Label(finding, systemImage: "xmark.octagon.fill").font(.caption).foregroundStyle(KanameColor.warning)
                     }
                     if let current = DesktopWorkflowMigrationStage.allCases.firstIndex(of: assessment.stage),
                        DesktopWorkflowMigrationStage.allCases.indices.contains(current + 1) {
@@ -11187,9 +11187,9 @@ private struct WorkflowDefinitionCard: View {
 
     private func readinessTint(_ state: DesktopWorkflowMigrationReadinessState) -> Color {
         switch state {
-        case .ready: Nord.auroraGreen
-        case .attention: Nord.auroraYellow
-        case .blocked: Nord.auroraRed
+        case .ready: KanameColor.success
+        case .attention: KanameColor.warning
+        case .blocked: KanameColor.danger
         }
     }
 }
@@ -11236,7 +11236,7 @@ struct WorkflowManualRunSheet: View {
                         .font(.system(.body, design: .monospaced))
                         .frame(minHeight: 150)
                         .padding(6)
-                        .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+                        .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 8))
                         .accessibilityLabel("Manual workflow JSON input")
                 }
             } else {
@@ -11249,7 +11249,7 @@ struct WorkflowManualRunSheet: View {
             }
             if let validationMessage {
                 Label(validationMessage, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption).foregroundStyle(Nord.auroraYellow)
+                    .font(.caption).foregroundStyle(KanameColor.warning)
             }
             DesktopSheetActionBar(
                 primaryTitle: "Start run",
@@ -11330,7 +11330,7 @@ private struct WorkflowMetricsRow: View {
                         Text(metric.label).font(.caption2).foregroundStyle(.secondary)
                     }
                     .padding(.horizontal, 10).padding(.vertical, 7)
-                    .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 8))
+                    .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 8))
                 }
             }
         }
@@ -11346,7 +11346,7 @@ private struct WorkflowDefinitionHeader: View {
             GridRow {
                 Image(systemName: definition.icon)
                     .font(.title2)
-                    .foregroundStyle(definition.enabled ? Nord.frost1 : .secondary)
+                    .foregroundStyle(definition.enabled ? KanameColor.accent : .secondary)
                 Grid(alignment: .leading, verticalSpacing: 4) {
                     GridRow { Text(definition.name).font(.headline) }
                     GridRow { Text(definition.summary).font(.caption).foregroundStyle(.secondary) }
@@ -11397,7 +11397,7 @@ private struct WorkflowTriggerBindingRow: View {
                         GridRow {
                             Text(health.state.label + (health.lastSuccessAtUnixMillis.map { " · last verified " + Date(timeIntervalSince1970: Double($0) / 1_000).formatted(date: .abbreviated, time: .shortened) } ?? ""))
                                 .font(.caption2)
-                                .foregroundStyle(health.state == .actionRequired ? Nord.auroraYellow : .secondary)
+                                .foregroundStyle(health.state == .actionRequired ? KanameColor.warning : .secondary)
                         }
                     }
                 }
@@ -11590,7 +11590,7 @@ private struct DesktopCalendarView: View {
                             VStack(alignment: .leading, spacing: 10) {
                                 HStack {
                                     Image(systemName: event.provider == .apple ? "apple.logo" : "g.circle.fill")
-                                        .foregroundStyle(Nord.frost1)
+                                        .foregroundStyle(KanameColor.accent)
                                     Text(event.title).font(.headline).lineLimit(2)
                                     Spacer()
                                     if event.recurringEventID != nil { Image(systemName: "repeat").foregroundStyle(.secondary) }
@@ -11605,7 +11605,7 @@ private struct DesktopCalendarView: View {
                                 }
                                 if event.provider == .google, !event.canEdit {
                                     Label("Reconnect this Google account in Settings to enable approved event changes.", systemImage: "person.crop.circle.badge.exclamationmark")
-                                        .font(.caption).foregroundStyle(Nord.auroraYellow)
+                                        .font(.caption).foregroundStyle(KanameColor.warning)
                                 }
                                 HStack {
                                     Button("Change") { eventEditRequest = CalendarEventEditRequest(event: event, kind: .update) }
@@ -11641,7 +11641,7 @@ private struct DesktopCalendarView: View {
                                 HStack {
                                     Image(systemName: "calendar")
                                         .font(.title2)
-                                        .foregroundStyle(Nord.auroraPurple)
+                                        .foregroundStyle(KanameColor.blocked)
                                     Spacer()
                                     KanameStatusBadge(
                                         KanameDesktopStatusPresentation.record(proposal.status),
@@ -11676,7 +11676,7 @@ private struct DesktopCalendarView: View {
                                     LabeledContent("Recovery phase", value: phase.replacingOccurrences(of: "Applied", with: " applied").capitalized)
                                 }
                                 if let receipt = proposal.remoteReceipt {
-                                    Text(receipt).foregroundStyle(proposal.status == .failed ? Nord.auroraRed : Nord.auroraGreen)
+                                    Text(receipt).foregroundStyle(proposal.status == .failed ? KanameColor.danger : KanameColor.success)
                                 }
                                 calendarProposalAction(proposal)
                             }
@@ -11693,7 +11693,7 @@ private struct DesktopCalendarView: View {
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .sheet(isPresented: $showsProposal) {
             NewCalendarProposalSheet(model: model)
         }
@@ -11730,7 +11730,7 @@ private struct DesktopCalendarView: View {
             .buttonStyle(.borderedProminent)
             .disabled(calendar.isBusy)
         } else if proposal.status == .waiting {
-            Label("Waiting in Inbox", systemImage: "tray.full").foregroundStyle(Nord.auroraYellow)
+            Label("Waiting in Inbox", systemImage: "tray.full").foregroundStyle(KanameColor.warning)
         } else if proposal.status == .failed,
                   let source = model.snapshot.domains.calendarSources.first(where: { $0.id == proposal.calendarSourceID }) {
             Button("Review again") {
@@ -11784,11 +11784,11 @@ private struct CalendarSourceVisibilityCard: View {
                 }
             } icon: {
                 Image(systemName: source.provider == .apple ? "apple.logo" : "g.circle.fill")
-                    .foregroundStyle(source.isEnabled ? Nord.frost1 : .secondary)
+                    .foregroundStyle(source.isEnabled ? KanameColor.accent : .secondary)
             }
         }
         .padding(12)
-        .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 10))
+        .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 10))
     }
 }
 
@@ -11862,7 +11862,7 @@ private struct CalendarEventMutationSheet: View {
                 }
                 if scope == .thisAndFuture {
                     Label("Kaname validates the provider's recurrence before approval. Unsupported finite Google series are refused; Apple uses its native future-events span.", systemImage: "scissors")
-                        .font(.caption).foregroundStyle(Nord.auroraYellow)
+                        .font(.caption).foregroundStyle(KanameColor.warning)
                 }
                 if source?.provider == .apple, request.event.recurringEventID != nil {
                     Text("EventKit does not expose a safe whole-series operation, so Apple Calendar offers only this event or this and future events.")
@@ -11985,7 +11985,7 @@ private struct DesktopGitHubView: View {
                             HStack {
                                 Image(systemName: "point.3.connected.trianglepath.dotted")
                                     .font(.title2)
-                                    .foregroundStyle(Nord.frost0)
+                                    .foregroundStyle(KanameColor.active)
                                 Spacer()
                                 KanameStatusBadge(
                                     KanameDesktopStatusPresentation.record(workspace.status),
@@ -12029,7 +12029,7 @@ private struct DesktopGitHubView: View {
                         if inspection.wasTruncated {
                             Text("The bounded Git response was truncated.")
                                 .font(.caption)
-                                .foregroundStyle(Nord.auroraYellow)
+                                .foregroundStyle(KanameColor.warning)
                         }
                     }
                     .font(.caption)
@@ -12102,7 +12102,7 @@ private struct DesktopGitHubView: View {
                         ForEach(model.snapshot.operations.gitStackLayers) { layer in
                             HStack(alignment: .top, spacing: 13) {
                                 Image(systemName: "circle.hexagongrid.fill")
-                                    .foregroundStyle(Nord.frost1)
+                                    .foregroundStyle(KanameColor.accent)
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text(layer.title).font(.headline)
                                     Text("\(layer.branch) → \(layer.baseBranch)")
@@ -12131,7 +12131,7 @@ private struct DesktopGitHubView: View {
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .sheet(isPresented: $showsNewLayer) {
             NewGitStackLayerSheet(model: model)
         }
@@ -12150,7 +12150,7 @@ private struct DesktopGitHubView: View {
                 }
                 .buttonStyle(.borderedProminent)
             case .awaitingApproval:
-                Text("Awaiting approval").font(.caption).foregroundStyle(Nord.auroraYellow)
+                Text("Awaiting approval").font(.caption).foregroundStyle(KanameColor.warning)
             default:
                 Button("Request PR approval") {
                     githubControl.requestPullRequestApproval(model: model, workspace: workspace, layer: layer)
@@ -12172,7 +12172,7 @@ private struct DesktopGitHubView: View {
                 }
                 .buttonStyle(.borderedProminent)
             case .awaitingApproval:
-                Text("Merge awaiting approval").foregroundStyle(Nord.auroraYellow)
+                Text("Merge awaiting approval").foregroundStyle(KanameColor.warning)
             default:
                 Button("Request merge approval") {
                     githubControl.requestMergeApproval(model: model, pullRequest: pullRequest)
@@ -12232,7 +12232,7 @@ private struct DesktopSkillsView: View {
                                     HStack {
                                         Image(systemName: skill.kind.symbol)
                                             .font(.title2)
-                                            .foregroundStyle(skill.enabled ? Nord.frost1 : .secondary)
+                                            .foregroundStyle(skill.enabled ? KanameColor.accent : .secondary)
                                         VStack(alignment: .leading, spacing: 2) {
                                             Text(skill.name).font(.headline)
                                             Text(skill.kind.label)
@@ -12291,7 +12291,7 @@ private struct DesktopSkillsView: View {
                                     .controlSize(.small)
                                 }
                                 .padding(10)
-                                .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 10))
+                                .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 10))
                             }
                             if let registerMessage {
                                 Text(registerMessage).font(.caption).foregroundStyle(.secondary)
@@ -12319,7 +12319,7 @@ private struct DesktopSkillsView: View {
             .padding(22)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .onAppear(perform: refreshDiscovered)
         .onChange(of: model.snapshot.domains.skills.count) { _ in refreshDiscovered() }
     }
@@ -12414,7 +12414,7 @@ private struct DesktopCodingView: View {
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 12)
-            .background(Nord.polarNight1)
+            .background(KanameColor.surface)
 
             Divider()
 
@@ -12431,7 +12431,7 @@ private struct DesktopCodingView: View {
                 qualityEvidence
             }
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
     }
 
     private var overview: some View {
@@ -12468,7 +12468,7 @@ private struct DesktopCodingView: View {
                         title: "Running",
                         value: model.activeThreads.filter { $0.kind == .coding && $0.attention == .running }.count,
                         symbol: "bolt.fill",
-                        tint: Nord.frost1
+                        tint: KanameColor.accent
                     )
                     codingPulse(
                         title: "Needs input",
@@ -12476,19 +12476,19 @@ private struct DesktopCodingView: View {
                             $0.kind == .coding && ($0.attention == .needsInput || $0.attention == .needsApproval)
                         }.count,
                         symbol: "person.crop.circle.badge.questionmark",
-                        tint: Nord.auroraYellow
+                        tint: KanameColor.warning
                     )
                     codingPulse(
                         title: "Worktrees",
                         value: model.snapshot.operations.worktrees.filter { $0.state != .removed }.count,
                         symbol: "arrow.triangle.branch",
-                        tint: Nord.frost2
+                        tint: KanameColor.accent
                     )
                     codingPulse(
                         title: "Checks",
                         value: model.snapshot.operations.qualityGates.count,
                         symbol: "checkmark.seal.fill",
-                        tint: Nord.auroraGreen
+                        tint: KanameColor.success
                     )
                 }
 
@@ -12571,7 +12571,7 @@ private struct DesktopCodingView: View {
                                         .font(.caption.weight(.semibold))
                                         .padding(.horizontal, 8)
                                         .padding(.vertical, 5)
-                                        .background(Nord.polarNight0, in: Capsule())
+                                        .background(KanameColor.canvas, in: Capsule())
                                 }
                             }
                         }
@@ -12588,11 +12588,11 @@ private struct DesktopCodingView: View {
                         VStack(spacing: 7) {
                             ZStack {
                                 Circle()
-                                    .fill(index == 0 ? Nord.frost1 : Nord.polarNight2)
+                                    .fill(index == 0 ? KanameColor.accent : KanameColor.raised)
                                     .frame(width: 28, height: 28)
                                 Text("\(index + 1)")
                                     .font(.caption2.weight(.bold))
-                                    .foregroundStyle(index == 0 ? Nord.polarNight0 : .secondary)
+                                    .foregroundStyle(index == 0 ? KanameColor.canvas : .secondary)
                             }
                             Text(step)
                                 .font(.caption2)
@@ -12601,14 +12601,14 @@ private struct DesktopCodingView: View {
                         }
                         if index < 6 {
                             Rectangle()
-                                .fill(Nord.polarNight3)
+                                .fill(KanameColor.separator)
                                 .frame(height: 1)
                                 .offset(y: -11)
                         }
                     }
                 }
                 .padding(18)
-                .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 16))
+                .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 16))
             }
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -12632,7 +12632,7 @@ private struct DesktopCodingView: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 12))
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(title), \(value)")
     }
@@ -12675,7 +12675,7 @@ private struct DesktopCodingView: View {
                             if !session.limitations.isEmpty {
                                 Text("Limits: \(session.limitations.joined(separator: " · "))")
                                     .font(.caption2)
-                                    .foregroundStyle(Nord.auroraYellow)
+                                    .foregroundStyle(KanameColor.warning)
                             }
                         }
                         .panelStyle()
@@ -12783,7 +12783,7 @@ private struct DesktopCodingView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         case .awaitingApproval:
-            Text("Awaiting approval").foregroundStyle(Nord.auroraYellow)
+            Text("Awaiting approval").foregroundStyle(KanameColor.warning)
         default:
             Button("Request commit approval") { control.requestCommitApproval(model: model, worktree: worktree, message: message) }
                 .disabled(message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -12797,7 +12797,7 @@ private struct DesktopCodingView: View {
             Button("Create approved worktree") { control.create(model: model, worktree: worktree) }
                 .buttonStyle(.borderedProminent)
         case .awaitingApproval:
-            Text("Awaiting Inbox approval").foregroundStyle(Nord.auroraYellow)
+            Text("Awaiting Inbox approval").foregroundStyle(KanameColor.warning)
         case .rejected:
             Text("Creation rejected").foregroundStyle(.secondary)
         default:
@@ -12811,7 +12811,7 @@ private struct DesktopCodingView: View {
         case .approved:
             Button("Remove approved worktree", role: .destructive) { control.cleanup(model: model, worktree: worktree) }
         case .awaitingApproval:
-            Text("Cleanup awaiting approval").foregroundStyle(Nord.auroraYellow)
+            Text("Cleanup awaiting approval").foregroundStyle(KanameColor.warning)
         default:
             Button("Request cleanup", role: .destructive) { control.requestCleanupApproval(model: model, worktree: worktree) }
         }
@@ -12954,7 +12954,7 @@ private struct ProviderCapabilityCard: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Image(systemName: "cpu.fill")
-                    .foregroundStyle(status == .ready ? Nord.frost1 : .secondary)
+                    .foregroundStyle(status == .ready ? KanameColor.accent : .secondary)
                 Text(provider.name).font(.headline)
                 Spacer()
                 KanameStatusBadge(
@@ -13002,7 +13002,7 @@ private struct DesktopDevicesView: View {
                         title: "This Mac",
                         subtitle: "Configured foundation",
                         status: "Current health not checked",
-                        tint: Nord.auroraYellow,
+                        tint: KanameColor.warning,
                         facts: [
                             ("Intended role", "Execution host and authority"),
                             ("Storage policy", "Local 0700 / 0600"),
@@ -13014,7 +13014,7 @@ private struct DesktopDevicesView: View {
                         title: "iPhone companion",
                         subtitle: "Physical qualification deferred",
                         status: "Simulator and device checks not run",
-                        tint: Nord.auroraYellow,
+                        tint: KanameColor.warning,
                         facts: [
                             ("Physical device", "Not selected or checked"),
                             ("Simulator", "Qualification not run"),
@@ -13033,21 +13033,21 @@ private struct DesktopDevicesView: View {
                         status: model.snapshot.remote.relayStatus,
                         detail: "Foundation for authenticated envelope storage. No hosted-state or cleanup result is implied.",
                         symbol: "network.badge.shield.half.filled",
-                        tint: Nord.auroraYellow
+                        tint: KanameColor.warning
                     )
                     RemoteStatusCard(
                         title: "Notifications",
                         status: model.snapshot.remote.notificationStatus,
                         detail: "The foundation limits APNs to an attention hint; delivery and payload checks require evidence.",
                         symbol: "bell.badge.fill",
-                        tint: Nord.auroraYellow
+                        tint: KanameColor.warning
                     )
                     RemoteStatusCard(
                         title: "Reconciliation",
                         status: model.snapshot.remote.queueStatus,
                         detail: "The recovery contract is implemented as a foundation; queue and receipt behavior is not assumed.",
                         symbol: "arrow.triangle.2.circlepath.circle.fill",
-                        tint: Nord.auroraYellow
+                        tint: KanameColor.warning
                     )
                 }
 
@@ -13058,7 +13058,7 @@ private struct DesktopDevicesView: View {
                     }
                 }
                 .padding(.horizontal, 18)
-                .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 16))
+                .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 16))
 
                 BoundaryCallout(
                     title: "Live device actions remain off",
@@ -13068,7 +13068,7 @@ private struct DesktopDevicesView: View {
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
     }
 }
 
@@ -13092,11 +13092,11 @@ private struct DesktopSettingsModal: View {
                 automaticBackup: automaticBackup,
                 dismiss: dismiss
             )
-                .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                 .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
                 .overlay {
                     RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .stroke(Nord.polarNight3, lineWidth: 1)
+                        .stroke(KanameColor.separator, lineWidth: 1)
                 }
                 .shadow(color: .black.opacity(0.42), radius: 28, y: 12)
                 .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
@@ -13234,7 +13234,7 @@ private struct DesktopSettingsShell: View {
                                 .textSelection(.enabled)
                                 .padding(12)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(Nord.polarNight2.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+                                .background(KanameColor.raised.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
                         }
                     }
                     .padding(24)
@@ -13244,7 +13244,7 @@ private struct DesktopSettingsShell: View {
                 footer
             }
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .frame(minWidth: 720, idealWidth: 940, maxWidth: 1_040, minHeight: 480, idealHeight: 640, maxHeight: 660)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Kaname settings")
@@ -13289,10 +13289,10 @@ private struct DesktopSettingsShell: View {
                         .padding(.horizontal, 11)
                         .padding(.vertical, 8)
                         .background(
-                            category == item ? Nord.frost2.opacity(0.22) : .clear,
+                            category == item ? KanameColor.accent.opacity(0.22) : .clear,
                             in: RoundedRectangle(cornerRadius: 8)
                         )
-                        .foregroundStyle(category == item ? Nord.snowStorm0 : .secondary)
+                        .foregroundStyle(category == item ? KanameColor.textPrimary : .secondary)
                 }
                 .buttonStyle(.plain)
                 .focused($focusedCategory, equals: item)
@@ -13311,7 +13311,7 @@ private struct DesktopSettingsShell: View {
             idealWidth: usesAccessibilityTextLayout ? 260 : 205,
             maxWidth: usesAccessibilityTextLayout ? 290 : 230
         )
-        .background(Nord.polarNight1)
+        .background(KanameColor.surface)
     }
 
     private var footer: some View {
@@ -13345,7 +13345,7 @@ private struct DesktopSettingsShell: View {
         .font(.caption)
         .foregroundStyle(
             TimeZone(identifier: draft.defaultScheduleTimeZoneIdentifier) == nil
-                ? Nord.auroraYellow
+                ? KanameColor.warning
                 : Color.secondary.opacity(0.65)
         )
     }
@@ -13388,11 +13388,23 @@ private struct DesktopSettingsShell: View {
         }
     }
 
+    @AppStorage("kaname.appearance") private var appearance = "dark"
+
     private var generalPage: some View {
-        SettingsSection(title: "Workspace", symbol: "macwindow") {
-            Toggle("Show technical details by default", isOn: $draft.showTechnicalDetails)
-            Toggle("Use compact thread rows", isOn: $draft.compactRows)
-            Toggle("Confirm before archiving", isOn: $draft.confirmBeforeArchiving)
+        VStack(alignment: .leading, spacing: 16) {
+            SettingsSection(title: "Appearance", symbol: "circle.lefthalf.filled") {
+                Picker("Appearance", selection: $appearance) {
+                    Text("Dark").tag("dark")
+                    Text("Light").tag("light")
+                    Text("Match system").tag("system")
+                }
+                .pickerStyle(.segmented)
+            }
+            SettingsSection(title: "Workspace", symbol: "macwindow") {
+                Toggle("Show technical details by default", isOn: $draft.showTechnicalDetails)
+                Toggle("Use compact thread rows", isOn: $draft.compactRows)
+                Toggle("Confirm before archiving", isOn: $draft.confirmBeforeArchiving)
+            }
         }
     }
 
@@ -13479,14 +13491,14 @@ private struct DesktopSettingsShell: View {
                 } else {
                     ForEach(integrations.googleAccounts) { account in
                         HStack {
-                            Circle().fill(Nord.auroraGreen).frame(width: 7, height: 7)
+                            Circle().fill(KanameColor.success).frame(width: 7, height: 7)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(account.displayName).font(.subheadline.weight(.semibold))
                                 Text(account.identity).font(.caption).foregroundStyle(.secondary)
                             }
                             Spacer()
                             Button("Disconnect") { integrations.disconnectGoogleAccount(id: account.id, model: model) }
-                                .buttonStyle(.borderless).foregroundStyle(Nord.auroraRed)
+                                .buttonStyle(.borderless).foregroundStyle(KanameColor.danger)
                         }
                     }
                 }
@@ -13636,12 +13648,12 @@ private struct DesktopSettingsShell: View {
                                 .disabled(updates.isBusy)
                         }
                         .padding(12)
-                        .background(Nord.polarNight2.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
+                        .background(KanameColor.raised.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
                     }
                 } else {
                     Label("Candidate never reads, publishes, or stages the stable update catalog.", systemImage: "testtube.2")
                         .font(.caption)
-                        .foregroundStyle(Nord.frost1)
+                        .foregroundStyle(KanameColor.accent)
                 }
             }
             SettingsSection(title: "Update continuity", symbol: "arrow.triangle.2.circlepath.circle.fill") {
@@ -13658,7 +13670,7 @@ private struct DesktopSettingsShell: View {
                     systemImage: "checkmark.seal"
                 )
                 .font(.caption)
-                .foregroundStyle(Nord.frost1)
+                .foregroundStyle(KanameColor.accent)
                 if let releaseNotes = updates.receipt.releaseNotes,
                    !releaseNotes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     DisclosureGroup("Release notes") {
@@ -13686,7 +13698,7 @@ private struct DesktopSettingsShell: View {
                 } else {
                     Label("Candidate state is isolated. Qualify here, then stage a stable-identity build from stable Kaname.", systemImage: "testtube.2")
                         .font(.caption)
-                        .foregroundStyle(Nord.frost1)
+                        .foregroundStyle(KanameColor.accent)
                 }
                 if let message = updates.message {
                     Label(message, systemImage: "info.circle")
@@ -13714,7 +13726,7 @@ private struct DesktopSettingsShell: View {
                 .font(.caption).foregroundStyle(.secondary)
             if TimeZone(identifier: draft.defaultScheduleTimeZoneIdentifier) == nil {
                 Label("Enter a valid IANA identifier such as Asia/Tokyo.", systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption).foregroundStyle(Nord.auroraYellow)
+                    .font(.caption).foregroundStyle(KanameColor.warning)
             }
         }
     }
@@ -13762,11 +13774,11 @@ private struct DesktopSettingsShell: View {
 
     private var providerDescriptors: [SettingsProviderDescriptor] {
         [
-            .init(name: "Codex", driver: .codex, symbol: "terminal.fill", tint: Nord.frost1, detail: "OpenAI coding sessions, models, and skills"),
+            .init(name: "Codex", driver: .codex, symbol: "terminal.fill", tint: KanameColor.accent, detail: "OpenAI coding sessions, models, and skills"),
             .init(name: "Claude", driver: .claudeAgent, symbol: "sparkles", tint: .orange, detail: "Claude Code sessions and models"),
             .init(name: "OpenCode", driver: .openCode, symbol: "chevron.left.forwardslash.chevron.right", tint: .purple, detail: "OpenCode sessions and upstream providers"),
-            .init(name: "Cursor", driver: .cursorAgent, symbol: "cursorarrow.rays", tint: Nord.frost0, detail: "Cursor CLI print + stream-json conversation sessions"),
-            .init(name: "Grok", driver: .grokBuild, symbol: "bolt.fill", tint: Nord.auroraYellow, detail: "Grok Build headless --single conversation sessions"),
+            .init(name: "Cursor", driver: .cursorAgent, symbol: "cursorarrow.rays", tint: KanameColor.active, detail: "Cursor CLI print + stream-json conversation sessions"),
+            .init(name: "Grok", driver: .grokBuild, symbol: "bolt.fill", tint: KanameColor.warning, detail: "Grok Build headless --single conversation sessions"),
         ]
     }
 
@@ -13847,7 +13859,7 @@ private struct SettingsProviderRow: View {
                     Text(summary).font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Circle().fill(connected ? Nord.auroraGreen : needsAttention ? Nord.auroraYellow : .secondary).frame(width: 8, height: 8)
+                Circle().fill(connected ? KanameColor.success : needsAttention ? KanameColor.warning : .secondary).frame(width: 8, height: 8)
             }
         }
         .panelStyle()
@@ -13896,7 +13908,7 @@ private struct SettingsIntegrationCard<Actions: View, Details: View>: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(title).font(.headline)
                     HStack(spacing: 6) {
-                        Circle().fill(connected ? Nord.auroraGreen : .secondary).frame(width: 7, height: 7)
+                        Circle().fill(connected ? KanameColor.success : .secondary).frame(width: 7, height: 7)
                         Text(detail).font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -14182,7 +14194,7 @@ private struct DesktopThreadInspector: View {
         if let error = summary.run.errorSummary, !error.isEmpty {
             Label(error, systemImage: "exclamationmark.triangle.fill")
                 .font(.subheadline)
-                .foregroundStyle(Nord.auroraRed)
+                .foregroundStyle(KanameColor.danger)
                 .textSelection(.enabled)
                 .panelStyle()
         }
@@ -14313,7 +14325,7 @@ private struct DesktopThreadInspector: View {
             if summary.payloadWasTruncated {
                 Label("One or more in-workspace payloads were capped; the sealed evidence log remains authoritative.", systemImage: "exclamationmark.triangle")
                     .font(.caption)
-                    .foregroundStyle(Nord.auroraYellow)
+                    .foregroundStyle(KanameColor.warning)
             }
         }
         .panelStyle()
@@ -14350,7 +14362,7 @@ private struct DesktopInspectorEventGroupRow: View {
             }
         }
         .padding(8)
-        .background(Nord.polarNight1.opacity(0.6), in: RoundedRectangle(cornerRadius: 8))
+        .background(KanameColor.surface.opacity(0.6), in: RoundedRectangle(cornerRadius: 8))
         .accessibilityLabel("\(group.events.count) \(group.title)")
     }
 }
@@ -14390,10 +14402,10 @@ private struct DesktopProjectInspector: View {
 
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Included context").font(.headline)
-                    InspectorStatus(label: "Instructions", value: "\(project.context.instructionReferences.count)", tint: Nord.frost1)
-                    InspectorStatus(label: "Knowledge", value: "\(project.context.knowledgeSourceIDs.count)", tint: Nord.frost2)
-                    InspectorStatus(label: "Skills & tools", value: "\(project.context.skillIDs.count)", tint: Nord.auroraPurple)
-                    InspectorStatus(label: "Conversations", value: "\(projectThreads.count)", tint: Nord.auroraGreen)
+                    InspectorStatus(label: "Instructions", value: "\(project.context.instructionReferences.count)", tint: KanameColor.accent)
+                    InspectorStatus(label: "Knowledge", value: "\(project.context.knowledgeSourceIDs.count)", tint: KanameColor.accent)
+                    InspectorStatus(label: "Skills & tools", value: "\(project.context.skillIDs.count)", tint: KanameColor.blocked)
+                    InspectorStatus(label: "Conversations", value: "\(projectThreads.count)", tint: KanameColor.success)
                     if let lastFreshness {
                         HStack {
                             Text("Last source read").font(.caption).foregroundStyle(.secondary)
@@ -14437,10 +14449,10 @@ private struct DesktopContextInspector: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Local health")
                         .font(.headline)
-                    InspectorStatus(label: "Workspace state", value: "Durable", tint: Nord.auroraGreen)
-                    InspectorStatus(label: "External accounts", value: "Disconnected", tint: Nord.polarNight3)
-                    InspectorStatus(label: "Mobile relay", value: "Clean", tint: Nord.frost0)
-                    InspectorStatus(label: "Physical iPhone", value: "Excluded", tint: Nord.auroraYellow)
+                    InspectorStatus(label: "Workspace state", value: "Durable", tint: KanameColor.success)
+                    InspectorStatus(label: "External accounts", value: "Disconnected", tint: KanameColor.separator)
+                    InspectorStatus(label: "Mobile relay", value: "Clean", tint: KanameColor.active)
+                    InspectorStatus(label: "Physical iPhone", value: "Excluded", tint: KanameColor.warning)
                 }
                 .panelStyle()
 
@@ -14720,7 +14732,7 @@ private struct NewKnowledgeProposalSheet: View {
                     .scrollContentBackground(.hidden)
                     .padding(8)
                     .frame(minHeight: 150)
-                    .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 9))
+                    .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 9))
             }
             .formStyle(.grouped)
             HStack {
@@ -15056,7 +15068,7 @@ private struct NewEmailDraftSheet: View {
                 .scrollContentBackground(.hidden)
                 .padding(8)
                 .frame(minHeight: 220)
-                .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 10))
+                .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 10))
             HStack {
                 Text("Save draft only")
                     .font(.caption)
@@ -15135,7 +15147,7 @@ private struct NewCalendarProposalSheet: View {
                 }
                 if writableSources.isEmpty {
                     Text("Enable a writable calendar in Settings, or reconnect Google to grant Calendar event changes.")
-                        .font(.caption).foregroundStyle(Nord.auroraYellow)
+                        .font(.caption).foregroundStyle(KanameColor.warning)
                 }
                 Toggle("All-day event", isOn: $isAllDay)
                 DatePicker(
@@ -15481,7 +15493,7 @@ private struct NewDesktopThreadSheet: View {
                             ? "checkmark.shield.fill"
                             : (runtimeMode == .fullAccess ? "exclamationmark.shield" : "lock.shield")
                     )
-                    .foregroundStyle(kind != .coding && runtimeMode == .fullAccess ? Nord.auroraYellow : .secondary)
+                    .foregroundStyle(kind != .coding && runtimeMode == .fullAccess ? KanameColor.warning : .secondary)
                 }
             }
             .formStyle(.grouped)
@@ -15533,7 +15545,7 @@ private struct AccountStrip: View {
             ForEach(accounts) { account in
                 HStack(spacing: 12) {
                     Image(systemName: account.service.symbol)
-                        .foregroundStyle(account.status == .ready ? Nord.auroraGreen : .secondary)
+                        .foregroundStyle(account.status == .ready ? KanameColor.success : .secondary)
                         .frame(width: 24)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(account.displayName)
@@ -15603,7 +15615,7 @@ private struct ApprovalQueueStrip: View {
                     .font(.caption)
                 }
                 .padding(12)
-                .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 10))
+                .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 10))
             }
             if pending.isEmpty {
                 Text("No action is waiting for approval.")
@@ -15626,17 +15638,17 @@ private struct DesktopAuthorityCard: View {
             LabeledContent {
                 Text("Foundation")
                     .kanameSemanticFont(.caption.weight(.bold))
-                    .foregroundStyle(Nord.auroraYellow)
+                    .foregroundStyle(KanameColor.warning)
             } label: {
                 Label("Local authority", systemImage: "desktopcomputer")
                     .kanameSemanticFont(.headline)
             }
-            InspectorStatus(label: "Workspace", value: "Configured · not verified", tint: Nord.auroraYellow)
-            InspectorStatus(label: "Remote", value: remote.relayStatus, tint: Nord.auroraYellow)
-            InspectorStatus(label: "Phone", value: "Not run · deferred", tint: Nord.auroraYellow)
+            InspectorStatus(label: "Workspace", value: "Configured · not verified", tint: KanameColor.warning)
+            InspectorStatus(label: "Remote", value: remote.relayStatus, tint: KanameColor.warning)
+            InspectorStatus(label: "Phone", value: "Not run · deferred", tint: KanameColor.warning)
         }
         .padding(15)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 16))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 16))
     }
 }
 
@@ -15720,7 +15732,7 @@ private struct ThreadCard: View {
             }
             .padding(16)
             .frame(maxWidth: .infinity, minHeight: 170, alignment: .topLeading)
-            .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 16))
+            .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 16))
         }
         .buttonStyle(.plain)
         .accessibilityElement(children: .ignore)
@@ -15745,7 +15757,7 @@ private struct ThreadRow: View {
                             .kanameSemanticFont(.headline)
                             .lineLimit(1)
                         if thread.unread {
-                            Circle().fill(Nord.frost1).frame(width: 7, height: 7)
+                            Circle().fill(KanameColor.accent).frame(width: 7, height: 7)
                         }
                     }
                     Text(thread.summary)
@@ -15763,7 +15775,7 @@ private struct ThreadRow: View {
                     .foregroundStyle(.tertiary)
             }
             .padding(13)
-            .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+            .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 14))
         }
         .buttonStyle(.plain)
         .accessibilityElement(children: .ignore)
@@ -15786,7 +15798,7 @@ private struct ThreadDirectoryLabel: View {
                     Text(thread.title)
                         .font(.headline)
                         .lineLimit(1)
-                    if thread.unread { Circle().fill(Nord.frost1).frame(width: 7, height: 7) }
+                    if thread.unread { Circle().fill(KanameColor.accent).frame(width: 7, height: 7) }
                 }
                 Text("\(thread.provider) · \(thread.kind.label)")
                     .font(.caption)
@@ -15814,20 +15826,20 @@ private struct ThreadDirectoryStatus {
         let runningSince = runs.last(where: { $0.state == .running })?.startedAtUnixMillis
         switch thread.attention {
         case .needsApproval:
-            (label, symbol, tint, runningSinceUnixMillis) = ("Approval required", "hand.raised.fill", Nord.auroraYellow, nil)
+            (label, symbol, tint, runningSinceUnixMillis) = ("Approval required", "hand.raised.fill", KanameColor.warning, nil)
         case .needsInput:
-            (label, symbol, tint, runningSinceUnixMillis) = ("Waiting for input", "questionmark.bubble.fill", Nord.auroraPurple, nil)
+            (label, symbol, tint, runningSinceUnixMillis) = ("Waiting for input", "questionmark.bubble.fill", KanameColor.blocked, nil)
         case .failed:
-            (label, symbol, tint, runningSinceUnixMillis) = ("Failed", "exclamationmark.circle.fill", Nord.auroraRed, nil)
+            (label, symbol, tint, runningSinceUnixMillis) = ("Failed", "exclamationmark.circle.fill", KanameColor.danger, nil)
         case .running:
-            (label, symbol, tint, runningSinceUnixMillis) = ("Running", "circle.dashed", Nord.frost1, runningSince)
+            (label, symbol, tint, runningSinceUnixMillis) = ("Running", "circle.dashed", KanameColor.accent, runningSince)
         case .queued:
             (label, symbol, tint, runningSinceUnixMillis) = ("Queued", "clock", .secondary, nil)
         case .needsResponse:
             (label, symbol, tint, runningSinceUnixMillis) = (
                 thread.unread ? "Response ready" : "Ready",
                 thread.unread ? "checkmark.circle.fill" : "circle",
-                thread.unread ? Nord.auroraGreen : .secondary,
+                thread.unread ? KanameColor.success : .secondary,
                 nil
             )
         case .completed:
@@ -15929,7 +15941,7 @@ private struct QuickActionCard: View {
                     .foregroundStyle(.tertiary)
             }
             .padding(15)
-            .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 15))
+            .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 15))
         }
         .buttonStyle(.plain)
     }
@@ -15949,7 +15961,7 @@ private struct ProjectCard: View {
                     HStack(spacing: 12) {
                         Image(systemName: "folder.fill")
                             .font(.title2)
-                            .foregroundStyle(Nord.frost2)
+                            .foregroundStyle(KanameColor.accent)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(project.name).font(.title3.weight(.bold))
                             Text("\(threads.count) active thread\(threads.count == 1 ? "" : "s")")
@@ -15966,7 +15978,7 @@ private struct ProjectCard: View {
                     Image(systemName: "square.and.pencil")
                         .font(.body.weight(.semibold))
                         .frame(width: 30, height: 30)
-                        .background(Nord.polarNight2, in: Circle())
+                        .background(KanameColor.raised, in: Circle())
                 }
                 .buttonStyle(.plain)
                 .help("New conversation in \(project.name)")
@@ -16019,7 +16031,7 @@ private struct ProjectCard: View {
         }
         .padding(18)
         .frame(maxWidth: .infinity, minHeight: 210, alignment: .topLeading)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 17))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 17))
     }
 }
 
@@ -16055,7 +16067,7 @@ private struct DeviceEndpointCard: View {
         }
         .padding(18)
         .frame(maxWidth: .infinity, minHeight: 205, alignment: .topLeading)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 17))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 17))
     }
 }
 
@@ -16082,7 +16094,7 @@ private struct RemoteStatusCard: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, minHeight: 180, alignment: .topLeading)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 16))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 16))
     }
 }
 
@@ -16095,10 +16107,10 @@ private struct RemoteTimelineRow: View {
             VStack(spacing: 0) {
                 Image(systemName: event.state.symbol)
                     .foregroundStyle(event.state.tint)
-                    .background(Nord.polarNight1)
+                    .background(KanameColor.surface)
                 if !isLast {
                     Rectangle()
-                        .fill(Nord.polarNight3)
+                        .fill(KanameColor.separator)
                         .frame(width: 1, height: 45)
                 }
             }
@@ -16156,14 +16168,14 @@ private struct DesktopDecisionFooter<Actions: View>: View {
         }
         .padding(.horizontal, 22)
         .padding(.vertical, 16)
-        .background(Nord.polarNight1)
+        .background(KanameColor.surface)
     }
 
     private var decisionText: some View {
         (
             Text(title).font(.subheadline.weight(.semibold))
                 + Text("\n")
-                + Text(detail).font(.caption).foregroundColor(Nord.snowStorm0.opacity(0.72))
+                + Text(detail).font(.caption).foregroundColor(KanameColor.textPrimary.opacity(0.72))
         )
         .fixedSize(horizontal: false, vertical: true)
     }
@@ -16238,7 +16250,7 @@ private struct ThreadPlanView: View {
                 }
             }
         }
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
@@ -16332,17 +16344,17 @@ private struct ThreadPlanView: View {
     private var requestChangesButton: some View {
         Button("Request changes", systemImage: "text.bubble", action: requestChanges)
             .buttonStyle(.bordered)
-            .tint(Nord.frost1)
+            .tint(KanameColor.accent)
             .accessibilityHint("Opens Chat and focuses the composer for revision guidance")
     }
 
     private var approvePlanButton: some View {
         Button(action: approvePlan) {
             Label("Approve plan & implement", systemImage: "checkmark.shield.fill")
-                .foregroundStyle(Nord.polarNight0)
+                .foregroundStyle(KanameColor.canvas)
         }
         .buttonStyle(.borderedProminent)
-        .tint(Nord.auroraGreen)
+        .tint(KanameColor.success)
         .disabled(items.isEmpty || !providerSupportsImplementation)
         .help(approvalHelp)
         .accessibilityHint(approvalHelp)
@@ -16446,7 +16458,7 @@ private struct ThreadPlanBodyView: View {
                         .font(.system(.callout, design: .monospaced))
                         .padding(10)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                 }
             }
         }
@@ -16523,7 +16535,7 @@ private struct ThreadEvidenceView: View {
                         ForEach(findings) { finding in
                             HStack(alignment: .top, spacing: 12) {
                                 Image(systemName: "magnifyingglass.circle.fill")
-                                    .foregroundStyle(Nord.frost1)
+                                    .foregroundStyle(KanameColor.accent)
                                     .font(.title3)
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text(finding.title).font(.subheadline.weight(.semibold))
@@ -16534,7 +16546,7 @@ private struct ThreadEvidenceView: View {
                                 Spacer()
                             }
                             .padding(15)
-                            .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+                            .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 14))
                         }
                         if !items.isEmpty {
                             Text("Checks")
@@ -16560,7 +16572,7 @@ private struct ThreadEvidenceView: View {
                                     .foregroundStyle(item.state.tint)
                             }
                             .padding(15)
-                            .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+                            .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 14))
                         }
                     }
                 }
@@ -16618,7 +16630,7 @@ private struct DesktopMessageBubble: View {
             if message.role == .user { Spacer(minLength: 60) }
             if message.role != .user {
                 Image(systemName: message.role == .assistant ? "sparkles" : "shield.lefthalf.filled")
-                    .foregroundStyle(message.role == .assistant ? Nord.frost1 : Nord.auroraPurple)
+                    .foregroundStyle(message.role == .assistant ? KanameColor.accent : KanameColor.blocked)
                     .frame(width: 25)
             }
             VStack(alignment: .leading, spacing: 6) {
@@ -16731,7 +16743,7 @@ private struct DesktopConversationImagePreview: View {
             }
         }
         .frame(width: size.width, height: size.height)
-        .background(Nord.polarNight2, in: RoundedRectangle(cornerRadius: 9))
+        .background(KanameColor.raised, in: RoundedRectangle(cornerRadius: 9))
         .clipShape(RoundedRectangle(cornerRadius: 9))
         .accessibilityLabel("Attached image \(attachment.filename)")
 #else
@@ -16956,15 +16968,15 @@ private extension DesktopRecordState {
 
     var tint: Color {
         switch self {
-        case .ready: Nord.auroraGreen
-        case .draft: Nord.frost1
-        case .proposed: Nord.auroraPurple
-        case .paused: Nord.auroraYellow
-        case .disconnected: Nord.polarNight3
-        case .needsReview: Nord.auroraOrange
-        case .waiting: Nord.auroraYellow
-        case .running: Nord.frost1
-        case .failed: Nord.auroraRed
+        case .ready: KanameColor.success
+        case .draft: KanameColor.accent
+        case .proposed: KanameColor.blocked
+        case .paused: KanameColor.warning
+        case .disconnected: KanameColor.separator
+        case .needsReview: KanameColor.external
+        case .waiting: KanameColor.warning
+        case .running: KanameColor.accent
+        case .failed: KanameColor.danger
         }
     }
 
@@ -16990,12 +17002,12 @@ private extension DesktopActionState {
 
     var tint: Color {
         switch self {
-        case .proposed, .awaitingApproval: Nord.auroraYellow
-        case .approved, .running: Nord.frost1
-        case .rejected, .failed: Nord.auroraRed
-        case .interrupted: Nord.auroraOrange
-        case .completed, .reconciled: Nord.auroraGreen
-        case .cancelled: Nord.polarNight3
+        case .proposed, .awaitingApproval: KanameColor.warning
+        case .approved, .running: KanameColor.accent
+        case .rejected, .failed: KanameColor.danger
+        case .interrupted: KanameColor.external
+        case .completed, .reconciled: KanameColor.success
+        case .cancelled: KanameColor.separator
         }
     }
 }
@@ -17026,9 +17038,9 @@ private extension DesktopKnowledgeSource.Kind {
 
     var tint: Color {
         switch self {
-        case .obsidian: Nord.auroraPurple
-        case .lode: Nord.frost0
-        case .repository: Nord.frost1
+        case .obsidian: KanameColor.blocked
+        case .lode: KanameColor.active
+        case .repository: KanameColor.accent
         }
     }
 }
@@ -17070,13 +17082,13 @@ private extension DesktopAccountRecord.Service {
 private extension DesktopAttention {
     var tint: Color {
         switch self {
-        case .needsResponse, .needsApproval: Nord.auroraYellow
-        case .needsInput: Nord.auroraPurple
-        case .running: Nord.frost0
-        case .queued: Nord.frost3
-        case .completed: Nord.auroraGreen
-        case .failed: Nord.auroraRed
-        case .archived: Nord.polarNight3
+        case .needsResponse, .needsApproval: KanameColor.warning
+        case .needsInput: KanameColor.blocked
+        case .running: KanameColor.active
+        case .queued: KanameColor.accentStrong
+        case .completed: KanameColor.success
+        case .failed: KanameColor.danger
+        case .archived: KanameColor.separator
         }
     }
 }
@@ -17112,9 +17124,9 @@ private extension DesktopMessageRole {
 
     var background: Color {
         switch self {
-        case .user: Nord.frost3.opacity(0.24)
-        case .assistant: Nord.polarNight1
-        case .system: Nord.auroraPurple.opacity(0.12)
+        case .user: KanameColor.accentStrong.opacity(0.24)
+        case .assistant: KanameColor.surface
+        case .system: KanameColor.blocked.opacity(0.12)
         }
     }
 }
@@ -17130,9 +17142,9 @@ private extension DesktopPlanItem.State {
 
     var tint: Color {
         switch self {
-        case .pending: Nord.snowStorm0.opacity(0.78)
-        case .inProgress: Nord.frost1
-        case .complete: Nord.auroraGreen
+        case .pending: KanameColor.textPrimary.opacity(0.78)
+        case .inProgress: KanameColor.accent
+        case .complete: KanameColor.success
         }
     }
 }
@@ -17152,11 +17164,11 @@ private extension DesktopCodingWorkflowStage {
 
     var tint: Color {
         switch self {
-        case .failed, .rejected: Nord.auroraRed
-        case .planReview, .implementationReview, .evidenceReview, .knowledgeReview: Nord.auroraYellow
-        case .planning, .preparing, .implementing: Nord.frost1
-        case .completed: Nord.auroraGreen
-        case .discuss: Nord.frost0
+        case .failed, .rejected: KanameColor.danger
+        case .planReview, .implementationReview, .evidenceReview, .knowledgeReview: KanameColor.warning
+        case .planning, .preparing, .implementing: KanameColor.accent
+        case .completed: KanameColor.success
+        case .discuss: KanameColor.active
         }
     }
 }
@@ -17165,11 +17177,11 @@ private extension DesktopPlanPhase {
     var tint: Color {
         switch self {
         case .notStarted: Color.secondary
-        case .saved: Nord.frost0
-        case .drafting, .implementing: Nord.frost1
-        case .awaitingApproval, .reviewingResult: Nord.auroraYellow
-        case .completed: Nord.auroraGreen
-        case .stopped: Nord.auroraRed
+        case .saved: KanameColor.active
+        case .drafting, .implementing: KanameColor.accent
+        case .awaitingApproval, .reviewingResult: KanameColor.warning
+        case .completed: KanameColor.success
+        case .stopped: KanameColor.danger
         }
     }
 }
@@ -17201,10 +17213,10 @@ private extension DesktopEvidence.State {
 
     var tint: Color {
         switch self {
-        case .passed: Nord.auroraGreen
-        case .pending: Nord.frost1
-        case .notRun: Nord.auroraYellow
-        case .failed: Nord.auroraRed
+        case .passed: KanameColor.success
+        case .pending: KanameColor.accent
+        case .notRun: KanameColor.warning
+        case .failed: KanameColor.danger
         }
     }
 }
@@ -17230,10 +17242,10 @@ private extension DesktopRemoteEvent.State {
 
     var tint: Color {
         switch self {
-        case .passed: Nord.auroraGreen
-        case .ready: Nord.frost1
-        case .notRun: Nord.auroraYellow
-        case .deferred: Nord.auroraYellow
+        case .passed: KanameColor.success
+        case .ready: KanameColor.accent
+        case .notRun: KanameColor.warning
+        case .deferred: KanameColor.warning
         }
     }
 }

@@ -4,6 +4,7 @@ import KanameProtocol
 import KanamePrototypeUI
 import KanameWorkflowHost
 import SwiftUI
+import KanameDesignSystem
 
 private struct AutomationWorkflowStarterTemplate: Identifiable {
     let id: String
@@ -32,7 +33,7 @@ private struct AutomationWorkflowStarterTemplate: Identifiable {
                 title: "Email feedback loop",
                 summary: "Keep one durable conversation across replies and human review.",
                 symbol: "envelope.arrow.triangle.branch",
-                tint: Nord.frost1,
+                tint: KanameColor.accent,
                 triggerKinds: [.email],
                 steps: [
                     .init(
@@ -67,7 +68,7 @@ private struct AutomationWorkflowStarterTemplate: Identifiable {
                 title: "Classify and route",
                 summary: "Choose typed matched and fallback paths from one decision.",
                 symbol: "arrow.triangle.branch",
-                tint: Nord.auroraYellow,
+                tint: KanameColor.warning,
                 triggerKinds: [.manual],
                 steps: [
                     .init(
@@ -97,7 +98,7 @@ private struct AutomationWorkflowStarterTemplate: Identifiable {
                 title: "Parallel review",
                 summary: "Run a bounded collection concurrently, then review the aggregate.",
                 symbol: "arrow.triangle.2.circlepath",
-                tint: Nord.auroraPurple,
+                tint: KanameColor.blocked,
                 triggerKinds: [.manual],
                 steps: [
                     .init(
@@ -124,7 +125,7 @@ private struct AutomationWorkflowStarterTemplate: Identifiable {
                 title: "Approval gate",
                 summary: "Place an explicit approval barrier before adding a reviewed effect.",
                 symbol: "checkmark.shield",
-                tint: Nord.auroraGreen,
+                tint: KanameColor.success,
                 triggerKinds: [.manual],
                 steps: [
                     .init(
@@ -143,7 +144,7 @@ private struct AutomationWorkflowStarterTemplate: Identifiable {
                 title: "Batch processing",
                 summary: "Process a bounded collection with controlled concurrency and aggregation.",
                 symbol: "square.stack.3d.up",
-                tint: Nord.frost2,
+                tint: KanameColor.accent,
                 triggerKinds: [.manual],
                 steps: [
                     .init(
@@ -336,7 +337,7 @@ struct AutomationWorkflowProductView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
         .onAppear {
             if selectedWorkflowID == nil { selectedWorkflowID = definitions.first?.id }
             prepareStudioQualificationFixtureIfRequested()
@@ -642,7 +643,7 @@ private struct AutomationComponentsView: View {
                     }
                     Spacer()
                     Label("\(componentCount) installed", systemImage: "puzzlepiece.extension.fill")
-                        .font(.caption.weight(.semibold)).foregroundStyle(Nord.frost1)
+                        .font(.caption.weight(.semibold)).foregroundStyle(KanameColor.accent)
                 }
                 if let packageMessage {
                     BoundaryCallout(title: "Package operation", detail: packageMessage)
@@ -760,15 +761,15 @@ private struct AutomationComponentsView: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 14))
     }
 
     private func componentGuideCard(title: String, symbol: String, detail: String) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: symbol)
-                .foregroundStyle(Nord.frost1)
+                .foregroundStyle(KanameColor.accent)
                 .frame(width: 24, height: 24)
-                .background(Nord.frost1.opacity(0.12), in: RoundedRectangle(cornerRadius: 7))
+                .background(KanameColor.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 7))
             VStack(alignment: .leading, spacing: 3) {
                 Text(title).font(.caption.weight(.semibold))
                 Text(detail).font(.caption2).foregroundStyle(.secondary)
@@ -777,7 +778,7 @@ private struct AutomationComponentsView: View {
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .topLeading)
-        .background(Nord.polarNight2.opacity(0.55), in: RoundedRectangle(cornerRadius: 10))
+        .background(KanameColor.raised.opacity(0.55), in: RoundedRectangle(cornerRadius: 10))
     }
 
     private var schedules: some View {
@@ -808,7 +809,7 @@ private struct AutomationComponentsView: View {
             }
             ForEach(model.snapshot.domains.automations) { rule in
                 HStack(alignment: .top, spacing: 12) {
-                    Image(systemName: "calendar.badge.clock").foregroundStyle(rule.status == .paused ? .secondary : Nord.frost1)
+                    Image(systemName: "calendar.badge.clock").foregroundStyle(rule.status == .paused ? .secondary : KanameColor.accent)
                     VStack(alignment: .leading, spacing: 3) {
                         Text(rule.name).font(.subheadline.weight(.semibold))
                         Text("\(rule.schedule) · \(rule.timeZoneIdentifier)").font(.caption).foregroundStyle(.secondary)
@@ -823,12 +824,12 @@ private struct AutomationComponentsView: View {
                     .labelsHidden()
                 }
                 .padding(12)
-                .background(Nord.polarNight2.opacity(0.55), in: RoundedRectangle(cornerRadius: 10))
+                .background(KanameColor.raised.opacity(0.55), in: RoundedRectangle(cornerRadius: 10))
             }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 14))
     }
 
     private func componentSection<Content: View>(
@@ -845,7 +846,7 @@ private struct AutomationComponentsView: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 14))
         .accessibilityHint(empty)
     }
 
@@ -858,7 +859,7 @@ private struct AutomationComponentsView: View {
     ) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: ready ? "checkmark.seal.fill" : "pause.circle")
-                .foregroundStyle(ready ? Nord.auroraGreen : .secondary)
+                .foregroundStyle(ready ? KanameColor.success : .secondary)
             VStack(alignment: .leading, spacing: 3) {
                 Text(title).font(.subheadline.weight(.semibold))
                 Text(detail.isEmpty ? "No additional capabilities declared" : detail)
@@ -867,12 +868,12 @@ private struct AutomationComponentsView: View {
             Spacer()
             VStack(alignment: .trailing, spacing: 3) {
                 Text(version).font(.system(.caption, design: .monospaced))
-                Text(status).font(.caption2).foregroundStyle(ready ? Nord.auroraGreen : .secondary)
+                Text(status).font(.caption2).foregroundStyle(ready ? KanameColor.success : .secondary)
             }
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Nord.polarNight2.opacity(0.55), in: RoundedRectangle(cornerRadius: 10))
+        .background(KanameColor.raised.opacity(0.55), in: RoundedRectangle(cornerRadius: 10))
     }
 }
 
@@ -968,7 +969,7 @@ private struct AutomationReadinessView: View {
                         ForEach(installations) { installation in
                             HStack(alignment: .top, spacing: 12) {
                                 Image(systemName: installation.readinessIssues.isEmpty ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
-                                    .foregroundStyle(installation.readinessIssues.isEmpty ? Nord.auroraGreen : Nord.auroraYellow)
+                                    .foregroundStyle(installation.readinessIssues.isEmpty ? KanameColor.success : KanameColor.warning)
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(installation.name).font(.subheadline.weight(.semibold))
                                     Text(installation.readinessIssues.isEmpty
@@ -980,7 +981,7 @@ private struct AutomationReadinessView: View {
                                 Button("Configure…") { configureInstallation(installation) }.buttonStyle(.bordered)
                             }
                             .padding(12)
-                            .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
+                            .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 12))
                         }
                     }
                     VStack(alignment: .leading, spacing: 10) {
@@ -998,7 +999,7 @@ private struct AutomationReadinessView: View {
                                     .font(.caption2.weight(.bold)).foregroundStyle(readinessTint(check.state))
                             }
                             .padding(10)
-                            .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 10))
+                            .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 10))
                         }
                     }
                 }
@@ -1016,7 +1017,7 @@ private struct AutomationReadinessView: View {
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 10))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 10))
     }
 }
 
@@ -1030,9 +1031,9 @@ private func readinessSymbol(_ state: DesktopWorkflowMigrationReadinessState) ->
 
 private func readinessTint(_ state: DesktopWorkflowMigrationReadinessState) -> Color {
     switch state {
-    case .ready: Nord.auroraGreen
-    case .attention: Nord.auroraYellow
-    case .blocked: Nord.auroraRed
+    case .ready: KanameColor.success
+    case .attention: KanameColor.warning
+    case .blocked: KanameColor.danger
     }
 }
 
@@ -1082,10 +1083,10 @@ struct AutomationWorkflowDesignPreview: View {
                     ) {
                         Label("Design preview", systemImage: "hammer.fill")
                             .font(.caption.weight(.semibold))
-                            .foregroundStyle(Nord.auroraYellow)
+                            .foregroundStyle(KanameColor.warning)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 6)
-                            .background(Nord.auroraYellow.opacity(0.12), in: Capsule())
+                            .background(KanameColor.warning.opacity(0.12), in: Capsule())
                         Button("New workflow", systemImage: "plus") {}
                             .buttonStyle(.borderedProminent)
                             .disabled(true)
@@ -1141,16 +1142,16 @@ struct AutomationWorkflowDesignPreview: View {
                     .padding(proxy.size.width < 950 ? 14 : 20)
                 }
             }
-            .background(Nord.polarNight0)
+            .background(KanameColor.canvas)
         }
     }
 
     private var compactProductHeader: some View {
         HStack(spacing: 10) {
             Image(systemName: "point.3.connected.trianglepath.dotted")
-                .foregroundStyle(Nord.frost1)
+                .foregroundStyle(KanameColor.accent)
                 .frame(width: 30, height: 30)
-                .background(Nord.frost1.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                .background(KanameColor.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
             VStack(alignment: .leading, spacing: 2) {
                 Text("Automations").font(.headline.weight(.bold))
                 Text("Design, run, and debug repeatable work")
@@ -1160,10 +1161,10 @@ struct AutomationWorkflowDesignPreview: View {
             Spacer()
             Label("Design preview", systemImage: "hammer.fill")
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(Nord.auroraYellow)
+                .foregroundStyle(KanameColor.warning)
                 .padding(.horizontal, 9)
                 .padding(.vertical, 5)
-                .background(Nord.auroraYellow.opacity(0.12), in: Capsule())
+                .background(KanameColor.warning.opacity(0.12), in: Capsule())
         }
         .padding(.horizontal, 20)
         .padding(.top, 14)
@@ -1217,7 +1218,7 @@ private struct AutomationMatchRoutingDesignPreview: View {
             HStack(spacing: 14) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Match routing").font(.title3.weight(.bold))
-                    Text(option.title).font(.caption.weight(.semibold)).foregroundStyle(Nord.frost1)
+                    Text(option.title).font(.caption.weight(.semibold)).foregroundStyle(KanameColor.accent)
                     Text(option.summary).font(.caption2).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -1231,7 +1232,7 @@ private struct AutomationMatchRoutingDesignPreview: View {
                 .frame(width: 480)
                 Label("Design only", systemImage: "hammer.fill")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(Nord.auroraYellow)
+                    .foregroundStyle(KanameColor.warning)
             }
 
             HStack(alignment: .top, spacing: 12) {
@@ -1254,7 +1255,7 @@ private struct AutomationMatchRoutingCanvas: View {
             HStack(spacing: 10) {
                 Label("Canvas", systemImage: "point.3.connected.trianglepath.dotted")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(Nord.frost1)
+                    .foregroundStyle(KanameColor.accent)
                 Text("Readable 100%").font(.caption2).foregroundStyle(.secondary)
                 Spacer()
                 Label("One value in", systemImage: "arrow.right")
@@ -1289,24 +1290,24 @@ private struct AutomationMatchRoutingCanvas: View {
                             dots.addEllipse(in: CGRect(x: x, y: y, width: 1.2, height: 1.2))
                         }
                     }
-                    context.fill(dots, with: .color(Nord.polarNight3.opacity(0.38)))
+                    context.fill(dots, with: .color(KanameColor.separator.opacity(0.38)))
                 }
             }
             .clipShape(RoundedRectangle(cornerRadius: 12))
-            .overlay { RoundedRectangle(cornerRadius: 12).stroke(Nord.polarNight3, lineWidth: 1) }
+            .overlay { RoundedRectangle(cornerRadius: 12).stroke(KanameColor.separator, lineWidth: 1) }
 
             HStack(spacing: 14) {
-                Label("Success", systemImage: "checkmark.circle.fill").foregroundStyle(Nord.auroraGreen)
-                Label("Error", systemImage: "xmark.octagon.fill").foregroundStyle(Nord.auroraRed)
-                Label("Match route", systemImage: "arrow.triangle.branch").foregroundStyle(Nord.auroraYellow)
-                Label("Retry loop", systemImage: "arrow.clockwise").foregroundStyle(Nord.auroraOrange)
+                Label("Success", systemImage: "checkmark.circle.fill").foregroundStyle(KanameColor.success)
+                Label("Error", systemImage: "xmark.octagon.fill").foregroundStyle(KanameColor.danger)
+                Label("Match route", systemImage: "arrow.triangle.branch").foregroundStyle(KanameColor.warning)
+                Label("Retry loop", systemImage: "arrow.clockwise").foregroundStyle(KanameColor.external)
                 Spacer()
                 Text("Case order and fallback are versioned with the workflow")
             }
             .font(.caption2)
         }
         .padding(12)
-        .background(Nord.polarNight1.opacity(0.46), in: RoundedRectangle(cornerRadius: 14))
+        .background(KanameColor.surface.opacity(0.46), in: RoundedRectangle(cornerRadius: 14))
     }
 
     @ViewBuilder
@@ -1325,21 +1326,21 @@ private struct AutomationMatchRoutingCanvas: View {
             title: "Match priority",
             input: "Success.value · Int",
             cases: [
-                ("5", "Urgent path", Nord.auroraRed),
-                ("8", "Review path", Nord.auroraYellow),
-                ("_", "Otherwise", Nord.frost1),
+                ("5", "Urgent path", KanameColor.danger),
+                ("8", "Review path", KanameColor.warning),
+                ("_", "Otherwise", KanameColor.accent),
             ]
         )
         .frame(width: 230)
         .position(x: size.width * 0.46, y: size.height * 0.50)
 
-        routeDestination("Urgent", detail: "Notify now", symbol: "bell.badge.fill", tint: Nord.auroraRed)
+        routeDestination("Urgent", detail: "Notify now", symbol: "bell.badge.fill", tint: KanameColor.danger)
             .frame(width: 165)
             .position(x: size.width * 0.82, y: size.height * 0.24)
-        routeDestination("Review", detail: "Human decision", symbol: "person.crop.circle.badge.questionmark", tint: Nord.auroraYellow)
+        routeDestination("Review", detail: "Human decision", symbol: "person.crop.circle.badge.questionmark", tint: KanameColor.warning)
             .frame(width: 165)
             .position(x: size.width * 0.82, y: size.height * 0.50)
-        routeDestination("Normal", detail: "Continue", symbol: "arrow.right.circle", tint: Nord.frost1)
+        routeDestination("Normal", detail: "Continue", symbol: "arrow.right.circle", tint: KanameColor.accent)
             .frame(width: 165)
             .position(x: size.width * 0.82, y: size.height * 0.76)
     }
@@ -1360,16 +1361,16 @@ private struct AutomationMatchRoutingCanvas: View {
             .frame(width: 340)
             .position(x: size.width * 0.48, y: size.height * 0.50)
 
-        routeDestination("Fast path", detail: "Codes 5 or 8", symbol: "bolt.fill", tint: Nord.auroraGreen)
+        routeDestination("Fast path", detail: "Codes 5 or 8", symbol: "bolt.fill", tint: KanameColor.success)
             .frame(width: 160)
             .position(x: size.width * 0.84, y: size.height * 0.19)
-        routeDestination("Follow-up", detail: "Range 13…19", symbol: "clock.arrow.circlepath", tint: Nord.auroraPurple)
+        routeDestination("Follow-up", detail: "Range 13…19", symbol: "clock.arrow.circlepath", tint: KanameColor.blocked)
             .frame(width: 160)
             .position(x: size.width * 0.84, y: size.height * 0.40)
-        routeDestination("Missing value", detail: "Ask for input", symbol: "questionmark.circle", tint: Nord.auroraYellow)
+        routeDestination("Missing value", detail: "Ask for input", symbol: "questionmark.circle", tint: KanameColor.warning)
             .frame(width: 160)
             .position(x: size.width * 0.84, y: size.height * 0.61)
-        routeDestination("Default", detail: "Safe fallback", symbol: "arrow.down.right.circle", tint: Nord.frost1)
+        routeDestination("Default", detail: "Safe fallback", symbol: "arrow.down.right.circle", tint: KanameColor.accent)
             .frame(width: 160)
             .position(x: size.width * 0.84, y: size.height * 0.82)
     }
@@ -1390,13 +1391,13 @@ private struct AutomationMatchRoutingCanvas: View {
             .frame(width: 380)
             .position(x: size.width * 0.49, y: size.height * 0.50)
 
-        routeDestination("Priority retry", detail: "ALL + nested ANY", symbol: "arrow.clockwise", tint: Nord.auroraOrange)
+        routeDestination("Priority retry", detail: "ALL + nested ANY", symbol: "arrow.clockwise", tint: KanameColor.external)
             .frame(width: 175)
             .position(x: size.width * 0.85, y: size.height * 0.25)
-        routeDestination("Manual review", detail: "Risk or missing data", symbol: "person.crop.circle.badge.questionmark", tint: Nord.auroraYellow)
+        routeDestination("Manual review", detail: "Risk or missing data", symbol: "person.crop.circle.badge.questionmark", tint: KanameColor.warning)
             .frame(width: 175)
             .position(x: size.width * 0.85, y: size.height * 0.52)
-        routeDestination("Standard path", detail: "Otherwise", symbol: "arrow.right.circle", tint: Nord.frost1)
+        routeDestination("Standard path", detail: "Otherwise", symbol: "arrow.right.circle", tint: KanameColor.accent)
             .frame(width: 175)
             .position(x: size.width * 0.85, y: size.height * 0.79)
     }
@@ -1417,25 +1418,25 @@ private struct AutomationMatchRoutingCanvas: View {
             title: "Match error",
             input: "Error.kind · ErrorKind",
             cases: [
-                ("timeout", "Retry", Nord.auroraOrange),
-                ("invalid_input", "Review", Nord.auroraYellow),
-                ("unknown", "Reconcile", Nord.auroraRed),
-                ("_", "Fail safely", Nord.frost1),
+                ("timeout", "Retry", KanameColor.external),
+                ("invalid_input", "Review", KanameColor.warning),
+                ("unknown", "Reconcile", KanameColor.danger),
+                ("_", "Fail safely", KanameColor.accent),
             ]
         )
         .frame(width: 240)
         .position(x: size.width * 0.44, y: size.height * 0.58)
 
-        routeDestination("Receipt", detail: "Success continues", symbol: "doc.text.magnifyingglass", tint: Nord.auroraGreen)
+        routeDestination("Receipt", detail: "Success continues", symbol: "doc.text.magnifyingglass", tint: KanameColor.success)
             .frame(width: 165)
             .position(x: size.width * 0.82, y: size.height * 0.15)
-        routeDestination("Retry controller", detail: "Max 3 · backoff", symbol: "arrow.clockwise", tint: Nord.auroraOrange)
+        routeDestination("Retry controller", detail: "Max 3 · backoff", symbol: "arrow.clockwise", tint: KanameColor.external)
             .frame(width: 175)
             .position(x: size.width * 0.74, y: size.height * 0.38)
-        routeDestination("Human review", detail: "Correct input", symbol: "person.crop.circle.badge.exclamationmark", tint: Nord.auroraYellow)
+        routeDestination("Human review", detail: "Correct input", symbol: "person.crop.circle.badge.exclamationmark", tint: KanameColor.warning)
             .frame(width: 175)
             .position(x: size.width * 0.80, y: size.height * 0.62)
-        routeDestination("Reconcile", detail: "Never auto-retry", symbol: "questionmark.diamond.fill", tint: Nord.auroraRed)
+        routeDestination("Reconcile", detail: "Never auto-retry", symbol: "questionmark.diamond.fill", tint: KanameColor.danger)
             .frame(width: 175)
             .position(x: size.width * 0.80, y: size.height * 0.84)
     }
@@ -1443,7 +1444,7 @@ private struct AutomationMatchRoutingCanvas: View {
     private var expandedMatchBoard: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                Image(systemName: "arrow.triangle.branch").foregroundStyle(Nord.auroraYellow)
+                Image(systemName: "arrow.triangle.branch").foregroundStyle(KanameColor.warning)
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Match classification.code").font(.caption.weight(.bold))
                     Text("Expanded while selected · String?").font(.caption2).foregroundStyle(.secondary)
@@ -1451,31 +1452,31 @@ private struct AutomationMatchRoutingCanvas: View {
                 Spacer()
                 Text("FIRST MATCH")
                     .font(.system(size: 8, weight: .bold))
-                    .foregroundStyle(Nord.auroraYellow)
+                    .foregroundStyle(KanameColor.warning)
             }
             .padding(10)
-            .background(Nord.auroraYellow.opacity(0.08))
+            .background(KanameColor.warning.opacity(0.08))
 
-            expandedBoardRow("01", pattern: "5 | 8", destination: "Fast path", tint: Nord.auroraGreen)
-            expandedBoardRow("02", pattern: "13…19", destination: "Follow-up", tint: Nord.auroraPurple)
-            expandedBoardRow("03", pattern: "null", destination: "Missing value", tint: Nord.auroraYellow)
-            expandedBoardRow("04", pattern: "\"blocked\"", destination: "Human review", tint: Nord.auroraRed)
-            expandedBoardRow("05", pattern: "_ otherwise", destination: "Default", tint: Nord.frost1)
+            expandedBoardRow("01", pattern: "5 | 8", destination: "Fast path", tint: KanameColor.success)
+            expandedBoardRow("02", pattern: "13…19", destination: "Follow-up", tint: KanameColor.blocked)
+            expandedBoardRow("03", pattern: "null", destination: "Missing value", tint: KanameColor.warning)
+            expandedBoardRow("04", pattern: "\"blocked\"", destination: "Human review", tint: KanameColor.danger)
+            expandedBoardRow("05", pattern: "_ otherwise", destination: "Default", tint: KanameColor.accent)
             Button("Add case", systemImage: "plus") {}
                 .buttonStyle(.plain)
                 .font(.caption2.weight(.semibold))
-                .foregroundStyle(Nord.frost1)
+                .foregroundStyle(KanameColor.accent)
                 .padding(9)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
-        .overlay { RoundedRectangle(cornerRadius: 12).stroke(Nord.auroraYellow.opacity(0.52), lineWidth: 1.4) }
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 12))
+        .overlay { RoundedRectangle(cornerRadius: 12).stroke(KanameColor.warning.opacity(0.52), lineWidth: 1.4) }
     }
 
     private var complexObjectMatchBoard: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                Image(systemName: "arrow.triangle.branch").foregroundStyle(Nord.auroraYellow)
+                Image(systemName: "arrow.triangle.branch").foregroundStyle(KanameColor.warning)
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Match success.result").font(.caption.weight(.bold))
                     Text("RequestResult object · first match").font(.caption2).foregroundStyle(.secondary)
@@ -1483,28 +1484,28 @@ private struct AutomationMatchRoutingCanvas: View {
                 Spacer()
                 Text("COMPOUND")
                     .font(.system(size: 8, weight: .bold))
-                    .foregroundStyle(Nord.auroraYellow)
+                    .foregroundStyle(KanameColor.warning)
             }
             .padding(10)
-            .background(Nord.auroraYellow.opacity(0.08))
+            .background(KanameColor.warning.opacity(0.08))
 
             compoundCaseRow(
                 "01",
                 title: "Priority retry",
                 summary: "ALL 2 · nested ANY 1 of 2",
-                tint: Nord.auroraOrange
+                tint: KanameColor.external
             )
             compoundCaseRow(
                 "02",
                 title: "Manual review",
                 summary: "ANY 2 conditions",
-                tint: Nord.auroraYellow
+                tint: KanameColor.warning
             )
             compoundCaseRow(
                 "03",
                 title: "Otherwise",
                 summary: "Every valid unmatched value",
-                tint: Nord.frost1
+                tint: KanameColor.accent
             )
 
             HStack(spacing: 10) {
@@ -1517,8 +1518,8 @@ private struct AutomationMatchRoutingCanvas: View {
             .foregroundStyle(.secondary)
             .padding(9)
         }
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
-        .overlay { RoundedRectangle(cornerRadius: 12).stroke(Nord.auroraYellow.opacity(0.52), lineWidth: 1.4) }
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 12))
+        .overlay { RoundedRectangle(cornerRadius: 12).stroke(KanameColor.warning.opacity(0.52), lineWidth: 1.4) }
     }
 
     private func compoundCaseRow(_ index: String, title: String, summary: String, tint: Color) -> some View {
@@ -1537,7 +1538,7 @@ private struct AutomationMatchRoutingCanvas: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 9)
-        .background(Nord.polarNight0.opacity(0.55))
+        .background(KanameColor.canvas.opacity(0.55))
         .overlay(alignment: .bottom) { Divider() }
     }
 
@@ -1552,7 +1553,7 @@ private struct AutomationMatchRoutingCanvas: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
-        .background(Nord.polarNight0.opacity(0.55))
+        .background(KanameColor.canvas.opacity(0.55))
         .overlay(alignment: .bottom) { Divider() }
     }
 
@@ -1567,12 +1568,12 @@ private struct AutomationMatchRoutingCanvas: View {
             Label(title, systemImage: symbol).font(.caption.weight(.bold))
             Text(subtitle).font(.caption2).foregroundStyle(.secondary)
             Divider()
-            outputPort("Success · \(success)", tint: Nord.auroraGreen)
-            outputPort("Error · \(error)", tint: Nord.auroraRed)
+            outputPort("Success · \(success)", tint: KanameColor.success)
+            outputPort("Error · \(error)", tint: KanameColor.danger)
         }
         .padding(10)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 11))
-        .overlay { RoundedRectangle(cornerRadius: 11).stroke(Nord.frost1.opacity(0.45), lineWidth: 1) }
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 11))
+        .overlay { RoundedRectangle(cornerRadius: 11).stroke(KanameColor.accent.opacity(0.45), lineWidth: 1) }
     }
 
     private func outputPort(_ label: String, tint: Color) -> some View {
@@ -1590,7 +1591,7 @@ private struct AutomationMatchRoutingCanvas: View {
     ) -> some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                Image(systemName: "arrow.triangle.branch").foregroundStyle(Nord.auroraYellow)
+                Image(systemName: "arrow.triangle.branch").foregroundStyle(KanameColor.warning)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(title).font(.caption.weight(.bold))
                     Text("Typed · first match").font(.caption2).foregroundStyle(.secondary)
@@ -1598,16 +1599,16 @@ private struct AutomationMatchRoutingCanvas: View {
                 Spacer()
             }
             .padding(10)
-            .background(Nord.auroraYellow.opacity(0.08))
+            .background(KanameColor.warning.opacity(0.08))
 
             HStack(spacing: 6) {
-                Circle().fill(Nord.frost1).frame(width: 7, height: 7)
+                Circle().fill(KanameColor.accent).frame(width: 7, height: 7)
                 Text(input).font(.system(size: 9, weight: .semibold, design: .monospaced)).lineLimit(1)
                 Spacer()
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 7)
-            .background(Nord.polarNight0.opacity(0.65))
+            .background(KanameColor.canvas.opacity(0.65))
 
             ForEach(Array(cases.enumerated()), id: \.offset) { index, item in
                 HStack(spacing: 7) {
@@ -1628,8 +1629,8 @@ private struct AutomationMatchRoutingCanvas: View {
                 }
             }
         }
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
-        .overlay { RoundedRectangle(cornerRadius: 12).stroke(Nord.auroraYellow.opacity(0.58), lineWidth: 1.5) }
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 12))
+        .overlay { RoundedRectangle(cornerRadius: 12).stroke(KanameColor.warning.opacity(0.58), lineWidth: 1.5) }
     }
 
     private func routeDestination(_ title: String, detail: String, symbol: String, tint: Color) -> some View {
@@ -1642,36 +1643,36 @@ private struct AutomationMatchRoutingCanvas: View {
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 10))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 10))
         .overlay { RoundedRectangle(cornerRadius: 10).stroke(tint.opacity(0.46), lineWidth: 1) }
     }
 
     private func drawRoutes(context: inout GraphicsContext, size: CGSize) {
         switch option {
         case .namedPorts:
-            drawRoute(&context, from: CGPoint(x: size.width * 0.13 + 82, y: size.height * 0.50 + 13), to: CGPoint(x: size.width * 0.46 - 115, y: size.height * 0.50 - 40), tint: Nord.auroraGreen)
-            drawRoute(&context, from: CGPoint(x: size.width * 0.46 + 115, y: size.height * 0.50 - 10), to: CGPoint(x: size.width * 0.82 - 82, y: size.height * 0.24), tint: Nord.auroraRed)
-            drawRoute(&context, from: CGPoint(x: size.width * 0.46 + 115, y: size.height * 0.50 + 25), to: CGPoint(x: size.width * 0.82 - 82, y: size.height * 0.50), tint: Nord.auroraYellow)
-            drawRoute(&context, from: CGPoint(x: size.width * 0.46 + 115, y: size.height * 0.50 + 60), to: CGPoint(x: size.width * 0.82 - 82, y: size.height * 0.76), tint: Nord.frost1)
+            drawRoute(&context, from: CGPoint(x: size.width * 0.13 + 82, y: size.height * 0.50 + 13), to: CGPoint(x: size.width * 0.46 - 115, y: size.height * 0.50 - 40), tint: KanameColor.success)
+            drawRoute(&context, from: CGPoint(x: size.width * 0.46 + 115, y: size.height * 0.50 - 10), to: CGPoint(x: size.width * 0.82 - 82, y: size.height * 0.24), tint: KanameColor.danger)
+            drawRoute(&context, from: CGPoint(x: size.width * 0.46 + 115, y: size.height * 0.50 + 25), to: CGPoint(x: size.width * 0.82 - 82, y: size.height * 0.50), tint: KanameColor.warning)
+            drawRoute(&context, from: CGPoint(x: size.width * 0.46 + 115, y: size.height * 0.50 + 60), to: CGPoint(x: size.width * 0.82 - 82, y: size.height * 0.76), tint: KanameColor.accent)
         case .expandedBoard:
-            drawRoute(&context, from: CGPoint(x: size.width * 0.11 + 82, y: size.height * 0.50 + 13), to: CGPoint(x: size.width * 0.48 - 170, y: size.height * 0.50 - 125), tint: Nord.auroraGreen)
+            drawRoute(&context, from: CGPoint(x: size.width * 0.11 + 82, y: size.height * 0.50 + 13), to: CGPoint(x: size.width * 0.48 - 170, y: size.height * 0.50 - 125), tint: KanameColor.success)
             let boardX = size.width * 0.48 + 170
-            drawRoute(&context, from: CGPoint(x: boardX, y: size.height * 0.50 - 78), to: CGPoint(x: size.width * 0.84 - 80, y: size.height * 0.19), tint: Nord.auroraGreen)
-            drawRoute(&context, from: CGPoint(x: boardX, y: size.height * 0.50 - 38), to: CGPoint(x: size.width * 0.84 - 80, y: size.height * 0.40), tint: Nord.auroraPurple)
-            drawRoute(&context, from: CGPoint(x: boardX, y: size.height * 0.50 + 2), to: CGPoint(x: size.width * 0.84 - 80, y: size.height * 0.61), tint: Nord.auroraYellow)
-            drawRoute(&context, from: CGPoint(x: boardX, y: size.height * 0.50 + 82), to: CGPoint(x: size.width * 0.84 - 80, y: size.height * 0.82), tint: Nord.frost1)
+            drawRoute(&context, from: CGPoint(x: boardX, y: size.height * 0.50 - 78), to: CGPoint(x: size.width * 0.84 - 80, y: size.height * 0.19), tint: KanameColor.success)
+            drawRoute(&context, from: CGPoint(x: boardX, y: size.height * 0.50 - 38), to: CGPoint(x: size.width * 0.84 - 80, y: size.height * 0.40), tint: KanameColor.blocked)
+            drawRoute(&context, from: CGPoint(x: boardX, y: size.height * 0.50 + 2), to: CGPoint(x: size.width * 0.84 - 80, y: size.height * 0.61), tint: KanameColor.warning)
+            drawRoute(&context, from: CGPoint(x: boardX, y: size.height * 0.50 + 82), to: CGPoint(x: size.width * 0.84 - 80, y: size.height * 0.82), tint: KanameColor.accent)
         case .objectConditions:
-            drawRoute(&context, from: CGPoint(x: size.width * 0.11 + 87, y: size.height * 0.50 + 13), to: CGPoint(x: size.width * 0.49 - 190, y: size.height * 0.50 - 70), tint: Nord.auroraGreen)
+            drawRoute(&context, from: CGPoint(x: size.width * 0.11 + 87, y: size.height * 0.50 + 13), to: CGPoint(x: size.width * 0.49 - 190, y: size.height * 0.50 - 70), tint: KanameColor.success)
             let boardX = size.width * 0.49 + 190
-            drawRoute(&context, from: CGPoint(x: boardX, y: size.height * 0.50 - 42), to: CGPoint(x: size.width * 0.85 - 87, y: size.height * 0.25), tint: Nord.auroraOrange)
-            drawRoute(&context, from: CGPoint(x: boardX, y: size.height * 0.50 + 10), to: CGPoint(x: size.width * 0.85 - 87, y: size.height * 0.52), tint: Nord.auroraYellow)
-            drawRoute(&context, from: CGPoint(x: boardX, y: size.height * 0.50 + 64), to: CGPoint(x: size.width * 0.85 - 87, y: size.height * 0.79), tint: Nord.frost1)
+            drawRoute(&context, from: CGPoint(x: boardX, y: size.height * 0.50 - 42), to: CGPoint(x: size.width * 0.85 - 87, y: size.height * 0.25), tint: KanameColor.external)
+            drawRoute(&context, from: CGPoint(x: boardX, y: size.height * 0.50 + 10), to: CGPoint(x: size.width * 0.85 - 87, y: size.height * 0.52), tint: KanameColor.warning)
+            drawRoute(&context, from: CGPoint(x: boardX, y: size.height * 0.50 + 64), to: CGPoint(x: size.width * 0.85 - 87, y: size.height * 0.79), tint: KanameColor.accent)
         case .errorRecovery:
-            drawRoute(&context, from: CGPoint(x: size.width * 0.12 + 87, y: size.height * 0.42 - 7), to: CGPoint(x: size.width * 0.82 - 82, y: size.height * 0.15), tint: Nord.auroraGreen)
-            drawRoute(&context, from: CGPoint(x: size.width * 0.12 + 87, y: size.height * 0.42 + 25), to: CGPoint(x: size.width * 0.44 - 120, y: size.height * 0.58 - 54), tint: Nord.auroraRed)
-            drawRoute(&context, from: CGPoint(x: size.width * 0.44 + 120, y: size.height * 0.58 - 18), to: CGPoint(x: size.width * 0.74 - 87, y: size.height * 0.38), tint: Nord.auroraOrange)
-            drawRoute(&context, from: CGPoint(x: size.width * 0.44 + 120, y: size.height * 0.58 + 18), to: CGPoint(x: size.width * 0.80 - 87, y: size.height * 0.62), tint: Nord.auroraYellow)
-            drawRoute(&context, from: CGPoint(x: size.width * 0.44 + 120, y: size.height * 0.58 + 54), to: CGPoint(x: size.width * 0.80 - 87, y: size.height * 0.84), tint: Nord.auroraRed)
+            drawRoute(&context, from: CGPoint(x: size.width * 0.12 + 87, y: size.height * 0.42 - 7), to: CGPoint(x: size.width * 0.82 - 82, y: size.height * 0.15), tint: KanameColor.success)
+            drawRoute(&context, from: CGPoint(x: size.width * 0.12 + 87, y: size.height * 0.42 + 25), to: CGPoint(x: size.width * 0.44 - 120, y: size.height * 0.58 - 54), tint: KanameColor.danger)
+            drawRoute(&context, from: CGPoint(x: size.width * 0.44 + 120, y: size.height * 0.58 - 18), to: CGPoint(x: size.width * 0.74 - 87, y: size.height * 0.38), tint: KanameColor.external)
+            drawRoute(&context, from: CGPoint(x: size.width * 0.44 + 120, y: size.height * 0.58 + 18), to: CGPoint(x: size.width * 0.80 - 87, y: size.height * 0.62), tint: KanameColor.warning)
+            drawRoute(&context, from: CGPoint(x: size.width * 0.44 + 120, y: size.height * 0.58 + 54), to: CGPoint(x: size.width * 0.80 - 87, y: size.height * 0.84), tint: KanameColor.danger)
             drawRetryLoop(&context, size: size)
         }
     }
@@ -1710,14 +1711,14 @@ private struct AutomationMatchRoutingCanvas: View {
             control1: CGPoint(x: start.x, y: size.height * 0.05),
             control2: CGPoint(x: end.x, y: size.height * 0.05)
         )
-        context.stroke(path, with: .color(Nord.auroraOrange.opacity(0.9)), style: StrokeStyle(lineWidth: 2.4, dash: [8, 5]))
+        context.stroke(path, with: .color(KanameColor.external.opacity(0.9)), style: StrokeStyle(lineWidth: 2.4, dash: [8, 5]))
 
         var arrow = Path()
         arrow.move(to: end)
         arrow.addLine(to: CGPoint(x: end.x + 8, y: end.y - 5))
         arrow.addLine(to: CGPoint(x: end.x + 8, y: end.y + 5))
         arrow.closeSubpath()
-        context.fill(arrow, with: .color(Nord.auroraOrange))
+        context.fill(arrow, with: .color(KanameColor.external))
     }
 }
 
@@ -1728,9 +1729,9 @@ private struct AutomationMatchRoutingInspector: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 9) {
                 Image(systemName: "arrow.triangle.branch")
-                    .foregroundStyle(Nord.auroraYellow)
+                    .foregroundStyle(KanameColor.warning)
                     .frame(width: 30, height: 30)
-                    .background(Nord.auroraYellow.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                    .background(KanameColor.warning.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
                 VStack(alignment: .leading, spacing: 1) {
                     Text(inspectorTitle).font(.headline)
                     Text("Deterministic routing · no side effects").font(.caption2).foregroundStyle(.secondary)
@@ -1748,7 +1749,7 @@ private struct AutomationMatchRoutingInspector: View {
                 Label("Exhaustive", systemImage: "checkmark.circle.fill")
             }
             .font(.system(size: 9, weight: .semibold))
-            .foregroundStyle(Nord.auroraGreen)
+            .foregroundStyle(KanameColor.success)
 
             Divider()
             HStack {
@@ -1763,7 +1764,7 @@ private struct AutomationMatchRoutingInspector: View {
                     if index < cases.count - 1 { Divider() }
                 }
             }
-            .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 9))
+            .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 9))
 
             Button("Add case", systemImage: "plus") {}
                 .buttonStyle(.bordered)
@@ -1775,9 +1776,9 @@ private struct AutomationMatchRoutingInspector: View {
             } else {
                 Label("A value that matches no explicit case must use Otherwise; silent dropping is not allowed.", systemImage: "shield.fill")
                     .font(.caption2)
-                    .foregroundStyle(Nord.auroraYellow)
+                    .foregroundStyle(KanameColor.warning)
                     .padding(9)
-                    .background(Nord.auroraYellow.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                    .background(KanameColor.warning.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
             }
 
             Spacer(minLength: 0)
@@ -1786,7 +1787,7 @@ private struct AutomationMatchRoutingInspector: View {
                 .font(.caption2).foregroundStyle(.secondary)
         }
         .padding(14)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 14))
     }
 
     private var inspectorTitle: String {
@@ -1822,13 +1823,13 @@ private struct AutomationMatchRoutingInspector: View {
     private var cases: [(String, String, Color)] {
         switch option {
         case .namedPorts:
-            [("5", "Urgent", Nord.auroraRed), ("8", "Review", Nord.auroraYellow), ("_", "Normal", Nord.frost1)]
+            [("5", "Urgent", KanameColor.danger), ("8", "Review", KanameColor.warning), ("_", "Normal", KanameColor.accent)]
         case .expandedBoard:
-            [("5 | 8", "Fast path", Nord.auroraGreen), ("13…19", "Follow-up", Nord.auroraPurple), ("null", "Missing value", Nord.auroraYellow), ("\"blocked\"", "Human review", Nord.auroraRed), ("_", "Default", Nord.frost1)]
+            [("5 | 8", "Fast path", KanameColor.success), ("13…19", "Follow-up", KanameColor.blocked), ("null", "Missing value", KanameColor.warning), ("\"blocked\"", "Human review", KanameColor.danger), ("_", "Default", KanameColor.accent)]
         case .objectConditions:
-            [("ALL + ANY", "Priority retry", Nord.auroraOrange), ("ANY", "Manual review", Nord.auroraYellow), ("_", "Standard path", Nord.frost1)]
+            [("ALL + ANY", "Priority retry", KanameColor.external), ("ANY", "Manual review", KanameColor.warning), ("_", "Standard path", KanameColor.accent)]
         case .errorRecovery:
-            [(".timeout", "Retry controller", Nord.auroraOrange), (".invalidInput", "Human review", Nord.auroraYellow), (".unknownOutcome", "Reconcile", Nord.auroraRed), ("_", "Fail safely", Nord.frost1)]
+            [(".timeout", "Retry controller", KanameColor.external), (".invalidInput", "Human review", KanameColor.warning), (".unknownOutcome", "Reconcile", KanameColor.danger), ("_", "Fail safely", KanameColor.accent)]
         }
     }
 
@@ -1840,7 +1841,7 @@ private struct AutomationMatchRoutingInspector: View {
                 .textSelection(.enabled)
                 .padding(8)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 7))
+                .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 7))
         }
     }
 
@@ -1863,15 +1864,15 @@ private struct AutomationMatchRoutingInspector: View {
     private var errorSafetyPanel: some View {
         VStack(alignment: .leading, spacing: 6) {
             Label("Retry remains a control node", systemImage: "arrow.clockwise.circle.fill")
-                .font(.caption.weight(.bold)).foregroundStyle(Nord.auroraOrange)
+                .font(.caption.weight(.bold)).foregroundStyle(KanameColor.external)
             safetyRow("Maximum attempts", value: "3")
             safetyRow("Backoff", value: "2 s · ×2 · jitter")
             safetyRow("Idempotency", value: "Required")
             safetyRow("Unknown outcome", value: "Never auto-retry")
         }
         .padding(9)
-        .background(Nord.auroraOrange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-        .overlay { RoundedRectangle(cornerRadius: 8).stroke(Nord.auroraOrange.opacity(0.28), lineWidth: 1) }
+        .background(KanameColor.external.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+        .overlay { RoundedRectangle(cornerRadius: 8).stroke(KanameColor.external.opacity(0.28), lineWidth: 1) }
     }
 
     private var complexConditionPanel: some View {
@@ -1879,25 +1880,25 @@ private struct AutomationMatchRoutingInspector: View {
             HStack {
                 Label("Priority retry", systemImage: "point.3.filled.connected.trianglepath.dotted")
                     .font(.caption.weight(.bold))
-                    .foregroundStyle(Nord.auroraOrange)
+                    .foregroundStyle(KanameColor.external)
                 Spacer()
                 Text("ALL").font(.system(size: 9, weight: .bold, design: .monospaced))
             }
 
-            conditionRow("status", relation: "equals", value: "failed", tint: Nord.auroraGreen)
-            conditionRow("error.retryable", relation: "is", value: "true", tint: Nord.auroraGreen)
+            conditionRow("status", relation: "equals", value: "failed", tint: KanameColor.success)
+            conditionRow("error.retryable", relation: "is", value: "true", tint: KanameColor.success)
 
             HStack {
                 Text("AND").font(.system(size: 8, weight: .bold, design: .monospaced)).foregroundStyle(.secondary)
                 Divider()
-                Text("ANY · 1 of 2").font(.system(size: 9, weight: .bold, design: .monospaced)).foregroundStyle(Nord.frost1)
+                Text("ANY · 1 of 2").font(.system(size: 9, weight: .bold, design: .monospaced)).foregroundStyle(KanameColor.accent)
                 Spacer()
                 Button("+ condition") {}.buttonStyle(.plain).font(.system(size: 9))
             }
             .frame(height: 18)
 
-            conditionRow("customer.tier", relation: "equals", value: "priority", tint: Nord.frost1)
-            conditionRow("value", relation: "≥", value: "10,000", tint: Nord.frost1)
+            conditionRow("customer.tier", relation: "equals", value: "priority", tint: KanameColor.accent)
+            conditionRow("value", relation: "≥", value: "10,000", tint: KanameColor.accent)
 
             HStack(spacing: 7) {
                 Button("+ AND") {}.buttonStyle(.bordered).controlSize(.mini)
@@ -1906,12 +1907,12 @@ private struct AutomationMatchRoutingInspector: View {
                 Spacer()
                 Label("Fixture matched", systemImage: "checkmark.circle.fill")
                     .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(Nord.auroraGreen)
+                    .foregroundStyle(KanameColor.success)
             }
         }
         .padding(9)
-        .background(Nord.auroraOrange.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
-        .overlay { RoundedRectangle(cornerRadius: 8).stroke(Nord.auroraOrange.opacity(0.26), lineWidth: 1) }
+        .background(KanameColor.external.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
+        .overlay { RoundedRectangle(cornerRadius: 8).stroke(KanameColor.external.opacity(0.26), lineWidth: 1) }
     }
 
     private func conditionRow(_ field: String, relation: String, value: String, tint: Color) -> some View {
@@ -1923,7 +1924,7 @@ private struct AutomationMatchRoutingInspector: View {
         }
         .padding(.horizontal, 7)
         .padding(.vertical, 5)
-        .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 6))
+        .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 6))
     }
 
     private func safetyRow(_ label: String, value: String) -> some View {
@@ -1965,10 +1966,10 @@ private enum AutomationPreviewState {
 
     var tint: Color {
         switch self {
-        case .complete: Nord.auroraGreen
-        case .running: Nord.frost1
-        case .waiting: Nord.auroraYellow
-        case .blocked: Nord.auroraRed
+        case .complete: KanameColor.success
+        case .running: KanameColor.accent
+        case .waiting: KanameColor.warning
+        case .blocked: KanameColor.danger
         case .planned: Color.secondary
         }
     }
@@ -2007,7 +2008,7 @@ private struct AutomationMigrationProgress: View {
         HStack(spacing: 5) {
             ForEach(Array(labels.enumerated()), id: \.offset) { index, label in
                 Circle()
-                    .fill(index < completed ? Nord.auroraGreen : Nord.polarNight3)
+                    .fill(index < completed ? KanameColor.success : KanameColor.separator)
                     .frame(width: 7, height: 7)
                     .help(label)
             }
@@ -2162,7 +2163,7 @@ private struct AutomationPipelinePreview: View {
                     .padding(.horizontal, 12)
                     .padding(.vertical, 10)
                     .background(
-                        selectedWorkflowID == workflow.id ? Nord.frost1.opacity(0.16) : Color.clear,
+                        selectedWorkflowID == workflow.id ? KanameColor.accent.opacity(0.16) : Color.clear,
                         in: RoundedRectangle(cornerRadius: 8)
                     )
                     .contentShape(Rectangle())
@@ -2171,7 +2172,7 @@ private struct AutomationPipelinePreview: View {
             }
         }
         .padding(8)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 14))
     }
 
     private var workflowSummary: some View {
@@ -2209,7 +2210,7 @@ private struct AutomationPipelinePreview: View {
         }
         .padding(14)
         .frame(minHeight: 520, alignment: .topLeading)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 14))
     }
 
     private func libraryFact(_ label: String, value: String) -> some View {
@@ -2230,7 +2231,7 @@ private struct AutomationPipelineStrip: View {
                     VStack(spacing: 7) {
                         ZStack {
                             RoundedRectangle(cornerRadius: 12)
-                                .fill(Nord.polarNight2)
+                                .fill(KanameColor.raised)
                                 .overlay {
                                     RoundedRectangle(cornerRadius: 12)
                                         .stroke(stage.2.tint.opacity(stage.2 == .running ? 0.95 : 0.35), lineWidth: stage.2 == .running ? 2 : 1)
@@ -2246,12 +2247,12 @@ private struct AutomationPipelineStrip: View {
 
                     if index < stages.count - 1 {
                         Rectangle()
-                            .fill(index < 3 ? Nord.auroraGreen.opacity(0.8) : Nord.polarNight3)
+                            .fill(index < 3 ? KanameColor.success.opacity(0.8) : KanameColor.separator)
                             .frame(width: 12, height: 2)
                             .overlay(alignment: .trailing) {
                                 Image(systemName: "chevron.right")
                                     .font(.system(size: 7, weight: .bold))
-                                    .foregroundStyle(index < 3 ? Nord.auroraGreen : .secondary)
+                                    .foregroundStyle(index < 3 ? KanameColor.success : .secondary)
                             }
                             .padding(.bottom, 23)
                     }
@@ -2259,7 +2260,7 @@ private struct AutomationPipelineStrip: View {
             }
         }
         .padding(14)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 14))
     }
 }
 
@@ -2298,8 +2299,8 @@ private enum AutomationCanvasPattern: String, CaseIterable, Identifiable {
             AutomationCanvasGraph(
                 defaultSelectedID: "classify",
                 groups: [
-                    .init(id: "read", title: "READ-ONLY", x: 0.02, y: 0.08, width: 0.67, height: 0.84, tint: Nord.frost1),
-                    .init(id: "routes", title: "ROUTED OUTPUTS", x: 0.71, y: 0.08, width: 0.27, height: 0.84, tint: Nord.auroraYellow),
+                    .init(id: "read", title: "READ-ONLY", x: 0.02, y: 0.08, width: 0.67, height: 0.84, tint: KanameColor.accent),
+                    .init(id: "routes", title: "ROUTED OUTPUTS", x: 0.71, y: 0.08, width: 0.27, height: 0.84, tint: KanameColor.warning),
                 ],
                 steps: [
                     .init(id: "trigger", title: "New mail", subtitle: "Account-scoped trigger", symbol: "envelope.badge", kind: .trigger, x: 0.10, y: 0.50, state: .complete, input: "Mail event", output: "Message reference", authority: "Observe only"),
@@ -2321,7 +2322,7 @@ private enum AutomationCanvasPattern: String, CaseIterable, Identifiable {
             AutomationCanvasGraph(
                 defaultSelectedID: "fanout",
                 groups: [
-                    .init(id: "parallel", title: "PARALLEL LANES", x: 0.34, y: 0.07, width: 0.42, height: 0.86, tint: Nord.auroraPurple),
+                    .init(id: "parallel", title: "PARALLEL LANES", x: 0.34, y: 0.07, width: 0.42, height: 0.86, tint: KanameColor.blocked),
                 ],
                 steps: [
                     .init(id: "batch", title: "Frozen batch", subtitle: "184 messages", symbol: "shippingbox", kind: .data, x: 0.10, y: 0.50, state: .complete, input: "Query result", output: "Mail batch", authority: "Read only"),
@@ -2347,8 +2348,8 @@ private enum AutomationCanvasPattern: String, CaseIterable, Identifiable {
             AutomationCanvasGraph(
                 defaultSelectedID: "approval",
                 groups: [
-                    .init(id: "human", title: "HUMAN BOUNDARY", x: 0.25, y: 0.08, width: 0.34, height: 0.84, tint: Nord.auroraYellow),
-                    .init(id: "effect", title: "APPROVED EFFECT", x: 0.61, y: 0.08, width: 0.37, height: 0.84, tint: Nord.auroraRed),
+                    .init(id: "human", title: "HUMAN BOUNDARY", x: 0.25, y: 0.08, width: 0.34, height: 0.84, tint: KanameColor.warning),
+                    .init(id: "effect", title: "APPROVED EFFECT", x: 0.61, y: 0.08, width: 0.37, height: 0.84, tint: KanameColor.danger),
                 ],
                 steps: [
                     .init(id: "draft", title: "Prepare draft", subtitle: "No send", symbol: "square.and.pencil", kind: .data, x: 0.10, y: 0.50, state: .complete, input: "Full thread", output: "Draft proposal", authority: "Draft only"),
@@ -2369,9 +2370,9 @@ private enum AutomationCanvasPattern: String, CaseIterable, Identifiable {
             AutomationCanvasGraph(
                 defaultSelectedID: "context",
                 groups: [
-                    .init(id: "case", title: "CASE-184 · ONE DURABLE CONVERSATION", x: 0.02, y: 0.05, width: 0.96, height: 0.90, tint: Nord.frost1),
-                    .init(id: "effect-wait", title: "EFFECT + DURABLE WAIT", x: 0.80, y: 0.08, width: 0.18, height: 0.70, tint: Nord.auroraRed),
-                    .init(id: "episodes", title: "FEEDBACK EPISODES · ARTIFACT LINEAGE", x: 0.36, y: 0.68, width: 0.62, height: 0.27, tint: Nord.auroraPurple),
+                    .init(id: "case", title: "CASE-184 · ONE DURABLE CONVERSATION", x: 0.02, y: 0.05, width: 0.96, height: 0.90, tint: KanameColor.accent),
+                    .init(id: "effect-wait", title: "EFFECT + DURABLE WAIT", x: 0.80, y: 0.08, width: 0.18, height: 0.70, tint: KanameColor.danger),
+                    .init(id: "episodes", title: "FEEDBACK EPISODES · ARTIFACT LINEAGE", x: 0.36, y: 0.68, width: 0.62, height: 0.27, tint: KanameColor.blocked),
                 ],
                 steps: [
                     .init(id: "inbound", title: "Inbound email", subtitle: "New message or reply", symbol: "envelope.badge", kind: .trigger, x: 0.09, y: 0.28, state: .complete, input: "Scoped mail event", output: "Thread + message refs", authority: "Observe only"),
@@ -2402,8 +2403,8 @@ private enum AutomationCanvasPattern: String, CaseIterable, Identifiable {
             AutomationCanvasGraph(
                 defaultSelectedID: "effect",
                 groups: [
-                    .init(id: "effect", title: "EFFECT BOUNDARY", x: 0.20, y: 0.08, width: 0.27, height: 0.84, tint: Nord.auroraRed),
-                    .init(id: "recovery", title: "RECOVERY ROUTES", x: 0.49, y: 0.08, width: 0.49, height: 0.84, tint: Nord.auroraOrange),
+                    .init(id: "effect", title: "EFFECT BOUNDARY", x: 0.20, y: 0.08, width: 0.27, height: 0.84, tint: KanameColor.danger),
+                    .init(id: "recovery", title: "RECOVERY ROUTES", x: 0.49, y: 0.08, width: 0.49, height: 0.84, tint: KanameColor.external),
                 ],
                 steps: [
                     .init(id: "each", title: "For each item", subtitle: "Bounded batch", symbol: "repeat", kind: .loop, x: 0.09, y: 0.50, state: .complete, input: "Frozen targets", output: "One target", authority: "No effect"),
@@ -2741,7 +2742,7 @@ private struct AutomationCanvasPreview: View {
                     .lineLimit(1)
                 Spacer()
                 Label(selectedStep.authority, systemImage: "lock.shield")
-                    .foregroundStyle(selectedStep.kind == .effect ? Nord.auroraYellow : .secondary)
+                    .foregroundStyle(selectedStep.kind == .effect ? KanameColor.warning : .secondary)
                     .lineLimit(1)
             }
             .font(.caption)
@@ -2806,7 +2807,7 @@ private struct AutomationCanvasPreview: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity)
-        .background(Nord.polarNight1.opacity(0.45), in: RoundedRectangle(cornerRadius: 14))
+        .background(KanameColor.surface.opacity(0.45), in: RoundedRectangle(cornerRadius: 14))
     }
 
     private var problemsDrawer: some View {
@@ -2852,10 +2853,10 @@ private struct AutomationCanvasPreview: View {
                         .font(.caption).foregroundStyle(.secondary)
                     Text(isEditing ? "DRAFT \(nextVersionLabel.uppercased())" : "PUBLISHED v\(workflow.version)")
                         .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(isEditing ? Nord.auroraYellow : Nord.auroraGreen)
+                        .foregroundStyle(isEditing ? KanameColor.warning : KanameColor.success)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
-                        .background((isEditing ? Nord.auroraYellow : Nord.auroraGreen).opacity(0.12), in: Capsule())
+                        .background((isEditing ? KanameColor.warning : KanameColor.success).opacity(0.12), in: Capsule())
                 }
             }
             Spacer()
@@ -2903,7 +2904,7 @@ private struct AutomationCanvasPreview: View {
                 Text(workflow.name).font(.headline.weight(.bold))
                 Text(isEditing ? "DRAFT \(nextVersionLabel.uppercased())" : "PUBLISHED v\(workflow.version)")
                     .font(.caption)
-                    .foregroundStyle(isEditing ? Nord.auroraYellow : .secondary)
+                    .foregroundStyle(isEditing ? KanameColor.warning : .secondary)
             }
             Spacer()
             Button("Add", systemImage: "plus") {
@@ -2939,10 +2940,10 @@ private struct AutomationCanvasPreview: View {
             if isEditing {
                 Button("Undo", systemImage: "arrow.uturn.backward") {}.buttonStyle(.plain)
                 Button("Redo", systemImage: "arrow.uturn.forward") {}.buttonStyle(.plain).disabled(true)
-                Label("Draft changes", systemImage: "circle.fill").foregroundStyle(Nord.auroraYellow)
+                Label("Draft changes", systemImage: "circle.fill").foregroundStyle(KanameColor.warning)
             } else {
                 Text("Preview only · no qualification receipt")
-                    .foregroundStyle(Nord.auroraYellow)
+                    .foregroundStyle(KanameColor.warning)
             }
             if !compact {
                 Text("\(graph.steps.count) nodes · \(graph.edges.count) connections")
@@ -2972,7 +2973,7 @@ private struct AutomationCanvasPreview: View {
             .foregroundStyle(.secondary)
             if !compact {
                 Label(isLive ? "Published" : "Autosaved", systemImage: "checkmark.circle")
-                    .foregroundStyle(Nord.auroraGreen)
+                    .foregroundStyle(KanameColor.success)
             }
         }
         .font(.caption)
@@ -2980,12 +2981,12 @@ private struct AutomationCanvasPreview: View {
 
     private func canvasLegend(compact: Bool) -> some View {
         HStack(spacing: 14) {
-            Label("Data", systemImage: "circle.fill").foregroundStyle(Nord.frost1)
-            Label("Decision", systemImage: "circle.fill").foregroundStyle(Nord.auroraYellow)
-            Label("Parallel", systemImage: "circle.fill").foregroundStyle(Nord.auroraPurple)
-            Label("Effect", systemImage: "circle.fill").foregroundStyle(Nord.auroraRed)
+            Label("Data", systemImage: "circle.fill").foregroundStyle(KanameColor.accent)
+            Label("Decision", systemImage: "circle.fill").foregroundStyle(KanameColor.warning)
+            Label("Parallel", systemImage: "circle.fill").foregroundStyle(KanameColor.blocked)
+            Label("Effect", systemImage: "circle.fill").foregroundStyle(KanameColor.danger)
             if !compact {
-                Label("Error / retry", systemImage: "circle.fill").foregroundStyle(Nord.auroraOrange)
+                Label("Error / retry", systemImage: "circle.fill").foregroundStyle(KanameColor.external)
             }
             Spacer()
             if !compact {
@@ -3039,13 +3040,13 @@ private struct AutomationOutlinePreview: View {
                                 routeList(outgoingEdges(for: step.id))
                                 Text(step.authority)
                                     .font(.caption2)
-                                    .foregroundStyle(step.kind == .effect ? Nord.auroraYellow : .secondary)
+                                    .foregroundStyle(step.kind == .effect ? KanameColor.warning : .secondary)
                                     .frame(width: 150, alignment: .leading)
                             }
                             .padding(.horizontal, 12)
                             .padding(.vertical, 8)
                             .background(
-                                selectedStepID == step.id ? Nord.frost1.opacity(0.12) : Color.clear,
+                                selectedStepID == step.id ? KanameColor.accent.opacity(0.12) : Color.clear,
                                 in: RoundedRectangle(cornerRadius: 8)
                             )
                             .contentShape(Rectangle())
@@ -3056,8 +3057,8 @@ private struct AutomationOutlinePreview: View {
                 .padding(8)
             }
         }
-        .background(Nord.polarNight0.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
-        .overlay { RoundedRectangle(cornerRadius: 12).stroke(Nord.polarNight3, lineWidth: 1) }
+        .background(KanameColor.canvas.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
+        .overlay { RoundedRectangle(cornerRadius: 12).stroke(KanameColor.separator, lineWidth: 1) }
     }
 
     private func incomingEdges(for stepID: String) -> [AutomationCanvasEdge] {
@@ -3120,11 +3121,11 @@ private struct AutomationSourceDiagnosticPreview: View {
                     }
                 }
             }
-            .background(Nord.polarNight0.opacity(0.7), in: RoundedRectangle(cornerRadius: 8))
+            .background(KanameColor.canvas.opacity(0.7), in: RoundedRectangle(cornerRadius: 8))
         }
         .padding(10)
-        .background(Nord.polarNight0.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
-        .overlay { RoundedRectangle(cornerRadius: 12).stroke(Nord.polarNight3, lineWidth: 1) }
+        .background(KanameColor.canvas.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
+        .overlay { RoundedRectangle(cornerRadius: 12).stroke(KanameColor.separator, lineWidth: 1) }
     }
 
     private var sourceHeader: some View {
@@ -3134,7 +3135,7 @@ private struct AutomationSourceDiagnosticPreview: View {
             if let pointer = diagnostic?.focusTarget.jsonPointer {
                 Text(pointer)
                     .font(.system(.caption2, design: .monospaced))
-                    .foregroundStyle(Nord.frost1)
+                    .foregroundStyle(KanameColor.accent)
             }
             Spacer()
             if let range = diagnostic?.focusTarget.sourceRange {
@@ -3152,13 +3153,13 @@ private struct AutomationSourceDiagnosticPreview: View {
                 .foregroundStyle(.tertiary)
                 .frame(width: 24, alignment: .trailing)
             Text(text)
-                .foregroundStyle(selected ? Nord.snowStorm0 : Color.secondary)
+                .foregroundStyle(selected ? KanameColor.textPrimary : Color.secondary)
         }
         .font(.system(size: 11, design: .monospaced))
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(selected ? Nord.auroraRed.opacity(0.18) : Color.clear)
+        .background(selected ? KanameColor.danger.opacity(0.18) : Color.clear)
     }
 
     private func isSelected(_ zeroBasedLine: Int) -> Bool {
@@ -3188,7 +3189,7 @@ private struct AutomationNodePalette: View {
                     .lineLimit(1)
             }
             .padding(7)
-            .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 7))
+            .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 7))
             paletteSection("START", items: [
                 ("Trigger", "bolt.fill"), ("Schedule", "calendar.badge.clock"),
             ])
@@ -3221,12 +3222,12 @@ private struct AutomationNodePalette: View {
                 systemImage: isEditing ? "keyboard" : "lock.fill"
             )
             .font(.caption2)
-            .foregroundStyle(isEditing ? Nord.frost1 : .secondary)
+            .foregroundStyle(isEditing ? KanameColor.accent : .secondary)
         }
         .padding(13)
         .fixedSize(horizontal: false, vertical: true)
         .frame(maxWidth: .infinity, alignment: .topLeading)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 14))
     }
 
     private func paletteSection(_ title: String, items: [(String, String)]) -> some View {
@@ -3240,7 +3241,7 @@ private struct AutomationNodePalette: View {
                     Image(systemName: item.1).frame(width: 14)
                     Text(item.0).lineLimit(1)
                     Spacer(minLength: 0)
-                    if isEditing { Image(systemName: "plus.circle").foregroundStyle(Nord.frost1) }
+                    if isEditing { Image(systemName: "plus.circle").foregroundStyle(KanameColor.accent) }
                 }
                 .font(.caption.weight(.medium))
                 .padding(.vertical, 2)
@@ -3288,12 +3289,12 @@ private enum AutomationCanvasNodeKind {
 
     var tint: Color {
         switch self {
-        case .trigger, .data, .policy, .receipt: Nord.frost1
-        case .context: Nord.frost0
-        case .decision, .human, .wait: Nord.auroraYellow
-        case .parallel, .join, .loop, .subflow: Nord.auroraPurple
-        case .ai: Nord.frost0
-        case .effect, .error: Nord.auroraRed
+        case .trigger, .data, .policy, .receipt: KanameColor.accent
+        case .context: KanameColor.active
+        case .decision, .human, .wait: KanameColor.warning
+        case .parallel, .join, .loop, .subflow: KanameColor.blocked
+        case .ai: KanameColor.active
+        case .effect, .error: KanameColor.danger
         }
     }
 }
@@ -3323,12 +3324,12 @@ private struct AutomationCanvasEdge: Identifiable {
 
         var tint: Color {
             switch self {
-            case .data: Nord.frost1
-            case .conditional: Nord.auroraYellow
-            case .success: Nord.auroraGreen
-            case .parallel: Nord.auroraPurple
-            case .error: Nord.auroraRed
-            case .loop: Nord.auroraOrange
+            case .data: KanameColor.accent
+            case .conditional: KanameColor.warning
+            case .success: KanameColor.success
+            case .parallel: KanameColor.blocked
+            case .error: KanameColor.danger
+            case .loop: KanameColor.external
             }
         }
     }
@@ -3444,7 +3445,7 @@ private struct AutomationCanvasGraph {
             groups: [
                 .init(
                     id: "published", title: "PUBLISHED REVISION \(revision.version)",
-                    x: 0.015, y: 0.05, width: 0.97, height: 0.90, tint: Nord.frost1
+                    x: 0.015, y: 0.05, width: 0.97, height: 0.90, tint: KanameColor.accent
                 ),
             ],
             steps: nodes,
@@ -3645,9 +3646,9 @@ private struct AutomationNodeCanvas: View {
                         } label: {
                             Image(systemName: "plus")
                                 .font(.system(size: 9, weight: .bold))
-                                .foregroundStyle(Nord.polarNight0)
+                                .foregroundStyle(KanameColor.canvas)
                                 .frame(width: 20, height: 20)
-                                .background(Nord.frost1, in: Circle())
+                                .background(KanameColor.accent, in: Circle())
                         }
                         .buttonStyle(.plain)
                         .help("Insert a compatible node on this connection")
@@ -3658,11 +3659,11 @@ private struct AutomationNodeCanvas: View {
             .overlay(alignment: .topLeading) {
                 Label(viewportPreset.title, systemImage: viewportSymbol)
                     .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(Nord.frost1)
+                    .foregroundStyle(KanameColor.accent)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 5)
-                    .background(Nord.polarNight0.opacity(0.94), in: Capsule())
-                    .overlay { Capsule().stroke(Nord.frost1.opacity(0.35), lineWidth: 1) }
+                    .background(KanameColor.canvas.opacity(0.94), in: Capsule())
+                    .overlay { Capsule().stroke(KanameColor.accent.opacity(0.35), lineWidth: 1) }
                     .padding(10)
             }
             .overlay(alignment: .bottomTrailing) {
@@ -3681,7 +3682,7 @@ private struct AutomationNodeCanvas: View {
         }
         .background { AutomationDotGrid() }
         .clipShape(RoundedRectangle(cornerRadius: 12))
-        .overlay { RoundedRectangle(cornerRadius: 12).stroke(Nord.polarNight3, lineWidth: 1) }
+        .overlay { RoundedRectangle(cornerRadius: 12).stroke(KanameColor.separator, lineWidth: 1) }
     }
 
     private var viewportSymbol: String {
@@ -3777,7 +3778,7 @@ private struct AutomationNodeCanvas: View {
         .foregroundStyle(edge.kind.tint)
         .padding(.horizontal, 6)
         .padding(.vertical, 3)
-        .background(selected ? edge.kind.tint.opacity(0.22) : Nord.polarNight0.opacity(0.94), in: Capsule())
+        .background(selected ? edge.kind.tint.opacity(0.22) : KanameColor.canvas.opacity(0.94), in: Capsule())
         .overlay {
             if selected { Capsule().stroke(edge.kind.tint, lineWidth: 1.5) }
         }
@@ -3795,7 +3796,7 @@ private struct AutomationNodeCanvas: View {
                   let target = graph.steps.first(where: { $0.id == edge.targetID }) else { continue }
             let route = edgeRoute(edge: edge, source: source, target: target, size: size, layout: layout)
             let selected = selectedEdgeID?.wrappedValue == edge.id
-            let tint = selected || edge.active ? edge.kind.tint : Nord.polarNight3
+            let tint = selected || edge.active ? edge.kind.tint : KanameColor.separator
             context.stroke(
                 route.path,
                 with: .color(tint),
@@ -3969,16 +3970,16 @@ private struct AutomationCanvasMinimap: View {
                     width: visibleWorldRect.width * scaleX,
                     height: visibleWorldRect.height * scaleY
                 )
-                context.fill(Path(viewportRect), with: .color(Nord.frost1.opacity(0.12)))
-                context.stroke(Path(viewportRect), with: .color(Nord.frost1), lineWidth: 1.5)
+                context.fill(Path(viewportRect), with: .color(KanameColor.accent.opacity(0.12)))
+                context.stroke(Path(viewportRect), with: .color(KanameColor.accent), lineWidth: 1.5)
             }
             .frame(height: 64)
-            .background(Nord.polarNight0.opacity(0.7), in: RoundedRectangle(cornerRadius: 6))
+            .background(KanameColor.canvas.opacity(0.7), in: RoundedRectangle(cornerRadius: 6))
         }
         .padding(8)
         .frame(width: 170)
-        .background(Nord.polarNight1.opacity(0.97), in: RoundedRectangle(cornerRadius: 10))
-        .overlay { RoundedRectangle(cornerRadius: 10).stroke(Nord.polarNight3, lineWidth: 1) }
+        .background(KanameColor.surface.opacity(0.97), in: RoundedRectangle(cornerRadius: 10))
+        .overlay { RoundedRectangle(cornerRadius: 10).stroke(KanameColor.separator, lineWidth: 1) }
         .shadow(color: .black.opacity(0.25), radius: 8, y: 3)
     }
 }
@@ -3999,10 +4000,10 @@ private struct AutomationSemanticNodeCard: View {
         }
         .padding(.horizontal, 8)
         .frame(width: 104, height: 50, alignment: .leading)
-        .background(Nord.polarNight2, in: RoundedRectangle(cornerRadius: 8))
+        .background(KanameColor.raised, in: RoundedRectangle(cornerRadius: 8))
         .overlay {
             RoundedRectangle(cornerRadius: 8)
-                .stroke(selected ? Nord.frost1 : step.kind.tint.opacity(0.45), lineWidth: selected ? 2 : 1)
+                .stroke(selected ? KanameColor.accent : step.kind.tint.opacity(0.45), lineWidth: selected ? 2 : 1)
         }
     }
 }
@@ -4033,11 +4034,11 @@ private struct AutomationDotGrid: View {
             for x in stride(from: spacing, to: size.width, by: spacing) {
                 for y in stride(from: spacing, to: size.height, by: spacing) {
                     let rect = CGRect(x: x, y: y, width: 1.4, height: 1.4)
-                    context.fill(Path(ellipseIn: rect), with: .color(Nord.polarNight3.opacity(0.7)))
+                    context.fill(Path(ellipseIn: rect), with: .color(KanameColor.separator.opacity(0.7)))
                 }
             }
         }
-        .background(Nord.polarNight0.opacity(0.55))
+        .background(KanameColor.canvas.opacity(0.55))
     }
 }
 
@@ -4066,16 +4067,16 @@ private struct AutomationNodeCard: View {
                     Text("5 internal steps collapsed")
                 }
                 .font(.system(size: 8, weight: .semibold))
-                .foregroundStyle(Nord.auroraPurple)
+                .foregroundStyle(KanameColor.blocked)
             }
         }
         .padding(10)
         .frame(width: 154, alignment: .leading)
-        .background(Nord.polarNight2, in: RoundedRectangle(cornerRadius: 11))
+        .background(KanameColor.raised, in: RoundedRectangle(cornerRadius: 11))
         .overlay {
             RoundedRectangle(cornerRadius: 11)
                 .stroke(
-                    selected ? Nord.frost1 : step.kind.tint.opacity(step.state == .running ? 0.9 : 0.30),
+                    selected ? KanameColor.accent : step.kind.tint.opacity(step.state == .running ? 0.9 : 0.30),
                     lineWidth: selected || step.state == .running ? 2 : 1
                 )
         }
@@ -4104,10 +4105,10 @@ private struct AutomationStorageCanvasDesign: View {
                 AutomationDotGrid()
 
                 RoundedRectangle(cornerRadius: 14)
-                    .fill(Nord.frost1.opacity(0.035))
+                    .fill(KanameColor.accent.opacity(0.035))
                     .overlay {
                         RoundedRectangle(cornerRadius: 14)
-                            .stroke(Nord.frost1.opacity(0.42), style: StrokeStyle(lineWidth: 1.5, dash: [7, 6]))
+                            .stroke(KanameColor.accent.opacity(0.42), style: StrokeStyle(lineWidth: 1.5, dash: [7, 6]))
                     }
                     .frame(width: width - 24, height: 310)
                     .position(x: width / 2, y: 167)
@@ -4126,10 +4127,10 @@ private struct AutomationStorageCanvasDesign: View {
                     Text("JOB BOUNDARY · RUN #184")
                 }
                 .font(.system(size: 9, weight: .bold))
-                .foregroundStyle(Nord.frost1)
+                .foregroundStyle(KanameColor.accent)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 5)
-                .background(Nord.polarNight0.opacity(0.94), in: Capsule())
+                .background(KanameColor.canvas.opacity(0.94), in: Capsule())
                 .position(x: 112, y: 26)
 
                 AutomationStorageProcessCard(
@@ -4161,7 +4162,7 @@ private struct AutomationStorageCanvasDesign: View {
                     title: "Job storage · #184",
                     subtitle: "Visible only inside this job · survives waits and restarts",
                     symbol: "shippingbox.fill",
-                    tint: Nord.frost1,
+                    tint: KanameColor.accent,
                     facts: ["7 values", "3 files", "48.2 MB", "Deletes with job"],
                     width: jobStorageWidth,
                     selected: mode == .scopes
@@ -4173,13 +4174,13 @@ private struct AutomationStorageCanvasDesign: View {
                     Text(mode == .promotion ? "PROMOTE · SELECTED" : "EXPLICIT PROMOTION ONLY")
                 }
                 .font(.system(size: 9, weight: .bold))
-                .foregroundStyle(mode == .promotion ? Nord.auroraYellow : Nord.auroraPurple)
+                .foregroundStyle(mode == .promotion ? KanameColor.warning : KanameColor.blocked)
                 .padding(.horizontal, 9)
                 .padding(.vertical, 6)
-                .background(Nord.polarNight0, in: Capsule())
+                .background(KanameColor.canvas, in: Capsule())
                 .overlay {
                     Capsule().stroke(
-                        mode == .promotion ? Nord.auroraYellow : Nord.auroraPurple.opacity(0.55),
+                        mode == .promotion ? KanameColor.warning : KanameColor.blocked.opacity(0.55),
                         lineWidth: mode == .promotion ? 2 : 1
                     )
                 }
@@ -4189,7 +4190,7 @@ private struct AutomationStorageCanvasDesign: View {
                     title: "Workflow storage · Reply-driven reporting",
                     subtitle: "Isolated installation storage · durable across jobs and versions",
                     symbol: "externaldrive.fill",
-                    tint: Nord.auroraPurple,
+                    tint: KanameColor.blocked,
                     facts: ["templates/", "cases/", "86 MB", "Explicit lifecycle"],
                     width: workflowStorageWidth,
                     selected: mode == .promotion
@@ -4203,7 +4204,7 @@ private struct AutomationStorageCanvasDesign: View {
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 12))
-        .overlay { RoundedRectangle(cornerRadius: 12).stroke(Nord.polarNight3, lineWidth: 1) }
+        .overlay { RoundedRectangle(cornerRadius: 12).stroke(KanameColor.separator, lineWidth: 1) }
     }
 
     private func drawStorageConnections(
@@ -4217,7 +4218,7 @@ private struct AutomationStorageCanvasDesign: View {
         flow.addLine(to: CGPoint(x: middleX - 72, y: 100))
         flow.move(to: CGPoint(x: middleX + 72, y: 100))
         flow.addLine(to: CGPoint(x: rightX - 72, y: 100))
-        context.stroke(flow, with: .color(Nord.frost1), style: StrokeStyle(lineWidth: 2.2, dash: [7, 6]))
+        context.stroke(flow, with: .color(KanameColor.accent), style: StrokeStyle(lineWidth: 2.2, dash: [7, 6]))
 
         var jobAccess = Path()
         for x in [leftX, middleX, rightX] {
@@ -4228,14 +4229,14 @@ private struct AutomationStorageCanvasDesign: View {
                 control2: CGPoint(x: middleX + (x - middleX) * 0.38, y: 174)
             )
         }
-        context.stroke(jobAccess, with: .color(Nord.frost1.opacity(0.78)), style: StrokeStyle(lineWidth: 1.7, dash: [4, 5]))
+        context.stroke(jobAccess, with: .color(KanameColor.accent.opacity(0.78)), style: StrokeStyle(lineWidth: 1.7, dash: [4, 5]))
 
         var promotion = Path()
         promotion.move(to: CGPoint(x: middleX, y: 290))
         promotion.addLine(to: CGPoint(x: middleX, y: 397))
         context.stroke(
             promotion,
-            with: .color(mode == .promotion ? Nord.auroraYellow : Nord.auroraPurple.opacity(0.65)),
+            with: .color(mode == .promotion ? KanameColor.warning : KanameColor.blocked.opacity(0.65)),
             style: StrokeStyle(lineWidth: mode == .promotion ? 3 : 1.8, dash: mode == .promotion ? [7, 5] : [4, 6])
         )
     }
@@ -4251,20 +4252,20 @@ private struct AutomationStorageProcessCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 7) {
-                Image(systemName: symbol).foregroundStyle(Nord.frost1)
+                Image(systemName: symbol).foregroundStyle(KanameColor.accent)
                 Text(title).font(.caption.weight(.bold)).lineLimit(1)
             }
             Text(subtitle).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
             Text(access)
                 .font(.system(size: 8, weight: .bold))
-                .foregroundStyle(Nord.frost1)
+                .foregroundStyle(KanameColor.accent)
         }
         .padding(10)
         .frame(width: 148, height: 84, alignment: .leading)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 11))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 11))
         .overlay {
             RoundedRectangle(cornerRadius: 11)
-                .stroke(selected ? Nord.frost1 : Nord.polarNight3, lineWidth: selected ? 2 : 1)
+                .stroke(selected ? KanameColor.accent : KanameColor.separator, lineWidth: selected ? 2 : 1)
         }
     }
 }
@@ -4294,7 +4295,7 @@ private struct AutomationStorageResourceCard: View {
                 ForEach(facts, id: \.self) { fact in
                     Text(fact)
                         .font(.system(size: 8, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(fact.contains("Deletes") ? Nord.auroraYellow : tint)
+                        .foregroundStyle(fact.contains("Deletes") ? KanameColor.warning : tint)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 3)
                         .background(tint.opacity(0.09), in: Capsule())
@@ -4303,10 +4304,10 @@ private struct AutomationStorageResourceCard: View {
         }
         .padding(11)
         .frame(width: width, height: 92, alignment: .leading)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 12))
         .overlay {
             RoundedRectangle(cornerRadius: 12)
-                .stroke(selected ? tint : Nord.polarNight3, lineWidth: selected ? 2 : 1)
+                .stroke(selected ? tint : KanameColor.separator, lineWidth: selected ? 2 : 1)
         }
     }
 }
@@ -4410,14 +4411,14 @@ private struct AutomationNewWorkflowDesign: View {
             if let message {
                 Label(message, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
-                    .foregroundStyle(Nord.auroraYellow)
+                    .foregroundStyle(KanameColor.warning)
             }
 
             starterContent
         }
         .padding(18)
         .frame(maxWidth: .infinity, minHeight: 520, alignment: .topLeading)
-        .background(Nord.polarNight0)
+        .background(KanameColor.canvas)
     }
 
     @ViewBuilder
@@ -4465,10 +4466,10 @@ private struct AutomationNewWorkflowDesign: View {
                         }
                         .padding(14)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
+                        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 12))
                         .overlay {
                             RoundedRectangle(cornerRadius: 12)
-                                .stroke(selectedTemplateID == template.id ? template.tint : Nord.polarNight3,
+                                .stroke(selectedTemplateID == template.id ? template.tint : KanameColor.separator,
                                         lineWidth: selectedTemplateID == template.id ? 2 : 1)
                         }
                     }
@@ -4509,9 +4510,9 @@ private struct AutomationNewWorkflowDesign: View {
                 ForEach(visibleWorkflows) { workflow in
                     HStack(spacing: 12) {
                         Image(systemName: workflow.icon)
-                            .foregroundStyle(Nord.frost1)
+                            .foregroundStyle(KanameColor.accent)
                             .frame(width: 32, height: 32)
-                            .background(Nord.frost1.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                            .background(KanameColor.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
                         VStack(alignment: .leading, spacing: 3) {
                             Text(workflow.name).font(.headline)
                             Text(workflow.summary).font(.caption).foregroundStyle(.secondary).lineLimit(2)
@@ -4524,7 +4525,7 @@ private struct AutomationNewWorkflowDesign: View {
                             .disabled(onDuplicate == nil)
                     }
                     .padding(14)
-                    .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
+                    .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 12))
                 }
             }
         }
@@ -4551,7 +4552,7 @@ private struct AutomationNewWorkflowDesign: View {
             )
             if let sourceMessage {
                 Label(sourceMessage, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption).foregroundStyle(Nord.auroraYellow)
+                    .font(.caption).foregroundStyle(KanameColor.warning)
             }
             HStack {
                 Label("Import is bounded, schema-validated, and capability-checked.", systemImage: "lock.shield")
@@ -4599,7 +4600,7 @@ private struct AutomationBuilderInspectorShell<Content: View, Footer: View>: Vie
         .font(.caption)
         .padding(13)
         .frame(minHeight: 566, alignment: .topLeading)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 14))
     }
 }
 
@@ -4609,7 +4610,7 @@ private struct AutomationConditionDesignPanel: View {
             title: "Correction requested",
             subtitle: "Selected connection",
             symbol: "arrow.triangle.branch",
-            tint: Nord.auroraYellow
+            tint: KanameColor.warning
         ) {
             Text("Follow this path when").font(.caption.weight(.semibold))
             conditionField("Interpret reply", symbol: "point.3.connected.trianglepath.dotted")
@@ -4625,7 +4626,7 @@ private struct AutomationConditionDesignPanel: View {
             Divider()
             Text("Sample evaluation").font(.caption.weight(.semibold))
             Label("Matched fixture: Customer correction #3", systemImage: "checkmark.circle.fill")
-                .foregroundStyle(Nord.auroraGreen)
+                .foregroundStyle(KanameColor.success)
             Text("“Please keep the totals but change the table layout.”")
                 .foregroundStyle(.secondary)
             DisclosureGroup("Advanced predicate") {
@@ -4635,7 +4636,7 @@ private struct AutomationConditionDesignPanel: View {
             }
         } footer: {
             Label("1 of 3 outcomes tested", systemImage: "checkmark.seal")
-                .foregroundStyle(Nord.auroraYellow)
+                .foregroundStyle(KanameColor.warning)
         }
     }
 
@@ -4647,7 +4648,7 @@ private struct AutomationConditionDesignPanel: View {
             Image(systemName: "chevron.down").foregroundStyle(.secondary)
         }
         .padding(8)
-        .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 7))
+        .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 7))
     }
 }
 
@@ -4657,7 +4658,7 @@ private struct AutomationDataMappingDesignPanel: View {
             title: "Compile context",
             subtitle: "Input mapping",
             symbol: "text.append",
-            tint: Nord.frost1
+            tint: KanameColor.accent
         ) {
             Picker("Mapping", selection: .constant("Input")) {
                 Text("Setup").tag("Setup")
@@ -4667,9 +4668,9 @@ private struct AutomationDataMappingDesignPanel: View {
             }
             .pickerStyle(.segmented).labelsHidden()
             Text("Available data").font(.caption.weight(.semibold))
-            dataSource("Inbound email", field: "thread.id", sample: "18f3…", tint: Nord.frost1)
-            dataSource("Interpret reply", field: "instruction", sample: "change layout", tint: Nord.auroraYellow)
-            dataSource("Case state", field: "episodes[]", sample: "3 items", tint: Nord.auroraPurple)
+            dataSource("Inbound email", field: "thread.id", sample: "18f3…", tint: KanameColor.accent)
+            dataSource("Interpret reply", field: "instruction", sample: "change layout", tint: KanameColor.warning)
+            dataSource("Case state", field: "episodes[]", sample: "3 items", tint: KanameColor.blocked)
             Divider()
             Text("Node inputs").font(.caption.weight(.semibold))
             mappedField("caseID", source: "Inbound email · thread.id")
@@ -4677,7 +4678,7 @@ private struct AutomationDataMappingDesignPanel: View {
             mappedField("history", source: "Case state · episodes[]")
         } footer: {
             Label("3 mappings · all types compatible", systemImage: "checkmark.seal.fill")
-                .foregroundStyle(Nord.auroraGreen)
+                .foregroundStyle(KanameColor.success)
         }
     }
 
@@ -4686,15 +4687,15 @@ private struct AutomationDataMappingDesignPanel: View {
             HStack { Circle().fill(tint).frame(width: 6, height: 6); Text(title).fontWeight(.semibold); Spacer(); Image(systemName: "line.3.horizontal") }
             HStack { Text(field).font(.system(.caption2, design: .monospaced)); Spacer(); Text(sample).foregroundStyle(.secondary) }
         }
-        .padding(8).background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 7))
+        .padding(8).background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 7))
     }
 
     private func mappedField(_ target: String, source: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(target).font(.system(.caption2, design: .monospaced)).foregroundStyle(.secondary)
-            HStack { Image(systemName: "link").foregroundStyle(Nord.frost1); Text(source).lineLimit(1); Spacer(); Image(systemName: "checkmark.circle.fill").foregroundStyle(Nord.auroraGreen) }
+            HStack { Image(systemName: "link").foregroundStyle(KanameColor.accent); Text(source).lineLimit(1); Spacer(); Image(systemName: "checkmark.circle.fill").foregroundStyle(KanameColor.success) }
         }
-        .padding(8).background(Nord.frost1.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
+        .padding(8).background(KanameColor.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
     }
 }
 
@@ -4704,7 +4705,7 @@ private struct AutomationStorageAccessDesignPanel: View {
             title: "Run work type",
             subtitle: "Storage access",
             symbol: "externaldrive.badge.checkmark",
-            tint: Nord.frost1
+            tint: KanameColor.accent
         ) {
             Text("Declared access").font(.caption.weight(.semibold))
             storageScope(
@@ -4712,19 +4713,19 @@ private struct AutomationStorageAccessDesignPanel: View {
                 detail: "Read + write",
                 paths: "artifacts/draft/*\nstate/progress",
                 symbol: "shippingbox.fill",
-                tint: Nord.frost1
+                tint: KanameColor.accent
             )
             storageScope(
                 "Workflow storage",
                 detail: "Read only",
                 paths: "templates/*\nreference/*",
                 symbol: "externaldrive.fill",
-                tint: Nord.auroraPurple
+                tint: KanameColor.blocked
             )
             Divider()
             Text("Commit visibility").font(.caption.weight(.semibold))
             Label("Changes become visible after this node commits", systemImage: "checkmark.seal")
-                .foregroundStyle(Nord.auroraGreen)
+                .foregroundStyle(KanameColor.success)
             Text("Parallel branches may read the same job data. A same-key write conflict fails visibly unless an atomic update or Join is declared.")
                 .foregroundStyle(.secondary)
             Divider()
@@ -4734,7 +4735,7 @@ private struct AutomationStorageAccessDesignPanel: View {
                 .foregroundStyle(.secondary)
         } footer: {
             Label("2 scopes · no cross-workflow access", systemImage: "checkmark.seal.fill")
-                .foregroundStyle(Nord.auroraGreen)
+                .foregroundStyle(KanameColor.success)
         }
     }
 
@@ -4768,17 +4769,17 @@ private struct AutomationStoragePromotionDesignPanel: View {
             title: "Promote artifact",
             subtitle: "Durable storage write",
             symbol: "arrow.up.doc.fill",
-            tint: Nord.auroraYellow
+            tint: KanameColor.warning
         ) {
             Text("Source · job storage").font(.caption.weight(.semibold))
-            storagePath("outputs/report-v3.xlsx", detail: "48.0 MB · digest 7d91…a8c2", tint: Nord.frost1)
+            storagePath("outputs/report-v3.xlsx", detail: "48.0 MB · digest 7d91…a8c2", tint: KanameColor.accent)
             HStack {
                 Spacer()
-                Image(systemName: "arrow.down").foregroundStyle(Nord.auroraYellow)
+                Image(systemName: "arrow.down").foregroundStyle(KanameColor.warning)
                 Spacer()
             }
             Text("Destination · workflow storage").font(.caption.weight(.semibold))
-            storagePath("cases/CASE-184/current/report.xlsx", detail: "Durable across jobs and versions", tint: Nord.auroraPurple)
+            storagePath("cases/CASE-184/current/report.xlsx", detail: "Durable across jobs and versions", tint: KanameColor.blocked)
             Divider()
             promotionFact("On conflict", value: "Create a new revision")
             promotionFact("Retention", value: "Until explicit removal")
@@ -4786,12 +4787,12 @@ private struct AutomationStoragePromotionDesignPanel: View {
             promotionFact("Publish impact", value: "Storage contract changed")
             Divider()
             Label("Copy, verify digest, then publish durable reference", systemImage: "checkmark.shield.fill")
-                .foregroundStyle(Nord.auroraGreen)
+                .foregroundStyle(KanameColor.success)
             Text("The original job copy remains available until the job is deleted.")
                 .foregroundStyle(.secondary)
         } footer: {
             Label("Workflow copy survives job deletion", systemImage: "externaldrive.fill.badge.checkmark")
-                .foregroundStyle(Nord.auroraPurple)
+                .foregroundStyle(KanameColor.blocked)
         }
     }
 
@@ -4820,7 +4821,7 @@ private struct AutomationNodeTestDesignPanel: View {
             title: "Interpret reply",
             subtitle: "Test node",
             symbol: "play.square.stack",
-            tint: Nord.auroraGreen
+            tint: KanameColor.success
         ) {
             Text("Fixture").font(.caption.weight(.semibold))
             HStack {
@@ -4830,13 +4831,13 @@ private struct AutomationNodeTestDesignPanel: View {
                 }
                 Spacer(); Image(systemName: "chevron.down")
             }
-            .padding(9).background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+            .padding(9).background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 8))
             HStack {
                 Button("Test node", systemImage: "play.fill") {}.buttonStyle(.borderedProminent).controlSize(.small)
                 Button("Test path") {}.buttonStyle(.bordered).controlSize(.small)
             }
             Divider()
-            Label("Completed in 1.2 s", systemImage: "checkmark.circle.fill").foregroundStyle(Nord.auroraGreen)
+            Label("Completed in 1.2 s", systemImage: "checkmark.circle.fill").foregroundStyle(KanameColor.success)
             testFact("Outcome", value: "correction")
             testFact("Confidence", value: "0.96")
             testFact("Next path", value: "Append episode")
@@ -4844,9 +4845,9 @@ private struct AutomationNodeTestDesignPanel: View {
             Text("Output preview").font(.caption.weight(.semibold))
             Text("{\n  intent: correction,\n  preserveTotals: true,\n  requestedChange: tableLayout\n}")
                 .font(.system(.caption2, design: .monospaced))
-                .foregroundStyle(Nord.frost1)
+                .foregroundStyle(KanameColor.accent)
                 .padding(8).frame(maxWidth: .infinity, alignment: .leading)
-                .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 7))
+                .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 7))
         } footer: {
             Label("Effect nodes remain proposed only", systemImage: "network.slash")
                 .foregroundStyle(.secondary)
@@ -4866,13 +4867,13 @@ private struct AutomationPublishReviewDesignPanel: View {
             title: "Review v\(currentVersion + 1)",
             subtitle: "Publish checkpoint",
             symbol: "arrow.up.doc.fill",
-            tint: Nord.auroraGreen
+            tint: KanameColor.success
         ) {
             HStack {
                 Text("v\(currentVersion)").foregroundStyle(.secondary)
                 Image(systemName: "arrow.right")
                 Text("v\(currentVersion + 1)").fontWeight(.bold)
-                Spacer(); Text("Draft").foregroundStyle(Nord.auroraYellow)
+                Spacer(); Text("Draft").foregroundStyle(KanameColor.warning)
             }
             reviewRow("Graph", detail: "+2 nodes · +3 connections", state: .attention)
             reviewRow("Mappings", detail: "3 changed · all valid", state: .passed)
@@ -4882,7 +4883,7 @@ private struct AutomationPublishReviewDesignPanel: View {
             Divider()
             Text("Activation").font(.caption.weight(.semibold))
             Label("Publish without activating", systemImage: "circle.inset.filled")
-                .foregroundStyle(Nord.frost1)
+                .foregroundStyle(KanameColor.accent)
             Text("Existing runs remain on their original definition. Activation is a separate action.")
                 .foregroundStyle(.secondary)
             Button("View visual diff", systemImage: "point.3.connected.trianglepath.dotted") {}
@@ -4898,7 +4899,7 @@ private struct AutomationPublishReviewDesignPanel: View {
     private func reviewRow(_ title: String, detail: String, state: ReviewState) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: state == .passed ? "checkmark.circle.fill" : "circlebadge.2.fill")
-                .foregroundStyle(state == .passed ? Nord.auroraGreen : Nord.auroraYellow)
+                .foregroundStyle(state == .passed ? KanameColor.success : KanameColor.warning)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).fontWeight(.semibold)
                 Text(detail).font(.caption2).foregroundStyle(.secondary)
@@ -5027,7 +5028,7 @@ private struct AutomationProblemsDrawer: View {
             }
         }
         .padding(isExpanded ? 13 : 8)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 12))
     }
 
     private var collapsedDrawer: some View {
@@ -5038,7 +5039,7 @@ private struct AutomationProblemsDrawer: View {
                 Label("Problems", systemImage: "exclamationmark.triangle.fill")
                     .font(.headline)
                 Text("\(diagnostics.count)")
-                    .foregroundStyle(Nord.auroraYellow)
+                    .foregroundStyle(KanameColor.warning)
                 severitySummary
                 Spacer()
                 Text("Show diagnostics")
@@ -5058,7 +5059,7 @@ private struct AutomationProblemsDrawer: View {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Label("Problems", systemImage: "exclamationmark.triangle.fill").font(.headline)
-                    Text("\(diagnostics.count)").foregroundStyle(Nord.auroraYellow)
+                    Text("\(diagnostics.count)").foregroundStyle(KanameColor.warning)
                     Spacer()
                     Text("Select an item to focus its exact graph or source location")
                         .font(.caption)
@@ -5096,7 +5097,7 @@ private struct AutomationProblemsDrawer: View {
                     Text(selected.summary).font(.headline)
                     Text(selected.instancePointer)
                         .font(.system(.caption2, design: .monospaced))
-                        .foregroundStyle(Nord.frost1)
+                        .foregroundStyle(KanameColor.accent)
                     HStack {
                         Button("Focus \(selected.focusTarget.projection.rawValue.capitalized)") {
                             onFocus(selected)
@@ -5127,9 +5128,9 @@ private struct AutomationProblemsDrawer: View {
         let warnings = diagnostics.filter { $0.severity == .warning }.count
         return HStack(spacing: 8) {
             Label("\(errors) errors", systemImage: "xmark.octagon.fill")
-                .foregroundStyle(Nord.auroraRed)
+                .foregroundStyle(KanameColor.danger)
             Label("\(warnings) warnings", systemImage: "exclamationmark.triangle.fill")
-                .foregroundStyle(Nord.auroraYellow)
+                .foregroundStyle(KanameColor.warning)
         }
         .font(.caption2)
     }
@@ -5138,7 +5139,7 @@ private struct AutomationProblemsDrawer: View {
         let selected = selectedID == diagnostic.id
         return HStack(spacing: 8) {
             Image(systemName: diagnostic.severity == .error ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
-                .foregroundStyle(diagnostic.severity == .error ? Nord.auroraRed : Nord.auroraYellow)
+                .foregroundStyle(diagnostic.severity == .error ? KanameColor.danger : KanameColor.warning)
                 .frame(width: 18)
             VStack(alignment: .leading, spacing: 1) {
                 Text(diagnostic.code).font(.system(.caption2, design: .monospaced).weight(.bold))
@@ -5147,13 +5148,13 @@ private struct AutomationProblemsDrawer: View {
             Spacer()
             Text(diagnostic.focusTarget.projection.rawValue.capitalized)
                 .font(.system(size: 9, weight: .bold))
-                .foregroundStyle(Nord.frost1)
+                .foregroundStyle(KanameColor.accent)
             Image(systemName: selected ? "scope" : "chevron.right")
-                .foregroundStyle(selected ? Nord.frost1 : .secondary)
+                .foregroundStyle(selected ? KanameColor.accent : .secondary)
         }
         .padding(.horizontal, 7)
         .padding(.vertical, 5)
-        .background(selected ? Nord.frost1.opacity(0.12) : Color.clear, in: RoundedRectangle(cornerRadius: 7))
+        .background(selected ? KanameColor.accent.opacity(0.12) : Color.clear, in: RoundedRectangle(cornerRadius: 7))
     }
 }
 
@@ -5185,19 +5186,19 @@ private struct AutomationVersionHistoryPanel: View {
                         Text("v\(version.0)").font(.system(.caption, design: .monospaced).weight(.bold))
                         Text(version.1)
                             .font(.caption2.weight(.semibold))
-                            .foregroundStyle(version.3 ? Nord.auroraGreen : .secondary)
+                            .foregroundStyle(version.3 ? KanameColor.success : .secondary)
                         Spacer()
-                        if version.3 { Image(systemName: "checkmark.circle.fill").foregroundStyle(Nord.auroraGreen) }
+                        if version.3 { Image(systemName: "checkmark.circle.fill").foregroundStyle(KanameColor.success) }
                     }
                     Text(version.2).font(.caption2).foregroundStyle(.secondary)
                     HStack(spacing: 8) {
                         Label("Graph", systemImage: "point.3.connected.trianglepath.dotted")
                         Label("Settings", systemImage: "slider.horizontal.3")
                     }
-                    .font(.system(size: 9)).foregroundStyle(Nord.frost1)
+                    .font(.system(size: 9)).foregroundStyle(KanameColor.accent)
                 }
                 .padding(9)
-                .background(version.3 ? Nord.frost1.opacity(0.12) : Nord.polarNight2.opacity(0.7), in: RoundedRectangle(cornerRadius: 9))
+                .background(version.3 ? KanameColor.accent.opacity(0.12) : KanameColor.raised.opacity(0.7), in: RoundedRectangle(cornerRadius: 9))
             }
             Spacer(minLength: 0)
             Divider()
@@ -5212,7 +5213,7 @@ private struct AutomationVersionHistoryPanel: View {
         }
         .padding(13)
         .frame(minHeight: 566, alignment: .topLeading)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 14))
     }
 }
 
@@ -5241,21 +5242,21 @@ private struct AutomationLiveVersionHistoryPanel: View {
                                 .font(.system(.caption, design: .monospaced).weight(.bold))
                             Text(index == 0 ? "Current" : "Published")
                                 .font(.caption2.weight(.semibold))
-                                .foregroundStyle(index == 0 ? Nord.auroraGreen : .secondary)
+                                .foregroundStyle(index == 0 ? KanameColor.success : .secondary)
                             Spacer()
                             if index == 0 {
-                                Image(systemName: "checkmark.circle.fill").foregroundStyle(Nord.auroraGreen)
+                                Image(systemName: "checkmark.circle.fill").foregroundStyle(KanameColor.success)
                             }
                         }
                         Text(installedLabel(revision.installedAtUnixMillis))
                             .font(.caption2).foregroundStyle(.secondary)
                         Text(String(revision.manifestDigest.prefix(12)))
                             .font(.system(size: 9, design: .monospaced))
-                            .foregroundStyle(Nord.frost1)
+                            .foregroundStyle(KanameColor.accent)
                     }
                     .padding(9)
                     .background(
-                        index == 0 ? Nord.frost1.opacity(0.12) : Nord.polarNight2.opacity(0.7),
+                        index == 0 ? KanameColor.accent.opacity(0.12) : KanameColor.raised.opacity(0.7),
                         in: RoundedRectangle(cornerRadius: 9)
                     )
                 }
@@ -5267,7 +5268,7 @@ private struct AutomationLiveVersionHistoryPanel: View {
         }
         .padding(13)
         .frame(minHeight: 566, alignment: .topLeading)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 14))
     }
 
     private func installedLabel(_ unixMillis: Int64) -> String {
@@ -5312,14 +5313,14 @@ private struct AutomationNodeInspector: View {
                     ? "Installed contract · qualification shown in Readiness"
                     : "Synthetic fixture contract · not operational")
             }
-            .foregroundStyle(isLive ? Nord.frost1 : Nord.auroraYellow)
+            .foregroundStyle(isLive ? KanameColor.accent : KanameColor.warning)
             Label(isLive ? "Bindings and authority are managed in Readiness" : "No live connections", systemImage: "network.slash")
                 .foregroundStyle(.secondary)
         }
         .font(.caption)
         .padding(13)
         .frame(minHeight: 566, alignment: .topLeading)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 14))
     }
 
     @ViewBuilder
@@ -5337,7 +5338,7 @@ private struct AutomationNodeInspector: View {
             inspectorFact("Retention", value: "Until settled")
             Divider()
             Label("Typed ports validated", systemImage: "point.3.connected.trianglepath.dotted")
-                .foregroundStyle(Nord.frost1)
+                .foregroundStyle(KanameColor.accent)
         case .history:
             if showsCaseHistory {
                 inspectorFact("Case", value: "CASE-184 · open")
@@ -5366,7 +5367,7 @@ private struct AutomationNodeInspector: View {
             inspectorFact("Model egress", value: step.kind == .ai ? "Declared projection" : "None")
             Divider()
             Text(step.kind == .effect ? "The exact target and approval are rechecked immediately before execution." : "This node cannot inherit effect authority from its trigger or upstream nodes.")
-                .foregroundStyle(step.kind == .effect ? Nord.auroraYellow : .secondary)
+                .foregroundStyle(step.kind == .effect ? KanameColor.warning : .secondary)
         }
     }
 
@@ -5645,7 +5646,7 @@ private struct AutomationRunsPreview: View {
                                 Text("#\(run.id)").font(.system(.caption, design: .monospaced).weight(.bold))
                                 Text("v\(run.version)")
                                     .font(.system(size: 9, weight: .bold, design: .monospaced))
-                                    .foregroundStyle(Nord.frost1)
+                                    .foregroundStyle(KanameColor.accent)
                             }
                             Text(run.workflow).font(.caption.weight(.semibold)).lineLimit(1)
                             Text(run.detail).font(.caption2).foregroundStyle(.secondary)
@@ -5658,7 +5659,7 @@ private struct AutomationRunsPreview: View {
                             .help("Open run details")
                     }
                     .padding(9)
-                    .background(selectedRunID == run.id ? Nord.frost1.opacity(0.15) : Color.clear, in: RoundedRectangle(cornerRadius: 9))
+                    .background(selectedRunID == run.id ? KanameColor.accent.opacity(0.15) : Color.clear, in: RoundedRectangle(cornerRadius: 9))
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -5670,7 +5671,7 @@ private struct AutomationRunsPreview: View {
         }
         .padding(13)
         .frame(minHeight: 590, alignment: .topLeading)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 14))
     }
 
     private func runDetail(isCompact: Bool) -> some View {
@@ -5688,7 +5689,7 @@ private struct AutomationRunsPreview: View {
                         Label(selectedRun.state.label, systemImage: selectedRun.state.symbol).foregroundStyle(selectedRun.state.tint)
                         Text("Workflow v\(selectedRun.version)")
                             .font(.system(.caption, design: .monospaced).weight(.semibold))
-                            .foregroundStyle(Nord.frost1)
+                            .foregroundStyle(KanameColor.accent)
                         Label("Historical snapshot", systemImage: "lock.doc")
                             .foregroundStyle(.secondary)
                     }
@@ -5703,7 +5704,7 @@ private struct AutomationRunsPreview: View {
             }
 
             HStack {
-                Label("Graph", systemImage: "point.3.connected.trianglepath.dotted").foregroundStyle(Nord.frost1)
+                Label("Graph", systemImage: "point.3.connected.trianglepath.dotted").foregroundStyle(KanameColor.accent)
                 Label("Settings v\(selectedRun.version)", systemImage: "slider.horizontal.3").foregroundStyle(.secondary)
                 Label("Evidence", systemImage: "doc.text.magnifyingglass").foregroundStyle(.secondary)
                 Spacer()
@@ -5728,11 +5729,11 @@ private struct AutomationRunsPreview: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, minHeight: 590, alignment: .topLeading)
-        .background(Nord.polarNight1.opacity(0.45), in: RoundedRectangle(cornerRadius: 14))
+        .background(KanameColor.surface.opacity(0.45), in: RoundedRectangle(cornerRadius: 14))
         .overlay {
             if showsDeleteJobConfirmation {
                 ZStack {
-                    Nord.polarNight0.opacity(0.74)
+                    KanameColor.canvas.opacity(0.74)
                         .clipShape(RoundedRectangle(cornerRadius: 14))
                     deleteJobConfirmation
                         .frame(width: 450)
@@ -5788,7 +5789,7 @@ private struct AutomationRunsPreview: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, minHeight: 190, alignment: .topLeading)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 12))
     }
 
     private var detailedStepInspector: some View {
@@ -5811,7 +5812,7 @@ private struct AutomationRunsPreview: View {
                 }
                 Spacer()
                 inspectorStatusFact("Status", value: selectedRun.state == .blocked ? "Failed" : "Succeeded", tint: selectedRun.state.tint)
-                inspectorStatusFact("Duration", value: stepIsLLM ? "1.8 s" : "16 ms", tint: Nord.frost1)
+                inspectorStatusFact("Duration", value: stepIsLLM ? "1.8 s" : "16 ms", tint: KanameColor.accent)
                 inspectorStatusFact("Started", value: "22:31:04", tint: .secondary)
                 Label("Read-only trace", systemImage: "lock.doc")
                     .font(.caption2.weight(.semibold))
@@ -5836,7 +5837,7 @@ private struct AutomationRunsPreview: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, minHeight: 286, alignment: .topLeading)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 12))
     }
 
     private var stepInspectorSubtitle: String {
@@ -5881,7 +5882,7 @@ private struct AutomationRunsPreview: View {
                 if let count = stepInspectorCount(for: section) {
                     Text(count)
                         .font(.system(size: 9, weight: .bold, design: .rounded))
-                        .foregroundStyle(section == .errors && count != "0" ? Nord.auroraRed : .secondary)
+                        .foregroundStyle(section == .errors && count != "0" ? KanameColor.danger : .secondary)
                 }
             }
             .font(.caption.weight(stepInspectorSection == section ? .semibold : .regular))
@@ -5934,10 +5935,10 @@ private struct AutomationRunsPreview: View {
         case .logs:
             VStack(alignment: .leading, spacing: 8) {
                 sectionHeading("Structured logs", detail: "Four events · node-local timestamps")
-                runLogLine("22:31:04.218", "Loaded immutable input checkpoint", Nord.polarNight3)
-                runLogLine("22:31:04.231", "Validated input schema case-context.v3", Nord.auroraGreen)
-                runLogLine("22:31:04.247", "Committed output checkpoint 7d91…a8c2", Nord.frost1)
-                runLogLine("22:31:04.251", "Released job-storage write lease", Nord.auroraPurple)
+                runLogLine("22:31:04.218", "Loaded immutable input checkpoint", KanameColor.separator)
+                runLogLine("22:31:04.231", "Validated input schema case-context.v3", KanameColor.success)
+                runLogLine("22:31:04.247", "Committed output checkpoint 7d91…a8c2", KanameColor.accent)
+                runLogLine("22:31:04.251", "Released job-storage write lease", KanameColor.blocked)
             }
         case .raw:
             rawStepEvidenceContent
@@ -5948,10 +5949,10 @@ private struct AutomationRunsPreview: View {
         VStack(alignment: .leading, spacing: 10) {
             sectionHeading("What happened", detail: "A concise summary before opening the underlying records")
             HStack(spacing: 10) {
-                overviewTile("Input", value: "3 variables · 2.4 KB", symbol: "arrow.down.doc", tint: Nord.frost1)
-                overviewTile("Output", value: selectedRun.state == .blocked ? "No output committed" : "4 values · 6.8 KB", symbol: "arrow.up.doc", tint: selectedRun.state == .blocked ? Nord.auroraRed : Nord.auroraGreen)
-                overviewTile("Storage", value: "2 job values changed", symbol: "shippingbox", tint: Nord.auroraPurple)
-                overviewTile("Evidence", value: "Input + output digests", symbol: "checkmark.seal", tint: Nord.auroraYellow)
+                overviewTile("Input", value: "3 variables · 2.4 KB", symbol: "arrow.down.doc", tint: KanameColor.accent)
+                overviewTile("Output", value: selectedRun.state == .blocked ? "No output committed" : "4 values · 6.8 KB", symbol: "arrow.up.doc", tint: selectedRun.state == .blocked ? KanameColor.danger : KanameColor.success)
+                overviewTile("Storage", value: "2 job values changed", symbol: "shippingbox", tint: KanameColor.blocked)
+                overviewTile("Evidence", value: "Input + output digests", symbol: "checkmark.seal", tint: KanameColor.warning)
             }
             Label(
                 selectedRun.state == .blocked
@@ -5960,7 +5961,7 @@ private struct AutomationRunsPreview: View {
                 systemImage: selectedRun.state == .blocked ? "exclamationmark.shield" : "checkmark.shield"
             )
             .font(.caption)
-            .foregroundStyle(selectedRun.state == .blocked ? Nord.auroraRed : Nord.auroraGreen)
+            .foregroundStyle(selectedRun.state == .blocked ? KanameColor.danger : KanameColor.success)
         }
     }
 
@@ -5971,7 +5972,7 @@ private struct AutomationRunsPreview: View {
                 executionDataPanel(
                     "Variables passed in",
                     subtitle: "Immutable input checkpoint · b840…19fc",
-                    tint: Nord.frost1,
+                    tint: KanameColor.accent,
                     rows: [
                         ("case_id", "String", "CASE-184", "Correlate case"),
                         ("episode", "Integer", "3", "Job storage"),
@@ -5981,7 +5982,7 @@ private struct AutomationRunsPreview: View {
                 executionDataPanel(
                     "Output produced",
                     subtitle: selectedRun.state == .blocked ? "No checkpoint committed" : "Committed checkpoint · 7d91…a8c2",
-                    tint: selectedRun.state == .blocked ? Nord.auroraRed : Nord.auroraGreen,
+                    tint: selectedRun.state == .blocked ? KanameColor.danger : KanameColor.success,
                     rows: selectedRun.state == .blocked ? [
                         ("—", "—", "No output", "Attempt failed"),
                     ] : [
@@ -6000,7 +6001,7 @@ private struct AutomationRunsPreview: View {
             executionDataPanel(
                 stepIsLLM ? "Assistant result" : "Produced values",
                 subtitle: selectedRun.state == .blocked ? "No checkpoint committed" : "Schema-valid · digest 7d91…a8c2",
-                tint: selectedRun.state == .blocked ? Nord.auroraRed : Nord.auroraGreen,
+                tint: selectedRun.state == .blocked ? KanameColor.danger : KanameColor.success,
                 rows: selectedRun.state == .blocked ? [
                     ("—", "—", "No output", "Attempt failed"),
                 ] : stepIsLLM ? [
@@ -6021,7 +6022,7 @@ private struct AutomationRunsPreview: View {
         if selectedRun.state == .blocked {
             VStack(alignment: .leading, spacing: 9) {
                 HStack(spacing: 10) {
-                    Image(systemName: "xmark.octagon.fill").foregroundStyle(Nord.auroraRed)
+                    Image(systemName: "xmark.octagon.fill").foregroundStyle(KanameColor.danger)
                     VStack(alignment: .leading, spacing: 1) {
                         Text("Provider outcome could not be proven").font(.caption.weight(.bold))
                         Text("The effect may have completed, so Kaname will not retry it automatically.")
@@ -6030,10 +6031,10 @@ private struct AutomationRunsPreview: View {
                     Spacer()
                     Text("UNKNOWN_OUTCOME")
                         .font(.system(size: 9, weight: .bold, design: .monospaced))
-                        .foregroundStyle(Nord.auroraRed)
+                        .foregroundStyle(KanameColor.danger)
                 }
                 .padding(9)
-                .background(Nord.auroraRed.opacity(0.09), in: RoundedRectangle(cornerRadius: 8))
+                .background(KanameColor.danger.opacity(0.09), in: RoundedRectangle(cornerRadius: 8))
 
                 HStack(alignment: .top, spacing: 10) {
                     diagnosticPanel(
@@ -6044,7 +6045,7 @@ private struct AutomationRunsPreview: View {
                             ("Technical cause", "Transport closed before receipt"),
                             ("Error ID", "err_01J8…M4Q"),
                         ],
-                        tint: Nord.auroraRed
+                        tint: KanameColor.danger
                     )
                     diagnosticPanel(
                         "What happens next",
@@ -6054,7 +6055,7 @@ private struct AutomationRunsPreview: View {
                             ("Output", "Nothing committed downstream"),
                             ("Recovery", "Human reconcile with provider"),
                         ],
-                        tint: Nord.auroraYellow
+                        tint: KanameColor.warning
                     )
                 }
                 HStack {
@@ -6070,7 +6071,7 @@ private struct AutomationRunsPreview: View {
                 sectionHeading("Errors", detail: "No warnings or failures were recorded for this attempt")
                 Label("Succeeded without retries", systemImage: "checkmark.circle.fill")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(Nord.auroraGreen)
+                    .foregroundStyle(KanameColor.success)
             }
         }
     }
@@ -6084,21 +6085,21 @@ private struct AutomationRunsPreview: View {
                     detail: "Mailbox summarizer · no external effects",
                     provenance: "Kaname policy · 620 tokens",
                     symbol: "shield.fill",
-                    tint: Nord.auroraYellow
+                    tint: KanameColor.warning
                 )
                 contextEnvelopeCard(
                     "Workflow instructions",
                     detail: "Summarize only the declared projection",
                     provenance: "Workflow v3 · 580 tokens",
                     symbol: "point.3.connected.trianglepath.dotted",
-                    tint: Nord.auroraPurple
+                    tint: KanameColor.blocked
                 )
                 contextEnvelopeCard(
                     "Current input",
                     detail: "184 messages · allowed fields only",
                     provenance: "Fan out · 3,820 tokens",
                     symbol: "arrow.down.doc",
-                    tint: Nord.frost1
+                    tint: KanameColor.accent
                 )
             }
             HStack(alignment: .top, spacing: 8) {
@@ -6107,21 +6108,21 @@ private struct AutomationRunsPreview: View {
                     detail: "3 prior messages · role-separated",
                     provenance: "Case thread · 1,140 tokens",
                     symbol: "bubble.left.and.bubble.right",
-                    tint: Nord.frost0
+                    tint: KanameColor.active
                 )
                 contextEnvelopeCard(
                     "Attachments & sources",
                     detail: "2 retrieved excerpts · content digests retained",
                     provenance: "Job storage · 80 tokens",
                     symbol: "paperclip",
-                    tint: Nord.auroraGreen
+                    tint: KanameColor.success
                 )
                 Label("Hidden chain-of-thought is not exposed. Configured reasoning effort and provider-supplied summaries live under Usage.", systemImage: "eye.slash")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .padding(9)
                     .frame(maxWidth: .infinity, minHeight: 62, alignment: .topLeading)
-                    .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+                    .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 8))
             }
         }
     }
@@ -6131,16 +6132,16 @@ private struct AutomationRunsPreview: View {
             sectionHeading("Messages", detail: "Role-separated summaries · expand one record at a time")
             HStack(alignment: .top, spacing: 10) {
                 VStack(spacing: 5) {
-                    messageRecord("System", index: "01", summary: "Policy and output contract", detail: "1,200 tokens", tint: Nord.auroraYellow)
-                    messageRecord("User", index: "02", summary: "Mailbox projection and requested digest", detail: "3,820 tokens", tint: Nord.frost1)
-                    messageRecord("Assistant", index: "03", summary: "Requested two read-only tools", detail: "146 tokens", tint: Nord.auroraPurple)
-                    messageRecord("Tool", index: "04", summary: "Two linked results · both succeeded", detail: "1,074 tokens", tint: Nord.auroraGreen)
+                    messageRecord("System", index: "01", summary: "Policy and output contract", detail: "1,200 tokens", tint: KanameColor.warning)
+                    messageRecord("User", index: "02", summary: "Mailbox projection and requested digest", detail: "3,820 tokens", tint: KanameColor.accent)
+                    messageRecord("Assistant", index: "03", summary: "Requested two read-only tools", detail: "146 tokens", tint: KanameColor.blocked)
+                    messageRecord("Tool", index: "04", summary: "Two linked results · both succeeded", detail: "1,074 tokens", tint: KanameColor.success)
                 }
                 .frame(maxWidth: .infinity)
 
                 VStack(alignment: .leading, spacing: 7) {
                     Label("Selected · User 02", systemImage: "bubble.left.fill")
-                        .font(.caption.weight(.bold)).foregroundStyle(Nord.frost1)
+                        .font(.caption.weight(.bold)).foregroundStyle(KanameColor.accent)
                     Text("Summarize this frozen mailbox batch using only sender domain, subject category, received date, and the approved excerpt.")
                         .font(.caption)
                         .textSelection(.enabled)
@@ -6155,7 +6156,7 @@ private struct AutomationRunsPreview: View {
                 }
                 .padding(10)
                 .frame(maxWidth: .infinity, minHeight: 152, alignment: .topLeading)
-                .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+                .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 8))
             }
         }
     }
@@ -6193,7 +6194,7 @@ private struct AutomationRunsPreview: View {
                 }
                 .padding(10)
                 .frame(width: 260, alignment: .topLeading)
-                .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+                .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 8))
             }
         }
     }
@@ -6210,7 +6211,7 @@ private struct AutomationRunsPreview: View {
                         ("Temperature", "Workflow default"),
                         ("Tool policy", "Two read-only tools"),
                     ],
-                    tint: Nord.auroraPurple
+                    tint: KanameColor.blocked
                 )
                 diagnosticPanel(
                     "Provider report",
@@ -6220,7 +6221,7 @@ private struct AutomationRunsPreview: View {
                         ("Latency", "1.8 s"),
                         ("Reasoning summary", "Not supplied"),
                     ],
-                    tint: Nord.frost1
+                    tint: KanameColor.accent
                 )
             }
         }
@@ -6264,7 +6265,7 @@ private struct AutomationRunsPreview: View {
         }
         .padding(9)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+        .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 8))
     }
 
     private func executionDataPanel(
@@ -6300,7 +6301,7 @@ private struct AutomationRunsPreview: View {
         }
         .padding(9)
         .frame(maxWidth: .infinity, alignment: .topLeading)
-        .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+        .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 8))
         .overlay { RoundedRectangle(cornerRadius: 8).stroke(tint.opacity(0.25), lineWidth: 1) }
     }
 
@@ -6322,7 +6323,7 @@ private struct AutomationRunsPreview: View {
         }
         .padding(9)
         .frame(maxWidth: .infinity, alignment: .topLeading)
-        .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+        .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 8))
         .overlay { RoundedRectangle(cornerRadius: 8).stroke(tint.opacity(0.24), lineWidth: 1) }
     }
 
@@ -6340,7 +6341,7 @@ private struct AutomationRunsPreview: View {
         }
         .padding(9)
         .frame(maxWidth: .infinity, minHeight: 62, alignment: .topLeading)
-        .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+        .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 8))
     }
 
     private func messageRecord(
@@ -6362,7 +6363,7 @@ private struct AutomationRunsPreview: View {
             Image(systemName: "chevron.right").font(.system(size: 8)).foregroundStyle(.secondary)
         }
         .padding(7)
-        .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 7))
+        .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 7))
     }
 
     private func toolCallRecord(
@@ -6376,11 +6377,11 @@ private struct AutomationRunsPreview: View {
             HStack {
                 Label(name, systemImage: "wrench.and.screwdriver.fill")
                     .font(.system(.caption, design: .monospaced).weight(.semibold))
-                    .foregroundStyle(Nord.auroraPurple)
+                    .foregroundStyle(KanameColor.blocked)
                 Text(callID).font(.system(size: 9, design: .monospaced)).foregroundStyle(.secondary)
                 Spacer()
                 Label("Succeeded", systemImage: "checkmark.circle.fill")
-                    .font(.caption2.weight(.semibold)).foregroundStyle(Nord.auroraGreen)
+                    .font(.caption2.weight(.semibold)).foregroundStyle(KanameColor.success)
                 Text(duration).font(.caption2).foregroundStyle(.secondary)
             }
             HStack(spacing: 6) {
@@ -6393,8 +6394,8 @@ private struct AutomationRunsPreview: View {
             }
         }
         .padding(9)
-        .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
-        .overlay { RoundedRectangle(cornerRadius: 8).stroke(Nord.auroraPurple.opacity(0.22), lineWidth: 1) }
+        .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 8))
+        .overlay { RoundedRectangle(cornerRadius: 8).stroke(KanameColor.blocked.opacity(0.22), lineWidth: 1) }
     }
 
     private func usageRow(_ label: String, value: String) -> some View {
@@ -6428,9 +6429,9 @@ private struct AutomationRunsPreview: View {
         case .storage:
             jobStorageInspector
         case .logs:
-            runLogLine("22:31:04.218", "Loaded immutable input checkpoint", Nord.polarNight3)
-            runLogLine("22:31:04.231", "Validated schema case-context.v3", Nord.auroraGreen)
-            runLogLine("22:31:04.247", "Produced 1 item · digest 7d91…a8c2", Nord.frost1)
+            runLogLine("22:31:04.218", "Loaded immutable input checkpoint", KanameColor.separator)
+            runLogLine("22:31:04.231", "Validated schema case-context.v3", KanameColor.success)
+            runLogLine("22:31:04.247", "Produced 1 item · digest 7d91…a8c2", KanameColor.accent)
         case .configuration:
             HStack(spacing: 28) {
                 evidenceFact("Definition", value: "Workflow v\(selectedRun.version)")
@@ -6456,7 +6457,7 @@ private struct AutomationRunsPreview: View {
                 "Job storage · #\(selectedRun.id)",
                 subtitle: "Private to this job",
                 symbol: "shippingbox.fill",
-                tint: Nord.frost1,
+                tint: KanameColor.accent,
                 rows: [
                     ("Values", "7 · 182 KB"),
                     ("Files", "3 · 48.0 MB"),
@@ -6467,7 +6468,7 @@ private struct AutomationRunsPreview: View {
                 "Recent changes",
                 subtitle: "Committed by nodes",
                 symbol: "arrow.triangle.2.circlepath",
-                tint: Nord.auroraGreen,
+                tint: KanameColor.success,
                 rows: [
                     ("Run work type", "+ report-v3.xlsx"),
                     ("Compile context", "~ episode = 3"),
@@ -6478,7 +6479,7 @@ private struct AutomationRunsPreview: View {
                 "Workflow storage",
                 subtitle: "Not deleted with this job",
                 symbol: "externaldrive.fill",
-                tint: Nord.auroraPurple,
+                tint: KanameColor.blocked,
                 rows: [
                     ("Durable values", "12"),
                     ("Promoted files", "4 · 86 MB"),
@@ -6533,12 +6534,12 @@ private struct AutomationRunsPreview: View {
         switch dataView {
         case .table:
             HStack(alignment: .top, spacing: 10) {
-                comparisonPanel("Received", tint: Nord.polarNight3) {
+                comparisonPanel("Received", tint: KanameColor.separator) {
                     comparisonRow("episodes", value: "2")
                     comparisonRow("artifact", value: "report-v2.xlsx")
                     comparisonRow("instruction", value: "Use monthly totals")
                 }
-                comparisonPanel("Produced", tint: Nord.auroraGreen) {
+                comparisonPanel("Produced", tint: KanameColor.success) {
                     comparisonRow("episodes", value: "3", changed: true)
                     comparisonRow("artifact", value: "report-v3.xlsx", changed: true)
                     comparisonRow("current_intent", value: "correction", changed: true)
@@ -6589,7 +6590,7 @@ private struct AutomationRunsPreview: View {
         }
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+        .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 8))
     }
 
     private func comparisonRow(_ field: String, value: String, changed: Bool = false) -> some View {
@@ -6597,7 +6598,7 @@ private struct AutomationRunsPreview: View {
             Text(field).foregroundStyle(.secondary)
             Spacer()
             if changed {
-                Image(systemName: "plus.circle.fill").foregroundStyle(Nord.auroraGreen)
+                Image(systemName: "plus.circle.fill").foregroundStyle(KanameColor.success)
             }
             Text(value).lineLimit(1)
         }
@@ -6609,12 +6610,12 @@ private struct AutomationRunsPreview: View {
             Text(title).font(.caption2.weight(.bold)).foregroundStyle(.secondary)
             Text(text)
                 .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(Nord.frost1)
+                .foregroundStyle(KanameColor.accent)
                 .textSelection(.enabled)
         }
         .padding(9)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+        .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 8))
     }
 
     private func dataCell(_ field: String, value: String) -> some View {
@@ -6624,8 +6625,8 @@ private struct AutomationRunsPreview: View {
         }
         .padding(9)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Nord.polarNight0)
-        .overlay { Rectangle().stroke(Nord.polarNight3.opacity(0.8), lineWidth: 0.5) }
+        .background(KanameColor.canvas)
+        .overlay { Rectangle().stroke(KanameColor.separator.opacity(0.8), lineWidth: 0.5) }
     }
 
     private func runLogLine(_ time: String, _ message: String, _ tint: Color) -> some View {
@@ -6657,7 +6658,7 @@ private struct AutomationRunsPreview: View {
             retentionExplanation
             Divider()
             Label("Unresolved runs are protected", systemImage: "shield.fill")
-                .foregroundStyle(Nord.auroraYellow)
+                .foregroundStyle(KanameColor.warning)
             Text("Waiting, failed, or unknown outcomes remain until resolved or manually deleted, even when successful runs are removed immediately.")
                 .font(.caption2).foregroundStyle(.secondary)
             Spacer(minLength: 24)
@@ -6669,7 +6670,7 @@ private struct AutomationRunsPreview: View {
         }
         .padding(20)
         .frame(maxWidth: 720, minHeight: 520, alignment: .topLeading)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 14))
         .frame(maxWidth: .infinity, alignment: .center)
     }
 
@@ -6689,12 +6690,12 @@ private struct AutomationRunsPreview: View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 10) {
                 Image(systemName: "trash.fill")
-                    .foregroundStyle(Nord.auroraRed)
+                    .foregroundStyle(KanameColor.danger)
                     .frame(width: 34, height: 34)
-                    .background(Nord.auroraRed.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
+                    .background(KanameColor.danger.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Delete job #\(selectedRun.id)?").font(.title3.weight(.bold))
-                    Text("This cannot be undone").font(.caption).foregroundStyle(Nord.auroraRed)
+                    Text("This cannot be undone").font(.caption).foregroundStyle(KanameColor.danger)
                 }
                 Spacer()
                 Button("Close", systemImage: "xmark") {
@@ -6717,14 +6718,14 @@ private struct AutomationRunsPreview: View {
                 Divider()
                 deletionRow("Workflow storage", value: "4 files · 86 MB", deleted: false)
             }
-            .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 9))
+            .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 9))
 
             Label(
                 "Promoted files and long-term values remain in workflow storage.",
                 systemImage: "externaldrive.fill.badge.checkmark"
             )
             .font(.caption)
-            .foregroundStyle(Nord.auroraPurple)
+            .foregroundStyle(KanameColor.blocked)
 
             HStack {
                 Spacer()
@@ -6737,21 +6738,21 @@ private struct AutomationRunsPreview: View {
             }
         }
         .padding(18)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
-        .overlay { RoundedRectangle(cornerRadius: 14).stroke(Nord.auroraRed.opacity(0.45), lineWidth: 1) }
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 14))
+        .overlay { RoundedRectangle(cornerRadius: 14).stroke(KanameColor.danger.opacity(0.45), lineWidth: 1) }
         .shadow(color: .black.opacity(0.35), radius: 24, y: 12)
     }
 
     private func deletionRow(_ label: String, value: String, deleted: Bool) -> some View {
         HStack(spacing: 10) {
             Image(systemName: deleted ? "trash" : "lock.shield.fill")
-                .foregroundStyle(deleted ? Nord.auroraRed : Nord.auroraPurple)
+                .foregroundStyle(deleted ? KanameColor.danger : KanameColor.blocked)
                 .frame(width: 18)
             Text(label).font(.caption.weight(.semibold))
             Spacer()
             Text(deleted ? "Delete · \(value)" : "Keep · \(value)")
                 .font(.caption2.weight(.bold))
-                .foregroundStyle(deleted ? Nord.auroraRed : Nord.auroraPurple)
+                .foregroundStyle(deleted ? KanameColor.danger : KanameColor.blocked)
         }
         .padding(10)
     }

@@ -4,6 +4,7 @@ import KanameDesktop
 import KanameLocalCore
 import KanamePrototypeUI
 import SwiftUI
+import KanameDesignSystem
 
 @MainActor
 final class DesktopDurableWorkflowRunsViewModel: ObservableObject {
@@ -311,7 +312,7 @@ struct DesktopDurableWorkflowRunsView: View {
         if history.runs.isEmpty {
             VStack(spacing: 10) {
                 Image(systemName: "point.3.connected.trianglepath.dotted")
-                    .font(.largeTitle).foregroundStyle(Nord.frost1)
+                    .font(.largeTitle).foregroundStyle(KanameColor.accent)
                 Text("No durable workflow runs yet").font(.headline)
                 Text(history.absenceReason == "not_found_or_purged"
                     ? "This run was not found or its retained history has been purged."
@@ -459,7 +460,7 @@ struct DesktopDurableWorkflowRunsView: View {
                         Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.secondary)
                     }
                     .padding(9)
-                    .background(selectedRunID == snapshot.id ? Nord.frost1.opacity(0.15) : .clear,
+                    .background(selectedRunID == snapshot.id ? KanameColor.accent.opacity(0.15) : .clear,
                                 in: RoundedRectangle(cornerRadius: 9))
                     .contentShape(Rectangle())
                 }
@@ -469,7 +470,7 @@ struct DesktopDurableWorkflowRunsView: View {
         }
         .padding(13)
         .frame(maxHeight: .infinity, alignment: .topLeading)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 14))
     }
 
     private func runDetail(
@@ -502,7 +503,7 @@ struct DesktopDurableWorkflowRunsView: View {
             retentionCard(snapshot.run)
             if let reason = snapshot.revisionAbsenceReason {
                 Label(reason, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption).foregroundStyle(Nord.auroraYellow).panelStyle()
+                    .font(.caption).foregroundStyle(KanameColor.warning).panelStyle()
             } else if let graph = snapshot.graph {
                 canvas(graph, run: snapshot.run)
                     .frame(height: qualificationFixture ? 220 : nil)
@@ -511,12 +512,12 @@ struct DesktopDurableWorkflowRunsView: View {
             } else {
                 Label("The revision exists, but its historical graph could not be decoded. No empty diagram is shown.",
                       systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption).foregroundStyle(Nord.auroraYellow).panelStyle()
+                    .font(.caption).foregroundStyle(KanameColor.warning).panelStyle()
             }
         }
         .padding(14)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Nord.polarNight1.opacity(0.45), in: RoundedRectangle(cornerRadius: 14))
+        .background(KanameColor.surface.opacity(0.45), in: RoundedRectangle(cornerRadius: 14))
     }
 
     @ViewBuilder
@@ -528,7 +529,7 @@ struct DesktopDurableWorkflowRunsView: View {
             VStack(alignment: .leading, spacing: 9) {
                 HStack {
                     Label("Effect lifecycle", systemImage: "bolt.horizontal.circle.fill")
-                        .font(.caption.weight(.semibold)).foregroundStyle(Nord.frost1)
+                        .font(.caption.weight(.semibold)).foregroundStyle(KanameColor.accent)
                     Spacer()
                     Text("\(effects.count) exact effect\(effects.count == 1 ? "" : "s")")
                         .font(.caption2).foregroundStyle(.secondary)
@@ -572,15 +573,15 @@ struct DesktopDurableWorkflowRunsView: View {
                         .font(.caption2)
                         .foregroundStyle(
                             DesktopWorkflowEffectLifecyclePresentation.requiresAttention(effect.status)
-                                ? Nord.auroraYellow : .secondary
+                                ? KanameColor.warning : .secondary
                         )
                     }
                     .padding(9)
-                    .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+                    .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 8))
                 }
             }
             .padding(10)
-            .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 10))
+            .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 10))
         }
     }
 
@@ -601,9 +602,9 @@ struct DesktopDurableWorkflowRunsView: View {
                 Spacer()
                 if let reason = preview.protectedReason {
                     Label(retentionProtectionLabel(reason), systemImage: "lock.fill")
-                        .font(.caption2).foregroundStyle(Nord.auroraYellow)
+                        .font(.caption2).foregroundStyle(KanameColor.warning)
                 } else if preview.automaticEligible {
-                    Text("Eligible now").font(.caption2).foregroundStyle(Nord.auroraGreen)
+                    Text("Eligible now").font(.caption2).foregroundStyle(KanameColor.success)
                 } else if let eligibleAt = preview.automaticEligibleAtUnixMillis {
                     Text(Date(timeIntervalSince1970: Double(eligibleAt) / 1_000), style: .relative)
                         .font(.caption2).foregroundStyle(.secondary)
@@ -620,7 +621,7 @@ struct DesktopDurableWorkflowRunsView: View {
                         .font(.caption2).foregroundStyle(.secondary)
                     if !preview.retainedPromotedHandleIDs.isEmpty {
                         Label("\(preview.retainedPromotedHandleIDs.count) promoted objects will be retained", systemImage: "archivebox.fill")
-                            .font(.caption2).foregroundStyle(Nord.auroraGreen)
+                            .font(.caption2).foregroundStyle(KanameColor.success)
                     }
                     retentionIdentifiers("Attempts", preview.affectedAttemptIDs)
                     retentionIdentifiers("Values", preview.affectedValueIDs)
@@ -633,15 +634,15 @@ struct DesktopDurableWorkflowRunsView: View {
                         showingPurgeConfirmation = true
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(Nord.auroraRed)
+                    .tint(KanameColor.danger)
                     .disabled(!preview.manualEligible)
                 }
                 .padding(9)
-                .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+                .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 8))
             }
         }
         .padding(10)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 10))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 10))
         .confirmationDialog(
             "Delete this run's retained data?",
             isPresented: $showingPurgeConfirmation,
@@ -681,7 +682,7 @@ struct DesktopDurableWorkflowRunsView: View {
         VStack(spacing: 8) {
             HStack {
                 Label("Run graph", systemImage: "point.3.connected.trianglepath.dotted")
-                    .font(.caption.weight(.semibold)).foregroundStyle(Nord.frost1)
+                    .font(.caption.weight(.semibold)).foregroundStyle(KanameColor.accent)
                 Spacer()
                 Button { zoom = max(0.65, zoom - 0.1) } label: { Image(systemName: "minus.magnifyingglass") }
                 Text("\(Int(zoom * 100))%").font(.system(size: 9, design: .monospaced)).frame(width: 38)
@@ -703,7 +704,7 @@ struct DesktopDurableWorkflowRunsView: View {
                                 control2: CGPoint(x: (target.x - 70) * zoom, y: (target.y + 45) * zoom)
                             )
                             let admitted = run.edges.contains { $0.edgeID == edge.id && $0.state == "admitted" }
-                            context.stroke(path, with: .color(admitted ? Nord.auroraGreen : Nord.polarNight3),
+                            context.stroke(path, with: .color(admitted ? KanameColor.success : KanameColor.separator),
                                            style: StrokeStyle(lineWidth: admitted ? 3 : 1.5, dash: admitted ? [] : [5, 5]))
                         }
                     }
@@ -742,9 +743,9 @@ struct DesktopDurableWorkflowRunsView: View {
                             }
                             .padding(11)
                             .frame(width: 220 * zoom, height: 90 * zoom, alignment: .leading)
-                            .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 11))
+                            .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 11))
                             .overlay { RoundedRectangle(cornerRadius: 11).stroke(
-                                selectedNodeID == node.id ? Nord.frost1 : statusTint(state).opacity(0.45),
+                                selectedNodeID == node.id ? KanameColor.accent : statusTint(state).opacity(0.45),
                                 lineWidth: selectedNodeID == node.id ? 2 : 1
                             ) }
                         }
@@ -754,7 +755,7 @@ struct DesktopDurableWorkflowRunsView: View {
                 }
                 .frame(width: size.width, height: size.height, alignment: .topLeading)
             }
-            .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 10))
+            .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 10))
             .overlay(alignment: .bottomTrailing) {
                 Text("Pan by scrolling · canvas keeps its world size")
                     .font(.system(size: 9)).foregroundStyle(.secondary).padding(8)
@@ -782,12 +783,12 @@ struct DesktopDurableWorkflowRunsView: View {
                             .padding(.horizontal, 10)
                             .padding(.vertical, 6)
                             .background(
-                                inspectorGroup == group ? Nord.frost1.opacity(0.22) : Nord.polarNight0,
+                                inspectorGroup == group ? KanameColor.accent.opacity(0.22) : KanameColor.canvas,
                                 in: Capsule()
                             )
                             .overlay {
                                 Capsule().stroke(
-                                    inspectorGroup == group ? Nord.frost1 : Nord.polarNight3,
+                                    inspectorGroup == group ? KanameColor.accent : KanameColor.separator,
                                     lineWidth: 1
                                 )
                             }
@@ -798,7 +799,7 @@ struct DesktopDurableWorkflowRunsView: View {
                 .frame(maxWidth: .infinity, minHeight: 145, alignment: .topLeading)
         }
         .padding(12)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 12))
     }
 
     @ViewBuilder
@@ -936,7 +937,7 @@ struct DesktopDurableWorkflowRunsView: View {
             VStack(alignment: .leading, spacing: 4) {
                 ForEach(run.events) { event in
                     HStack {
-                        Text("#\(event.storePosition)").font(.system(.caption2, design: .monospaced)).foregroundStyle(Nord.frost1)
+                        Text("#\(event.storePosition)").font(.system(.caption2, design: .monospaced)).foregroundStyle(KanameColor.accent)
                         Text(event.kind).font(.caption2)
                         Spacer()
                         Text(event.eventID).font(.system(size: 9, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1)
@@ -1014,9 +1015,9 @@ struct DesktopDurableWorkflowRunsView: View {
                         )
                     } else if ["dispatching", "outcome_unknown"].contains(effect.status) {
                         Label("Reconciliation is required. Retrying this effect is blocked.", systemImage: "exclamationmark.shield.fill")
-                            .font(.caption.weight(.semibold)).foregroundStyle(Nord.auroraYellow)
+                            .font(.caption.weight(.semibold)).foregroundStyle(KanameColor.warning)
                             .padding(9).frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Nord.auroraYellow.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+                            .background(KanameColor.warning.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
                     }
                 }
             }
@@ -1222,10 +1223,10 @@ struct DesktopDurableWorkflowRunsView: View {
             VStack(alignment: .leading, spacing: 7) { content() }
                 .padding(.top, 7)
         } label: {
-            Text(title).font(.caption.weight(.bold)).foregroundStyle(Nord.frost1)
+            Text(title).font(.caption.weight(.bold)).foregroundStyle(KanameColor.accent)
         }
         .padding(9)
-        .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+        .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 8))
     }
 
     private func llmMatches(_ tool: DesktopWorkflowProjectedLlmToolDefinition) -> Bool {
@@ -1375,7 +1376,7 @@ struct DesktopDurableWorkflowRunsView: View {
         return VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Label(metadata.result.capitalized, systemImage: "externaldrive.badge.checkmark")
-                    .font(.caption.weight(.bold)).foregroundStyle(Nord.frost1)
+                    .font(.caption.weight(.bold)).foregroundStyle(KanameColor.accent)
                 Spacer()
                 Text(port).font(.caption2).foregroundStyle(.secondary)
             }
@@ -1392,7 +1393,7 @@ struct DesktopDurableWorkflowRunsView: View {
             }
         }
         .padding(9)
-        .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+        .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 8))
     }
 
     private func storageRow(_ label: String, _ value: String) -> some View {
@@ -1407,29 +1408,29 @@ struct DesktopDurableWorkflowRunsView: View {
             Text(text).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
                 .padding(9).frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+        .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 8))
     }
 
     private func evidenceCard(title: String, detail: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(title).font(.caption.weight(.bold)).foregroundStyle(Nord.frost1)
+            Text(title).font(.caption.weight(.bold)).foregroundStyle(KanameColor.accent)
             Text(detail).font(.system(.caption2, design: .monospaced)).textSelection(.enabled)
         }
         .padding(9).frame(maxWidth: .infinity, alignment: .leading)
-        .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+        .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 8))
     }
 
     private func explainedEmpty(_ text: String) -> some View {
         Label(text, systemImage: "info.circle")
             .font(.caption).foregroundStyle(.secondary)
             .padding(10).frame(maxWidth: .infinity, alignment: .leading)
-            .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8))
+            .background(KanameColor.canvas, in: RoundedRectangle(cornerRadius: 8))
     }
 
     private func unavailable(_ message: String) -> some View {
         VStack(spacing: 10) {
             Label("Workflow run history unavailable", systemImage: "exclamationmark.triangle.fill")
-                .font(.headline).foregroundStyle(Nord.auroraYellow)
+                .font(.headline).foregroundStyle(KanameColor.warning)
             Text(message).font(.caption).foregroundStyle(.secondary)
             Button("Try again", systemImage: "arrow.clockwise") { Task { await viewModel.reload() } }
         }
@@ -1469,12 +1470,12 @@ struct DesktopDurableWorkflowRunsView: View {
 
     private func effectStatusTint(_ status: String) -> Color {
         switch status {
-        case "succeeded", "reconciled_applied": Nord.auroraGreen
-        case "rejected": Nord.auroraRed
-        case "proposed", "dispatching", "outcome_unknown": Nord.auroraYellow
-        case "authorized": Nord.frost1
+        case "succeeded", "reconciled_applied": KanameColor.success
+        case "rejected": KanameColor.danger
+        case "proposed", "dispatching", "outcome_unknown": KanameColor.warning
+        case "authorized": KanameColor.accent
         case "not_sent", "reconciled_not_applied": .secondary
-        default: Nord.auroraRed
+        default: KanameColor.danger
         }
     }
 
@@ -1490,9 +1491,9 @@ struct DesktopDurableWorkflowRunsView: View {
 
     private func effectStepTint(_ state: DesktopWorkflowEffectLifecycleStepState) -> Color {
         switch state {
-        case .complete: Nord.auroraGreen
-        case .current: Nord.frost1
-        case .attention: Nord.auroraYellow
+        case .complete: KanameColor.success
+        case .current: KanameColor.accent
+        case .attention: KanameColor.warning
         case .pending, .notApplicable: .secondary
         }
     }
@@ -1509,10 +1510,10 @@ struct DesktopDurableWorkflowRunsView: View {
 
     private func statusTint(_ status: String) -> Color {
         switch status {
-        case "succeeded": Nord.auroraGreen
-        case "failed": Nord.auroraRed
-        case "cancelled": Nord.auroraYellow
-        case "running", "cancelling": Nord.frost1
+        case "succeeded": KanameColor.success
+        case "failed": KanameColor.danger
+        case "cancelled": KanameColor.warning
+        case "running", "cancelling": KanameColor.accent
         default: .secondary
         }
     }

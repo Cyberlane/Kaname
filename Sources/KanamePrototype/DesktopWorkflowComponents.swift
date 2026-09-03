@@ -6,6 +6,7 @@ import SwiftFlow
 import SwiftUI
 #if canImport(Security)
 import Security
+import KanameDesignSystem
 #endif
 
 func makeWorkflowStudioReviewContract(
@@ -37,7 +38,7 @@ struct WorkflowJSONSourceEditor: View {
             HStack(spacing: 8) {
                 Label("JSON", systemImage: "curlybraces")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(Nord.frost1)
+                    .foregroundStyle(KanameColor.accent)
                 Text("Syntax highlighted · formats automatically")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -60,10 +61,10 @@ struct WorkflowJSONSourceEditor: View {
             WorkflowJSONTextView(text: $text, accessibilityLabel: accessibilityLabel)
         }
         .frame(minHeight: minimumHeight, maxHeight: .infinity)
-        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 10))
+        .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 10))
         .overlay {
             RoundedRectangle(cornerRadius: 10)
-                .stroke(Nord.polarNight3, lineWidth: 1)
+                .stroke(KanameColor.separator, lineWidth: 1)
         }
         .clipShape(RoundedRectangle(cornerRadius: 10))
     }
@@ -431,7 +432,7 @@ struct WorkflowInstallationSetupSheet: View {
                     installation.readinessIssues.isEmpty ? "Ready for explicit enablement" : "\(installation.readinessIssues.count) unresolved",
                     systemImage: installation.readinessIssues.isEmpty ? "checkmark.seal.fill" : "exclamationmark.triangle.fill"
                 )
-                .font(.caption).foregroundStyle(installation.readinessIssues.isEmpty ? Nord.auroraGreen : Nord.auroraYellow)
+                .font(.caption).foregroundStyle(installation.readinessIssues.isEmpty ? KanameColor.success : KanameColor.warning)
             }
             .padding(20)
             Divider()
@@ -454,7 +455,7 @@ struct WorkflowInstallationSetupSheet: View {
                             ForEach(dependencies) { dependency in
                                 LabeledContent("\(dependency.kind.rawValue.capitalized) · \(dependency.id)") {
                                     Text(resolve(dependency).map { "\($0.version) · locked" } ?? "Unavailable")
-                                        .foregroundStyle(resolve(dependency) == nil && dependency.required ? Nord.auroraYellow : .secondary)
+                                        .foregroundStyle(resolve(dependency) == nil && dependency.required ? KanameColor.warning : .secondary)
                                 }
                                 Text(dependency.versionRequirement).font(.caption2.monospaced()).foregroundStyle(.secondary)
                             }
@@ -493,7 +494,7 @@ struct WorkflowInstallationSetupSheet: View {
                     if !installation.readinessIssues.isEmpty {
                         Section("Readiness") {
                             ForEach(installation.readinessIssues, id: \.self) { issue in
-                                Label(issue, systemImage: "exclamationmark.circle.fill").foregroundStyle(Nord.auroraYellow)
+                                Label(issue, systemImage: "exclamationmark.circle.fill").foregroundStyle(KanameColor.warning)
                             }
                         }
                     }
@@ -759,11 +760,11 @@ struct WorkflowCapabilityInstallationRow: View {
                 }
             } icon: {
                 Image(systemName: capability.lastTestPassed ? "checkmark.shield.fill" : "exclamationmark.shield")
-                    .foregroundStyle(capability.lastTestPassed ? Nord.auroraGreen : Nord.auroraYellow)
+                    .foregroundStyle(capability.lastTestPassed ? KanameColor.success : KanameColor.warning)
             }
         }
         .padding(10)
-        .background(Nord.polarNight1.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
+        .background(KanameColor.surface.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
     }
 }
 
@@ -781,7 +782,7 @@ struct WorkflowConnectorInstallationRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: connector.qualified ? "cable.connector.horizontal" : "cable.connector.slash")
-                .foregroundStyle(connector.qualified ? Nord.auroraGreen : Nord.auroraYellow)
+                .foregroundStyle(connector.qualified ? KanameColor.success : KanameColor.warning)
                 .frame(width: 22)
             VStack(alignment: .leading, spacing: 3) {
                 Text(connector.name).font(.subheadline.weight(.semibold))
@@ -800,7 +801,7 @@ struct WorkflowConnectorInstallationRow: View {
             .disabled(!connector.qualified || bindingCount == 0)
         }
         .padding(10)
-        .background(Nord.polarNight1.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
+        .background(KanameColor.surface.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
     }
 }
 
@@ -831,7 +832,7 @@ struct WorkflowConnectorBindingSheet: View {
             }
             if let message {
                 Label(message, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption).foregroundStyle(Nord.auroraYellow)
+                    .font(.caption).foregroundStyle(KanameColor.warning)
             }
             HStack {
                 Spacer()
@@ -915,11 +916,11 @@ struct WorkflowRendererInstallationRow: View {
                 }
             } icon: {
                 Image(systemName: renderer.qualified ? "rectangle.3.group.fill" : "rectangle.3.group.bubble")
-                    .foregroundStyle(renderer.qualified ? Nord.auroraGreen : Nord.auroraYellow)
+                    .foregroundStyle(renderer.qualified ? KanameColor.success : KanameColor.warning)
             }
         }
         .padding(10)
-        .background(Nord.polarNight1.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
+        .background(KanameColor.surface.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
     }
 }
 
@@ -931,7 +932,7 @@ struct WorkflowQualificationSummaryRow: View {
             VStack(alignment: .leading, spacing: 5) {
                 ForEach(run.assertions) { assertion in
                     Label(assertion.detail, systemImage: assertion.passed ? "checkmark.circle" : "xmark.circle")
-                        .foregroundStyle(assertion.passed ? Nord.auroraGreen : Nord.auroraYellow)
+                        .foregroundStyle(assertion.passed ? KanameColor.success : KanameColor.warning)
                 }
                 Text("Input artifacts \(run.artifactDigests.count) · output artifacts \(run.outputArtifactDigests.count) · \(run.elapsedMilliseconds) ms")
                     .font(.caption2).foregroundStyle(.secondary)
@@ -940,7 +941,7 @@ struct WorkflowQualificationSummaryRow: View {
         } label: {
             HStack {
                 Label(run.fixtureName, systemImage: run.outcome == .passed ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
-                    .foregroundStyle(run.outcome == .passed ? Nord.auroraGreen : Nord.auroraYellow)
+                    .foregroundStyle(run.outcome == .passed ? KanameColor.success : KanameColor.warning)
                 Spacer()
                 Text(run.componentID).font(.caption2).foregroundStyle(.secondary)
             }
@@ -1081,7 +1082,7 @@ struct WorkflowStudioSheet: View {
                 } label: {
                     Label(summary, systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)
-                        .foregroundStyle(Nord.auroraYellow)
+                        .foregroundStyle(KanameColor.warning)
                         .lineLimit(2)
                         .multilineTextAlignment(.trailing)
                         .frame(maxWidth: 300, alignment: .trailing)
@@ -1090,7 +1091,7 @@ struct WorkflowStudioSheet: View {
             } else {
                 Label("Ready to publish", systemImage: "checkmark.seal.fill")
                     .font(.caption)
-                    .foregroundStyle(Nord.auroraGreen)
+                    .foregroundStyle(KanameColor.success)
             }
         }
         .padding(.horizontal, 20)
@@ -1225,7 +1226,7 @@ struct WorkflowStudioSheet: View {
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .scrollIndicators(.visible)
-        .background(Nord.polarNight1.opacity(0.45))
+        .background(KanameColor.surface.opacity(0.45))
     }
 
     @ViewBuilder
@@ -1248,7 +1249,7 @@ struct WorkflowStudioSheet: View {
                             Text(kind.label).lineLimit(1)
                             Spacer(minLength: 0)
                             Image(systemName: "plus.circle")
-                                .foregroundStyle(Nord.frost1)
+                                .foregroundStyle(KanameColor.accent)
                         }
                         .contentShape(Rectangle())
                     }
@@ -1256,7 +1257,7 @@ struct WorkflowStudioSheet: View {
                     .font(.callout.weight(.medium))
                     .padding(.horizontal, 8)
                     .frame(minHeight: 38)
-                    .background(Nord.polarNight2.opacity(0.55), in: RoundedRectangle(cornerRadius: 7))
+                    .background(KanameColor.raised.opacity(0.55), in: RoundedRectangle(cornerRadius: 7))
                     .accessibilityHint("Adds this node to the canvas without connecting it")
                 }
             }
@@ -1277,10 +1278,10 @@ struct WorkflowStudioSheet: View {
             Text("Workflow problems").font(.headline)
             if studioDiagnostics.isEmpty, let summary = draft?.validationSummary {
                 Label(summary, systemImage: "xmark.octagon.fill")
-                    .foregroundStyle(Nord.auroraRed)
+                    .foregroundStyle(KanameColor.danger)
             } else if studioDiagnostics.isEmpty {
                 Label("No blocking problems", systemImage: "checkmark.seal.fill")
-                    .foregroundStyle(Nord.auroraGreen)
+                    .foregroundStyle(KanameColor.success)
             } else {
                 ForEach(studioDiagnostics) { diagnostic in
                     Button {
@@ -1290,7 +1291,7 @@ struct WorkflowStudioSheet: View {
                         HStack(alignment: .top, spacing: 8) {
                             Image(systemName: diagnostic.severity == .error
                                 ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
-                                .foregroundStyle(diagnostic.severity == .error ? Nord.auroraRed : Nord.auroraYellow)
+                                .foregroundStyle(diagnostic.severity == .error ? KanameColor.danger : KanameColor.warning)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(diagnostic.message)
                                     .multilineTextAlignment(.leading)
@@ -1361,7 +1362,7 @@ struct WorkflowStudioSheet: View {
                     ForEach(Array(steps.enumerated()), id: \.element.id) { index, step in
                         HStack {
                             Text("\(index + 1)").font(.caption2.monospacedDigit()).foregroundStyle(.secondary).frame(width: 22)
-                            Image(systemName: workflowStudioSymbol(for: step.kind)).foregroundStyle(Nord.frost1).frame(width: 22)
+                            Image(systemName: workflowStudioSymbol(for: step.kind)).foregroundStyle(KanameColor.accent).frame(width: 22)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(step.name)
                                 Text(step.kind.label).font(.caption2).foregroundStyle(.secondary)
@@ -1416,7 +1417,7 @@ struct WorkflowStudioSheet: View {
                 )
                 if let sourceMessage {
                     Label(sourceMessage, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption).foregroundStyle(Nord.auroraYellow)
+                        .font(.caption).foregroundStyle(KanameColor.warning)
                 }
                 HStack {
                     Button("Reload canonical") { sourceText = model.workflowStudioCanonicalSource(draftID: draftID) ?? "" }
@@ -2209,14 +2210,14 @@ private struct WorkflowStudioCanvas: View {
         FlowConfiguration(
             defaultEdgePathType: .bezier,
             edgeStyle: EdgeStyle(
-                strokeColor: Nord.frost0.opacity(0.8),
-                selectedStrokeColor: Nord.frost1,
+                strokeColor: KanameColor.active.opacity(0.8),
+                selectedStrokeColor: KanameColor.accent,
                 lineWidth: 2,
                 selectedLineWidth: 3
             ),
             backgroundStyle: BackgroundStyle(
                 pattern: .dot,
-                color: Nord.polarNight3.opacity(0.65),
+                color: KanameColor.separator.opacity(0.65),
                 spacing: 22,
                 dotRadius: 1.2
             ),
@@ -2342,7 +2343,7 @@ private struct WorkflowStudioCanvas: View {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
                         Image(systemName: node.data.symbol)
-                            .foregroundStyle(Nord.frost1)
+                            .foregroundStyle(KanameColor.accent)
                         Text(node.data.title)
                             .font(.callout.weight(.semibold))
                             .lineLimit(1)
@@ -2358,15 +2359,15 @@ private struct WorkflowStudioCanvas: View {
                 }
                 .padding(12)
                 .frame(width: node.size.width, height: node.size.height, alignment: .topLeading)
-                .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12))
+                .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 12))
                 .overlay {
                     RoundedRectangle(cornerRadius: 12)
-                        .stroke(selected ? Nord.frost1 : Nord.polarNight3, lineWidth: selected ? 3 : 1)
+                        .stroke(selected ? KanameColor.accent : KanameColor.separator, lineWidth: selected ? 3 : 1)
                 }
             case .output:
                 HStack(spacing: 6) {
                     Circle()
-                        .fill(node.data.connected ? Nord.auroraGreen : Nord.auroraYellow)
+                        .fill(node.data.connected ? KanameColor.success : KanameColor.warning)
                         .frame(width: 7, height: 7)
                     Text(node.data.title)
                         .font(.caption.weight(.semibold))
@@ -2375,10 +2376,10 @@ private struct WorkflowStudioCanvas: View {
                 }
                 .padding(.horizontal, 8)
                 .frame(width: node.size.width, height: node.size.height)
-                .background(Nord.polarNight2, in: RoundedRectangle(cornerRadius: 7))
+                .background(KanameColor.raised, in: RoundedRectangle(cornerRadius: 7))
                 .overlay {
                     RoundedRectangle(cornerRadius: 7)
-                        .stroke(selected ? Nord.frost1 : Nord.polarNight3, lineWidth: selected ? 2 : 1)
+                        .stroke(selected ? KanameColor.accent : KanameColor.separator, lineWidth: selected ? 2 : 1)
                 }
             }
         }
@@ -2400,7 +2401,7 @@ private struct WorkflowStudioCanvas: View {
     }
 
     private func canvasEdge(_ edge: FlowEdge, geometry: EdgeGeometry) -> some View {
-        let color = edge.isSelected ? Nord.frost1 : Nord.frost0.opacity(0.9)
+        let color = edge.isSelected ? KanameColor.accent : KanameColor.active.opacity(0.9)
         return ZStack(alignment: .topLeading) {
             geometry.path
                 .stroke(color, style: StrokeStyle(lineWidth: edge.isSelected ? 3 : 2, lineCap: .round))
@@ -2411,7 +2412,7 @@ private struct WorkflowStudioCanvas: View {
                     .font(.system(size: 9, weight: .semibold, design: .rounded))
                     .padding(.horizontal, 6)
                     .padding(.vertical, 3)
-                    .background(Nord.polarNight0.opacity(0.94), in: Capsule())
+                    .background(KanameColor.canvas.opacity(0.94), in: Capsule())
                     .position(geometry.labelPosition)
             }
         }
@@ -2632,7 +2633,7 @@ struct WorkflowHumanReviewRow: View {
                 .font(.caption.weight(.semibold))
         }
         .padding(10)
-        .background(Nord.polarNight1.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
+        .background(KanameColor.surface.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
     }
 }
 
@@ -2657,18 +2658,18 @@ struct WorkflowStructuredReviewRow: View {
                 Label(request.contract.title, systemImage: "person.crop.circle.badge.checkmark")
                     .font(.subheadline.weight(.semibold))
                 Spacer()
-                Text("Review required").font(.caption2.weight(.semibold)).foregroundStyle(Nord.auroraYellow)
+                Text("Review required").font(.caption2.weight(.semibold)).foregroundStyle(KanameColor.warning)
             }
             Text(request.contract.summary).font(.caption).foregroundStyle(.secondary)
             TextEditor(text: $editedValue)
                 .font(.system(.caption, design: .monospaced))
                 .frame(minHeight: 88, maxHeight: 180)
                 .padding(6)
-                .background(Nord.polarNight0.opacity(0.75), in: RoundedRectangle(cornerRadius: 8))
+                .background(KanameColor.canvas.opacity(0.75), in: RoundedRectangle(cornerRadius: 8))
                 .accessibilityLabel("Structured review value")
             if let validationMessage {
                 Label(validationMessage, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption2).foregroundStyle(Nord.auroraYellow)
+                    .font(.caption2).foregroundStyle(KanameColor.warning)
             }
             HStack {
                 Text("Edits are schema-checked and bound to the recorded decision.")
@@ -2684,8 +2685,8 @@ struct WorkflowStructuredReviewRow: View {
             }
         }
         .padding(12)
-        .background(Nord.polarNight1.opacity(0.82), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Nord.auroraYellow.opacity(0.45)))
+        .background(KanameColor.surface.opacity(0.82), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(KanameColor.warning.opacity(0.45)))
     }
 
     private func submit(actionID: String) {
@@ -2713,10 +2714,10 @@ struct WorkflowWaitRow: View {
             .font(.caption2).foregroundStyle(.secondary).lineLimit(3).textSelection(.enabled)
         } label: {
             Label("Waiting for \(wait.source) · \(wait.state.rawValue)", systemImage: "envelope.badge.clock")
-                .font(.caption.weight(.semibold)).foregroundStyle(Nord.frost1)
+                .font(.caption.weight(.semibold)).foregroundStyle(KanameColor.accent)
         }
         .padding(10)
-        .background(Nord.polarNight1.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
+        .background(KanameColor.surface.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
     }
 }
 
@@ -2728,7 +2729,7 @@ struct WorkflowAuthorityGrantRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 9) {
             Image(systemName: grant.state == .active ? "checkmark.shield.fill" : "pause.circle")
-                .foregroundStyle(grant.state == .active ? Nord.auroraGreen : .secondary).frame(width: 20)
+                .foregroundStyle(grant.state == .active ? KanameColor.success : .secondary).frame(width: 20)
             VStack(alignment: .leading, spacing: 3) {
                 Text("\(grant.effectKind) · \(grant.connectorID)").font(.caption.weight(.semibold))
                 Text("Up to \(grant.maximumItemsPerExecution) items · \(grant.requiresManualRun ? "manual runs only" : "triggered runs allowed")")
@@ -2754,7 +2755,7 @@ struct WorkflowAuthorityGrantRow: View {
             }
         }
         .padding(10)
-        .background(Nord.polarNight1.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
+        .background(KanameColor.surface.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
     }
 }
 
@@ -2803,15 +2804,15 @@ struct WorkflowStandingGrantBuilderSheet: View {
                 if let simulation {
                     if simulation.findings.isEmpty {
                         Label("This scope matches the frozen preview and stays within its connector, effect, account, item, use, and expiry bounds.", systemImage: "checkmark.shield.fill")
-                            .foregroundStyle(Nord.auroraGreen)
+                            .foregroundStyle(KanameColor.success)
                     } else {
                         ForEach(simulation.findings, id: \.self) { finding in
-                            Label(finding, systemImage: "exclamationmark.triangle.fill").foregroundStyle(Nord.auroraYellow)
+                            Label(finding, systemImage: "exclamationmark.triangle.fill").foregroundStyle(KanameColor.warning)
                         }
                     }
                 }
             }
-            if let message { Text(message).font(.caption).foregroundStyle(Nord.auroraYellow) }
+            if let message { Text(message).font(.caption).foregroundStyle(KanameColor.warning) }
             HStack {
                 Spacer()
                 Button("Cancel", role: .cancel) { dismiss() }
@@ -2867,7 +2868,7 @@ struct WorkflowKnowledgeReviewRow: View {
             }
         }
         .padding(10)
-        .background(Nord.polarNight1.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
+        .background(KanameColor.surface.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
     }
 }
 
@@ -2901,7 +2902,7 @@ struct WorkflowArtifactRoleRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: artifact.active ? "doc.fill" : "clock.arrow.circlepath")
-                .foregroundStyle(artifact.active ? Nord.frost1 : .secondary).frame(width: 20)
+                .foregroundStyle(artifact.active ? KanameColor.accent : .secondary).frame(width: 20)
             VStack(alignment: .leading, spacing: 3) {
                 Text("\(artifact.role) · \(artifact.active ? "Current" : "Previous")")
                     .font(.caption.weight(.semibold))
@@ -2936,7 +2937,7 @@ struct WorkflowArtifactRoleRow: View {
             .menuStyle(.borderlessButton)
         }
         .padding(8)
-        .background(Nord.polarNight1.opacity(0.65), in: RoundedRectangle(cornerRadius: 8))
+        .background(KanameColor.surface.opacity(0.65), in: RoundedRectangle(cornerRadius: 8))
     }
 }
 
