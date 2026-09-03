@@ -2902,7 +2902,8 @@ public final class DesktopAppModel: ObservableObject {
         verificationExitStatus: Int32,
         verificationOutput: String,
         artifactPaths: [String],
-        digest: String
+        digest: String,
+        verificationWasRun: Bool = true
     ) -> Bool {
         guard let currentThread = thread(id: threadID), currentThread.kind == .coding,
               codingWorkflow(threadID: threadID)?.state == .reviewingEvidence,
@@ -2910,9 +2911,9 @@ public final class DesktopAppModel: ObservableObject {
                   $0.id == worktreeID && $0.threadID == threadID && ($0.state == .ready || $0.state == .review)
               }) else { return false }
         let changedFilesState: DesktopEvidence.State = artifactPaths.isEmpty ? .failed : .passed
-        let testState: DesktopEvidence.State = verificationExitStatus == 0 ? .passed : .failed
+        let testState: DesktopEvidence.State = !verificationWasRun ? .notRun : (verificationExitStatus == 0 ? .passed : .failed)
         let diffState: DesktopEvidence.State = diffCheckPassed ? .passed : .failed
-        let evidencePassed = diffCheckPassed && verificationExitStatus == 0 && !artifactPaths.isEmpty
+        let evidencePassed = diffCheckPassed && (!verificationWasRun || verificationExitStatus == 0) && !artifactPaths.isEmpty
         let items = [
             DesktopEvidence(
                 id: "coding-diff-\(worktreeID)",
@@ -2994,7 +2995,7 @@ public final class DesktopAppModel: ObservableObject {
               }) else { return false }
         if accepted {
             guard !currentThread.evidence.isEmpty,
-                  currentThread.evidence.allSatisfy({ $0.state == .passed }) else { return false }
+                  currentThread.evidence.allSatisfy({ $0.state == .passed || $0.state == .notRun }) else { return false }
         }
         let timestamp = now()
         var didApply = false
@@ -3011,7 +3012,7 @@ public final class DesktopAppModel: ObservableObject {
                   }) else { return }
             if accepted {
                 guard !snapshot.threads[threadIndex].evidence.isEmpty,
-                      snapshot.threads[threadIndex].evidence.allSatisfy({ $0.state == .passed }) else { return }
+                      snapshot.threads[threadIndex].evidence.allSatisfy({ $0.state == .passed || $0.state == .notRun }) else { return }
             }
             snapshot.operations.worktrees[worktreeIndex].state = accepted ? .accepted : .dirty
             snapshot.operations.worktrees[worktreeIndex].updatedAtUnixMillis = timestamp

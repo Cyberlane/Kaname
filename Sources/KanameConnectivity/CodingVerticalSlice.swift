@@ -87,9 +87,12 @@ public struct CodingEvidenceSnapshot: Equatable, Sendable {
     public let verificationOutputWasTruncated: Bool
     public let artifactPaths: [String]
     public let digest: String
+    /// False when no test command exists for the project; the verification
+    /// row is then reported as not run instead of failed.
+    public var verificationWasRun: Bool = true
 
     public var passed: Bool {
-        diffCheckPassed && verificationExitStatus == 0 && !artifactPaths.isEmpty
+        diffCheckPassed && (!verificationWasRun || verificationExitStatus == 0) && !artifactPaths.isEmpty
     }
 }
 
@@ -171,9 +174,12 @@ public enum CodingWorkspaceInspector {
         )
     }
 
+    /// `verificationExecutable == nil` means the project has no known test
+    /// command; git evidence is still collected and the verification row is
+    /// reported as not run.
     public static func collectEvidence(
         workspaceURL: URL,
-        verificationExecutable: String = "swift",
+        verificationExecutable: String? = "swift",
         verificationArguments: [String] = ["test"],
         timeout: Duration = .seconds(600)
     ) async throws -> CodingEvidenceSnapshot {
@@ -182,22 +188,36 @@ public enum CodingWorkspaceInspector {
         async let statResult = git(["diff", "--stat"], in: root)
         async let diffResult = git(["diff", "--no-ext-diff", "--unified=3"], in: root, maximumOutputBytes: 524_288)
         async let checkResult = git(["diff", "--check"], in: root)
-        let verification = try await LocalProcess.capture(
-            executable: verificationExecutable,
-            arguments: verificationArguments,
-            workingDirectory: root,
-            timeout: timeout,
-            environmentRemovals: CodexMCPIsolation.inheritedEnvironmentRemovals(),
-            maximumOutputBytes: 262_144
-        )
+        let verificationCommand: String
+        let verificationExitStatus: Int32
+        let verificationOutput: String
+        let verificationOutputWasTruncated: Bool
+        if let verificationExecutable {
+            let verification = try await LocalProcess.capture(
+                executable: verificationExecutable,
+                arguments: verificationArguments,
+                workingDirectory: root,
+                timeout: timeout,
+                environmentRemovals: CodexMCPIsolation.inheritedEnvironmentRemovals(),
+                maximumOutputBytes: 262_144
+            )
+            verificationCommand = ([verificationExecutable] + verificationArguments).joined(separator: " ")
+            verificationExitStatus = verification.exitStatus
+            verificationOutput = [verification.standardOutput, verification.standardError]
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n")
+            verificationOutputWasTruncated = verification.standardOutputWasTruncated || verification.standardErrorWasTruncated
+        } else {
+            verificationCommand = "No test command detected"
+            verificationExitStatus = 0
+            verificationOutput = "Kaname found no test command for this project (kaname.json, package.json, Cargo.toml, Package.swift, pyproject.toml, go.mod, Makefile). Nothing was run."
+            verificationOutputWasTruncated = false
+        }
         let (status, stat, diff, check) = try await (statusResult, statResult, diffResult, checkResult)
         let head = try await git(["rev-parse", "HEAD"], in: root)
             .standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
         let statusText = status.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
         let revision = revisionDigest(head: head, status: statusText)
-        let verificationOutput = [verification.standardOutput, verification.standardError]
-            .filter { !$0.isEmpty }
-            .joined(separator: "\n")
         let artifactPaths = changedPaths(from: statusText)
         let digestInput = [
             revision,
@@ -205,9 +225,9 @@ public enum CodingWorkspaceInspector {
             stat.standardOutput,
             diff.standardOutput,
             "\(check.exitStatus)",
-            verificationExecutable,
+            verificationExecutable ?? "",
             verificationArguments.joined(separator: "\u{0}"),
-            "\(verification.exitStatus)",
+            "\(verificationExitStatus)",
             verificationOutput,
         ].joined(separator: "\u{0}")
 
@@ -218,12 +238,13 @@ public enum CodingWorkspaceInspector {
             diffStat: stat.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines),
             diff: diff.standardOutput,
             diffCheckPassed: check.exitStatus == 0,
-            verificationCommand: ([verificationExecutable] + verificationArguments).joined(separator: " "),
-            verificationExitStatus: verification.exitStatus,
+            verificationCommand: verificationCommand,
+            verificationExitStatus: verificationExitStatus,
             verificationOutput: verificationOutput,
-            verificationOutputWasTruncated: verification.standardOutputWasTruncated || verification.standardErrorWasTruncated,
+            verificationOutputWasTruncated: verificationOutputWasTruncated,
             artifactPaths: artifactPaths,
-            digest: digest(Data(digestInput.utf8))
+            digest: digest(Data(digestInput.utf8)),
+            verificationWasRun: verificationExecutable != nil
         )
     }
 

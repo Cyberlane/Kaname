@@ -164,7 +164,7 @@ actor CodexAppServerConnection {
         let id = UUID()
         let (stream, continuation) = AsyncStream.makeStream(
             of: CodexAppServerIncomingMessage.self,
-            bufferingPolicy: .bufferingNewest(512)
+            bufferingPolicy: .bufferingNewest(8_192)
         )
         messageContinuations[id] = continuation
         continuation.onTermination = { [weak self] _ in

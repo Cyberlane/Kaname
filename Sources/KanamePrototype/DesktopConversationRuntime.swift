@@ -541,8 +541,12 @@ final class DesktopConversationRuntime: ObservableObject {
             guard let self else { return }
             defer { codingWorkflowBusyThreadIDs.remove(threadID) }
             do {
+                let worktreeURL = URL(fileURLWithPath: worktree.worktreePath, isDirectory: true)
+                let verification = Self.detectVerificationCommand(workspace: worktreeURL)
                 let evidence = try await CodingWorkspaceInspector.collectEvidence(
-                    workspaceURL: URL(fileURLWithPath: worktree.worktreePath, isDirectory: true)
+                    workspaceURL: worktreeURL,
+                    verificationExecutable: verification?.executable,
+                    verificationArguments: verification?.arguments ?? []
                 )
                 guard accepted != true || evidence.passed else {
                     throw CodingWorkspaceInspectorError.unavailable("Acceptance is disabled because the latest independent evidence does not pass.")
@@ -1675,7 +1679,12 @@ final class DesktopConversationRuntime: ObservableObject {
             guard let self else { return }
             defer { codingWorkflowBusyThreadIDs.remove(threadID) }
             do {
-                let evidence = try await CodingWorkspaceInspector.collectEvidence(workspaceURL: workspace)
+                let verification = Self.detectVerificationCommand(workspace: workspace)
+                let evidence = try await CodingWorkspaceInspector.collectEvidence(
+                    workspaceURL: workspace,
+                    verificationExecutable: verification?.executable,
+                    verificationArguments: verification?.arguments ?? []
+                )
                 guard persistCodingEvidence(evidence, threadID: threadID, worktreeID: worktreeID) else {
                     throw CodingWorkspaceInspectorError.unavailable(
                         "Kaname could not persist the exact evidence receipt."
@@ -1709,7 +1718,8 @@ final class DesktopConversationRuntime: ObservableObject {
             verificationExitStatus: evidence.verificationExitStatus,
             verificationOutput: evidence.verificationOutput,
             artifactPaths: evidence.artifactPaths,
-            digest: evidence.digest
+            digest: evidence.digest,
+            verificationWasRun: evidence.verificationWasRun
         ) else { return false }
         _ = model.addCodingKnowledgeCandidate(
             threadID: threadID,
@@ -1900,6 +1910,37 @@ final class DesktopConversationRuntime: ObservableObject {
     /// provider's auto mode instead of stalling on every shell command.
     static func implementationRuntimeMode(provider: String) -> ConversationRuntimeMode {
         provider.lowercased() == "codex" ? .autoAcceptEdits : .auto
+    }
+
+    /// Picks the project's test command: a `kaname.json` script of kind
+    /// `tests` first, then common ecosystem conventions. `nil` means no test
+    /// runner exists and verification is reported as not run.
+    static func detectVerificationCommand(workspace: URL) -> (executable: String, arguments: [String])? {
+        if let manifest = try? KanameProjectScriptsManifestLoader.load(fromProjectRoot: workspace),
+           let script = manifest.scripts.first(where: { $0.kind == .tests }) {
+            return ("/bin/sh", ["-lc", script.command])
+        }
+        let fileManager = FileManager.default
+        func exists(_ name: String) -> Bool { fileManager.fileExists(atPath: workspace.appending(path: name).path) }
+        func contains(_ name: String, _ needle: String) -> Bool {
+            guard let data = fileManager.contents(atPath: workspace.appending(path: name).path),
+                  data.count < 2 * 1_024 * 1_024 else { return false }
+            return String(decoding: data, as: UTF8.self).contains(needle)
+        }
+        if exists("package.json"), contains("package.json", "\"test\"") {
+            if exists("pnpm-lock.yaml") { return ("pnpm", ["test"]) }
+            if exists("bun.lockb") || exists("bun.lock") { return ("bun", ["test"]) }
+            if exists("yarn.lock") { return ("yarn", ["test"]) }
+            return ("npm", ["test"])
+        }
+        if exists("Cargo.toml") { return ("cargo", ["test"]) }
+        if exists("Package.swift") { return ("swift", ["test"]) }
+        if exists("go.mod") { return ("go", ["test", "./..."]) }
+        if exists("pytest.ini") || exists("pyproject.toml") && contains("pyproject.toml", "pytest") {
+            return ("pytest", [])
+        }
+        if exists("Makefile"), contains("Makefile", "\ntest:") { return ("make", ["test"]) }
+        return nil
     }
 
     static func supportsImageAttachments(provider: String) -> Bool {
