@@ -4760,13 +4760,34 @@ private struct DesktopThreadChangesView: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ScrollView([.horizontal, .vertical]) {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(changes.patch.split(separator: "\n", omittingEmptySubsequences: false).enumerated()), id: \.offset) { _, line in
-                            DesktopUnifiedDiffLine(text: String(line))
+                let parsed = DesktopUnifiedDiffPresentation.parse(changes.patch)
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack(spacing: 10) {
+                        Text("\(parsed.hunks) hunk\(parsed.hunks == 1 ? "" : "s")")
+                        Text("+\(parsed.added)").foregroundStyle(KanameColor.success)
+                        Text("-\(parsed.removed)").foregroundStyle(KanameColor.danger)
+                        if parsed.isBinary { Text("binary").foregroundStyle(.secondary) }
+                        Spacer()
+                        Button("Copy patch", systemImage: "doc.on.doc") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(changes.patch, forType: .string)
                         }
+                        .buttonStyle(.borderless)
+                        .labelStyle(.iconOnly)
+                        .help("Copy the unified diff for this file")
                     }
-                    .padding(.vertical, 8)
+                    .font(.caption.monospacedDigit())
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    Divider()
+                    ScrollView([.horizontal, .vertical]) {
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            ForEach(parsed.rows.filter { $0.kind != .header }) { row in
+                                DesktopUnifiedDiffLine(row: row)
+                            }
+                        }
+                        .padding(.vertical, 8)
+                    }
                 }
             }
         }
@@ -4775,24 +4796,52 @@ private struct DesktopThreadChangesView: View {
 }
 
 private struct DesktopUnifiedDiffLine: View {
-    let text: String
+    let row: DesktopUnifiedDiffPresentation.Row
 
     private var tint: Color {
-        if text.hasPrefix("+") && !text.hasPrefix("+++") { return KanameColor.success }
-        if text.hasPrefix("-") && !text.hasPrefix("---") { return KanameColor.danger }
-        if text.hasPrefix("@@") { return KanameColor.accent }
-        return .clear
+        switch row.kind {
+        case .added: KanameColor.success
+        case .removed: KanameColor.danger
+        case .hunk: KanameColor.accent
+        case .context, .header, .meta: .clear
+        }
+    }
+
+    private var marker: String {
+        switch row.kind {
+        case .added: "+"
+        case .removed: "-"
+        default: " "
+        }
     }
 
     var body: some View {
-        Text(text.isEmpty ? " " : text)
-            .font(.system(size: 11.5, design: .monospaced))
-            .foregroundStyle(text.hasPrefix("@@") ? KanameColor.accent : Color.primary)
-            .textSelection(.enabled)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 1)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(tint.opacity(0.13))
+        HStack(alignment: .top, spacing: 0) {
+            if row.kind == .hunk {
+                Text(row.text)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(KanameColor.accent)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 3)
+            } else {
+                Text(row.oldLine.map(String.init) ?? "")
+                    .frame(width: 42, alignment: .trailing)
+                Text(row.newLine.map(String.init) ?? "")
+                    .frame(width: 42, alignment: .trailing)
+                    .padding(.trailing, 6)
+                Text(marker)
+                    .frame(width: 12)
+                Text(row.text.isEmpty ? " " : row.text)
+                    .foregroundStyle(row.kind == .meta ? Color.secondary : Color.primary)
+                    .padding(.trailing, 10)
+            }
+        }
+        .font(.system(size: 11.5, design: .monospaced))
+        .foregroundStyle(.secondary)
+        .textSelection(.enabled)
+        .padding(.vertical, 1)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(tint.opacity(row.kind == .hunk ? 0.08 : 0.13))
     }
 }
 
