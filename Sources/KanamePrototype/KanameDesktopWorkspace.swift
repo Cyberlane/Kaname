@@ -5259,7 +5259,26 @@ private enum ConversationRuntimeCatalog {
         for provider: String,
         capabilities: [ProviderCapabilitySnapshot]
     ) -> [ProviderModel] {
-        snapshot(for: provider, capabilities: capabilities)?.models ?? []
+        let discovered = snapshot(for: provider, capabilities: capabilities)?.models ?? []
+        return discovered.isEmpty ? fallbackModels(for: provider) : discovered
+    }
+
+    /// Providers whose CLI has no model-discovery call still accept a model
+    /// flag. These are the aliases the CLI documents; custom IDs remain
+    /// available through the custom model sheet.
+    static func fallbackModels(for provider: String) -> [ProviderModel] {
+        switch provider.lowercased() {
+        case "claude":
+            let efforts = ["low", "medium", "high", "xhigh", "max"]
+            return [
+                ProviderModel(id: "fable", displayName: "Claude Fable (latest)", supportedReasoningEfforts: efforts, defaultReasoningEffort: "high"),
+                ProviderModel(id: "opus", displayName: "Claude Opus (latest)", supportedReasoningEfforts: efforts, defaultReasoningEffort: "high"),
+                ProviderModel(id: "sonnet", displayName: "Claude Sonnet (latest)", supportedReasoningEfforts: efforts, defaultReasoningEffort: "medium"),
+                ProviderModel(id: "haiku", displayName: "Claude Haiku (latest)", supportedReasoningEfforts: efforts, defaultReasoningEffort: "low"),
+            ]
+        default:
+            return []
+        }
     }
 
     static func selectedModel(
