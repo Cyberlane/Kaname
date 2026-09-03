@@ -222,6 +222,7 @@ struct AutomationWorkflowProductView: View {
     @State private var workflowStarterMessage: String?
     @State private var preparedStudioQualificationFixture = false
     @State private var manualRunDefinition: DesktopWorkflowDefinitionRecord?
+    private let libraryRunner = LocalCoreRunner.bundled()
     @State private var installationToConfigure: DesktopWorkflowInstallationRecord?
     @State private var editingSchedule: DesktopAutomationRule?
     @State private var showsNewSchedule = false
@@ -435,7 +436,8 @@ struct AutomationWorkflowProductView: View {
                     edit: { editWorkflow(definition) },
                     run: definition.triggerKinds.contains(.manual) && definition.enabled
                         ? { manualRunDefinition = definition }
-                        : nil
+                        : nil,
+                    publish: libraryRunner == nil ? nil : { publishToLibrary(definition, revision: revision) }
                 )
                 .padding(20)
             }
@@ -482,6 +484,40 @@ struct AutomationWorkflowProductView: View {
         workflowStarterMessage = nil
         studioDraftID = draftID
         showsWorkflowStarter = false
+    }
+
+    /// Converts a Builder workflow to the durable v1 graph and publishes it as
+    /// an active revision in the Rust library. Lossy conversions are reported
+    /// and not published.
+    private func publishToLibrary(_ definition: DesktopWorkflowDefinitionRecord, revision: DesktopWorkflowRevisionRecord) {
+        guard let runner = libraryRunner else { return }
+        let imported: DesktopWorkflowLegacyImportResult
+        do {
+            imported = try DesktopWorkflowLegacyImporter.importSource(.init(definition: definition, revision: revision))
+        } catch {
+            packageMessage = "Could not convert \(definition.name): \(error.localizedDescription)"
+            return
+        }
+        guard imported.isLossless else {
+            let losses = imported.losses.map(\.summary).joined(separator: "; ")
+            packageMessage = "\(definition.name) cannot be published yet. The durable graph would lose: \(losses)"
+            return
+        }
+        Task {
+            do {
+                let result = try await runner.publishWorkflow(
+                    workflowID: imported.workflow.workflowId,
+                    packageID: imported.workflow.packageId,
+                    name: imported.workflow.name,
+                    summary: imported.workflow.summary,
+                    workflowJSON: imported.canonicalSource,
+                    activate: true
+                )
+                packageMessage = "\(definition.name) published to the durable library as revision \(result.revisionID.suffix(8)) (\(result.executionSupport))\(result.activated ? ", active" : ""). Run it from Run history."
+            } catch {
+                packageMessage = "Publishing \(definition.name) failed: \(error.localizedDescription)"
+            }
+        }
     }
 
     private func duplicateWorkflow(_ definition: DesktopWorkflowDefinitionRecord) {
@@ -2470,6 +2506,7 @@ private struct AutomationCanvasPreview: View {
     private let liveSourceLines: [String]
     private let editAction: (() -> Void)?
     private let runAction: (() -> Void)?
+    private let publishAction: (() -> Void)?
     @State private var pattern: AutomationCanvasPattern
     @State private var selectedStepID: String
     @State private var selectedEdgeID: String?
@@ -2492,6 +2529,7 @@ private struct AutomationCanvasPreview: View {
         liveSourceLines = []
         editAction = nil
         runAction = nil
+        publishAction = nil
         let arguments = CommandLine.arguments
         builderDesignPanel = AutomationBuilderDesignPanel(arguments: arguments)
         if arguments.contains("--desktop-automation-small-readable") {
@@ -2561,7 +2599,8 @@ private struct AutomationCanvasPreview: View {
         revisions: [DesktopWorkflowRevisionRecord],
         sourceLines: [String],
         edit: @escaping () -> Void,
-        run: (() -> Void)?
+        run: (() -> Void)?,
+        publish: (() -> Void)? = nil
     ) {
         workflowID = workflow.id
         viewportPreset = .readable
@@ -2572,6 +2611,7 @@ private struct AutomationCanvasPreview: View {
         liveSourceLines = sourceLines
         editAction = edit
         runAction = run
+        publishAction = publish
         _pattern = State(initialValue: .decision)
         _selectedStepID = State(initialValue: graph.defaultSelectedID)
         _selectedEdgeID = State(initialValue: nil)
@@ -2832,6 +2872,11 @@ private struct AutomationCanvasPreview: View {
             if let runAction {
                 Button("Run…", systemImage: "play.fill", action: runAction)
                     .buttonStyle(.bordered)
+            }
+            if let publishAction {
+                Button("Publish to library", systemImage: "cylinder.split.1x2", action: publishAction)
+                    .buttonStyle(.bordered)
+                    .help("Converts this workflow to the durable v1 graph and publishes an active revision on the Rust executor")
             }
             Button("Versions", systemImage: "clock.arrow.circlepath") {
                 showsVersionHistory.toggle()
