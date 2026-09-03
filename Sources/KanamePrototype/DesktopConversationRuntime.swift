@@ -779,8 +779,15 @@ final class DesktopConversationRuntime: ObservableObject {
                             : "Kaname could not load selected Obsidian context: \(unavailable). No planning turn was sent."
                     )
                 }
-                let selectedContextSources = snapshot.contextSources.filter {
+                var selectedContextSources = snapshot.contextSources.filter {
                     (run.usesProjectContext ?? true) || $0.kind == .repositoryInstructions
+                }
+                // Recall: what Kaname already knows about this request, from the
+                // granted vault scopes and this project's earlier threads. Added
+                // as provenance-bearing sources so it shows in Consulted too.
+                if run.usesProjectContext ?? true,
+                   let userMessage = run.sourceMessageID.flatMap({ model.message(threadID: thread.id, id: $0) })?.body {
+                    selectedContextSources += await recallSources(for: thread, userMessage: userMessage)
                 }
                 let records = selectedContextSources.map { source in
                     DesktopCodingKnowledgeConsultedSource(
@@ -1536,7 +1543,7 @@ final class DesktopConversationRuntime: ObservableObject {
         return """
         Kaname Coding stage: DISCUSS AND PLAN ONLY.
 
-        You are in an ongoing planning conversation. Inspect the selected repository read-only as needed, answer the user, and keep one concrete implementation plan up to date. \(planMechanism) The plan steps must describe future implementation work, not the planning work you are doing, and stay pending. Do not edit files, create commits, run destructive commands, access the network, or begin implementation. Nothing is implemented until the user explicitly approves the plan in Kaname. If you investigated or debugged anything, end your reply with a '## Findings' section: one bullet per finding stating what you checked, what you observed, and what you concluded. When Kaname tools are available (MCP server `kaname`), use them: plan_update to keep the plan current (send the whole plan), finding_record for each finding, knowledge_search and knowledge_read for the user's notes, knowledge_propose to suggest a note update. Fall back to the Markdown sections only if the tools are absent.
+        You are in an ongoing planning conversation. Inspect the selected repository read-only as needed, answer the user, and keep one concrete implementation plan up to date. Sources titled "Recall" are what Kaname already knows from earlier threads and the user's notes; use them before re-deriving or guessing, and say when they change your plan. \(planMechanism) The plan steps must describe future implementation work, not the planning work you are doing, and stay pending. Do not edit files, create commits, run destructive commands, access the network, or begin implementation. Nothing is implemented until the user explicitly approves the plan in Kaname. If you investigated or debugged anything, end your reply with a '## Findings' section: one bullet per finding stating what you checked, what you observed, and what you concluded. When Kaname tools are available (MCP server `kaname`), use them: plan_update to keep the plan current (send the whole plan), finding_record for each finding, knowledge_search and knowledge_read for the user's notes, knowledge_propose to suggest a note update. Fall back to the Markdown sections only if the tools are absent.
 
         \(currentPlan)
 
@@ -1727,6 +1734,64 @@ final class DesktopConversationRuntime: ObservableObject {
         } catch {
             codingWorkflowErrors[threadID] = error.localizedDescription
         }
+    }
+
+    /// Deterministic recall for a planning turn: up to five vault hits for the
+    /// request across readable scopes, and up to three earlier coding threads
+    /// in the same project with their plans, decisions, and findings.
+    private func recallSources(for thread: DesktopThread, userMessage: String) async -> [CodingContextSource] {
+        var sources: [CodingContextSource] = []
+        let query = String(
+            userMessage
+                .components(separatedBy: .newlines).first?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .prefix(160) ?? ""
+        )
+        let readable = model.snapshot.operations.vaultScopes.filter(\.canRead).map(\.path)
+        if !query.isEmpty, !readable.isEmpty,
+           let service = try? ObsidianVaultService(readableScopes: readable, writableScopes: []) {
+            var hits = 0
+            for scope in readable where hits < 5 {
+                guard let results = try? await service.search(query: query, scope: scope, limit: 3) else { continue }
+                for result in results where hits < 5 {
+                    hits += 1
+                    sources.append(CodingContextSource(
+                        kind: .obsidian,
+                        title: "Recall · note \(result.path)",
+                        path: result.path,
+                        excerpt: String(result.context.prefix(1_200))
+                    ))
+                }
+            }
+        }
+        let priorThreads = model.snapshot.threads
+            .filter { $0.projectID == thread.projectID && $0.id != thread.id && $0.kind == .coding && !$0.plan.isEmpty }
+            .sorted { $0.updatedAtUnixMillis > $1.updatedAtUnixMillis }
+            .prefix(3)
+        for prior in priorThreads {
+            let workflow = model.codingWorkflow(threadID: prior.id)?.state
+            let decisions = (model.codingKnowledgeLane(threadID: prior.id)?.candidates ?? [])
+                .filter { $0.category == .decision }
+                .prefix(4)
+                .map { "- \($0.title): \($0.detail.prefix(200))" }
+            let findings = (prior.findings ?? []).prefix(4).map { "- \($0.title)" }
+            let plan = prior.plan.prefix(8).enumerated().map { "\($0.offset + 1). \($0.element.title)" }
+            let excerpt = [
+                "Thread: \(prior.title)",
+                "Outcome: \(workflow.map { "\($0)" } ?? "unknown")",
+                prior.summary.isEmpty ? nil : "Summary: \(prior.summary)",
+                plan.isEmpty ? nil : "Plan:\n" + plan.joined(separator: "\n"),
+                decisions.isEmpty ? nil : "Decisions:\n" + decisions.joined(separator: "\n"),
+                findings.isEmpty ? nil : "Findings:\n" + findings.joined(separator: "\n"),
+            ].compactMap { $0 }.joined(separator: "\n")
+            sources.append(CodingContextSource(
+                kind: .repositoryKnowledge,
+                title: "Recall · earlier thread \(prior.title)",
+                path: "kaname://thread/\(prior.id)",
+                excerpt: String(excerpt.prefix(2_000))
+            ))
+        }
+        return sources
     }
 
     private func knowledgeSourceID(
