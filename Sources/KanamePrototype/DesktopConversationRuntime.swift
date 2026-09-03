@@ -1544,7 +1544,7 @@ final class DesktopConversationRuntime: ObservableObject {
         return """
         Kaname Coding stage: DISCUSS AND PLAN ONLY.
 
-        You are in an ongoing planning conversation. Inspect the selected repository read-only as needed, answer the user, and keep one concrete implementation plan up to date. Sources titled "Recall" are what Kaname already knows from earlier threads and the user's notes; use them before re-deriving or guessing, and say when they change your plan. \(planMechanism) The plan steps must describe future implementation work, not the planning work you are doing, and stay pending. Do not edit files, create commits, run destructive commands, access the network, or begin implementation. Nothing is implemented until the user explicitly approves the plan in Kaname. If you investigated or debugged anything, end your reply with a '## Findings' section: one bullet per finding stating what you checked, what you observed, and what you concluded. When Kaname tools are available (MCP server `kaname`), use them: plan_update to keep the plan current (send the whole plan), finding_record for each finding, knowledge_search and knowledge_read for the user's notes, knowledge_propose to suggest a note update. Fall back to the Markdown sections only if the tools are absent.
+        You are in an ongoing planning conversation. Inspect the selected repository read-only as needed, answer the user, and keep one concrete implementation plan up to date. Sources titled "Recall" are what Kaname already knows from earlier threads and the user's notes; use them before re-deriving or guessing, and say when they change your plan. \(planMechanism) The plan steps must describe future implementation work, not the planning work you are doing, and stay pending. Do not edit files, create commits, run destructive commands, access the network, or begin implementation. Nothing is implemented until the user explicitly approves the plan in Kaname. If you investigated or debugged anything, end your reply with a '## Findings' section: one bullet per finding stating what you checked, what you observed, and what you concluded. When Kaname tools are available (MCP server `kaname`), use them: plan_update to keep the plan current (send the whole plan), finding_record for each finding, knowledge_search and knowledge_read for the user's notes, knowledge_propose to suggest a note update. Fall back to the Markdown sections only if the tools are absent. To build an automation, call workflow_schema, draft the graph, then workflow_publish.
 
         \(currentPlan)
 
@@ -1625,7 +1625,7 @@ final class DesktopConversationRuntime: ObservableObject {
         return """
         Kaname Coding stage: APPROVED ISOLATED IMPLEMENTATION.
 
-        Implement the approved plan below inside the selected linked Git worktree, following the user's latest message. This is an ongoing conversation: the user may send follow-up instructions and you continue in the same worktree. Do not write outside the worktree. Run the relevant local verification, report changed files and anything not run, and do not commit, push, publish, or merge. Provider completion is never acceptance; the user reviews Changes and Evidence in Kaname. If you investigated or debugged anything, end your reply with a '## Findings' section: one bullet per finding stating what you checked, what you observed, and what you concluded. When Kaname tools are available (MCP server `kaname`), use them: plan_update to keep the plan current (send the whole plan), finding_record for each finding, knowledge_search and knowledge_read for the user's notes, knowledge_propose to suggest a note update. Fall back to the Markdown sections only if the tools are absent.
+        Implement the approved plan below inside the selected linked Git worktree, following the user's latest message. This is an ongoing conversation: the user may send follow-up instructions and you continue in the same worktree. Do not write outside the worktree. Run the relevant local verification, report changed files and anything not run, and do not commit, push, publish, or merge. Provider completion is never acceptance; the user reviews Changes and Evidence in Kaname. If you investigated or debugged anything, end your reply with a '## Findings' section: one bullet per finding stating what you checked, what you observed, and what you concluded. When Kaname tools are available (MCP server `kaname`), use them: plan_update to keep the plan current (send the whole plan), finding_record for each finding, knowledge_search and knowledge_read for the user's notes, knowledge_propose to suggest a note update. Fall back to the Markdown sections only if the tools are absent. To build an automation, call workflow_schema, draft the graph, then workflow_publish.
 
         Project: \(project?.name ?? "Standalone")
         User message:
@@ -2160,6 +2160,8 @@ final class DesktopConversationRuntime: ObservableObject {
                 return (.status, "Read note", event.text ?? "")
             case "kaname/bridge-unavailable":
                 return (.error, "Kaname Bridge unavailable", event.text ?? "")
+            case "kaname/workflow_publish":
+                return (.status, "Workflow published", event.text ?? "")
             default:
                 return fallback
             }

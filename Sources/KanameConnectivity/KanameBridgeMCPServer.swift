@@ -1,4 +1,5 @@
 import Foundation
+import KanameLocalCore
 import Network
 
 /// Kaname Bridge: a loopback MCP server injected into every provider run so
@@ -40,6 +41,7 @@ public actor KanameBridgeMCPServer {
     private var readableScopes: [String]
     private var writableScopes: [String]
     private var memory: [KanameBridgeMemoryEntry]
+    private var workflowPublisher: LocalCoreRunner?
     private let emit: Emit
     private var listener: NWListener?
     private var binding: Binding?
@@ -63,6 +65,50 @@ public actor KanameBridgeMCPServer {
     public func updateMemory(_ entries: [KanameBridgeMemoryEntry]) {
         memory = entries
     }
+
+    /// Enables `workflow_publish` through the signed local core.
+    public func updateWorkflowPublisher(_ runner: LocalCoreRunner?) {
+        workflowPublisher = runner
+    }
+
+    /// Compact authoring guide for Kaname's v1 workflow graph. Kept in sync by
+    /// hand with Schema/Workflow/v1; the compiler is the authority and returns
+    /// diagnostics on publish.
+    static let workflowAuthoringGuide = """
+    # Kaname workflow v1 authoring guide
+
+    A workflow is one JSON document:
+    {"formatVersion":1,"workflowId":"<uuid v7>","packageId":"<dot.separated.id>","name":"…","summary":"…",
+     "graph":{"entrypoints":[{"id":"<uuid>","nodeId":"<trigger node id>"}],"nodes":[…],"edges":[…]},
+     "interfaces":{},"resources":{},"policies":{},"storage":{},"metadata":{}}
+    Every id is a UUID v7 shape: 8-4-4-4-12 hex with the third group starting with 7 and the fourth with 8, 9, a, or b
+    (example 018f5000-0101-7000-8000-000000000101). Keys are lowercase kebab-case (^[a-z][a-z0-9-]{0,63}$).
+
+    Node: {"id","key","name","type","typeVersion":1,"config":{…}}. Edge: {"id","from":{"nodeId","portId"},"to":{"nodeId","portId"},"mappingId":"<uuid>","mapping":<expression>}.
+    Expression forms: {"whole":true} | {"select":{"root":"input"|"value"|"item"|"error","pointer":"/json/pointer"}} | {"literal":{"type":"string"|"number"|"boolean"|"null"|"json","value":…}} | {"object":{"field":<expr>,…}} | {"array":[<expr>,…]} | {"coalesce":[<expr>,…]} | {"format":{"template":"…{name}…","values":{"name":<expr>}}}.
+
+    Node types, config keys, and ports:
+    - trigger.manual {} → out: success. Optional config.inputSchemaRef.
+    - trigger.schedule {"scheduleKey":"<key>","misfirePolicy":"skip"|"run-once"} → out: success. Cadence is set by the user in Kaname, not in the graph.
+    - trigger.event {"eventContract":"mail.message.received","deduplication":"event-id"|"contract-key"} → out: success. Mail events carry {accountBindingId, accountId, messageId, conversationId, resourceIds, cursor, provider}.
+    - data.validate {"schemaRef":"<schema id in schemaBundle>"} in: input → out: success, error.
+    - data.map {"mapping":<expression>} in: input → out: success, error.
+    - control.decision {"when":{"compare":{"left":<expr>,"operator":"equal"|"not-equal"|"greater"|"less"|"contains"|"exists","right":<expr>}}} in: input → out: matched, not-matched, error.
+    - control.match {"value":<expr>,"hitPolicy":"first"|"all","cases":[{"id","key","label","when":{"compare":…}}],"otherwise":{"id","key","label"}} in: input → out: case-<caseId> per case (and otherwise), error.
+    - control.parallel {"branches":N} in: input → out: branch ports, error. control.join {"policy":"all"|"any"|"quorum","cancelRemaining":bool} in: branches → out: success, error.
+    - control.for-each {"items":<expr>,"as":"item","maximumItems":N,"maximumConcurrency":N,"failurePolicy":"fail-fast"|"continue"} in: input → out: item (per item), success, error.
+    - control.retry {"maximumAttempts":N,"retryOn":["timed_out","crashed"],"backoff":{"initialMilliseconds":N,"multiplier":2,"maximumMilliseconds":N}} in: error → out: retry, exhausted.
+    - control.wait {"kind":"timer"|"reply"|"event","correlation":[<value refs>],"expirySeconds":N} in: input → out: resumed, expired, error.
+    - control.human-review {"proposal":<expr>,"authorityPolicy":"owner-approval","expirySeconds":N,"staleCheck":"digest"|"revision"} in: input → out: approved, rejected, expired.
+    - control.reconcile {"effect":"<effect node id>","maximumChecks":N} in: unknown → out: success, failure, still-unknown.
+    - compute.llm {"modelClass":"fast"|"balanced"|"reasoning","instructions":"…","prompt":<expr>,"context":[],"tools":[],"outputSchemaRef":"<schema id>","reasoningEffort":"low"|"medium"|"high","temperatureMilli":0,"maximumContextBytes":65536,"maximumOutputTokens":1024} in: input → out: success, error. The model answers JSON matching outputSchemaRef.
+    - compute.capability {"capabilityId":"…","version":"…","input":<expr>,"outputSchemaRef":"…"} in: input → out: success, error.
+    - effect.connector {"connectorClass":"mail","action":"send"|"draft"|"archive"|"label"|"trash"|"mark-read","input":<expr producing {accountBindingId, destinationFingerprint, conversationIds?, addLabelIds?, removeLabelIds?, recipients?, subject?, body?}>,"previewContract":"…","reconciliationContract":"…","idempotency":"required"} in: input → out: success, error. The user approves each effect in Run history unless a standing rule exists.
+    - storage.read/write/promote for durable scoped values; terminal.complete {"output":<expr>?}, terminal.fail {"error":<expr>}, terminal.cancel {"reason":…} in: input.
+
+    schemaBundleJson: {"bundleVersion":1,"schemas":[{"id":"<schema id>","schema":{…JSON Schema…}}]} for every schemaRef and outputSchemaRef you use.
+    Start small: trigger → validate → decision/match → terminal. Publish, run with input JSON, read Run history, iterate.
+    """
 
     public func currentBinding() -> Binding? { binding }
 
@@ -281,6 +327,26 @@ public actor KanameBridgeMCPServer {
             ],
         ],
         [
+            "name": "workflow_schema",
+            "description": "Returns the authoring guide for Kaname automation workflows (node types, config keys, ports, expression forms, document shape). Call before writing a workflow graph.",
+            "inputSchema": ["type": "object", "properties": [:] as [String: Any]],
+        ],
+        [
+            "name": "workflow_publish",
+            "description": "Publish a complete Kaname workflow v1 JSON document into the durable library as an active revision so the user can run or schedule it. Returns the revision, whether it compiled as executable, or the compiler's error.",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "name": ["type": "string"],
+                    "summary": ["type": "string"],
+                    "workflowJson": ["type": "string", "description": "The full workflow document as a JSON string."],
+                    "schemaBundleJson": ["type": "string", "description": "Optional schema bundle JSON string for schemaRef and outputSchemaRef ids."],
+                    "activate": ["type": "boolean"],
+                ],
+                "required": ["name", "workflowJson"],
+            ],
+        ],
+        [
             "name": "knowledge_propose",
             "description": "Propose a new or updated Obsidian note for the user to review. Nothing is written until the user approves in Kaname.",
             "inputSchema": [
@@ -403,6 +469,42 @@ public actor KanameBridgeMCPServer {
                 entry.findings.isEmpty ? nil : "## Findings\n" + entry.findings.map { "- \($0)" }.joined(separator: "\n"),
             ].compactMap { $0 }.joined(separator: "\n\n")
             return Self.toolText(text)
+        case "workflow_schema":
+            return Self.toolText(Self.workflowAuthoringGuide)
+        case "workflow_publish":
+            guard let publisher = workflowPublisher else {
+                return Self.toolText("Publishing is unavailable in this run (no local core).", isError: true)
+            }
+            guard let workflowJSON = arguments["workflowJson"] as? String,
+                  let data = workflowJSON.data(using: .utf8),
+                  let document = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let workflowID = document["workflowId"] as? String, !workflowID.isEmpty else {
+                return Self.toolText("workflow_publish needs workflowJson containing a parseable document with a workflowId.", isError: true)
+            }
+            let name = (arguments["name"] as? String) ?? (document["name"] as? String) ?? "Workflow"
+            let summary = (arguments["summary"] as? String) ?? (document["summary"] as? String) ?? ""
+            let packageID = (document["packageId"] as? String) ?? "dev.kaname.authored"
+            let schemaBundle = (arguments["schemaBundleJson"] as? String) ?? ""
+            let activate = (arguments["activate"] as? Bool) ?? true
+            do {
+                let result = try await publisher.publishWorkflow(
+                    workflowID: workflowID,
+                    packageID: packageID,
+                    name: name,
+                    summary: summary,
+                    workflowJSON: workflowJSON,
+                    schemaBundleJSON: schemaBundle,
+                    activate: activate
+                )
+                await emit(CodexRunEvent(
+                    kind: .nativeProviderEvent,
+                    nativeType: "kaname/workflow_publish",
+                    text: "\(name) → revision \(result.revisionID) (\(result.executionSupport))\(result.activated ? ", active" : "")"
+                ))
+                return Self.toolText("Published \(name) as revision \(result.revisionID); executionSupport=\(result.executionSupport); activated=\(result.activated). If executionSupport is not executable, fix the node configuration and publish again under a new workflowId or ask the user to run it from Automations › Run history.")
+            } catch {
+                return Self.toolText("Publish failed: \(error.localizedDescription). Check ids (uuid v7 shape), keys (kebab-case), port ids, and schemaRefs against workflow_schema, then retry with a new workflowId.", isError: true)
+            }
         case "knowledge_propose":
             guard let path = arguments["path"] as? String, path.hasSuffix(".md"),
                   let content = arguments["content"] as? String, !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {

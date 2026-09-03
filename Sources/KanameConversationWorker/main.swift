@@ -401,6 +401,10 @@ private enum KanameConversationWorker {
                         writable: request.bridgeKnowledgeWriteScopes ?? []
                     )
                     await bridge.updateMemory(request.bridgeMemoryPack ?? [])
+                    await bridge.updateWorkflowPublisher(LocalCoreRunner(
+                        machService: request.localCoreMachService,
+                        serviceRequirement: request.localCoreRequirement
+                    ))
                     let bridgeBinding = try? await bridge.start()
                     let newSession = makeSession(request, bridgeBinding: bridgeBinding)
                     await relay.attach(newSession)
@@ -589,6 +593,7 @@ private enum KanameConversationWorker {
                 _ = try? await recorder.record(event)
                 try? await writer.append(kind: .provider, providerEvent: event)
             }
+            await server.updateWorkflowPublisher(runner)
             if let binding = try? await server.start() {
                 bridge = server
                 bridgeBinding = binding
