@@ -1146,7 +1146,8 @@ struct KanameDesktopWorkspace: View {
                     openThread: { openThread($0) },
                     requestArchive: requestThreadArchive,
                     openDestination: navigate,
-                    startConversation: { beginConversation(projectID: inheritedProjectID) }
+                    startConversation: { beginConversation(projectID: inheritedProjectID) },
+                    startConversationInProject: { beginConversation(projectID: $0) }
                 )
             case .threads:
                 DesktopThreadsView(
@@ -2662,6 +2663,7 @@ private struct DesktopHomeView: View {
     let requestArchive: (String) -> Void
     let openDestination: (DesktopDestination) -> Void
     let startConversation: () -> Void
+    let startConversationInProject: (String) -> Void
 
     private var attentionThreads: [DesktopThread] {
         model.threads(matching: searchText).filter {
@@ -2669,58 +2671,22 @@ private struct DesktopHomeView: View {
         }
     }
 
+    private var runningThreads: [DesktopThread] {
+        model.threads(matching: searchText).filter { $0.attention == .running || $0.attention == .queued }.prefix(6).map { $0 }
+    }
+
+    private var openProjects: [DesktopProject] {
+        model.snapshot.projects.filter { $0.archivedAtUnixMillis == nil }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    private func threadCount(projectID: String) -> Int {
+        model.snapshot.threads.filter { $0.projectID == projectID && $0.attention != .archived }.count
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 hero
-
-                LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: usesSyntheticLargeText ? 260 : 190), spacing: 12)],
-                    spacing: 12
-                ) {
-                    MetricCard(
-                        title: "Needs you",
-                        value: "\(attentionThreads.count)",
-                        detail: attentionThreads.isEmpty ? "Nothing waiting on you" : "Waiting for your decision",
-                        symbol: "person.crop.circle.badge.exclamationmark",
-                        tint: attentionThreads.isEmpty ? KanameColor.success : KanameColor.warning
-                    )
-                    MetricCard(
-                        title: "Active work",
-                        value: "\(model.activeThreads.filter { $0.attention == .running || $0.attention == .queued }.count)",
-                        detail: "Running now",
-                        symbol: "bolt.fill",
-                        tint: KanameColor.active
-                    )
-                    MetricCard(
-                        title: "Projects",
-                        value: "\(model.snapshot.projects.count)",
-                        detail: "Repositories you work in",
-                        symbol: "folder.fill",
-                        tint: KanameColor.accent
-                    )
-                    MetricCard(
-                        title: "Local drafts",
-                        value: "\(model.snapshot.domains.emailDrafts.count + model.snapshot.domains.calendarProposals.count)",
-                        detail: "Email and calendar proposals",
-                        symbol: "doc.text.fill",
-                        tint: KanameColor.blocked
-                    )
-                    MetricCard(
-                        title: "Research",
-                        value: "\(model.snapshot.domains.research.count)",
-                        detail: "Open questions",
-                        symbol: DesktopDestination.research.symbol,
-                        tint: KanameColor.accent
-                    )
-                    MetricCard(
-                        title: "Automations",
-                        value: "\(model.snapshot.domains.automations.count)",
-                        detail: "Workflows",
-                        symbol: DesktopDestination.automations.symbol,
-                        tint: KanameColor.blocked
-                    )
-                }
 
                 SectionHeading(
                     title: "Needs attention",
@@ -2731,7 +2697,7 @@ private struct DesktopHomeView: View {
                     EmptyPanel(
                         symbol: "checkmark.circle.fill",
                         title: "Nothing needs a decision",
-                        detail: "Running and queued work remains visible below."
+                        detail: "Running and recent work stays visible below."
                     )
                 } else {
                     LazyVGrid(
@@ -2742,6 +2708,14 @@ private struct DesktopHomeView: View {
                             ThreadCard(thread: thread) { openThread(thread.id) }
                                 .contextMenu { threadActions(thread) }
                         }
+                    }
+                }
+
+                if !runningThreads.isEmpty {
+                    SectionHeading(title: "Running now", detail: "Provider turns in progress. Open one to watch its activity.")
+                    ForEach(runningThreads) { thread in
+                        ThreadRow(thread: thread) { openThread(thread.id) }
+                            .contextMenu { threadActions(thread) }
                     }
                 }
 
@@ -2785,7 +2759,7 @@ private struct DesktopHomeView: View {
                 .kanameSemanticFont(.largeTitle.weight(.bold))
                 .lineLimit(usesSyntheticLargeText ? 2 : 1)
                 .minimumScaleFactor(usesSyntheticLargeText ? 1 : 0.82)
-            Text("Your local work, attention, evidence, and device health in one place.")
+            Text("What needs you, what is running, and where you left off.")
                 .kanameSemanticFont(.body)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -2807,13 +2781,13 @@ private struct DesktopHomeView: View {
         if usesSyntheticLargeText {
             VStack(alignment: .leading, spacing: 18) {
                 recentWork
-                quickActions
+                projectsColumn
             }
         } else {
             HStack(alignment: .top, spacing: 16) {
                 recentWork
                     .frame(maxWidth: .infinity, alignment: .topLeading)
-                quickActions
+                projectsColumn
                     .frame(width: 360, alignment: .topLeading)
             }
         }
@@ -2821,10 +2795,22 @@ private struct DesktopHomeView: View {
 
     private var recentWork: some View {
         VStack(alignment: .leading, spacing: 12) {
-            SectionHeading(title: "Recent work", detail: "Durable local threads, newest first.")
-            ForEach(model.threads(matching: searchText).prefix(5)) { thread in
-                ThreadRow(thread: thread) { openThread(thread.id) }
-                    .contextMenu { threadActions(thread) }
+            SectionHeading(title: "Recent work", detail: "Newest first. Everything else lives in Threads.")
+            ForEach(model.threads(matching: searchText).prefix(8)) { thread in
+                VStack(alignment: .leading, spacing: 2) {
+                    ThreadRow(thread: thread) { openThread(thread.id) }
+                        .contextMenu { threadActions(thread) }
+                    if let project = model.project(id: thread.projectID) {
+                        Text(project.name)
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .padding(.leading, 14)
+                    }
+                }
+            }
+            if model.threads(matching: searchText).count > 8 {
+                Button("All threads", systemImage: "arrow.right") { openDestination(.threads) }
+                    .buttonStyle(.borderless)
             }
         }
     }
@@ -2847,30 +2833,43 @@ private struct DesktopHomeView: View {
         }
     }
 
-    private var quickActions: some View {
+    private var projectsColumn: some View {
         VStack(alignment: .leading, spacing: 12) {
-            SectionHeading(title: "Start or continue", detail: "Domain-specific local workspaces.")
-            QuickActionCard(
-                title: "Coding",
-                detail: "Inspect providers, use an isolated worktree, and review evidence before acceptance.",
-                symbol: DesktopDestination.liveCodex.symbol,
-                tint: KanameColor.accent
-            ) { openDestination(.liveCodex) }
-            QuickActionCard(
-                title: "Research",
-                detail: "Start from a question and explicit source boundary.",
-                symbol: DesktopDestination.research.symbol,
-                tint: KanameColor.active
-            ) { openDestination(.research) }
-            QuickActionCard(
-                title: "Calendar",
-                detail: "Draft a source-aware event proposal without changing a calendar.",
-                symbol: DesktopDestination.calendar.symbol,
-                tint: KanameColor.blocked
-            ) { openDestination(.calendar) }
+            SectionHeading(title: "Projects", detail: "Start a conversation where the code lives.")
+            if openProjects.isEmpty {
+                EmptyPanel(
+                    symbol: "folder.badge.plus",
+                    title: "No projects yet",
+                    detail: "Add a repository in Projects, then start a conversation inside it."
+                )
+            } else {
+                ForEach(openProjects.prefix(8)) { project in
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Circle()
+                            .fill(KanameColor.accent)
+                            .frame(width: 8, height: 8)
+                            .padding(.top, 4)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(project.name).font(.body.weight(.semibold))
+                            Text("\(threadCount(projectID: project.id)) thread\(threadCount(projectID: project.id) == 1 ? "" : "s")")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button {
+                            startConversationInProject(project.id)
+                        } label: {
+                            Image(systemName: "square.and.pencil")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("New conversation in \(project.name)")
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
             QuickActionCard(
                 title: "Automations",
-                detail: "Define a disabled schedule with safe missed-run policy.",
+                detail: "\(model.snapshot.domains.automations.count) workflow\(model.snapshot.domains.automations.count == 1 ? "" : "s"). Runs, schedules, and effects waiting for approval.",
                 symbol: DesktopDestination.automations.symbol,
                 tint: KanameColor.warning
             ) { openDestination(.automations) }
