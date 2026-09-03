@@ -146,15 +146,50 @@ public actor ObsidianVaultService {
         let target = try authorize(path: path, against: writableScopes)
         guard grant.targetPath == target else { throw ObsidianVaultError.approvalMismatch }
         guard content.utf8.count <= Self.maximumDocumentBytes else { throw ObsidianVaultError.documentTooLarge }
-        let current = try await inspectForWrite(path: target)
+        let current = try await inspectForWriteOrEmpty(path: target)
         guard grant.baseDigest == current.digest else { throw ObsidianVaultError.conflict(currentDigest: current.digest) }
         let pathLiteral = try Self.jsonLiteral(target)
         let contentLiteral = try Self.jsonLiteral(content)
-        let code = "(async()=>{const p=\(pathLiteral);const f=app.vault.getAbstractFileByPath(p);if(!f){throw new Error(\"missing note\")}await app.vault.modify(f,\(contentLiteral));return true})()"
+        // Creates the note (and missing parent folders) when the approved base
+        // revision is the empty document; otherwise replaces the existing note.
+        let code = "(async()=>{const p=\(pathLiteral);let f=app.vault.getAbstractFileByPath(p);if(!f){const parts=p.split('/');parts.pop();let dir='';for(const part of parts){dir=dir?dir+'/'+part:part;if(!app.vault.getAbstractFileByPath(dir)){await app.vault.createFolder(dir)}}await app.vault.create(p,\(contentLiteral));return true}await app.vault.modify(f,\(contentLiteral));return true})()"
         _ = try await command(["eval", "code=\(code)"], maximumBytes: 32_768)
         let reconciled = try await inspectForWrite(path: target)
         guard reconciled.digest == Self.digest(content) else { throw ObsidianVaultError.malformedResponse }
         return reconciled
+    }
+
+    /// Snapshot of a note that does not exist yet: empty content, empty digest.
+    public static func emptyDocument(path: String) -> ObsidianDocumentSnapshot {
+        ObsidianDocumentSnapshot(
+            path: path,
+            content: "",
+            digest: digest(""),
+            wikilinks: [],
+            backlinks: [],
+            properties: [:],
+            attachments: [],
+            wasTruncated: false
+        )
+    }
+
+    /// Like `inspect`, but a missing note yields the empty document so a
+    /// caller can seed a draft that creates it.
+    public func inspectOrEmpty(path: String) async throws -> ObsidianDocumentSnapshot {
+        let target = try authorize(path: path, against: writableScopes)
+        do {
+            return try await inspect(path: target)
+        } catch ObsidianVaultError.commandFailed {
+            return Self.emptyDocument(path: target)
+        }
+    }
+
+    private func inspectForWriteOrEmpty(path: String) async throws -> ObsidianDocumentSnapshot {
+        do {
+            return try await inspectForWrite(path: path)
+        } catch ObsidianVaultError.commandFailed {
+            return Self.emptyDocument(path: path)
+        }
     }
 
     private func inspectForWrite(path: String) async throws -> ObsidianDocumentSnapshot {

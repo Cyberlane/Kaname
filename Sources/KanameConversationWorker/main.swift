@@ -554,8 +554,11 @@ private enum KanameConversationWorker {
         var bridgeBinding: KanameBridgeMCPServer.Binding?
         if driver == .claude {
             let scopes = request.bridgeKnowledgeReadScopes ?? []
-            let knowledge = scopes.isEmpty ? nil : try? ObsidianVaultService(readableScopes: scopes, writableScopes: [])
-            let server = KanameBridgeMCPServer(knowledge: knowledge, readableScopes: scopes) { event in
+            let writeScopes = request.bridgeKnowledgeWriteScopes ?? []
+            let knowledge = scopes.isEmpty && writeScopes.isEmpty
+                ? nil
+                : try? ObsidianVaultService(readableScopes: scopes + writeScopes, writableScopes: writeScopes)
+            let server = KanameBridgeMCPServer(knowledge: knowledge, readableScopes: scopes + writeScopes, writableScopes: writeScopes) { event in
                 _ = try? await recorder.record(event)
                 try? await writer.append(kind: .provider, providerEvent: event)
             }

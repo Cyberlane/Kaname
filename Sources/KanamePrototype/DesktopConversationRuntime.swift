@@ -334,7 +334,11 @@ final class DesktopConversationRuntime: ObservableObject {
         let worktree = latestCodingWorktree(threadID: threadID)
         if codingWorkflowBusyThreadIDs.contains(threadID) { return .preparing }
         if let active = runs.last(where: { $0.state == .running || $0.state == .proposed }) {
-            return active.purpose == .codingImplementation ? .implementing : .planning
+            switch active.purpose {
+            case .codingImplementation: return .implementing
+            case .codingKnowledge: return .knowledgeReview
+            case .codingPlan, .conversation: return .planning
+            }
         }
         if let latest = runs.last {
             if latest.state == .failed || latest.state == .interrupted { return .failed }
@@ -587,6 +591,10 @@ final class DesktopConversationRuntime: ObservableObject {
                         "Kaname could not persist the exact review decision; the implementation remains unaccepted."
                     )
                 }
+                if accepted {
+                    codingWorkflowBusyThreadIDs.remove(threadID)
+                    runKnowledgeTurn(threadID: threadID)
+                }
             } catch {
                 codingWorkflowErrors[threadID] = error.localizedDescription
             }
@@ -716,7 +724,8 @@ final class DesktopConversationRuntime: ObservableObject {
             isCodingPlan: run.purpose == .codingPlan,
             curatedPreviewMCPGranted: previewGrant && run.purpose == .codingImplementation,
             createdAtUnixMillis: run.startedAtUnixMillis,
-            bridgeKnowledgeReadScopes: model.snapshot.operations.vaultScopes.filter(\.canRead).map(\.path)
+            bridgeKnowledgeReadScopes: model.snapshot.operations.vaultScopes.filter(\.canRead).map(\.path),
+            bridgeKnowledgeWriteScopes: model.snapshot.operations.vaultScopes.filter(\.canWrite).map(\.path)
         )
         var queuedRequestURL: URL?
         do {
@@ -986,14 +995,12 @@ final class DesktopConversationRuntime: ObservableObject {
            let path = object["path"] as? String,
            let content = object["content"] as? String {
             let rationale = (object["rationale"] as? String) ?? ""
-            _ = model.addCodingKnowledgeCandidate(
+            model.addKnowledgeNoteProposal(
                 threadID: serviceEvent.threadID,
-                category: .decision,
-                title: "Proposed note: \(path)",
-                detail: KanameTextBounds.utf8Prefix(
-                    (rationale.isEmpty ? "" : rationale + "\n\n") + content,
-                    maximumBytes: 8 * 1_024
-                )
+                runID: serviceEvent.runID,
+                path: path,
+                content: content,
+                rationale: rationale
             )
             guard model.persistenceError == nil else { return false }
         }
@@ -1457,6 +1464,9 @@ final class DesktopConversationRuntime: ObservableObject {
         if purpose == .codingImplementation {
             return implementationPrompt(thread: thread, userMessage: userMessage)
         }
+        if purpose == .codingKnowledge {
+            return knowledgePrompt(thread: thread)
+        }
         guard includeProjectContext else {
             return """
             Respond inside Kaname's unified \(thread.kind.label.lowercased()) conversation.
@@ -1538,6 +1548,64 @@ final class DesktopConversationRuntime: ObservableObject {
 
         Exact digest-bound context snapshot and user request:
         \(frozenContext)
+        """
+    }
+
+    /// Runs one read-only provider turn that asks for the durable knowledge
+    /// update through the Bridge. Safe to call again from the Knowledge tab.
+    func runKnowledgeTurn(threadID: String) {
+        guard !codingWorkflowBusyThreadIDs.contains(threadID),
+              let thread = model.thread(id: threadID),
+              thread.kind == .coding,
+              model.codingWorkflow(threadID: threadID)?.state == .updatingKnowledge,
+              !model.providerRuns(threadID: threadID).contains(where: { $0.state == .running || $0.state == .proposed }),
+              let worktree = latestCodingWorktree(threadID: threadID),
+              let sourceMessageID = thread.messages.last(where: { $0.role == .user })?.id else { return }
+        codingWorkflowErrors.removeValue(forKey: threadID)
+        guard let runID = model.enqueueProviderRun(
+            threadID: threadID,
+            sourceMessageID: sourceMessageID,
+            usesProjectContext: true,
+            workspacePathOverride: worktree.worktreePath,
+            purpose: .codingKnowledge,
+            runtimeModeOverride: .approvalRequired,
+            networkAccessOverride: false
+        ) else { return }
+        pollCandidateThreadIDs.insert(threadID)
+        submit(runID: runID)
+    }
+
+    private func knowledgePrompt(thread: DesktopThread) -> String {
+        let project = model.project(id: thread.projectID)
+        let plan = thread.plan.enumerated().map { "\($0.offset + 1). \($0.element.title)" }.joined(separator: "\n")
+        let findings = (thread.findings ?? []).map { "- \($0.detail)" }.joined(separator: "\n")
+        let evidence = thread.evidence.map { "- \($0.label): \($0.state.rawValue)" }.joined(separator: "\n")
+        let request = thread.messages.first(where: { $0.role == .user })?.body ?? ""
+        let writable = model.snapshot.operations.vaultScopes.filter(\.canWrite).map(\.path)
+        let readable = model.snapshot.operations.vaultScopes.filter(\.canRead).map(\.path)
+        let projectName = project?.name ?? "this project"
+        let suggestedPath = writable.first.map { "\($0.hasSuffix("/") ? String($0.dropLast()) : $0)/\(projectName).md" } ?? "(no writable scope granted)"
+        return """
+        Kaname Coding stage: KNOWLEDGE UPDATE (read-only).
+
+        The implementation below was accepted. Your job now is to keep the user's Obsidian notes current. Do not edit repository files. Use the kaname MCP tools:
+        1. knowledge_search and knowledge_read to look at the existing notes in the readable scopes (\(readable.joined(separator: ", "))) and avoid duplicating what is already written.
+        2. knowledge_propose with the FULL updated content of each note that should change. Preferred project note: \(suggestedPath). Writable scopes: \(writable.joined(separator: ", ")). If a general, reusable lesson came out of this work (language, platform, tooling), propose a second note for it under the writable scope.
+        3. Keep notes as curated current truth: decisions, constraints, gotchas, how things work now. Not a chat log. Preserve existing frontmatter and sections you are not changing.
+        If nothing durable was learned, say so in one sentence and propose nothing.
+
+        Project: \(projectName)
+        Original request:
+        \(request)
+
+        Approved plan:
+        \(plan)
+
+        Findings:
+        \(findings.isEmpty ? "(none recorded)" : findings)
+
+        Evidence:
+        \(evidence.isEmpty ? "(none recorded)" : evidence)
         """
     }
 
@@ -2032,6 +2100,8 @@ final class DesktopConversationRuntime: ObservableObject {
                 (.status, "Plan ready", "Review the structured Plan tab. No implementation authority has been granted.")
             case .codingImplementation:
                 (.status, "Implementation turn complete", "Kaname is collecting independent evidence before asking you to accept or reject the result.")
+            case .codingKnowledge:
+                (.status, "Knowledge draft ready", "Review the proposed notes in the Knowledge tab; nothing is written until you approve.")
             case .conversation:
                 (.status, "Turn complete", "The provider completed; the response is ready for you.")
             }

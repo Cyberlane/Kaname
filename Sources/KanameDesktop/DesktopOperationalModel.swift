@@ -130,6 +130,7 @@ public struct DesktopCodingKnowledgeLane: Codable, Equatable, Identifiable, Send
     public var acceptedWorktreeID: String?
     public var proposalID: String?
     public var writeID: String?
+    public var noteProposals: [DesktopKnowledgeNoteProposal]?
     public let createdAtUnixMillis: Int64
     public var updatedAtUnixMillis: Int64
 
@@ -518,6 +519,24 @@ public enum DesktopProviderRunPurpose: String, Codable, Equatable, Sendable {
     case conversation
     case codingPlan
     case codingImplementation
+    /// Read-only turn after acceptance that asks the provider to propose the
+    /// durable knowledge update through the Kaname Bridge.
+    case codingKnowledge
+}
+
+/// A note the provider proposed through `knowledge_propose`. Nothing is
+/// written until the user opens it as a draft, reviews the diff, and approves.
+public struct DesktopKnowledgeNoteProposal: Codable, Equatable, Identifiable, Sendable {
+    public let id: String
+    public var path: String
+    public var content: String
+    public var rationale: String
+    public var runID: String?
+    public var createdAtUnixMillis: Int64
+
+    public init(id: String, path: String, content: String, rationale: String, runID: String?, createdAtUnixMillis: Int64) {
+        (self.id, self.path, self.content, self.rationale, self.runID, self.createdAtUnixMillis) = (id, path, content, rationale, runID, createdAtUnixMillis)
+    }
 }
 
 private struct DesktopProviderRunPayload: Decodable {

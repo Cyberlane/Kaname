@@ -38,14 +38,16 @@ public actor KanameBridgeMCPServer {
 
     private let knowledge: ObsidianVaultService?
     private let readableScopes: [String]
+    private let writableScopes: [String]
     private let emit: Emit
     private var listener: NWListener?
     private var binding: Binding?
     private let queue = DispatchQueue(label: "com.cyberlane.kaname.bridge-mcp")
 
-    public init(knowledge: ObsidianVaultService?, readableScopes: [String], emit: @escaping Emit) {
+    public init(knowledge: ObsidianVaultService?, readableScopes: [String], writableScopes: [String] = [], emit: @escaping Emit) {
         self.knowledge = knowledge
         self.readableScopes = readableScopes
+        self.writableScopes = writableScopes
         self.emit = emit
     }
 
@@ -318,6 +320,12 @@ public actor KanameBridgeMCPServer {
             guard let path = arguments["path"] as? String, path.hasSuffix(".md"),
                   let content = arguments["content"] as? String, !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 return Self.toolText("knowledge_propose needs a .md path and content.", isError: true)
+            }
+            guard !writableScopes.isEmpty else {
+                return Self.toolText("The user has not granted a writable Obsidian scope, so no note can be proposed. Mention this in your reply instead.", isError: true)
+            }
+            guard writableScopes.contains(where: { scope in path == scope || path.hasPrefix(scope.hasSuffix("/") ? scope : scope + "/") }) else {
+                return Self.toolText("Path must be inside a writable scope: \(writableScopes.joined(separator: ", ")).", isError: true)
             }
             let payload: [String: Any] = [
                 "path": path,

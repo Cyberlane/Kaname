@@ -49,6 +49,40 @@ final class DesktopKnowledgeViewModel: ObservableObject {
         }
     }
 
+    /// Seeds the editable draft from a Bridge note proposal. A missing note
+    /// becomes a create; the approval binds to the empty base digest.
+    func prepareProposedDraft(model: DesktopAppModel, threadID: String, proposal: DesktopKnowledgeNoteProposal) {
+        guard !isBusy else { return }
+        guard model.snapshot.operations.vaultScopes.contains(where: { scope in
+            scope.canWrite && (proposal.path == scope.path || proposal.path.hasPrefix(scope.path.hasSuffix("/") ? scope.path : scope.path + "/"))
+        }) else {
+            message = "The proposed path is outside every writable vault scope."
+            return
+        }
+        codingThreadID = threadID
+        isBusy = true
+        Task {
+            defer { isBusy = false }
+            do {
+                let snapshot = try await service(model: model).inspectOrEmpty(path: proposal.path)
+                document = snapshot
+                draft = proposal.content
+                diff = nil
+                activeWriteID = nil
+                if !snapshot.content.isEmpty {
+                    model.recordKnowledgeDocument(Self.documentRecord(snapshot, existing: model.snapshot.operations.knowledgeDocuments.first {
+                        $0.path == snapshot.path
+                    }))
+                }
+                message = snapshot.content.isEmpty
+                    ? "New note \(snapshot.path). Review the draft, then review the diff and request write approval."
+                    : "Loaded \(snapshot.path). The proposal replaces its content; review the diff before requesting approval."
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+    }
+
     func seedDefaultScope(model: DesktopAppModel) {
         guard model.snapshot.operations.vaultScopes.isEmpty,
               let source = model.snapshot.domains.knowledgeSources.first(where: { $0.kind == .obsidian }) else { return }

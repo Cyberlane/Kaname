@@ -2479,6 +2479,8 @@ public final class DesktopAppModel: ObservableObject {
                         reason: "The approved plan is being implemented in an isolated worktree.",
                         timestamp: now()
                     )
+                case .codingKnowledge:
+                    snapshot.threads[threadIndex].summary = "Drafting the knowledge update…"
                 case .conversation, nil:
                     snapshot.threads[threadIndex].summary = "Kaname is responding…"
                 }
@@ -2692,6 +2694,9 @@ public final class DesktopAppModel: ObservableObject {
                         reason: "Implementation finished; explicit review is required before independent evidence collection.",
                         timestamp: timestamp
                     )
+                case .codingKnowledge:
+                    attention = .needsApproval
+                    threadSummary = "Knowledge update drafted. Review the proposed notes in the Knowledge tab."
                 case .conversation:
                     attention = .needsResponse
                     threadSummary = assistant.map(Self.provisionalConversationTitle) ?? "Provider completed."
@@ -2858,6 +2863,40 @@ public final class DesktopAppModel: ObservableObject {
             existing += items.filter { !known.contains($0.id) }
             snapshot.threads[index].findings = Array(existing.suffix(200))
             snapshot.threads[index].updatedAtUnixMillis = timestamp
+        }
+    }
+
+    /// Records a note the provider proposed through the Kaname Bridge.
+    public func addKnowledgeNoteProposal(threadID: String, runID: String?, path: String, content: String, rationale: String) {
+        let timestamp = now()
+        guard let thread = thread(id: threadID), thread.kind == .coding else { return }
+        let proposal = DesktopKnowledgeNoteProposal(
+            id: "note-proposal-\(Self.stableLocalDigest(path + "\u{0}" + content).prefix(16))",
+            path: path,
+            content: String(content.prefix(256 * 1_024)),
+            rationale: String(rationale.prefix(4_000)),
+            runID: runID,
+            createdAtUnixMillis: timestamp
+        )
+        mutate { snapshot in
+            guard let threadIndex = snapshot.threads.firstIndex(where: { $0.id == threadID }) else { return }
+            if let laneIndex = snapshot.operations.codingKnowledgeLanes.firstIndex(where: { $0.threadID == threadID }) {
+                var proposals = snapshot.operations.codingKnowledgeLanes[laneIndex].noteProposals ?? []
+                proposals.removeAll { $0.path == proposal.path }
+                proposals.append(proposal)
+                snapshot.operations.codingKnowledgeLanes[laneIndex].noteProposals = Array(proposals.suffix(20))
+                snapshot.operations.codingKnowledgeLanes[laneIndex].updatedAtUnixMillis = timestamp
+            } else {
+                var lane = DesktopCodingKnowledgeLane(
+                    projectID: snapshot.threads[threadIndex].projectID,
+                    threadID: threadID,
+                    createdAtUnixMillis: timestamp,
+                    updatedAtUnixMillis: timestamp
+                )
+                lane.noteProposals = [proposal]
+                snapshot.operations.codingKnowledgeLanes.append(lane)
+            }
+            snapshot.threads[threadIndex].updatedAtUnixMillis = timestamp
         }
     }
 

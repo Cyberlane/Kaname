@@ -3124,7 +3124,8 @@ private struct DesktopThreadConversation: View {
             case .knowledge:
                 DesktopCodingKnowledgeLaneView(
                     model: model,
-                    thread: thread
+                    thread: thread,
+                    draftKnowledge: { runtime.runKnowledgeTurn(threadID: thread.id) }
                 )
                 .id(thread.id)
             }
@@ -7539,6 +7540,7 @@ final class DesktopPersonalIntegrationViewModel: ObservableObject {
 private struct DesktopCodingKnowledgeLaneView: View {
     @ObservedObject var model: DesktopAppModel
     let thread: DesktopThread
+    var draftKnowledge: (() -> Void)? = nil
     @StateObject private var knowledge = DesktopKnowledgeViewModel()
     @State private var targetScopeID: String?
     @State private var targetPath = ""
@@ -7635,6 +7637,7 @@ private struct DesktopCodingKnowledgeLaneView: View {
                             }
                         }
                     }
+                    proposedNotesSection(lane)
                     proposalSection(lane)
                     statusSection(lane)
                 } else {
@@ -7685,6 +7688,54 @@ private struct DesktopCodingKnowledgeLaneView: View {
         .panelStyle()
         .accessibilityElement(children: .contain)
         .accessibilityLabel(accessibilityLabel)
+    }
+
+    /// Notes the provider proposed through the Bridge after acceptance.
+    private func proposedNotesSection(_ lane: DesktopCodingKnowledgeLane) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Proposed notes").font(.headline)
+                Spacer()
+                if knowledgeReadyForDisposition, let draftKnowledge {
+                    Button("Draft knowledge update", systemImage: "sparkles", action: draftKnowledge)
+                        .buttonStyle(.bordered)
+                        .help("Ask the provider to propose note updates from this accepted work")
+                }
+            }
+            let proposals = lane.noteProposals ?? []
+            if proposals.isEmpty {
+                Text(knowledgeReadyForDisposition
+                    ? "No note proposals yet. Kaname asks the provider for one after acceptance; use the button to ask again."
+                    : "Note proposals appear here after the implementation is accepted.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(proposals) { proposal in
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(proposal.path).font(.subheadline.weight(.semibold)).textSelection(.enabled)
+                            Spacer()
+                            Button("Open as draft", systemImage: "square.and.pencil") {
+                                knowledge.prepareProposedDraft(model: model, threadID: thread.id, proposal: proposal)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                        }
+                        if !proposal.rationale.isEmpty {
+                            Text(proposal.rationale).font(.caption).foregroundStyle(.secondary)
+                        }
+                        Text(proposal.content)
+                            .font(.system(.caption, design: .monospaced))
+                            .lineLimit(8)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10)
+                    .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 10))
+                }
+            }
+        }
+        .panelStyle()
     }
 
     private func proposalSection(_ lane: DesktopCodingKnowledgeLane) -> some View {

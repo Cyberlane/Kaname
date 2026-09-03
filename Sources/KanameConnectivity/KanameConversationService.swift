@@ -26,6 +26,7 @@ public struct KanameConversationServiceRequest: Codable, Equatable, Sendable {
     public let createdAtUnixMillis: Int64
     /// Vault-relative Obsidian scopes the Kaname Bridge may read for this run.
     public let bridgeKnowledgeReadScopes: [String]?
+    public let bridgeKnowledgeWriteScopes: [String]?
 
     public init(
         runID: String,
@@ -47,9 +48,11 @@ public struct KanameConversationServiceRequest: Codable, Equatable, Sendable {
         isCodingPlan: Bool = false,
         curatedPreviewMCPGranted: Bool = false,
         createdAtUnixMillis: Int64,
-        bridgeKnowledgeReadScopes: [String]? = nil
+        bridgeKnowledgeReadScopes: [String]? = nil,
+        bridgeKnowledgeWriteScopes: [String]? = nil
     ) {
         self.bridgeKnowledgeReadScopes = bridgeKnowledgeReadScopes
+        self.bridgeKnowledgeWriteScopes = bridgeKnowledgeWriteScopes
         (self.runID, self.threadID, self.projectID) = (runID, threadID, projectID)
         (self.provider, self.model, self.reasoningEffort) = (provider, model, reasoningEffort)
         (self.runtimeMode, self.networkAccess) = (runtimeMode, runtimeMode == .fullAccess ? true : networkAccess)
