@@ -4541,12 +4541,21 @@ private struct DesktopThreadChangesView: View {
                             Button {
                                 changes.select(path: path, worktree: worktree)
                             } label: {
-                                Label(path, systemImage: "doc.text")
-                                    .font(.system(.caption, design: .monospaced))
-                                    .foregroundStyle(Nord.frost1)
-                                    .lineLimit(2)
-                                    .multilineTextAlignment(.leading)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                    Label(path, systemImage: "doc.text")
+                                        .font(.system(.caption, design: .monospaced))
+                                        .foregroundStyle(Nord.frost1)
+                                        .lineLimit(2)
+                                        .multilineTextAlignment(.leading)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                    if let stat = fileStat(path) {
+                                        Text(stat.added > 0 ? "+\(stat.added)" : "")
+                                            .foregroundStyle(Nord.auroraGreen)
+                                        Text(stat.removed > 0 ? "-\(stat.removed)" : "")
+                                            .foregroundStyle(Nord.auroraRed)
+                                    }
+                                }
+                                .font(.system(.caption2, design: .monospaced))
                             }
                             .buttonStyle(.plain)
                             .listRowBackground(
@@ -4563,6 +4572,26 @@ private struct DesktopThreadChangesView: View {
                 diffPane
             }
         }
+    }
+
+    /// Added and removed line counts for one path, parsed from `git diff --numstat`-style
+    /// or `--stat`-style summary lines when the worktree snapshot carries them.
+    private func fileStat(_ path: String) -> (added: Int, removed: Int)? {
+        guard let summary = changes.snapshot?.diffSummary, !summary.isEmpty else { return nil }
+        for line in summary.split(separator: "\n") {
+            let parts = line.split(separator: "\t")
+            if parts.count >= 3, parts[2].trimmingCharacters(in: .whitespaces) == path,
+               let added = Int(parts[0]), let removed = Int(parts[1]) {
+                return (added, removed)
+            }
+            if line.contains(path), let bar = line.firstIndex(of: "|") {
+                let tail = line[line.index(after: bar)...]
+                let added = tail.filter { $0 == "+" }.count
+                let removed = tail.filter { $0 == "-" }.count
+                if added + removed > 0 { return (added, removed) }
+            }
+        }
+        return nil
     }
 
     private func turnCheckpoints(_ worktree: DesktopWorktreeRecord) -> [DesktopCodingCheckpointRecord] {
@@ -4598,6 +4627,13 @@ private struct DesktopThreadChangesView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer()
+                if let selected = changes.selectedPath, let worktree {
+                    Button("Open file", systemImage: "arrow.up.forward.app") {
+                        NSWorkspace.shared.open(URL(fileURLWithPath: worktree.worktreePath).appendingPathComponent(selected))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
                 if changes.isLoading { ProgressView().controlSize(.small) }
             }
             .padding(.horizontal, 14)
