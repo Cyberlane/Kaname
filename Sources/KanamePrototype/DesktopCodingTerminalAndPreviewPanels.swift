@@ -6,7 +6,191 @@ import SwiftUI
 @preconcurrency import WebKit
 #endif
 
+/// Processes tab: what the provider ran (default) plus the human shell.
 struct DesktopCodingTerminalPanel: View {
+    @ObservedObject var model: DesktopAppModel
+    let thread: DesktopThread
+    @State private var mode: Mode = .processes
+
+    private enum Mode: String, CaseIterable, Identifiable {
+        case processes, shell
+        var id: String { rawValue }
+        var label: String { self == .processes ? "Processes" : "Shell" }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Picker("Mode", selection: $mode) {
+                    ForEach(Mode.allCases) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(maxWidth: 220)
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(Nord.polarNight1)
+            Divider()
+            switch mode {
+            case .processes: DesktopCodingProcessesPanel(model: model, thread: thread)
+            case .shell: DesktopCodingShellPanel(model: model, thread: thread)
+            }
+        }
+    }
+}
+
+/// Every command the provider executed in this thread, newest last, with its
+/// output. Derived from the durable provider event records, so it survives
+/// restarts and needs no PTY.
+struct DesktopCodingProcessesPanel: View {
+    @ObservedObject var model: DesktopAppModel
+    let thread: DesktopThread
+    @State private var expanded: Set<String> = []
+
+    private var processes: [DesktopCodingProcessRecord] {
+        DesktopCodingProcessProjection.processes(from: model.providerEvents(threadID: thread.id))
+    }
+
+    var body: some View {
+        let processes = processes
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 10) {
+                    if processes.isEmpty {
+                        EmptyPanel(
+                            symbol: "terminal",
+                            title: "No processes yet",
+                            detail: "Commands the provider runs appear here with their output."
+                        )
+                    }
+                    ForEach(processes) { process in
+                        DesktopCodingProcessCard(
+                            process: process,
+                            isExpanded: expanded.contains(process.id) || process.isRunning,
+                            toggle: {
+                                if expanded.contains(process.id) { expanded.remove(process.id) } else { expanded.insert(process.id) }
+                            }
+                        )
+                        .id(process.id)
+                    }
+                    Color.clear.frame(height: 1).id("processes-bottom")
+                }
+                .padding(16)
+            }
+            .onChange(of: processes.count) { _ in
+                proxy.scrollTo("processes-bottom", anchor: .bottom)
+            }
+        }
+        .background(Nord.polarNight0)
+    }
+}
+
+private struct DesktopCodingProcessCard: View {
+    let process: DesktopCodingProcessRecord
+    let isExpanded: Bool
+    let toggle: () -> Void
+
+    private var tint: Color {
+        switch process.state {
+        case .running: Nord.frost1
+        case .completed: (process.exitCode ?? 0) == 0 ? Nord.auroraGreen : Nord.auroraRed
+        case .failed: Nord.auroraRed
+        case .declined, .interrupted: Nord.auroraYellow
+        case .observed: Color.secondary
+        }
+    }
+
+    private var symbol: String {
+        switch process.state {
+        case .running: "circle.dotted"
+        case .completed: (process.exitCode ?? 0) == 0 ? "checkmark.circle.fill" : "xmark.circle.fill"
+        case .failed: "xmark.circle.fill"
+        case .declined, .interrupted: "minus.circle.fill"
+        case .observed: "circle"
+        }
+    }
+
+    private var statusLine: String {
+        var parts: [String] = []
+        if process.isRunning { parts.append("running") }
+        if let exitCode = process.exitCode { parts.append("exit \(exitCode)") }
+        if let duration = process.durationLabel { parts.append(duration) }
+        if process.outputWasTruncated { parts.append("output truncated") }
+        return parts.joined(separator: " · ")
+    }
+
+    private var commandText: some View {
+        Text(process.command)
+            .font(.system(.callout, design: .monospaced))
+            .lineLimit(isExpanded ? nil : 2)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var startedAt: Date {
+        Date(timeIntervalSince1970: Double(process.startedAtUnixMillis) / 1_000)
+    }
+
+    private var metaRow: some View {
+        HStack(spacing: 8) {
+            if let summary = process.summary {
+                Text(summary).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+            if !statusLine.isEmpty {
+                Text(statusLine).font(.caption2.monospaced()).foregroundStyle(tint)
+            }
+            Spacer(minLength: 0)
+            Text(startedAt, style: .time)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button(action: toggle) {
+                HStack(alignment: .top, spacing: 10) {
+                    if process.isRunning {
+                        ProgressView().controlSize(.small).frame(width: 18)
+                    } else {
+                        Image(systemName: symbol).foregroundStyle(tint).frame(width: 18)
+                    }
+                    VStack(alignment: .leading, spacing: 3) {
+                        commandText
+                        metaRow
+                    }
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(process.command). \(statusLine)")
+            .accessibilityHint(isExpanded ? "Collapse output" : "Expand output")
+
+            if isExpanded {
+                let output = process.output.strippingANSIEscapes
+                Text(output.isEmpty ? (process.isRunning ? "Waiting for output…" : "No output.") : output)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(output.isEmpty ? .secondary : .primary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10)
+                    .background(Nord.polarNight0, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+        }
+        .padding(12)
+        .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(tint.opacity(0.25), lineWidth: 1)
+        }
+    }
+}
+
+struct DesktopCodingShellPanel: View {
     @ObservedObject var model: DesktopAppModel
     let thread: DesktopThread
     @State private var commandDraft = ""

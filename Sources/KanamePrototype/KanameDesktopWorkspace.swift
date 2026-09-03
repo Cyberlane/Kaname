@@ -3487,6 +3487,16 @@ private struct DesktopThreadConversation: View {
                 .padding(.top, 10)
                 .frame(maxWidth: DesktopComposerPresentation.maximumWidth)
             }
+            if let run = model.providerRuns(threadID: thread.id).last(where: { $0.state == .running }) {
+                DesktopConversationActivityStrip(
+                    run: run,
+                    events: model.providerEvents(threadID: thread.id).filter { $0.runID == run.id },
+                    stop: { runtime.interrupt(threadID: thread.id) }
+                )
+                .padding(.horizontal, 14)
+                .padding(.top, 10)
+                .frame(maxWidth: DesktopComposerPresentation.maximumWidth)
+            }
             composerDock
         }
     }
@@ -4792,6 +4802,65 @@ private struct DesktopCodingWorkflowStatusControl: View {
             }
             .buttonStyle(.bordered)
             .accessibilityHint("Stops the active provider turn")
+        }
+    }
+}
+
+/// Live "it is doing something" row above the composer while a run is active.
+/// Shows the current tool or command and a tool count; details stay in the
+/// timeline and the Processes tab.
+private struct DesktopConversationActivityStrip: View {
+    let run: DesktopProviderRunRecord
+    let events: [DesktopProviderEventRecord]
+    let stop: () -> Void
+
+    private var latestActivity: String {
+        guard let event = events.last(where: { $0.kind == .tool || $0.kind == .reasoning || $0.kind == .status }) else {
+            return "Thinking…"
+        }
+        if event.kind == .tool, let observation = event.toolObservation {
+            if let process = DesktopCodingProcessProjection.processes(from: [event]).first, !process.command.isEmpty,
+               process.command != observation.name {
+                return "$ \(process.command)"
+            }
+            return observation.name ?? event.title
+        }
+        return event.title
+    }
+
+    private var toolCount: Int {
+        Set(events.filter { $0.kind == .tool }.compactMap { $0.toolObservation?.callID }).count
+    }
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            let elapsed = max(0, Int64(context.date.timeIntervalSince1970 * 1_000) - run.startedAtUnixMillis) / 1_000
+            HStack(spacing: 10) {
+                ProgressView().controlSize(.small)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Working · \(run.provider) · \(elapsed / 60 > 0 ? "\(elapsed / 60)m \(elapsed % 60)s" : "\(elapsed)s")")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Text(latestActivity)
+                        .font(.system(.caption, design: .monospaced))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 8)
+                if toolCount > 0 {
+                    Text("\(toolCount) tool\(toolCount == 1 ? "" : "s")")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+                Button("Stop", systemImage: "stop.fill", action: stop)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(Nord.frost1.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("\(run.provider) is working. \(latestActivity)")
         }
     }
 }

@@ -46,7 +46,7 @@ public enum DesktopThreadPanel: String, CaseIterable, Identifiable, Sendable {
         case .conversation: "Chat"
         case .plan: "Plan"
         case .changes: "Changes"
-        case .terminal: "Terminal"
+        case .terminal: "Processes"
         case .preview: "Preview"
         case .evidence: "Evidence"
         case .knowledge: "Knowledge"
