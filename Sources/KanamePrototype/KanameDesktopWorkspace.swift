@@ -8302,11 +8302,95 @@ private struct NativeObsidianMarkdown: View {
         return Array(lines.suffix(from: lines.index(after: closing)))
     }
 
+    private enum Block {
+        case line(String)
+        case code(String)
+        case table(header: [String], rows: [[String]])
+    }
+
+    /// Groups fenced code and pipe tables into blocks; every other line renders on its own.
+    private var blocks: [Block] {
+        var blocks: [Block] = []
+        var code: [String]?
+        var table: [[String]] = []
+        func flushTable() {
+            guard !table.isEmpty else { return }
+            let header = table[0]
+            let rows = table.dropFirst().filter { row in
+                !row.allSatisfy { cell in cell.trimmingCharacters(in: .whitespaces).allSatisfy { ":-".contains($0) } }
+            }
+            blocks.append(.table(header: header, rows: Array(rows)))
+            table = []
+        }
+        for line in bodyLines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") {
+                flushTable()
+                if let open = code {
+                    blocks.append(.code(open.joined(separator: "\n")))
+                    code = nil
+                } else {
+                    code = []
+                }
+                continue
+            }
+            if code != nil {
+                code?.append(line)
+                continue
+            }
+            if trimmed.hasPrefix("|"), trimmed.hasSuffix("|") {
+                table.append(
+                    trimmed.dropFirst().dropLast().components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespaces) }
+                )
+                continue
+            }
+            flushTable()
+            blocks.append(.line(line))
+        }
+        flushTable()
+        if let code { blocks.append(.code(code.joined(separator: "\n"))) }
+        return blocks
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            ForEach(Array(bodyLines.enumerated()), id: \.offset) { _, line in
-                rendered(line)
+            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                switch block {
+                case let .line(line):
+                    rendered(line)
+                case let .code(text):
+                    Text(text)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                        .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Nord.polarNight2, in: RoundedRectangle(cornerRadius: 8))
+                case let .table(header, rows):
+                    tableView(header: header, rows: rows)
+                }
             }
+        }
+    }
+
+    private func tableView(header: [String], rows: [[String]]) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 6) {
+                GridRow {
+                    ForEach(Array(header.enumerated()), id: \.offset) { _, cell in
+                        Text(inline(cell)).font(.caption.weight(.semibold))
+                    }
+                }
+                Divider().gridCellUnsizedAxes(.horizontal)
+                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                    GridRow {
+                        ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
+                            Text(inline(cell)).font(.caption)
+                        }
+                    }
+                }
+            }
+            .padding(10)
+            .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 8))
         }
     }
 
@@ -8315,6 +8399,21 @@ private struct NativeObsidianMarkdown: View {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         if trimmed.isEmpty {
             Spacer().frame(height: 5)
+        } else if let range = trimmed.range(of: #"^(\d+[.)]|[-*+])\s+\[([ xX])\]\s+"#, options: .regularExpression) {
+            let checked = trimmed[range].contains("x") || trimmed[range].contains("X")
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: checked ? "checkmark.square.fill" : "square")
+                    .foregroundStyle(checked ? Nord.auroraGreen : .secondary)
+                Text(inline(String(trimmed[range.upperBound...])))
+                    .strikethrough(checked, color: .secondary)
+            }
+        } else if let range = trimmed.range(of: #"^\d+[.)]\s+"#, options: .regularExpression) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(String(trimmed[range]).trimmingCharacters(in: .whitespaces))
+                    .font(.callout.monospacedDigit())
+                    .foregroundStyle(Nord.frost1)
+                Text(inline(String(trimmed[range.upperBound...])))
+            }
         } else if trimmed.hasPrefix("#") {
             let level = min(trimmed.prefix(while: { $0 == "#" }).count, 6)
             Text(inline(String(trimmed.dropFirst(level)).trimmingCharacters(in: .whitespaces)))
