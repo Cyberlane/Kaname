@@ -548,6 +548,28 @@ private enum KanameConversationWorker {
             return false
         }
         let session = NativeProviderConversationSession()
+        // Kaname Bridge: the agent's direct channel back into Kaname. Tool calls
+        // become run events on the same durable stream as provider output.
+        var bridge: KanameBridgeMCPServer?
+        var bridgeBinding: KanameBridgeMCPServer.Binding?
+        if driver == .claude {
+            let scopes = request.bridgeKnowledgeReadScopes ?? []
+            let knowledge = scopes.isEmpty ? nil : try? ObsidianVaultService(readableScopes: scopes, writableScopes: [])
+            let server = KanameBridgeMCPServer(knowledge: knowledge, readableScopes: scopes) { event in
+                _ = try? await recorder.record(event)
+                try? await writer.append(kind: .provider, providerEvent: event)
+            }
+            if let binding = try? await server.start() {
+                bridge = server
+                bridgeBinding = binding
+            } else {
+                try? await writer.append(
+                    kind: .provider,
+                    providerEvent: CodexRunEvent(kind: .nativeProviderEvent, nativeType: "kaname/bridge-unavailable", text: "Kaname Bridge could not start; continuing without Kaname tools.")
+                )
+            }
+        }
+        defer { if let bridge { _Concurrency.Task { await bridge.stop() } } }
         let stream = await session.events(for: NativeConversationRequest(
             driver: driver,
             prompt: request.prompt,
@@ -557,7 +579,8 @@ private enum KanameConversationWorker {
             reasoningEffort: request.reasoningEffort,
             runtimeMode: request.runtimeMode,
             networkAccess: request.networkAccess,
-            resumableSessionID: request.resumableNativeThreadID
+            resumableSessionID: request.resumableNativeThreadID,
+            bridge: bridgeBinding
         ))
         try? await writer.append(
             kind: .serviceStarted,

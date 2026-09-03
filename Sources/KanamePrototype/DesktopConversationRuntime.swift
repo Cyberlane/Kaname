@@ -715,7 +715,8 @@ final class DesktopConversationRuntime: ObservableObject {
             workspaceAuthorization: authorization,
             isCodingPlan: run.purpose == .codingPlan,
             curatedPreviewMCPGranted: previewGrant && run.purpose == .codingImplementation,
-            createdAtUnixMillis: run.startedAtUnixMillis
+            createdAtUnixMillis: run.startedAtUnixMillis,
+            bridgeKnowledgeReadScopes: model.snapshot.operations.vaultScopes.filter(\.canRead).map(\.path)
         )
         var queuedRequestURL: URL?
         do {
@@ -973,6 +974,27 @@ final class DesktopConversationRuntime: ObservableObject {
         guard let event = prepared.providerEvent else { return true }
         if event.kind == .planUpdated, let planText = event.planText {
             model.setProviderPlanBody(threadID: serviceEvent.threadID, text: planText)
+            guard model.persistenceError == nil else { return false }
+        }
+        if event.nativeType == "kaname/finding", let text = event.text {
+            model.appendFindings(threadID: serviceEvent.threadID, runID: serviceEvent.runID, texts: [text])
+            guard model.persistenceError == nil else { return false }
+        }
+        if event.nativeType == "kaname/knowledge_proposal",
+           let payload = event.payload,
+           let object = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
+           let path = object["path"] as? String,
+           let content = object["content"] as? String {
+            let rationale = (object["rationale"] as? String) ?? ""
+            _ = model.addCodingKnowledgeCandidate(
+                threadID: serviceEvent.threadID,
+                category: .decision,
+                title: "Proposed note: \(path)",
+                detail: KanameTextBounds.utf8Prefix(
+                    (rationale.isEmpty ? "" : rationale + "\n\n") + content,
+                    maximumBytes: 8 * 1_024
+                )
+            )
             guard model.persistenceError == nil else { return false }
         }
         if event.kind == .planUpdated, let update = event.planUpdate {
@@ -1493,7 +1515,7 @@ final class DesktopConversationRuntime: ObservableObject {
         case "codex":
             "Use the structured plan-update mechanism so every step appears in Kaname's Plan tab."
         case "claude":
-            "Finish your reply with the complete plan as Markdown under a '## Plan' heading using a numbered list of steps. If plan mode offers a plan file, write the same plan there. Do not search for TodoWrite or ExitPlanMode."
+            "Call the kaname plan_update tool with the full step list whenever the plan changes, and also finish your reply with the complete plan as Markdown under a '## Plan' heading. If plan mode offers a plan file, write the same plan there. Do not search for TodoWrite or ExitPlanMode."
         default:
             "Finish your reply with the complete plan as Markdown under a '## Plan' heading using a numbered list of steps."
         }
@@ -1504,7 +1526,7 @@ final class DesktopConversationRuntime: ObservableObject {
         return """
         Kaname Coding stage: DISCUSS AND PLAN ONLY.
 
-        You are in an ongoing planning conversation. Inspect the selected repository read-only as needed, answer the user, and keep one concrete implementation plan up to date. \(planMechanism) The plan steps must describe future implementation work, not the planning work you are doing, and stay pending. Do not edit files, create commits, run destructive commands, access the network, or begin implementation. Nothing is implemented until the user explicitly approves the plan in Kaname. If you investigated or debugged anything, end your reply with a '## Findings' section: one bullet per finding stating what you checked, what you observed, and what you concluded.
+        You are in an ongoing planning conversation. Inspect the selected repository read-only as needed, answer the user, and keep one concrete implementation plan up to date. \(planMechanism) The plan steps must describe future implementation work, not the planning work you are doing, and stay pending. Do not edit files, create commits, run destructive commands, access the network, or begin implementation. Nothing is implemented until the user explicitly approves the plan in Kaname. If you investigated or debugged anything, end your reply with a '## Findings' section: one bullet per finding stating what you checked, what you observed, and what you concluded. When Kaname tools are available (MCP server `kaname`), use them: plan_update to keep the plan current (send the whole plan), finding_record for each finding, knowledge_search and knowledge_read for the user's notes, knowledge_propose to suggest a note update. Fall back to the Markdown sections only if the tools are absent.
 
         \(currentPlan)
 
@@ -1527,7 +1549,7 @@ final class DesktopConversationRuntime: ObservableObject {
         return """
         Kaname Coding stage: APPROVED ISOLATED IMPLEMENTATION.
 
-        Implement the approved plan below inside the selected linked Git worktree, following the user's latest message. This is an ongoing conversation: the user may send follow-up instructions and you continue in the same worktree. Do not write outside the worktree. Run the relevant local verification, report changed files and anything not run, and do not commit, push, publish, or merge. Provider completion is never acceptance; the user reviews Changes and Evidence in Kaname. If you investigated or debugged anything, end your reply with a '## Findings' section: one bullet per finding stating what you checked, what you observed, and what you concluded.
+        Implement the approved plan below inside the selected linked Git worktree, following the user's latest message. This is an ongoing conversation: the user may send follow-up instructions and you continue in the same worktree. Do not write outside the worktree. Run the relevant local verification, report changed files and anything not run, and do not commit, push, publish, or merge. Provider completion is never acceptance; the user reviews Changes and Evidence in Kaname. If you investigated or debugged anything, end your reply with a '## Findings' section: one bullet per finding stating what you checked, what you observed, and what you concluded. When Kaname tools are available (MCP server `kaname`), use them: plan_update to keep the plan current (send the whole plan), finding_record for each finding, knowledge_search and knowledge_read for the user's notes, knowledge_propose to suggest a note update. Fall back to the Markdown sections only if the tools are absent.
 
         Project: \(project?.name ?? "Standalone")
         User message:
@@ -1971,6 +1993,14 @@ final class DesktopConversationRuntime: ObservableObject {
                 return (.status, "Rate limit", boundedText(payload?["rate_limit_info"].flatMap { try? JSONSerialization.data(withJSONObject: $0) }.map { String(decoding: $0, as: UTF8.self) }, limit: 300) ?? fallback.detail)
             case "user":
                 return (.native, "Tool results delivered", "Provider received tool output.")
+            case "kaname/finding":
+                return (.reasoning, "Finding recorded", firstLine(event.text ?? "", limit: 200))
+            case "kaname/knowledge_proposal":
+                return (.status, "Note update proposed", event.text ?? "")
+            case "kaname/knowledge_read":
+                return (.status, "Read note", event.text ?? "")
+            case "kaname/bridge-unavailable":
+                return (.error, "Kaname Bridge unavailable", event.text ?? "")
             default:
                 return fallback
             }

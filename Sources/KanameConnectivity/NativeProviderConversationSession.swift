@@ -43,6 +43,8 @@ public struct NativeConversationRequest: Sendable {
     public let runtimeMode: ConversationRuntimeMode
     public let networkAccess: Bool
     public let resumableSessionID: String?
+    /// Kaname Bridge MCP endpoint to inject, when the driver supports MCP flags.
+    public let bridge: KanameBridgeMCPServer.Binding?
 
     public init(
         driver: NativeConversationDriver,
@@ -53,8 +55,10 @@ public struct NativeConversationRequest: Sendable {
         reasoningEffort: String,
         runtimeMode: ConversationRuntimeMode = .approvalRequired,
         networkAccess: Bool = false,
-        resumableSessionID: String?
+        resumableSessionID: String?,
+        bridge: KanameBridgeMCPServer.Binding? = nil
     ) {
+        self.bridge = bridge
         self.driver = driver
         self.prompt = String(prompt.prefix(262_144))
         self.attachmentPaths = Array(attachmentPaths.prefix(ConversationImageAttachment.maximumCountPerMessage))
@@ -178,6 +182,12 @@ public actor NativeProviderConversationSession {
                 arguments += ["--resume", sessionID]
             } else {
                 arguments += ["--session-id", UUID().uuidString.lowercased()]
+            }
+            if let bridge = request.bridge {
+                arguments += [
+                    "--mcp-config", bridge.claudeMCPConfigJSON,
+                    "--allowedTools", "mcp__\(KanameBridgeMCPServer.serverName)",
+                ]
             }
             let attachmentContext = request.attachmentPaths.enumerated().map { index, path in
                 "Image \(index + 1) (inspect with the Read tool): `\(path)`"
