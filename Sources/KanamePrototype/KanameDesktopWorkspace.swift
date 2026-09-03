@@ -12147,6 +12147,22 @@ private struct DesktopGitHubView: View {
 private struct DesktopSkillsView: View {
     @ObservedObject var model: DesktopAppModel
     @State private var query = ""
+    @State private var discovered: [SkillRegistryEntry] = []
+    @State private var registerMessage: String?
+
+    /// SKILL.md files on disk (home skill roots plus every project workspace)
+    /// that the catalog does not know yet.
+    private func refreshDiscovered() {
+        let roots = model.snapshot.projects.compactMap { $0.path.map { URL(fileURLWithPath: $0, isDirectory: true) } }
+        var seen = Set<String>()
+        var entries: [SkillRegistryEntry] = []
+        for entry in SkillRegistryLoader.loadRegistry(workspaceRoot: nil) + roots.flatMap({ SkillRegistryLoader.loadRegistry(workspaceRoot: $0) }) {
+            guard seen.insert(entry.path).inserted else { continue }
+            entries.append(entry)
+        }
+        let registered = Set(model.snapshot.domains.skills.compactMap(\.registryName))
+        discovered = entries.filter { !registered.contains($0.name) }.sorted { $0.name < $1.name }
+    }
 
     private var filteredSkills: [DesktopSkillRecord] {
         let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -12209,6 +12225,41 @@ private struct DesktopSkillsView: View {
                             }
                         }
                     }
+                    if !discovered.isEmpty {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Discovered on disk, not in the catalog")
+                                .font(.headline)
+                            Text("These SKILL.md files are already usable from the composer with $name. Register them so they also appear here and in search.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            ForEach(discovered) { entry in
+                                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(entry.name).font(.subheadline.weight(.semibold))
+                                        Text(entry.description).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                                        Text(entry.path).font(.system(.caption2, design: .monospaced)).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
+                                    }
+                                    Spacer()
+                                    Button("Register") {
+                                        if model.registerDiscoveredSkill(registryName: entry.name, path: entry.path, description: entry.description) != nil {
+                                            registerMessage = "Registered \(entry.name)."
+                                        } else {
+                                            registerMessage = "Could not register \(entry.name)."
+                                        }
+                                        refreshDiscovered()
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                }
+                                .padding(10)
+                                .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 10))
+                            }
+                            if let registerMessage {
+                                Text(registerMessage).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        .panelStyle()
+                    }
                     BoundaryCallout(
                         title: "Updates are reviewable",
                         detail: "Behavioral instructions and executables are pinned with source, revision, licence, requested capabilities, and a diff before installation or activation."
@@ -12230,6 +12281,8 @@ private struct DesktopSkillsView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Nord.polarNight0)
+        .onAppear(perform: refreshDiscovered)
+        .onChange(of: model.snapshot.domains.skills.count) { _ in refreshDiscovered() }
     }
 }
 

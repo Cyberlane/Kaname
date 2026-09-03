@@ -3921,6 +3921,31 @@ public final class DesktopAppModel: ObservableObject {
         return true
     }
 
+    /// Adds a SKILL.md discovered on disk to the catalog so the Skills screen,
+    /// composer picker, and search all see the same entry. `registryName` binds
+    /// the catalog record to the on-disk skill used at run time.
+    @discardableResult
+    public func registerDiscoveredSkill(registryName: String, path: String, description: String) -> String? {
+        let cleanName = Self.normalized(registryName)
+        guard !cleanName.isEmpty else { return nil }
+        if let existing = snapshot.domains.skills.first(where: { $0.registryName == cleanName }) { return existing.id }
+        let record = DesktopSkillRecord(
+            id: "skill-\(Self.stableLocalDigest(cleanName + "\u{0}" + path).prefix(16))",
+            name: cleanName,
+            registryName: cleanName,
+            kind: .skill,
+            scope: path.hasPrefix(FileManager.default.homeDirectoryForCurrentUser.path + "/.") ? "user" : "workspace",
+            source: path,
+            revision: Self.stableLocalDigest(description).prefix(12).description,
+            status: .ready,
+            enabled: true
+        )
+        let persisted = mutate { snapshot in
+            snapshot.domains.skills.append(record)
+        }
+        return persisted ? record.id : nil
+    }
+
     public func setSkillEnabled(id: String, enabled: Bool) {
         mutateRecord(at: \.domains.skills, id: id) { skill in
             skill.enabled = enabled
