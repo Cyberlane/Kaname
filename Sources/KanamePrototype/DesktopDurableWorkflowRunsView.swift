@@ -204,6 +204,9 @@ final class DesktopDurableWorkflowRunsViewModel: ObservableObject {
         }
         do {
             let result = try await runner.startWorkflowRun(workflowID: item.workflowID, revisionID: revisionID, inputs: inputs)
+            if result.outcome == "waiting" {
+                DesktopCodingNotifier.notify(kind: .effectProposed, threadTitle: item.name, hideDetails: false)
+            }
             startMessage = "\(item.name): run \(result.runID.suffix(8)) \(result.outcome) after \(result.eventCount) events."
         } catch {
             startMessage = "\(item.name) did not start: \(error.localizedDescription)"

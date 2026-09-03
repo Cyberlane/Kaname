@@ -2272,12 +2272,42 @@ private struct DesktopGlobalSearchPalette: View {
             guard !_Concurrency.Task<Never, Never>.isCancelled else { return nil }
             let indexPath = KanameDesktopEnvironment.current.desktopDirectory
                 .appendingPathComponent("search-index.sqlite").path
-            let search = DesktopGlobalSearch.searchOutput(
+            var search = DesktopGlobalSearch.searchOutput(
                 query: request.query,
                 in: corpus,
                 ftsRows: ftsRows,
                 persistentDatabasePath: indexPath
             )
+            guard !_Concurrency.Task<Never, Never>.isCancelled else { return nil }
+            // Live Obsidian hits across the readable vault scopes join the
+            // Knowledge section, so Cmd-K reaches the notes too.
+            let readableScopes = request.snapshot.operations.vaultScopes.filter(\.canRead).map(\.path)
+            let rawQuery = request.query.rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !readableScopes.isEmpty, rawQuery.count >= 3,
+               let service = try? ObsidianVaultService(readableScopes: readableScopes, writableScopes: []) {
+                var hits: [DesktopGlobalSearchResult] = []
+                let capturedAt = Int64(Date().timeIntervalSince1970 * 1_000)
+                for scope in readableScopes where hits.count < 8 {
+                    guard !_Concurrency.Task<Never, Never>.isCancelled else { return nil }
+                    guard let results = try? await service.search(query: rawQuery, scope: scope, limit: 4) else { continue }
+                    for result in results where hits.count < 8 && !hits.contains(where: { $0.document.id == "vault-note:\(result.path)" }) {
+                        hits.append(DesktopGlobalSearchResult(
+                            document: DesktopGlobalSearchLocalIndex.vaultNoteDocument(path: result.path, context: result.context, capturedAtUnixMillis: capturedAt),
+                            score: 50,
+                            matchedFields: [.summary]
+                        ))
+                    }
+                }
+                if !hits.isEmpty {
+                    var sections = search.sections
+                    if let index = sections.firstIndex(where: { $0.domain == .knowledge }) {
+                        sections[index] = DesktopGlobalSearchSection(domain: .knowledge, results: sections[index].results + hits)
+                    } else {
+                        sections.append(DesktopGlobalSearchSection(domain: .knowledge, results: hits))
+                    }
+                    search = DesktopGlobalSearchOutput(sections: sections, fullTextResult: search.fullTextResult)
+                }
+            }
             guard !_Concurrency.Task<Never, Never>.isCancelled else { return nil }
             return DesktopGlobalSearchScheduledOutput(corpus: corpus, search: search)
         }

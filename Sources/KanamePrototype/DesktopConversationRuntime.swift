@@ -977,6 +977,9 @@ final class DesktopConversationRuntime: ObservableObject {
     private func applyEffects(for prepared: PreparedServiceEvent) -> Bool {
         let serviceEvent = prepared.serviceEvent
         if serviceEvent.kind == .serviceFailed {
+            if let title = model.thread(id: serviceEvent.threadID)?.title {
+                DesktopCodingNotifier.notify(kind: .runFailed, threadTitle: title, hideDetails: model.snapshot.preferences.previewPrivacy == .hidden)
+            }
             if model.providerRun(id: serviceEvent.runID)?.state != .failed {
                 model.stopProviderRun(
                     id: serviceEvent.runID,
@@ -1046,6 +1049,15 @@ final class DesktopConversationRuntime: ObservableObject {
         switch event.kind {
         case .providerCompleted:
             let completedRun = model.providerRun(id: serviceEvent.runID)
+            if let purpose = completedRun?.purpose, let title = model.thread(id: serviceEvent.threadID)?.title {
+                let hide = model.snapshot.preferences.previewPrivacy == .hidden
+                switch purpose {
+                case .codingPlan: DesktopCodingNotifier.notify(kind: .planReady, threadTitle: title, hideDetails: hide)
+                case .codingImplementation: DesktopCodingNotifier.notify(kind: .implementationFinished, threadTitle: title, hideDetails: hide)
+                case .codingKnowledge: DesktopCodingNotifier.notify(kind: .knowledgeDraftReady, threadTitle: title, hideDetails: hide)
+                case .conversation: break
+                }
+            }
             if completedRun?.purpose == .codingPlan || completedRun?.purpose == .codingImplementation,
                let reply = model.thread(id: serviceEvent.threadID)?.messages.last(where: { $0.role == .assistant })?.body {
                 let findings = ProviderFindingsMarkdown.findings(fromMarkdown: reply)

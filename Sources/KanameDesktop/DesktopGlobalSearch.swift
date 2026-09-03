@@ -312,6 +312,10 @@ public struct DesktopGlobalSearchResult: Equatable, Identifiable, Sendable {
     public let score: Int
     public let matchedFields: [DesktopGlobalSearchMatchedField]
 
+    public init(document: DesktopGlobalSearchDocument, score: Int, matchedFields: [DesktopGlobalSearchMatchedField]) {
+        (self.document, self.score, self.matchedFields) = (document, score, matchedFields)
+    }
+
     public var id: String { document.id }
     public var domain: DesktopGlobalSearchDomain { document.domain }
     public var provenance: DesktopGlobalSearchProvenance { document.provenance }
@@ -330,6 +334,10 @@ public struct DesktopGlobalSearchResult: Equatable, Identifiable, Sendable {
 public struct DesktopGlobalSearchSection: Equatable, Identifiable, Sendable {
     public let domain: DesktopGlobalSearchDomain
     public let results: [DesktopGlobalSearchResult]
+
+    public init(domain: DesktopGlobalSearchDomain, results: [DesktopGlobalSearchResult]) {
+        (self.domain, self.results) = (domain, results)
+    }
 
     public var id: DesktopGlobalSearchDomain { domain }
     public var title: String { domain.label }
@@ -619,6 +627,26 @@ public enum DesktopGlobalSearchLocalIndex {
         ))
 
         return DesktopGlobalSearchLocalCorpus(documents: documents, capturedAtUnixMillis: capturedAt)
+    }
+
+    /// A live Obsidian search hit, shown in the Knowledge section next to the
+    /// snapshot-backed documents. Navigates to the note by vault path.
+    public static func vaultNoteDocument(path: String, context: String, capturedAtUnixMillis: Int64) -> DesktopGlobalSearchDocument {
+        let title = path.split(separator: "/").last.map(String.init)?.replacingOccurrences(of: ".md", with: "") ?? path
+        return localDocument(
+            id: "vault-note:\(path)",
+            domain: .knowledge,
+            title: title,
+            summary: String(context.replacingOccurrences(of: "\n", with: " ").prefix(240)),
+            keywords: [path],
+            target: .init(kind: .knowledgeDocument, itemID: path),
+            source: .obsidianSnapshot,
+            sourceID: path,
+            sourceLabel: "Obsidian search",
+            scopeLabel: path,
+            updatedAtUnixMillis: capturedAtUnixMillis,
+            capturedAtUnixMillis: capturedAtUnixMillis
+        )
     }
 
     private static func localDocument(
