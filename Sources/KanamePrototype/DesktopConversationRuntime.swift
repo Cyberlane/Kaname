@@ -1678,6 +1678,8 @@ final class DesktopConversationRuntime: ObservableObject {
             "Use the structured plan-update mechanism so every step appears in Kaname's Plan tab."
         case "claude":
             "Call the kaname plan_update tool with the full step list whenever the plan changes, and also finish your reply with the complete plan as Markdown under a '## Plan' heading. If plan mode offers a plan file, write the same plan there. Do not search for TodoWrite or ExitPlanMode. Use history_search when the request may relate to earlier work in this project."
+        case "opencode":
+            "Call the kaname MCP tool plan_update with the full step list whenever the plan changes, and also finish your reply with the complete plan as Markdown under a '## Plan' heading. Use history_search when the request may relate to earlier work in this project."
         default:
             "Finish your reply with the complete plan as Markdown under a '## Plan' heading using a numbered list of steps."
         }

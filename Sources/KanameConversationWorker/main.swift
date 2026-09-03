@@ -583,7 +583,7 @@ private enum KanameConversationWorker {
         // become run events on the same durable stream as provider output.
         var bridge: KanameBridgeMCPServer?
         var bridgeBinding: KanameBridgeMCPServer.Binding?
-        if driver == .claude {
+        if driver == .claude || driver == .openCode {
             let scopes = request.bridgeKnowledgeReadScopes ?? []
             let writeScopes = request.bridgeKnowledgeWriteScopes ?? []
             let knowledge = scopes.isEmpty && writeScopes.isEmpty

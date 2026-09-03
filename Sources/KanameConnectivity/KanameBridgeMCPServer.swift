@@ -20,6 +20,23 @@ public actor KanameBridgeMCPServer {
         public let port: UInt16
 
         /// Inline `--mcp-config` JSON for Claude Code.
+        /// Inline OpenCode config (`OPENCODE_CONFIG_CONTENT`): merges over the
+        /// user's global and project config, so nothing is written into the repo.
+        public var openCodeMCPConfigJSON: String {
+            let object: [String: Any] = [
+                "mcp": [
+                    KanameBridgeMCPServer.serverName: [
+                        "type": "remote",
+                        "url": url.absoluteString,
+                        "enabled": true,
+                        "headers": ["Authorization": "Bearer \(bearerToken)"],
+                    ],
+                ],
+            ]
+            let data = (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])) ?? Data("{}".utf8)
+            return String(decoding: data, as: UTF8.self)
+        }
+
         public var claudeMCPConfigJSON: String {
             let object: [String: Any] = [
                 "mcpServers": [

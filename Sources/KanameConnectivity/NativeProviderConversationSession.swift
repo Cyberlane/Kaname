@@ -99,10 +99,15 @@ public actor NativeProviderConversationSession {
         let command = ProviderExecutableLocator.resolveNativeConversationExecutable(for: request.driver)
         do {
             let arguments = Self.arguments(for: request)
+            var environmentOverrides: [String: String] = [:]
+            if request.driver == .openCode, let bridge = request.bridge {
+                environmentOverrides["OPENCODE_CONFIG_CONTENT"] = bridge.openCodeMCPConfigJSON
+            }
             let child = try LocalProcess.start(
                 executable: command,
                 arguments: arguments,
                 workingDirectory: request.workspace,
+                environmentOverrides: environmentOverrides,
                 environmentRemovals: CodexMCPIsolation.inheritedEnvironmentRemovals()
             )
             running = child

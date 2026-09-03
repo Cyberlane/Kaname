@@ -16359,7 +16359,7 @@ private struct ThreadPlanView: View {
         .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+                .strokeBorder(KanameColor.separator, lineWidth: 1)
         }
     }
 
