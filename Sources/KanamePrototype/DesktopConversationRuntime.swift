@@ -725,7 +725,8 @@ final class DesktopConversationRuntime: ObservableObject {
             curatedPreviewMCPGranted: previewGrant && run.purpose == .codingImplementation,
             createdAtUnixMillis: run.startedAtUnixMillis,
             bridgeKnowledgeReadScopes: model.snapshot.operations.vaultScopes.filter(\.canRead).map(\.path),
-            bridgeKnowledgeWriteScopes: model.snapshot.operations.vaultScopes.filter(\.canWrite).map(\.path)
+            bridgeKnowledgeWriteScopes: model.snapshot.operations.vaultScopes.filter(\.canWrite).map(\.path),
+            bridgeMemoryPack: bridgeMemoryPack(for: thread)
         )
         var queuedRequestURL: URL?
         do {
@@ -1532,7 +1533,7 @@ final class DesktopConversationRuntime: ObservableObject {
         case "codex":
             "Use the structured plan-update mechanism so every step appears in Kaname's Plan tab."
         case "claude":
-            "Call the kaname plan_update tool with the full step list whenever the plan changes, and also finish your reply with the complete plan as Markdown under a '## Plan' heading. If plan mode offers a plan file, write the same plan there. Do not search for TodoWrite or ExitPlanMode."
+            "Call the kaname plan_update tool with the full step list whenever the plan changes, and also finish your reply with the complete plan as Markdown under a '## Plan' heading. If plan mode offers a plan file, write the same plan there. Do not search for TodoWrite or ExitPlanMode. Use history_search when the request may relate to earlier work in this project."
         default:
             "Finish your reply with the complete plan as Markdown under a '## Plan' heading using a numbered list of steps."
         }
@@ -1734,6 +1735,31 @@ final class DesktopConversationRuntime: ObservableObject {
         } catch {
             codingWorkflowErrors[threadID] = error.localizedDescription
         }
+    }
+
+    /// Compact history of this project's other coding threads for the Bridge
+    /// `history_search` and `history_read` tools. Bounded so it stays cheap to
+    /// ship with every run.
+    private func bridgeMemoryPack(for thread: DesktopThread) -> [KanameBridgeMemoryEntry] {
+        model.snapshot.threads
+            .filter { $0.projectID == thread.projectID && $0.id != thread.id && $0.kind == .coding }
+            .sorted { $0.updatedAtUnixMillis > $1.updatedAtUnixMillis }
+            .prefix(40)
+            .map { prior in
+                KanameBridgeMemoryEntry(
+                    threadID: prior.id,
+                    title: String(prior.title.prefix(200)),
+                    summary: String(prior.summary.prefix(400)),
+                    outcome: model.codingWorkflow(threadID: prior.id).map { "\($0.state)" } ?? "unknown",
+                    plan: prior.plan.prefix(12).map { String($0.title.prefix(300)) },
+                    decisions: (model.codingKnowledgeLane(threadID: prior.id)?.candidates ?? [])
+                        .filter { $0.category == .decision }
+                        .prefix(6)
+                        .map { String("\($0.title): \($0.detail)".prefix(400)) },
+                    findings: (prior.findings ?? []).prefix(8).map { String($0.detail.prefix(300)) },
+                    updatedAtUnixMillis: prior.updatedAtUnixMillis
+                )
+            }
     }
 
     /// Deterministic recall for a planning turn: up to five vault hits for the

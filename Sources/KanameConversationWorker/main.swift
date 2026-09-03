@@ -400,6 +400,7 @@ private enum KanameConversationWorker {
                         readable: request.bridgeKnowledgeReadScopes ?? [],
                         writable: request.bridgeKnowledgeWriteScopes ?? []
                     )
+                    await bridge.updateMemory(request.bridgeMemoryPack ?? [])
                     let bridgeBinding = try? await bridge.start()
                     let newSession = makeSession(request, bridgeBinding: bridgeBinding)
                     await relay.attach(newSession)
@@ -415,6 +416,7 @@ private enum KanameConversationWorker {
                         readable: request.bridgeKnowledgeReadScopes ?? [],
                         writable: request.bridgeKnowledgeWriteScopes ?? []
                     )
+                    await codexBridge?.updateMemory(request.bridgeMemoryPack ?? [])
                 }
                 guard let activeSession = session, let activeEventPump = eventPump else { continue }
                 let sessionIsReusable = await processCodex(
@@ -583,7 +585,7 @@ private enum KanameConversationWorker {
             let knowledge = scopes.isEmpty && writeScopes.isEmpty
                 ? nil
                 : try? ObsidianVaultService(readableScopes: scopes + writeScopes, writableScopes: writeScopes)
-            let server = KanameBridgeMCPServer(knowledge: knowledge, readableScopes: scopes + writeScopes, writableScopes: writeScopes) { event in
+            let server = KanameBridgeMCPServer(knowledge: knowledge, readableScopes: scopes + writeScopes, writableScopes: writeScopes, memory: request.bridgeMemoryPack ?? []) { event in
                 _ = try? await recorder.record(event)
                 try? await writer.append(kind: .provider, providerEvent: event)
             }

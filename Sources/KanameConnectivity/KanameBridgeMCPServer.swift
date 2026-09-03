@@ -39,16 +39,29 @@ public actor KanameBridgeMCPServer {
     private var knowledge: ObsidianVaultService?
     private var readableScopes: [String]
     private var writableScopes: [String]
+    private var memory: [KanameBridgeMemoryEntry]
     private let emit: Emit
     private var listener: NWListener?
     private var binding: Binding?
     private let queue = DispatchQueue(label: "com.cyberlane.kaname.bridge-mcp")
 
-    public init(knowledge: ObsidianVaultService?, readableScopes: [String], writableScopes: [String] = [], emit: @escaping Emit) {
+    public init(
+        knowledge: ObsidianVaultService?,
+        readableScopes: [String],
+        writableScopes: [String] = [],
+        memory: [KanameBridgeMemoryEntry] = [],
+        emit: @escaping Emit
+    ) {
         self.knowledge = knowledge
         self.readableScopes = readableScopes
         self.writableScopes = writableScopes
+        self.memory = memory
         self.emit = emit
+    }
+
+    /// Replaces the recallable thread history for the next run.
+    public func updateMemory(_ entries: [KanameBridgeMemoryEntry]) {
+        memory = entries
     }
 
     public func currentBinding() -> Binding? { binding }
@@ -247,6 +260,27 @@ public actor KanameBridgeMCPServer {
             ],
         ],
         [
+            "name": "history_search",
+            "description": "Search Kaname's earlier coding threads in this project (titles, summaries, plans, decisions, findings). Use it before re-deriving something the user may have decided before.",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "query": ["type": "string"],
+                    "limit": ["type": "integer", "minimum": 1, "maximum": 20],
+                ],
+                "required": ["query"],
+            ],
+        ],
+        [
+            "name": "history_read",
+            "description": "Read one earlier thread's plan, decisions, and findings by thread id from history_search.",
+            "inputSchema": [
+                "type": "object",
+                "properties": ["threadId": ["type": "string"]],
+                "required": ["threadId"],
+            ],
+        ],
+        [
             "name": "knowledge_propose",
             "description": "Propose a new or updated Obsidian note for the user to review. Nothing is written until the user approves in Kaname.",
             "inputSchema": [
@@ -325,6 +359,50 @@ public actor KanameBridgeMCPServer {
             } catch {
                 return Self.toolText("Could not read \(path): \(error.localizedDescription)", isError: true)
             }
+        case "history_search":
+            guard let query = (arguments["query"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !query.isEmpty else {
+                return Self.toolText("history_search needs a query.", isError: true)
+            }
+            guard !memory.isEmpty else {
+                return Self.toolText("No earlier threads exist for this project yet.")
+            }
+            let limit = min(max((arguments["limit"] as? Int) ?? 5, 1), 20)
+            let terms = query.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init).filter { $0.count > 2 }
+            func score(_ entry: KanameBridgeMemoryEntry) -> Int {
+                let haystack = ([entry.title, entry.summary] + entry.plan + entry.decisions + entry.findings).joined(separator: "\n").lowercased()
+                return terms.reduce(0) { $0 + (haystack.contains($1) ? 1 : 0) }
+            }
+            var scored: [(entry: KanameBridgeMemoryEntry, hits: Int)] = []
+            for entry in memory {
+                let hits = score(entry)
+                if hits > 0 { scored.append((entry, hits)) }
+            }
+            scored.sort { lhs, rhs in
+                if lhs.hits != rhs.hits { return lhs.hits > rhs.hits }
+                return lhs.entry.updatedAtUnixMillis > rhs.entry.updatedAtUnixMillis
+            }
+            let ranked = Array(scored.prefix(limit))
+            guard !ranked.isEmpty else { return Self.toolText("No earlier thread matched \"\(query)\".") }
+            var lines: [String] = []
+            for item in ranked {
+                let matches = item.hits == 1 ? "match" : "matches"
+                let summary = String(item.entry.summary.prefix(200))
+                lines.append("- [\(item.entry.threadID)] \(item.entry.title) · \(item.entry.outcome) · \(item.hits) \(matches)\n  \(summary)")
+            }
+            return Self.toolText(lines.joined(separator: "\n"))
+        case "history_read":
+            guard let threadID = arguments["threadId"] as? String, let entry = memory.first(where: { $0.threadID == threadID }) else {
+                return Self.toolText("No earlier thread with that id is in this project's history.", isError: true)
+            }
+            let text = [
+                "# \(entry.title)",
+                "Outcome: \(entry.outcome)",
+                entry.summary.isEmpty ? nil : "Summary: \(entry.summary)",
+                entry.plan.isEmpty ? nil : "## Plan\n" + entry.plan.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n"),
+                entry.decisions.isEmpty ? nil : "## Decisions\n" + entry.decisions.map { "- \($0)" }.joined(separator: "\n"),
+                entry.findings.isEmpty ? nil : "## Findings\n" + entry.findings.map { "- \($0)" }.joined(separator: "\n"),
+            ].compactMap { $0 }.joined(separator: "\n\n")
+            return Self.toolText(text)
         case "knowledge_propose":
             guard let path = arguments["path"] as? String, path.hasSuffix(".md"),
                   let content = arguments["content"] as? String, !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {

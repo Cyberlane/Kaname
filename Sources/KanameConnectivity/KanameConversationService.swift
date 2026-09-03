@@ -4,6 +4,23 @@ import Darwin
 import Foundation
 import KanameDomain
 
+/// One earlier thread the Kaname Bridge can recall for the agent.
+public struct KanameBridgeMemoryEntry: Codable, Equatable, Sendable {
+    public let threadID: String
+    public let title: String
+    public let summary: String
+    public let outcome: String
+    public let plan: [String]
+    public let decisions: [String]
+    public let findings: [String]
+    public let updatedAtUnixMillis: Int64
+
+    public init(threadID: String, title: String, summary: String, outcome: String, plan: [String], decisions: [String], findings: [String], updatedAtUnixMillis: Int64) {
+        (self.threadID, self.title, self.summary, self.outcome) = (threadID, title, summary, outcome)
+        (self.plan, self.decisions, self.findings, self.updatedAtUnixMillis) = (plan, decisions, findings, updatedAtUnixMillis)
+    }
+}
+
 public struct KanameConversationServiceRequest: Codable, Equatable, Sendable {
     public let runID: String
     public let threadID: String
@@ -27,6 +44,8 @@ public struct KanameConversationServiceRequest: Codable, Equatable, Sendable {
     /// Vault-relative Obsidian scopes the Kaname Bridge may read for this run.
     public let bridgeKnowledgeReadScopes: [String]?
     public let bridgeKnowledgeWriteScopes: [String]?
+    /// Earlier threads in the same project, for the Bridge history tools.
+    public let bridgeMemoryPack: [KanameBridgeMemoryEntry]?
 
     public init(
         runID: String,
@@ -49,10 +68,12 @@ public struct KanameConversationServiceRequest: Codable, Equatable, Sendable {
         curatedPreviewMCPGranted: Bool = false,
         createdAtUnixMillis: Int64,
         bridgeKnowledgeReadScopes: [String]? = nil,
-        bridgeKnowledgeWriteScopes: [String]? = nil
+        bridgeKnowledgeWriteScopes: [String]? = nil,
+        bridgeMemoryPack: [KanameBridgeMemoryEntry]? = nil
     ) {
         self.bridgeKnowledgeReadScopes = bridgeKnowledgeReadScopes
         self.bridgeKnowledgeWriteScopes = bridgeKnowledgeWriteScopes
+        self.bridgeMemoryPack = bridgeMemoryPack
         (self.runID, self.threadID, self.projectID) = (runID, threadID, projectID)
         (self.provider, self.model, self.reasoningEffort) = (provider, model, reasoningEffort)
         (self.runtimeMode, self.networkAccess) = (runtimeMode, runtimeMode == .fullAccess ? true : networkAccess)
