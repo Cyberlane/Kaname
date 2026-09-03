@@ -359,6 +359,7 @@ private enum KanameConversationWorker {
     private static func serve(store: KanameConversationServiceStore, threadID: String) async throws {
         var session: CodexLiveSession?
         var eventPump: CodexSessionEventPump?
+        var codexBridge: KanameBridgeMCPServer?
         var activeWorkspace: String?
         var sessionHasNativeThread = false
         var idleChecks = 0
@@ -386,13 +387,34 @@ private enum KanameConversationWorker {
                 if activeWorkspace != request.workspacePath {
                     await session?.close()
                     await eventPump?.waitUntilStopped()
-                    let newSession = makeSession(request)
+                    await codexBridge?.stop()
+                    // Kaname Bridge for this Codex session. Tool calls are injected
+                    // into the session stream and routed to the active run.
+                    let relay = CodexBridgeRelay()
+                    let bridge = KanameBridgeMCPServer(
+                        knowledge: nil,
+                        readableScopes: [],
+                        writableScopes: []
+                    ) { event in await relay.inject(event) }
+                    await bridge.updateScopes(
+                        readable: request.bridgeKnowledgeReadScopes ?? [],
+                        writable: request.bridgeKnowledgeWriteScopes ?? []
+                    )
+                    let bridgeBinding = try? await bridge.start()
+                    let newSession = makeSession(request, bridgeBinding: bridgeBinding)
+                    await relay.attach(newSession)
                     let newEventPump = CodexSessionEventPump(store: store)
                     await newEventPump.start(await newSession.events(), session: newSession)
                     session = newSession
                     eventPump = newEventPump
+                    codexBridge = bridge
                     activeWorkspace = request.workspacePath
                     sessionHasNativeThread = false
+                } else {
+                    await codexBridge?.updateScopes(
+                        readable: request.bridgeKnowledgeReadScopes ?? [],
+                        writable: request.bridgeKnowledgeWriteScopes ?? []
+                    )
                 }
                 guard let activeSession = session, let activeEventPump = eventPump else { continue }
                 let sessionIsReusable = await processCodex(
@@ -415,6 +437,8 @@ private enum KanameConversationWorker {
             } else {
                 await session?.close()
                 await eventPump?.waitUntilStopped()
+                await codexBridge?.stop()
+                codexBridge = nil
                 session = nil
                 eventPump = nil
                 activeWorkspace = nil
@@ -425,6 +449,7 @@ private enum KanameConversationWorker {
         }
         await session?.close()
         await eventPump?.waitUntilStopped()
+        await codexBridge?.stop()
         try store.writeWorkerState(KanameConversationWorkerState.record(
             threadID: threadID,
             runID: nil,
@@ -659,7 +684,10 @@ private enum KanameConversationWorker {
         }
     }
 
-    private static func makeSession(_ request: KanameConversationServiceRequest) -> CodexLiveSession {
+    private static func makeSession(
+        _ request: KanameConversationServiceRequest,
+        bridgeBinding: KanameBridgeMCPServer.Binding? = nil
+    ) -> CodexLiveSession {
         let instance = ProviderInstance(
             id: ProviderInstanceID(rawValue: "codexLocal")!,
             driver: .codex,
@@ -669,8 +697,21 @@ private enum KanameConversationWorker {
             instance: instance,
             workspaceURL: URL(fileURLWithPath: request.workspacePath),
             persistentSessionDirectory: URL(fileURLWithPath: request.providerStatePath),
-            curatedPreviewMCPGranted: request.curatedPreviewMCPGranted
+            curatedPreviewMCPGranted: request.curatedPreviewMCPGranted,
+            bridgeBinding: bridgeBinding
         ))
+    }
+
+    /// Bridges tool-call events into whichever Codex session is currently
+    /// attached; the session did not exist yet when the Bridge was created.
+    actor CodexBridgeRelay {
+        private weak var session: CodexLiveSession?
+
+        func attach(_ session: CodexLiveSession) { self.session = session }
+
+        func inject(_ event: CodexRunEvent) async {
+            await session?.injectBridgeEvent(event)
+        }
     }
 
     private static func requiredValue(after flag: String) throws -> String {

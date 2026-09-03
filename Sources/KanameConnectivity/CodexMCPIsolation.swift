@@ -42,10 +42,11 @@ enum CodexMCPIsolation {
         timeout: Duration,
         codexHome: URL?,
         baseArguments: [String],
-        curatedPreview: KanamePreviewMCPHTTPServer.Binding? = nil
+        curatedPreview: KanamePreviewMCPHTTPServer.Binding? = nil,
+        bridge: KanameBridgeMCPServer.Binding? = nil
     ) async throws -> [String] {
         let enforcedArguments = try enforcedLaunchArguments(baseArguments: baseArguments)
-        let environment = curatedPreviewEnvironment(home: codexHome, binding: curatedPreview)
+        let environment = curatedPreviewEnvironment(home: codexHome, binding: curatedPreview, bridge: bridge)
         let discovered = try await configuredServers(
             executable: executable,
             workingDirectory: workingDirectory,
@@ -54,9 +55,11 @@ enum CodexMCPIsolation {
             arguments: enforcedArguments
         )
 
-        if let curatedPreview {
-            guard allowsCuratedPreviewMCP(hasPreviewGrant: true) else {
-                throw CodexLiveSessionError.mcpConfigurationPresent
+        if curatedPreview != nil || bridge != nil {
+            if curatedPreview != nil {
+                guard allowsCuratedPreviewMCP(hasPreviewGrant: true) else {
+                    throw CodexLiveSessionError.mcpConfigurationPresent
+                }
             }
             guard let home = codexHome else {
                 throw CodexLiveSessionError.isolatedHomeUnavailable
@@ -64,17 +67,20 @@ enum CodexMCPIsolation {
             guard discovered.isEmpty else {
                 throw CodexLiveSessionError.mcpConfigurationPresent
             }
-            try writeCuratedPreviewMCPConfig(home: home, binding: curatedPreview)
+            try writeKanameMCPConfig(home: home, preview: curatedPreview, bridge: bridge)
             let afterInjection = try await configuredServers(
                 executable: executable,
                 workingDirectory: workingDirectory,
                 timeout: timeout,
-                environment: curatedPreviewEnvironment(home: home, binding: curatedPreview),
+                environment: curatedPreviewEnvironment(home: home, binding: curatedPreview, bridge: bridge),
                 arguments: enforcedArguments
             )
-            let allowed = afterInjection.filter(\.enabled)
-            guard allowed.count == 1,
-                  allowed[0].name == CodingPreviewMCPGrant.curatedServerName else {
+            // Only the servers Kaname just wrote may be enabled, nothing else.
+            var expected = Set<String>()
+            if curatedPreview != nil { expected.insert(CodingPreviewMCPGrant.curatedServerName) }
+            if bridge != nil { expected.insert(KanameBridgeMCPServer.serverName) }
+            let allowed = Set(afterInjection.filter(\.enabled).map(\.name))
+            guard allowed == expected else {
                 throw CodexLiveSessionError.mcpConfigurationPresent
             }
             return enforcedArguments

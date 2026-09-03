@@ -64,6 +64,8 @@ public struct CodexLiveSessionConfiguration: Sendable {
     /// When true and an inbox `coding.preview_mcp_grant` was validated by the
     /// caller, Kaname injects only the curated `kaname-preview` MCP bridge.
     public let curatedPreviewMCPGranted: Bool
+    /// Kaname Bridge endpoint to inject alongside the provider (plan, findings, knowledge).
+    public let bridgeBinding: KanameBridgeMCPServer.Binding?
 
     public init(
         instance: ProviderInstance,
@@ -73,8 +75,10 @@ public struct CodexLiveSessionConfiguration: Sendable {
         codexHome: URL? = nil,
         persistentSessionDirectory: URL? = nil,
         launchArguments: [String] = [],
-        curatedPreviewMCPGranted: Bool = false
+        curatedPreviewMCPGranted: Bool = false,
+        bridgeBinding: KanameBridgeMCPServer.Binding? = nil
     ) {
+        self.bridgeBinding = bridgeBinding
         (self.instance, self.executable) = (instance, executable)
         self.workspaceURL = workspaceURL.standardizedFileURL
         (self.timeout, self.codexHome) = (timeout, codexHome)
@@ -568,7 +572,7 @@ public actor CodexLiveSession {
 
     public func events() -> AsyncStream<CodexRunEvent> {
         let id = UUID()
-        return AsyncStream(bufferingPolicy: .bufferingNewest(512)) { continuation in
+        return AsyncStream(bufferingPolicy: .bufferingNewest(8_192)) { continuation in
             continuations[id] = continuation
             continuation.onTermination = { [weak self] _ in
                 _Concurrency.Task { await self?.removeContinuation(id) }
@@ -613,7 +617,10 @@ public actor CodexLiveSession {
                 let server = KanamePreviewMCPHTTPServer()
                 curatedBinding = try await server.start()
                 previewMCPServer = server
-                allowedMCPServerNames = [CodingPreviewMCPGrant.curatedServerName]
+                allowedMCPServerNames.insert(CodingPreviewMCPGrant.curatedServerName)
+            }
+            if configuration.bridgeBinding != nil {
+                allowedMCPServerNames.insert(KanameBridgeMCPServer.serverName)
             }
             let launchArguments = try await CodexMCPIsolation.launchArguments(
                 executable: configuration.executable,
@@ -621,7 +628,8 @@ public actor CodexLiveSession {
                 timeout: configuration.timeout,
                 codexHome: isolatedHome.url,
                 baseArguments: configuration.launchArguments,
-                curatedPreview: curatedBinding
+                curatedPreview: curatedBinding,
+                bridge: configuration.bridgeBinding
             )
             let processConfiguration = ProviderProbeConfiguration(
                 instance: configuration.instance,
@@ -632,7 +640,8 @@ public actor CodexLiveSession {
                 codexLaunchArguments: launchArguments,
                 environmentOverrides: CodexMCPIsolation.curatedPreviewEnvironment(
                     home: isolatedHome.url,
-                    binding: curatedBinding
+                    binding: curatedBinding,
+                    bridge: configuration.bridgeBinding
                 ),
                 allowedMCPServerNames: allowedMCPServerNames
             )
@@ -1063,6 +1072,12 @@ public actor CodexLiveSession {
         for event in eventCoalescer.ingest(event) {
             deliver(event)
         }
+    }
+
+    /// Delivers an event produced by the Kaname Bridge on behalf of the
+    /// active turn. Events without a native turn ID route to the pending run.
+    public func injectBridgeEvent(_ event: CodexRunEvent) {
+        deliver(event)
     }
 
     private func deliver(_ event: CodexRunEvent) {

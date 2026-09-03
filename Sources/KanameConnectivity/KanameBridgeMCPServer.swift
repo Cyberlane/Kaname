@@ -36,9 +36,9 @@ public actor KanameBridgeMCPServer {
 
     public typealias Emit = @Sendable (CodexRunEvent) async -> Void
 
-    private let knowledge: ObsidianVaultService?
-    private let readableScopes: [String]
-    private let writableScopes: [String]
+    private var knowledge: ObsidianVaultService?
+    private var readableScopes: [String]
+    private var writableScopes: [String]
     private let emit: Emit
     private var listener: NWListener?
     private var binding: Binding?
@@ -52,6 +52,15 @@ public actor KanameBridgeMCPServer {
     }
 
     public func currentBinding() -> Binding? { binding }
+
+    /// Re-scopes knowledge access for the next run on a long-lived session.
+    public func updateScopes(readable: [String], writable: [String]) {
+        readableScopes = readable + writable
+        writableScopes = writable
+        knowledge = (readable.isEmpty && writable.isEmpty)
+            ? nil
+            : try? ObsidianVaultService(readableScopes: readable + writable, writableScopes: writable)
+    }
 
     public func start() async throws -> Binding {
         if let binding { return binding }
