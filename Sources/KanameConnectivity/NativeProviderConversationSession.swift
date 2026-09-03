@@ -805,3 +805,36 @@ public enum ProviderPlanMarkdown {
         return steps
     }
 }
+
+/// Extracts the bullets of a `## Findings` section from a provider reply.
+public enum ProviderFindingsMarkdown {
+    public static func findings(fromMarkdown markdown: String) -> [String] {
+        var inSection = false
+        var findings: [String] = []
+        var current: String?
+        func flush() {
+            if let text = current?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty { findings.append(text) }
+            current = nil
+        }
+        for rawLine in markdown.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.range(of: #"^#{1,6}\s+"#, options: .regularExpression) != nil {
+                flush()
+                inSection = line.lowercased().contains("finding")
+                continue
+            }
+            guard inSection else { continue }
+            if let range = line.range(of: #"^(\d+[.)]|[-*+])\s+"#, options: .regularExpression) {
+                flush()
+                current = String(line[range.upperBound...])
+            } else if !line.isEmpty, current != nil {
+                current! += " " + line
+            } else if line.isEmpty {
+                flush()
+            }
+            if findings.count >= 64 { break }
+        }
+        flush()
+        return findings
+    }
+}

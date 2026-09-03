@@ -3115,6 +3115,7 @@ private struct DesktopThreadConversation: View {
             case .evidence:
                 ThreadEvidenceView(
                     items: thread.evidence,
+                    findings: thread.findings ?? [],
                     isAwaitingReview: thread.kind == .coding && codingStage == .evidenceReview,
                     recheckEvidence: { runtime.recheckImplementation(threadID: thread.id) },
                     accept: { runtime.reviewImplementation(threadID: thread.id, accepted: true) },
@@ -16132,6 +16133,7 @@ private struct ThreadPlanRow: View {
 
 private struct ThreadEvidenceView: View {
     let items: [DesktopEvidence]
+    let findings: [DesktopFinding]
     let isAwaitingReview: Bool
     let recheckEvidence: () -> Void
     let accept: () -> Void
@@ -16141,8 +16143,33 @@ private struct ThreadEvidenceView: View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    if items.isEmpty {
-                        EmptyPanel(symbol: "checkmark.seal", title: "No evidence yet", detail: "Provider completion does not count as accepted work.")
+                    if !findings.isEmpty {
+                        Text("Findings")
+                            .font(.headline)
+                        ForEach(findings) { finding in
+                            HStack(alignment: .top, spacing: 12) {
+                                Image(systemName: "magnifyingglass.circle.fill")
+                                    .foregroundStyle(Nord.frost1)
+                                    .font(.title3)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(finding.title).font(.subheadline.weight(.semibold))
+                                    if finding.detail != finding.title {
+                                        Text(finding.detail).font(.subheadline).foregroundStyle(.secondary)
+                                    }
+                                }
+                                Spacer()
+                            }
+                            .padding(15)
+                            .background(Nord.polarNight1, in: RoundedRectangle(cornerRadius: 14))
+                        }
+                        if !items.isEmpty {
+                            Text("Checks")
+                                .font(.headline)
+                                .padding(.top, 8)
+                        }
+                    }
+                    if items.isEmpty, findings.isEmpty {
+                        EmptyPanel(symbol: "checkmark.seal", title: "No findings or checks yet", detail: "Findings appear as the agent investigates. Checks run after implementation.")
                     } else {
                         ForEach(items) { item in
                             HStack(alignment: .top, spacing: 12) {

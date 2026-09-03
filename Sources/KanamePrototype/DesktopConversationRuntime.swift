@@ -1004,6 +1004,14 @@ final class DesktopConversationRuntime: ObservableObject {
         switch event.kind {
         case .providerCompleted:
             let completedRun = model.providerRun(id: serviceEvent.runID)
+            if completedRun?.purpose == .codingPlan || completedRun?.purpose == .codingImplementation,
+               let reply = model.thread(id: serviceEvent.threadID)?.messages.last(where: { $0.role == .assistant })?.body {
+                let findings = ProviderFindingsMarkdown.findings(fromMarkdown: reply)
+                if !findings.isEmpty {
+                    model.appendFindings(threadID: serviceEvent.threadID, runID: serviceEvent.runID, texts: findings)
+                    guard model.persistenceError == nil else { return false }
+                }
+            }
             if completedRun?.purpose == .codingPlan,
                let fallback = model.thread(id: serviceEvent.threadID)?.messages.last(where: { $0.role == .assistant })?.body,
                !fallback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -1491,7 +1499,7 @@ final class DesktopConversationRuntime: ObservableObject {
         return """
         Kaname Coding stage: DISCUSS AND PLAN ONLY.
 
-        You are in an ongoing planning conversation. Inspect the selected repository read-only as needed, answer the user, and keep one concrete implementation plan up to date. \(planMechanism) The plan steps must describe future implementation work, not the planning work you are doing, and stay pending. Do not edit files, create commits, run destructive commands, access the network, or begin implementation. Nothing is implemented until the user explicitly approves the plan in Kaname.
+        You are in an ongoing planning conversation. Inspect the selected repository read-only as needed, answer the user, and keep one concrete implementation plan up to date. \(planMechanism) The plan steps must describe future implementation work, not the planning work you are doing, and stay pending. Do not edit files, create commits, run destructive commands, access the network, or begin implementation. Nothing is implemented until the user explicitly approves the plan in Kaname. If you investigated or debugged anything, end your reply with a '## Findings' section: one bullet per finding stating what you checked, what you observed, and what you concluded.
 
         \(currentPlan)
 
@@ -1514,7 +1522,7 @@ final class DesktopConversationRuntime: ObservableObject {
         return """
         Kaname Coding stage: APPROVED ISOLATED IMPLEMENTATION.
 
-        Implement the approved plan below inside the selected linked Git worktree, following the user's latest message. This is an ongoing conversation: the user may send follow-up instructions and you continue in the same worktree. Do not write outside the worktree. Run the relevant local verification, report changed files and anything not run, and do not commit, push, publish, or merge. Provider completion is never acceptance; the user reviews Changes and Evidence in Kaname.
+        Implement the approved plan below inside the selected linked Git worktree, following the user's latest message. This is an ongoing conversation: the user may send follow-up instructions and you continue in the same worktree. Do not write outside the worktree. Run the relevant local verification, report changed files and anything not run, and do not commit, push, publish, or merge. Provider completion is never acceptance; the user reviews Changes and Evidence in Kaname. If you investigated or debugged anything, end your reply with a '## Findings' section: one bullet per finding stating what you checked, what you observed, and what you concluded.
 
         Project: \(project?.name ?? "Standalone")
         User message:

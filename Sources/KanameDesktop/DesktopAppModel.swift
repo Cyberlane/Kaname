@@ -165,6 +165,21 @@ public struct DesktopEvidence: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+/// One thing the provider learned while investigating or debugging: what it
+/// checked, what it observed, what it concluded. Parsed from a `## Findings`
+/// section in the provider's reply; later fed by a Kaname Bridge tool.
+public struct DesktopFinding: Codable, Equatable, Identifiable, Sendable {
+    public let id: String
+    public var title: String
+    public var detail: String
+    public var runID: String?
+    public var createdAtUnixMillis: Int64
+
+    public init(id: String, title: String, detail: String, runID: String?, createdAtUnixMillis: Int64) {
+        (self.id, self.title, self.detail, self.runID, self.createdAtUnixMillis) = (id, title, detail, runID, createdAtUnixMillis)
+    }
+}
+
 public struct DesktopThread: Codable, Equatable, Identifiable, Sendable {
     public let id: String
     public var projectID: String?
@@ -184,6 +199,7 @@ public struct DesktopThread: Codable, Equatable, Identifiable, Sendable {
     public var messages: [DesktopMessage]
     public var plan: [DesktopPlanItem]
     public var planBody: String?
+    public var findings: [DesktopFinding]?
     public var evidence: [DesktopEvidence]
 
     public init(
@@ -2816,6 +2832,32 @@ public final class DesktopAppModel: ObservableObject {
             } else {
                 snapshot.threads[index].plan.append(item)
             }
+        }
+    }
+
+    /// Appends findings parsed from a provider reply, skipping duplicates.
+    public func appendFindings(threadID: String, runID: String?, texts: [String]) {
+        let timestamp = now()
+        let items = texts.compactMap { raw -> DesktopFinding? in
+            let clean = Self.normalized(raw)
+            guard !clean.isEmpty else { return nil }
+            let firstSentence = clean.split(whereSeparator: { $0 == "\n" || $0 == "." }).first.map(String.init) ?? clean
+            return DesktopFinding(
+                id: "finding-\(Self.stableLocalDigest(clean).prefix(16))",
+                title: String(firstSentence.prefix(140)),
+                detail: String(clean.prefix(4_000)),
+                runID: runID,
+                createdAtUnixMillis: timestamp
+            )
+        }
+        guard !items.isEmpty else { return }
+        mutate { snapshot in
+            guard let index = snapshot.threads.firstIndex(where: { $0.id == threadID }) else { return }
+            var existing = snapshot.threads[index].findings ?? []
+            let known = Set(existing.map(\.id))
+            existing += items.filter { !known.contains($0.id) }
+            snapshot.threads[index].findings = Array(existing.suffix(200))
+            snapshot.threads[index].updatedAtUnixMillis = timestamp
         }
     }
 
