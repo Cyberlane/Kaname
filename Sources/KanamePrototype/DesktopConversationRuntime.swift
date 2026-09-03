@@ -38,6 +38,7 @@ final class DesktopConversationRuntime: ObservableObject {
     @Published private(set) var activeThreadIDs: Set<String> = []
     @Published private(set) var codingWorkflowBusyThreadIDs: Set<String> = []
     @Published private(set) var codingWorkflowErrors: [String: String] = [:]
+    @Published private(set) var pullRequestStatusByThreadID: [String: String] = [:]
     @Published private(set) var titleGenerationThreadIDs: Set<String> = []
     @Published private(set) var titleGenerationErrors: [String: String] = [:]
 
@@ -528,6 +529,107 @@ final class DesktopConversationRuntime: ObservableObject {
 
     func reviewImplementation(threadID: String, accepted: Bool) {
         refreshImplementationEvidence(threadID: threadID, accepted: accepted)
+    }
+
+    func pullRequestStatus(threadID: String) -> String? {
+        pullRequestStatusByThreadID[threadID]
+    }
+
+    /// Accepted work → signed commit of what is left, push the branch to origin,
+    /// `gh pr create` with the approved plan and findings as the description.
+    /// One approval covers the whole publish step; the PR link lands in the thread.
+    func openPullRequest(threadID: String) {
+        guard !codingWorkflowBusyThreadIDs.contains(threadID),
+              let thread = model.thread(id: threadID),
+              let worktree = latestCodingWorktree(threadID: threadID),
+              worktree.state == .accepted || worktree.state == .review || worktree.state == .dirty else {
+            pullRequestStatusByThreadID[threadID] = "Accept the implementation before opening a pull request."
+            return
+        }
+        codingWorkflowBusyThreadIDs.insert(threadID)
+        pullRequestStatusByThreadID[threadID] = "Working: committing, pushing \(worktree.branch), and opening the pull request…"
+        let gitControl = gitControl
+        _Concurrency.Task { [weak self] in
+            guard let self else { return }
+            defer { codingWorkflowBusyThreadIDs.remove(threadID) }
+            do {
+                let worktreeURL = URL(fileURLWithPath: worktree.worktreePath, isDirectory: true)
+                let github = GitHubControlService(timeout: .seconds(90))
+                let repository = try await github.inspect(repository: worktreeURL).repository
+                let base = await gitControl.remoteDefaultBranch(worktree: worktreeURL)
+                let head = worktree.branch
+                let prTarget = GitHubControlService.pullRequestTarget(repository: repository, head: head, base: base)
+                guard let approvalID = model.createApproval(
+                    threadID: threadID,
+                    title: "Publish branch and open pull request",
+                    exactTarget: prTarget,
+                    consequence: "Commit remaining changes in \(worktree.worktreePath), push \(head) to origin, and open a pull request against \(base) on \(repository).",
+                    dataLeavingDevice: "The branch commits, the plan, and the findings go to GitHub.",
+                    reversible: false,
+                    expiresAtUnixMillis: nil
+                ) else {
+                    throw CodingWorkspaceInspectorError.unavailable("Kaname could not persist the pull request approval.")
+                }
+                model.resolveApproval(id: approvalID, approved: true)
+
+                let snapshot = try await gitControl.inspect(worktree: worktreeURL)
+                if !snapshot.changedFiles.isEmpty {
+                    _ = try await gitControl.createSignedCommit(
+                        worktree: worktreeURL,
+                        relativePaths: snapshot.changedFiles,
+                        message: Self.pullRequestCommitMessage(thread: thread),
+                        grant: LocalGitMutationGrant(approvalID: approvalID, kind: .commit, exactTarget: worktreeURL.standardizedFileURL.path)
+                    )
+                }
+                try await gitControl.pushBranch(
+                    worktree: worktreeURL,
+                    branch: head,
+                    grant: LocalGitMutationGrant(approvalID: approvalID, kind: .push, exactTarget: worktreeURL.standardizedFileURL.path)
+                )
+                let pullRequest = try await github.createPullRequest(
+                    repository: repository,
+                    localRepository: worktreeURL,
+                    head: head,
+                    base: base,
+                    title: String(thread.title.prefix(200)),
+                    body: Self.pullRequestBody(thread: thread, worktree: worktree),
+                    grant: LocalGitMutationGrant(approvalID: approvalID, kind: .createPullRequest, exactTarget: prTarget)
+                )
+                let url = pullRequest
+                pullRequestStatusByThreadID[threadID] = "Pull request opened: \(url)"
+                model.appendSystemMessage(threadID: threadID, body: "Pull request opened for `\(head)` → `\(base)`: \(url)")
+                _ = model.addCodingKnowledgeCandidate(
+                    threadID: threadID,
+                    category: .decision,
+                    title: "Pull request opened",
+                    detail: "\(repository): \(head) → \(base)\n\(url)"
+                )
+            } catch {
+                pullRequestStatusByThreadID[threadID] = "Pull request failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private static func pullRequestCommitMessage(thread: DesktopThread) -> String {
+        let title = thread.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return title.isEmpty ? "Implement approved plan" : String(title.prefix(72))
+    }
+
+    private static func pullRequestBody(thread: DesktopThread, worktree: DesktopWorktreeRecord) -> String {
+        var parts: [String] = []
+        parts.append("## Summary\n\n" + (thread.summary.isEmpty ? thread.title : thread.summary))
+        if let plan = thread.planBody?.trimmingCharacters(in: .whitespacesAndNewlines), !plan.isEmpty {
+            parts.append("## Plan\n\n" + KanameTextBounds.utf8Prefix(plan, maximumBytes: 12 * 1_024))
+        }
+        if let findings = thread.findings, !findings.isEmpty {
+            let lines = findings.prefix(20).map { "- **\($0.title)** — \($0.detail)" }
+            parts.append("## Findings\n\n" + lines.joined(separator: "\n"))
+        }
+        var verification = "## Verification\n\n"
+        verification += worktree.testCommand.isEmpty ? "Not run." : "`\(worktree.testCommand)`: \(worktree.testSummary)"
+        parts.append(verification)
+        parts.append("---\nOpened from Kaname thread “\(thread.title)”.")
+        return parts.joined(separator: "\n\n")
     }
 
     private func refreshImplementationEvidence(threadID: String, accepted: Bool?) {

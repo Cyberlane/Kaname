@@ -3152,7 +3152,13 @@ private struct DesktopThreadConversation: View {
                     isAwaitingReview: thread.kind == .coding && codingStage == .evidenceReview,
                     recheckEvidence: { runtime.recheckImplementation(threadID: thread.id) },
                     accept: { runtime.reviewImplementation(threadID: thread.id, accepted: true) },
-                    reject: { runtime.reviewImplementation(threadID: thread.id, accepted: false) }
+                    reject: { runtime.reviewImplementation(threadID: thread.id, accepted: false) },
+                    pullRequest: thread.kind == .coding && codingStage == .completed
+                        ? .init(
+                            status: runtime.pullRequestStatus(threadID: thread.id),
+                            open: { runtime.openPullRequest(threadID: thread.id) }
+                        )
+                        : nil
                 )
             case .knowledge:
                 DesktopCodingKnowledgeLaneView(
@@ -16554,6 +16560,12 @@ private struct ThreadEvidenceView: View {
     let recheckEvidence: () -> Void
     let accept: () -> Void
     let reject: () -> Void
+    var pullRequest: PullRequestAction? = nil
+
+    struct PullRequestAction {
+        let status: String?
+        let open: () -> Void
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -16617,6 +16629,17 @@ private struct ThreadEvidenceView: View {
                     detail: "Accepting marks this work done locally and starts the knowledge update. Nothing is merged or pushed."
                 ) {
                     evidenceReviewActions
+                }
+            } else if let pullRequest {
+                Divider()
+                DesktopDecisionFooter(
+                    title: "Accepted",
+                    detail: pullRequest.status
+                        ?? "Commit what is left, push the branch to origin, and open a pull request with the plan and findings as the description."
+                ) {
+                    Button("Open pull request", action: pullRequest.open)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(pullRequest.status?.hasPrefix("Working") ?? false)
                 }
             }
         }

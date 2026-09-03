@@ -2101,7 +2101,21 @@ public final class DesktopAppModel: ObservableObject {
         )
     }
 
+    /// Appends a Kaname-authored note to a thread (for example a pull request link).
     @discardableResult
+    public func appendSystemMessage(threadID: String, body: String) -> String? {
+        let cleanBody = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanBody.isEmpty, cleanBody.utf8.count <= 32_000 else { return nil }
+        let message = DesktopMessage(role: .system, body: cleanBody, createdAtUnixMillis: now())
+        var appended = false
+        mutate { snapshot in
+            guard let index = snapshot.threads.firstIndex(where: { $0.id == threadID }) else { return }
+            snapshot.threads[index].messages.append(message)
+            appended = true
+        }
+        return appended ? message.id : nil
+    }
+
     public func appendUserMessage(
         threadID: String,
         body: String,

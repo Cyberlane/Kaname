@@ -6,6 +6,7 @@ public enum LocalGitMutationKind: String, Codable, Equatable, Sendable {
     case commit
     case cleanupWorktree
     case createPullRequest
+    case push
     case mergePullRequest
     case revertCheckpoint
 }
@@ -358,6 +359,31 @@ public actor DesktopGitControlService {
         _ = try await git(["add", "--"] + paths, at: target, preserveWhitespace: true)
         _ = try await git(["commit", "-S", "-m", String(message.prefix(998))], at: target, preserveWhitespace: true)
         return try await inspect(worktree: target)
+    }
+
+    /// Publishes the worktree branch to `origin` so a pull request can be opened.
+    /// Requires a push grant bound to the exact worktree path.
+    public func pushBranch(
+        worktree: URL,
+        branch: String,
+        grant: LocalGitMutationGrant
+    ) async throws {
+        let target = worktree.standardizedFileURL
+        guard grant.kind == .push, grant.exactTarget == target.path else {
+            throw DesktopGitControlError.approvalMismatch
+        }
+        guard !branch.isEmpty, !branch.hasPrefix("-") else { throw DesktopGitControlError.invalidTarget }
+        _ = try await git(["push", "--set-upstream", "origin", branch], at: target, preserveWhitespace: true)
+    }
+
+    /// Default branch of `origin` (falls back to `main`).
+    public func remoteDefaultBranch(worktree: URL) async -> String {
+        let target = worktree.standardizedFileURL
+        if let ref = try? await git(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], at: target),
+           let name = ref.split(separator: "/", maxSplits: 1).last, !name.isEmpty {
+            return String(name)
+        }
+        return "main"
     }
 
     public func removeWorktree(
