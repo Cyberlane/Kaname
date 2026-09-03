@@ -390,6 +390,11 @@ final class DesktopConversationRuntime: ObservableObject {
             defer { codingWorkflowBusyThreadIDs.remove(threadID) }
             do {
                 let rootSnapshot = try await CodingWorkspaceInspector.inspect(workspaceURL: root)
+                guard rootSnapshot.isGitRepository, rootSnapshot.head != "unborn" else {
+                    throw CodingWorkspaceInspectorError.unavailable(
+                        "Implementation needs a Git repository with at least one commit. Point the project at a repository root, or run git init and commit first."
+                    )
+                }
                 let token = UUID().uuidString.lowercased().prefix(8)
                 let target = environment.worktreeDirectory
                     .appending(path: "conversation-\(threadID.prefix(8))-\(token)", directoryHint: .isDirectory)

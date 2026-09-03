@@ -72,6 +72,9 @@ public struct CodingWorkspaceSnapshot: Equatable, Sendable {
     /// True when the caller selected more notes than the bounded selection
     /// metadata can retain.
     public let obsidianNoteSelectionWasTruncated: Bool
+    /// False when the workspace is a plain directory. Planning still works;
+    /// isolated implementation requires a repository.
+    public var isGitRepository: Bool = true
 }
 
 public struct CodingEvidenceSnapshot: Equatable, Sendable {
@@ -123,27 +126,37 @@ public enum CodingWorkspaceInspector {
         obsidianExecutable: String = "obsidian"
     ) async throws -> CodingWorkspaceSnapshot {
         let root = workspaceURL.standardizedFileURL
+        // Plain directories and repository subdirectories are inspected as
+        // read-only planning context; only isolated implementation needs a
+        // repository, and that is checked where the worktree is created.
         let top = try await git(["rev-parse", "--show-toplevel"], in: root)
-        guard top.exitStatus == 0,
-              URL(fileURLWithPath: top.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)).standardizedFileURL == root else {
-            throw CodingWorkspaceInspectorError.notRepository
-        }
+        let isGitRepository = top.exitStatus == 0
 
-        async let headResult = git(["rev-parse", "HEAD"], in: root)
-        async let branchResult = git(["branch", "--show-current"], in: root)
-        async let statusResult = git(["status", "--short", "--branch"], in: root)
-        async let diffStatResult = git(["diff", "--stat"], in: root)
-        let (headOutput, branchOutput, statusOutput, diffStatOutput) = try await (
-            headResult, branchResult, statusResult, diffStatResult
-        )
-        guard headOutput.exitStatus == 0,
-              branchOutput.exitStatus == 0,
-              statusOutput.exitStatus == 0,
-              diffStatOutput.exitStatus == 0 else {
-            throw CodingWorkspaceInspectorError.unavailable("Git could not inspect the selected worktree.")
+        var head = ""
+        var branch = ""
+        var status = ""
+        var diffStat = ""
+        if isGitRepository {
+            async let headResult = git(["rev-parse", "HEAD"], in: root)
+            async let branchResult = git(["branch", "--show-current"], in: root)
+            async let statusResult = git(["status", "--short", "--branch"], in: root)
+            async let diffStatResult = git(["diff", "--stat"], in: root)
+            let (headOutput, branchOutput, statusOutput, diffStatOutput) = try await (
+                headResult, branchResult, statusResult, diffStatResult
+            )
+            guard branchOutput.exitStatus == 0, statusOutput.exitStatus == 0, diffStatOutput.exitStatus == 0 else {
+                throw CodingWorkspaceInspectorError.unavailable("Git could not inspect the selected worktree.")
+            }
+            // A repository with no commits yet has no HEAD; treat it as empty.
+            head = headOutput.exitStatus == 0
+                ? headOutput.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+                : "unborn"
+            branch = branchOutput.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+            status = statusOutput.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+            diffStat = diffStatOutput.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            head = "no-git"
         }
-        let head = headOutput.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
-        let status = statusOutput.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
         let revision = revisionDigest(head: head, status: status)
         let deduplicatedObsidianNotePaths = deduplicatedPaths(
             ([obsidianNotePath].compactMap { $0 } + obsidianNotePaths)
@@ -160,17 +173,18 @@ public enum CodingWorkspaceInspector {
         return CodingWorkspaceSnapshot(
             root: root,
             isIsolatedWorktree: isLinkedWorktree(root),
-            branch: branchOutput.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines),
+            branch: branch,
             head: head,
             revision: revision,
             status: status,
-            diffStat: diffStatOutput.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines),
+            diffStat: diffStat,
             contextSources: contextResult.sources,
             searchMatches: matches,
             skills: SkillRegistryLoader.loadRegistry(workspaceRoot: root),
             requestedObsidianNotePaths: requestedObsidianNotePaths,
             missingObsidianNotePaths: contextResult.missingPaths,
-            obsidianNoteSelectionWasTruncated: obsidianNoteSelectionWasTruncated
+            obsidianNoteSelectionWasTruncated: obsidianNoteSelectionWasTruncated,
+            isGitRepository: isGitRepository
         )
     }
 
