@@ -50,6 +50,44 @@ final class DesktopDurableWorkflowRunsViewModel: ObservableObject {
         loadSchedules()
     }
 
+    // MARK: Sample workflow
+
+    /// A tiny executable workflow: manual trigger, validate `{"route": n}`,
+    /// route 5 to one terminal and everything else to another. Lets the Rust
+    /// executor be exercised end to end before any real workflow exists.
+    static let sampleWorkflowID = "018f5000-0001-7000-8000-000000000001"
+
+    static let sampleSchemaBundleJSON = """
+    {"bundleVersion":1,"schemas":[{"id":"dev.kaname.sample-input/v1","schema":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["route"],"properties":{"route":{"type":["number","string"]}},"additionalProperties":false}}]}
+    """
+
+    static let sampleWorkflowJSON = """
+    {"formatVersion":1,"workflowId":"018f5000-0001-7000-8000-000000000001","packageId":"dev.kaname.sample-route","name":"Sample: route a number","summary":"Manual trigger, validate the input, route 5 to one terminal and everything else to another.","graph":{"entrypoints":[{"id":"018f5000-0011-7000-8000-000000000011","nodeId":"018f5000-0101-7000-8000-000000000101"}],"nodes":[{"id":"018f5000-0101-7000-8000-000000000101","key":"manual","name":"manual","type":"trigger.manual","typeVersion":1,"config":{}},{"id":"018f5000-0102-7000-8000-000000000102","key":"validate","name":"validate","type":"data.validate","typeVersion":1,"config":{"schemaRef":"dev.kaname.sample-input/v1"}},{"id":"018f5000-0103-7000-8000-000000000103","key":"match","name":"match","type":"control.match","typeVersion":1,"config":{"value":{"root":"input","pointer":""},"hitPolicy":"first","cases":[{"id":"018f5000-0201-7000-8000-000000000201","key":"five","label":"Route five","when":{"compare":{"left":{"root":"value","pointer":"/route"},"operator":"equal","right":{"literal":{"type":"number","value":5}}}}}],"otherwise":{"id":"018f5000-0202-7000-8000-000000000202","key":"otherwise","label":"Otherwise"}}},{"id":"018f5000-0104-7000-8000-000000000104","key":"complete-five","name":"complete-five","type":"terminal.complete","typeVersion":1,"config":{}},{"id":"018f5000-0105-7000-8000-000000000105","key":"complete-otherwise","name":"complete-otherwise","type":"terminal.complete","typeVersion":1,"config":{}},{"id":"018f5000-0106-7000-8000-000000000106","key":"fail-validation","name":"fail-validation","type":"terminal.fail","typeVersion":1,"config":{"error":{"whole":true}}},{"id":"018f5000-0107-7000-8000-000000000107","key":"fail-match","name":"fail-match","type":"terminal.fail","typeVersion":1,"config":{"error":{"whole":true}}}],"edges":[{"id":"018f5100-0001-7000-8000-000000000001","from":{"nodeId":"018f5000-0101-7000-8000-000000000101","portId":"success"},"to":{"nodeId":"018f5000-0102-7000-8000-000000000102","portId":"input"},"mappingId":"018f5200-0001-7000-8000-000000000001","mapping":{"whole":true}},{"id":"018f5100-0002-7000-8000-000000000002","from":{"nodeId":"018f5000-0102-7000-8000-000000000102","portId":"success"},"to":{"nodeId":"018f5000-0103-7000-8000-000000000103","portId":"input"},"mappingId":"018f5200-0002-7000-8000-000000000002","mapping":{"whole":true}},{"id":"018f5100-0003-7000-8000-000000000003","from":{"nodeId":"018f5000-0102-7000-8000-000000000102","portId":"error"},"to":{"nodeId":"018f5000-0106-7000-8000-000000000106","portId":"input"},"mappingId":"018f5200-0003-7000-8000-000000000003","mapping":{"whole":true}},{"id":"018f5100-0004-7000-8000-000000000004","from":{"nodeId":"018f5000-0103-7000-8000-000000000103","portId":"case-018f5000-0201-7000-8000-000000000201"},"to":{"nodeId":"018f5000-0104-7000-8000-000000000104","portId":"input"},"mappingId":"018f5200-0004-7000-8000-000000000004","mapping":{"whole":true}},{"id":"018f5100-0005-7000-8000-000000000005","from":{"nodeId":"018f5000-0103-7000-8000-000000000103","portId":"case-018f5000-0202-7000-8000-000000000202"},"to":{"nodeId":"018f5000-0105-7000-8000-000000000105","portId":"input"},"mappingId":"018f5200-0005-7000-8000-000000000005","mapping":{"whole":true}},{"id":"018f5100-0006-7000-8000-000000000006","from":{"nodeId":"018f5000-0103-7000-8000-000000000103","portId":"error"},"to":{"nodeId":"018f5000-0107-7000-8000-000000000107","portId":"input"},"mappingId":"018f5200-0006-7000-8000-000000000006","mapping":{"whole":true}}]},"interfaces":{},"resources":{},"policies":{},"storage":{},"metadata":{}}
+    """
+
+    func installSampleWorkflow() async {
+        guard let runner, !isStarting else { return }
+        isStarting = true
+        defer { isStarting = false }
+        do {
+            let result = try await runner.publishWorkflow(
+                workflowID: Self.sampleWorkflowID,
+                packageID: "dev.kaname.sample-route",
+                name: "Sample: route a number",
+                summary: "Manual trigger, validate, match, terminal.",
+                workflowJSON: Self.sampleWorkflowJSON,
+                schemaBundleJSON: Self.sampleSchemaBundleJSON,
+                activate: true
+            )
+            startMessage = "Sample published as revision \(result.revisionID.suffix(8)) (\(result.executionSupport))\(result.activated ? ", active" : ""). Run it with input {\"route\": 5}."
+            runInputJSON = "{\"route\": 5}"
+        } catch {
+            startMessage = "Sample install failed: \(error.localizedDescription)"
+        }
+        await loadRunnableWorkflows()
+        await reload()
+    }
+
     // MARK: Interval schedules (host state read by the control service's tick)
 
     @Published private(set) var scheduleSeconds: [String: Int] = [:]
@@ -145,13 +183,26 @@ final class DesktopDurableWorkflowRunsViewModel: ObservableObject {
         await reload()
     }
 
+    /// Optional JSON for the entrypoint's `input` port when running manually.
+    @Published var runInputJSON = ""
+
     /// Starts a manual run on the Rust executor and refreshes history.
     func startRun(_ item: DesktopWorkflowV2PortfolioItem) async {
         guard let runner, let revisionID = item.activeRevisionID, !isStarting else { return }
         isStarting = true
         defer { isStarting = false }
+        var inputs: [String: Any] = [:]
+        let trimmed = runInputJSON.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            guard let data = trimmed.data(using: .utf8),
+                  let value = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) else {
+                startMessage = "Run input must be valid JSON."
+                return
+            }
+            inputs["input"] = value
+        }
         do {
-            let result = try await runner.startWorkflowRun(workflowID: item.workflowID, revisionID: revisionID)
+            let result = try await runner.startWorkflowRun(workflowID: item.workflowID, revisionID: revisionID, inputs: inputs)
             startMessage = "\(item.name): run \(result.runID.suffix(8)) \(result.outcome) after \(result.eventCount) events."
         } catch {
             startMessage = "\(item.name) did not start: \(error.localizedDescription)"
@@ -310,10 +361,16 @@ struct DesktopDurableWorkflowRunsView: View {
     /// Manual trigger for any active, executable revision on the Rust executor.
     @ViewBuilder private var runWorkflowMenu: some View {
         if viewModel.runnableWorkflows.isEmpty {
-            Button("Run workflow", systemImage: "play.fill") {}
-                .disabled(true)
-                .help("Activate an executable workflow revision first")
+            Button("Install sample workflow", systemImage: "square.and.arrow.down") {
+                Task { await viewModel.installSampleWorkflow() }
+            }
+            .disabled(viewModel.isStarting)
+            .help("Publishes a small manual workflow into the Rust library so runs can be tried")
         } else {
+            TextField("Run input JSON, e.g. {\"route\": 5}", text: $viewModel.runInputJSON)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(.caption, design: .monospaced))
+                .frame(maxWidth: 260)
             Menu {
                 Section("Run now") {
                     ForEach(viewModel.runnableWorkflows) { item in

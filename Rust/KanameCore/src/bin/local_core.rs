@@ -109,6 +109,9 @@ fn main() {
         {
             workflow_schedule_tick(journal_path, projection_path, application_support)
         }
+        [operation, _journal_path, application_support] if operation == "workflow-library-publish" => {
+            workflow_library_publish(application_support)
+        }
         _ => Err("usage: kaname-local-core scenario <F-01..F-14> | scenario-store <F-01..F-14> <journal-path> | append-event <journal-path> < event-envelope.bin | authorize-action <journal-path> < approval-command.bin | record-review <journal-path> < command-envelope.bin | replay <journal-path> < replay-request.bin | mobile-propose <journal-path> < enrollment-challenge.bin | mobile-decide <journal-path> < enrollment-decision.bin | mobile-admit <journal-path> <recipient-device-id> <recipient-key-id> < encrypted-envelope.bin | scale <S-01..S-04> | workflow-schema-check < request.json | workflow-canonicalize < value.json | workflow-compile < compile-request.bin | workflow-library-query <application-support-root> < query-request.bin | workflow-library-activate <application-support-root> < activation-request.bin | workflow-library-import-frozen <application-support-root> < import-request.bin | workflow-run-inspect <journal-path> <projection-path> < query.bin | workflow-connector-observation-begin <journal-path> <projection-path> < request.bin | workflow-connector-observation-settle <journal-path> <projection-path> < request.bin | workflow-run-purge <journal-path> <projection-path> <application-support-root> < request.bin | workflow-run-start <journal-path> <projection-path> <application-support-root> < request.json".to_owned()),
     };
     match result {
@@ -507,6 +510,146 @@ fn workflow_schedule_tick(
     serde_json::to_vec(&response)
         .map(hex::encode)
         .map_err(|_| "workflow_schedule_tick_encode_failed".to_owned())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowLibraryPublishRequest {
+    request_id: String,
+    workflow_id: String,
+    package_id: String,
+    name: String,
+    summary: String,
+    /// Full v1 workflow document as JSON text.
+    workflow_json: String,
+    #[serde(default)]
+    layout_json: String,
+    #[serde(default)]
+    schema_bundle_json: String,
+    #[serde(default)]
+    dependency_lock_json: String,
+    #[serde(default)]
+    configuration_contract_json: String,
+    #[serde(default)]
+    release_version: String,
+    #[serde(default)]
+    activate: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowLibraryPublishResponse {
+    request_id: String,
+    workflow_id: String,
+    revision_id: String,
+    package_digest: String,
+    execution_support: String,
+    activated: bool,
+    activation_generation: i64,
+}
+
+/// Creates a draft from a complete workflow document, publishes it as a
+/// revision (compiling through the same validator the executor trusts), and
+/// optionally activates it. This is the first desktop-callable publish path.
+fn workflow_library_publish(application_support: &str) -> Result<String, String> {
+    use kaname_core::workflow_drafts::CreateWorkflowDraft;
+    use kaname_core::workflow_publication::PublishWorkflowRevision;
+    let wire = read_standard_input()?;
+    let request: WorkflowLibraryPublishRequest =
+        serde_json::from_slice(&wire).map_err(|_| "workflow_library_publish_rejected".to_owned())?;
+    if request.request_id.is_empty() || request.workflow_id.is_empty() || request.workflow_json.is_empty() {
+        return Err("workflow_library_publish_rejected".to_owned());
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or_default();
+    let mut store = open_workflow_library(application_support)
+        .map_err(|_| "workflow_library_unavailable".to_owned())?;
+    let draft = store
+        .create_draft(CreateWorkflowDraft {
+            workflow_id: request.workflow_id.clone(),
+            package_id: request.package_id.clone(),
+            name: request.name.clone(),
+            summary: request.summary.clone(),
+            edit_id: format!("edit-{}", request.request_id),
+            session_id: "kaname-desktop".into(),
+            workflow_source: request.workflow_json.clone().into_bytes(),
+            layout_source: if request.layout_json.is_empty() {
+                br#"{"nodes":[]}"#.to_vec()
+            } else {
+                request.layout_json.clone().into_bytes()
+            },
+            recorded_at_unix_millis: now,
+        })
+        .map_err(|error| format!("workflow_library_publish_failed:draft:{error:?}"))?;
+    let revision_id = format!("revision-{}", request.request_id);
+    let published = store
+        .publish_revision(PublishWorkflowRevision {
+            workflow_id: request.workflow_id.clone(),
+            expected_draft_sequence: draft.head_sequence,
+            revision_id: revision_id.clone(),
+            registration_id: format!("registration-{}", request.request_id),
+            release_version: if request.release_version.is_empty() { "1.0.0".into() } else { request.release_version.clone() },
+            schema_bundle_json: if request.schema_bundle_json.is_empty() {
+                br#"{"bundleVersion":1,"schemas":[]}"#.to_vec()
+            } else {
+                request.schema_bundle_json.clone().into_bytes()
+            },
+            dependency_lock_json: if request.dependency_lock_json.is_empty() {
+                br#"{"lockVersion":1,"dependencies":[]}"#.to_vec()
+            } else {
+                request.dependency_lock_json.clone().into_bytes()
+            },
+            configuration_contract_json: if request.configuration_contract_json.is_empty() {
+                br#"{"type":"object"}"#.to_vec()
+            } else {
+                request.configuration_contract_json.clone().into_bytes()
+            },
+            published_at_unix_millis: now,
+        })
+        .map_err(|error| format!("workflow_library_publish_failed:publish:{error:?}"))?;
+    let revision = store
+        .load_workflow_revision(&revision_id, "active")
+        .map_err(|error| format!("workflow_library_publish_failed:load:{error:?}"))?;
+    let execution_support = format!("{:?}", revision.summary.execution_support).to_lowercase();
+    let mut activated = false;
+    let mut activation_generation = 0;
+    if request.activate {
+        let alias_id = format!("alias-active-{}", request.workflow_id);
+        let mut expected_generation = 0;
+        for _ in 0..3 {
+            match store.set_workflow_activation(SetWorkflowActivation {
+                alias_id: alias_id.clone(),
+                workflow_id: request.workflow_id.clone(),
+                alias_key: "active".into(),
+                revision_id: Some(revision_id.clone()),
+                expected_generation,
+                updated_at_unix_millis: now,
+            }) {
+                Ok(outcome) => {
+                    activated = true;
+                    activation_generation = outcome.generation;
+                    break;
+                }
+                Err(kaname_core::workflow_library::WorkflowLibraryError::ActivationConflict { actual, .. }) => {
+                    expected_generation = actual;
+                }
+                Err(error) => return Err(format!("workflow_library_publish_failed:activate:{error:?}")),
+            }
+        }
+    }
+    let json = serde_json::to_vec(&WorkflowLibraryPublishResponse {
+        request_id: request.request_id,
+        workflow_id: request.workflow_id,
+        revision_id,
+        package_digest: published.package_digest,
+        execution_support,
+        activated,
+        activation_generation,
+    })
+    .map_err(|_| "workflow_library_publish_encode_failed".to_owned())?;
+    Ok(hex::encode(json))
 }
 
 #[derive(Deserialize)]

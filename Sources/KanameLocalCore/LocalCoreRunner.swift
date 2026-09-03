@@ -72,6 +72,7 @@ public protocol LocalCoreControlService {
     func settleWorkflowConnectorObservation(_ request: Data, reply: @escaping (Data?, String) -> Void)
     func startWorkflowRun(_ request: Data, reply: @escaping (Data?, String) -> Void)
     func authorizeWorkflowEffect(_ request: Data, reply: @escaping (Data?, String) -> Void)
+    func publishWorkflow(_ request: Data, reply: @escaping (Data?, String) -> Void)
 }
 #endif
 
@@ -292,6 +293,49 @@ public struct LocalCoreRunner: Sendable {
             case status
             case duplicate
         }
+    }
+
+    public struct WorkflowPublishResult: Decodable, Equatable, Sendable {
+        public let requestID: String
+        public let workflowID: String
+        public let revisionID: String
+        public let packageDigest: String
+        public let executionSupport: String
+        public let activated: Bool
+        public let activationGeneration: Int64
+    }
+
+    /// Publishes a complete v1 workflow document into the Rust library as a new
+    /// revision and optionally activates it.
+    public func publishWorkflow(
+        workflowID: String,
+        packageID: String,
+        name: String,
+        summary: String,
+        workflowJSON: String,
+        schemaBundleJSON: String = "",
+        activate: Bool = true,
+        timeout: TimeInterval = 30
+    ) async throws -> WorkflowPublishResult {
+        let requestID = "workflow-publish-\(UUID().uuidString.lowercased())"
+        let request: [String: Any] = [
+            "requestId": requestID,
+            "workflowId": workflowID,
+            "packageId": packageID,
+            "name": name,
+            "summary": summary,
+            "workflowJson": workflowJSON,
+            "schemaBundleJson": schemaBundleJSON,
+            "activate": activate,
+        ]
+        let data = try JSONSerialization.data(withJSONObject: request, options: [.sortedKeys])
+        let output = try await serviceResponse(request: data, timeout: timeout, operation: .publishWorkflow)
+        guard output.count <= Self.maximumWorkflowLibraryResponseBytes,
+              let result = try? JSONDecoder().decode(WorkflowPublishResult.self, from: output),
+              result.requestID == requestID else {
+            throw LocalCoreRunnerError.malformedReport
+        }
+        return result
     }
 
     /// Records the owner's decision for a proposed workflow effect. The run
@@ -546,6 +590,7 @@ private enum LocalCoreServiceOperation {
     case settleWorkflowConnectorObservation
     case startWorkflowRun
     case authorizeWorkflowEffect
+    case publishWorkflow
 
     var maximumResponseBytes: Int {
         switch self {
@@ -615,6 +660,8 @@ private func runBoundedService(
         service.startWorkflowRun(request, reply: reply)
     case .authorizeWorkflowEffect:
         service.authorizeWorkflowEffect(request, reply: reply)
+    case .publishWorkflow:
+        service.publishWorkflow(request, reply: reply)
     }
     guard completion.wait(timeout: .now() + timeout) == .success else {
         connection.invalidate()

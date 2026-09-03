@@ -219,6 +219,20 @@ private final class LocalControlService: NSObject, LocalCoreControlService {
         )
     }
 
+    func publishWorkflow(_ request: Data, reply: @escaping (Data?, String) -> Void) {
+        let applicationSupportRoot = journalDirectory
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        runWireOperation(
+            "workflow-library-publish",
+            request: request,
+            extraArguments: [applicationSupportRoot.path],
+            maximumRequestBytes: LocalCoreRunner.maximumWorkflowLibraryRequestBytes,
+            timeout: 30,
+            reply: reply
+        )
+    }
+
     func authorizeWorkflowEffect(_ request: Data, reply: @escaping (Data?, String) -> Void) {
         let applicationSupportRoot = journalDirectory
             .deletingLastPathComponent()
