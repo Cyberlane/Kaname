@@ -332,12 +332,47 @@ public enum DesktopGlobalSearchFTS {
         matchingDocumentIDs(query: query, rows: rows, limit: limit, databasePath: ":memory:")
     }
 
+    /// Queries a file-backed index that is only rebuilt when the row generation
+    /// changes, so repeated searches over an unchanged workspace skip the
+    /// insert entirely.
+    public static func matchingDocumentIDs(
+        query: DesktopGlobalSearchQuery,
+        rows: [IndexedRow],
+        limit: Int = 50,
+        persistentDatabasePath: String
+    ) -> MatchResult {
+        matchingDocumentIDs(
+            query: query,
+            rows: rows,
+            limit: limit,
+            databasePath: persistentDatabasePath,
+            generationDigest: generationDigest(rows: rows)
+        )
+    }
+
+    /// Stable digest of what would be indexed; equal rows yield equal digests.
+    public static func generationDigest(rows: [IndexedRow]) -> String {
+        var hasher = SHA256()
+        for row in rows {
+            hasher.update(data: Data(row.documentID.utf8))
+            hasher.update(data: Data([0]))
+            hasher.update(data: Data(row.title.utf8))
+            hasher.update(data: Data([0]))
+            hasher.update(data: Data(row.body.utf8))
+            hasher.update(data: Data([0]))
+            hasher.update(data: Data(row.keywords.joined(separator: "\u{1F}").utf8))
+            hasher.update(data: Data([0x1E]))
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
     static func matchingDocumentIDs(
         query: DesktopGlobalSearchQuery,
         rows: [IndexedRow],
         limit: Int,
         databasePath: String,
-        executionProbe: ExecutionProbe = ExecutionProbe()
+        executionProbe: ExecutionProbe = ExecutionProbe(),
+        generationDigest: String? = nil
     ) -> MatchResult {
         guard !query.isEmpty, !rows.isEmpty, limit > 0 else { return .matches([]) }
         let match = rowsQuery(from: query)
@@ -392,10 +427,21 @@ public enum DesktopGlobalSearchFTS {
                 fallback: "Could not create the full-text search schema."
             ))
         }
-        switch insert(rows: rows, into: database, executionProbe: executionProbe) {
-        case .success: break
-        case .cancelled: return .cancelled
-        case let .failure(failure): return .failure(failure)
+        let reuseIndex = generationDigest != nil
+            && databasePath != ":memory:"
+            && storedGeneration(on: database) == generationDigest
+        if !reuseIndex {
+            if databasePath != ":memory:" {
+                _ = sqlite3_exec(database, "DELETE FROM search_index", nil, nil, nil)
+            }
+            switch insert(rows: rows, into: database, executionProbe: executionProbe) {
+            case .success: break
+            case .cancelled: return .cancelled
+            case let .failure(failure): return .failure(failure)
+            }
+            if let generationDigest, databasePath != ":memory:" {
+                storeGeneration(generationDigest, on: database)
+            }
         }
         guard !executionProbe.cancellationRequested() else {
             sqlite3_interrupt(database)
@@ -532,15 +578,32 @@ public enum DesktopGlobalSearchFTS {
 
     private static func createSchema(on database: OpaquePointer?) -> Int32 {
         let sql = """
-        CREATE VIRTUAL TABLE search_index USING fts5(
+        CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
             document_id UNINDEXED,
             title,
             body,
             keywords,
             tokenize='unicode61'
         );
+        CREATE TABLE IF NOT EXISTS search_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
         """
         return sqlite3_exec(database, sql, nil, nil, nil)
+    }
+
+    private static func storedGeneration(on database: OpaquePointer?) -> String? {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, "SELECT value FROM search_meta WHERE key = 'generation'", -1, &statement, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW, let text = sqlite3_column_text(statement, 0) else { return nil }
+        return String(cString: text)
+    }
+
+    private static func storeGeneration(_ digest: String, on database: OpaquePointer?) {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, "INSERT OR REPLACE INTO search_meta(key, value) VALUES ('generation', ?)", -1, &statement, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_text(statement, 1, digest, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        _ = sqlite3_step(statement)
     }
 
     private enum PopulationResult {

@@ -2270,10 +2270,13 @@ private struct DesktopGlobalSearchPalette: View {
                     supplementalRows: ftsRows
                 )
             guard !_Concurrency.Task<Never, Never>.isCancelled else { return nil }
+            let indexPath = KanameDesktopEnvironment.current.desktopDirectory
+                .appendingPathComponent("search-index.sqlite").path
             let search = DesktopGlobalSearch.searchOutput(
                 query: request.query,
                 in: corpus,
-                ftsRows: ftsRows
+                ftsRows: ftsRows,
+                persistentDatabasePath: indexPath
             )
             guard !_Concurrency.Task<Never, Never>.isCancelled else { return nil }
             return DesktopGlobalSearchScheduledOutput(corpus: corpus, search: search)

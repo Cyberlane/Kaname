@@ -674,14 +674,24 @@ public enum DesktopGlobalSearch {
         query: DesktopGlobalSearchQuery,
         in corpus: DesktopGlobalSearchLocalCorpus,
         limit: Int = 50,
-        ftsRows: [DesktopGlobalSearchFTS.IndexedRow] = []
+        ftsRows: [DesktopGlobalSearchFTS.IndexedRow] = [],
+        persistentDatabasePath: String? = nil
     ) -> DesktopGlobalSearchOutput {
         let boundedLimit = min(max(0, limit), maximumResults)
-        let fullTextResult = DesktopGlobalSearchFTS.matchingDocumentIDs(
-            query: query,
-            rows: ftsRows,
-            limit: boundedLimit
-        )
+        let fullTextResult: DesktopGlobalSearchFTS.MatchResult = if let persistentDatabasePath {
+            DesktopGlobalSearchFTS.matchingDocumentIDs(
+                query: query,
+                rows: ftsRows,
+                limit: boundedLimit,
+                persistentDatabasePath: persistentDatabasePath
+            )
+        } else {
+            DesktopGlobalSearchFTS.matchingDocumentIDs(
+                query: query,
+                rows: ftsRows,
+                limit: boundedLimit
+            )
+        }
         return searchOutput(
             query: query,
             in: corpus,
