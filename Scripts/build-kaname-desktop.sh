@@ -50,6 +50,7 @@ service_binary_path="$project_dir/.build/$configuration/KanameLocalControlServic
 update_helper_path="$project_dir/.build/$configuration/KanameUpdateHelper"
 conversation_worker_path="$project_dir/.build/$configuration/KanameConversationWorker"
 workflow_worker_path="$project_dir/.build/$configuration/KanameWorkflowWorker"
+llm_host_path="$project_dir/.build/$configuration/KanameWorkflowLlmHost"
 core_configuration="$configuration"
 if [[ "$configuration" == "debug" ]]; then
     core_binary_path="$project_dir/Rust/KanameCore/target/debug/kaname-local-core"
@@ -113,6 +114,7 @@ swift build -c "$configuration" --product KanameLocalControlService
 swift build -c "$configuration" --product KanameUpdateHelper
 swift build -c "$configuration" --product KanameConversationWorker
 swift build -c "$configuration" --product KanameWorkflowWorker
+swift build -c "$configuration" --product KanameWorkflowLlmHost
 if [[ "$core_configuration" == "debug" ]]; then
     cargo build --locked --manifest-path Rust/KanameCore/Cargo.toml --bin kaname-local-core
     cargo build --locked --manifest-path Rust/KanameLinkCore/Cargo.toml --bin kaname-link-gateway
@@ -184,6 +186,7 @@ cp "$service_binary_path" "$resources_path/KanameLocalControlService"
 cp "$update_helper_path" "$resources_path/KanameUpdateHelper"
 cp "$conversation_worker_path" "$resources_path/KanameConversationWorker"
 cp "$workflow_worker_path" "$resources_path/KanameWorkflowWorker"
+cp "$llm_host_path" "$resources_path/KanameWorkflowLlmHost"
 cp "$core_binary_path" "$resources_path/kaname-local-core"
 cp "$link_gateway_binary_path" "$resources_path/kaname-link-gateway"
 cp "$project_dir/LICENSE" "$resources_path/LICENSE"
@@ -199,11 +202,12 @@ jq -n \
     '{schemaVersion: 1, channel: $channel, bundleIdentifier: $bundleIdentifier, version: $version, build: $build, minimumWorkspaceSchema: 1, maximumWorkspaceSchema: $maximumWorkspaceSchema, releaseNotes: $releaseNotes}' \
     > "$resources_path/KanameUpdateManifest.json"
 chmod 755 "$contents_path/MacOS/KanamePrototype"
-chmod 755 "$resources_path/KanameLocalControlService" "$resources_path/KanameUpdateHelper" "$resources_path/KanameConversationWorker" "$resources_path/KanameWorkflowWorker" "$resources_path/kaname-local-core" "$resources_path/kaname-link-gateway"
+chmod 755 "$resources_path/KanameLocalControlService" "$resources_path/KanameUpdateHelper" "$resources_path/KanameConversationWorker" "$resources_path/KanameWorkflowWorker" "$resources_path/KanameWorkflowLlmHost" "$resources_path/kaname-local-core" "$resources_path/kaname-link-gateway"
 codesign "${codesign_arguments[@]}" --identifier "$service_identifier" "$resources_path/KanameLocalControlService"
 codesign "${codesign_arguments[@]}" --identifier "$identifier.update-helper" "$resources_path/KanameUpdateHelper"
 codesign "${codesign_arguments[@]}" --identifier "$identifier.conversation-worker" "$resources_path/KanameConversationWorker"
 codesign "${codesign_arguments[@]}" --identifier "$identifier.workflow-worker" "$resources_path/KanameWorkflowWorker"
+codesign "${codesign_arguments[@]}" --identifier "$identifier.workflow-llm-host" "$resources_path/KanameWorkflowLlmHost"
 codesign "${codesign_arguments[@]}" --identifier "$core_identifier" "$resources_path/kaname-local-core"
 codesign "${codesign_arguments[@]}" --identifier "$link_gateway_identifier" "$resources_path/kaname-link-gateway"
 codesign "${codesign_arguments[@]}" --identifier "$identifier" "$app_path"
