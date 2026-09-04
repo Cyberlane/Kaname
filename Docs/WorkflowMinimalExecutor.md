@@ -21,7 +21,7 @@ difference between them is how an occurrence is admitted, not how it executes.
   `event-id` or `contract-key`. Trigger `correlation` binds an event to an
   already running case and is not executable, so the configured array must be
   absent or empty. Kaname offers these contracts through
-  `workflow-event-fanout`: `mail.message.received` (Gmail deltas, app open),
+  `workflow-event-fanout`: `mail.message.received` (Gmail deltas, app open; carries sender, recipients, subject, date, labels, snippet, and a bounded body excerpt),
   `calendar.event.changed` (Google Calendar sync tokens, app open),
   `github.notification.received` (the `gh` user's inbox, polled by the local control service so it works with the app closed), and any
   contract posted to the local control service's webhook
