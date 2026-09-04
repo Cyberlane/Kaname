@@ -14,6 +14,8 @@ Commands
   run              Build (debug), then launch the Development app, replacing a running one.
   logs             Tail the newest Development UI logs and the local-core service log.
   test [swift|rust]  Run Rust core tests, then Swift tests where the toolchain has them.
+  smoke            Run the Newsletter triage flow through the core with the real hosts
+                   (one small model call) and assert it parks on the approval gate.
   clean            Remove .build and Rust target directories.
   doctor           Report toolchain facts that decide what works on this Mac.
 
@@ -149,6 +151,9 @@ case "$command_name" in
                 echo "dev: swift test needs Xcode (Swift Testing module); skipped on Command Line Tools." >&2
             fi
         fi
+        ;;
+    smoke)
+        exec "$script_dir/smoke-workflow-triage.sh"
         ;;
     clean)
         rm -rf "$project_dir/.build" "$project_dir/Rust/KanameCore/target" "$project_dir/Rust/KanameLinkCore/target"

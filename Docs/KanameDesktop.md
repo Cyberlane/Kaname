@@ -60,6 +60,7 @@ Scripts/dev.sh build    # debug-build every bundled Swift product and both Rust 
 Scripts/dev.sh run      # build, then launch the Development app, replacing a running one
 Scripts/dev.sh logs     # tail the newest UI logs and the local-core service log
 Scripts/dev.sh test     # Rust core tests, then Swift tests when Xcode is installed
+Scripts/dev.sh smoke    # Newsletter triage through the core with real hosts; one small model call
 ```
 
 On a Mac with Command Line Tools only, `dev.sh` puts the `swift-flow` dependency into edit mode and strips its `#Preview` blocks, because the previews macro ships only with Xcode. `Package.resolved` is rewritten while a package is in edit mode; do not commit that change. CI runs `.github/workflows/kaname-desktop-ci.yml`: Rust core format, lint, and tests, then a debug build of every bundled Swift product and the domain, protocol, and desktop test suites.
