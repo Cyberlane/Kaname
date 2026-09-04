@@ -46,7 +46,9 @@ final class DesktopAutomationRunWatcher: @unchecked Sendable {
             let observations = snapshot.runs.map { item in
                 (
                     runID: item.run.runID,
-                    status: item.run.status,
+                    // A run parked on a proposed effect reports failed with
+                    // effect.not-authorized; that is the approval gate, not a failure.
+                    status: item.run.errorCode == "effect.not-authorized" ? "awaiting-approval" : item.run.status,
                     name: item.graph?.name ?? item.run.workflowID,
                     proposedEffectIDs: item.run.effectAuthorities.filter { $0.status == "proposed" }.map(\.effectID)
                 )

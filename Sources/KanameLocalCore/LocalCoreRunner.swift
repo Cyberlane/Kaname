@@ -371,6 +371,7 @@ public struct LocalCoreRunner: Sendable {
         summary: String,
         workflowJSON: String,
         schemaBundleJSON: String = "",
+        dependencyLockJSON: String = "",
         activate: Bool = true,
         timeout: TimeInterval = 30
     ) async throws -> WorkflowPublishResult {
@@ -383,6 +384,7 @@ public struct LocalCoreRunner: Sendable {
             "summary": summary,
             "workflowJson": workflowJSON,
             "schemaBundleJson": schemaBundleJSON,
+            "dependencyLockJson": dependencyLockJSON,
             "activate": activate,
         ]
         let data = try JSONSerialization.data(withJSONObject: request, options: [.sortedKeys])

@@ -89,6 +89,89 @@ final class DesktopDurableWorkflowRunsViewModel: ObservableObject {
         await reload()
     }
 
+    // MARK: Newsletter triage template (first real mail flow)
+
+    /// First form of the gmail-assistant newsletters flow on the Rust executor:
+    /// mail.message.received → compute.llm (fast) classifies the message from
+    /// the enriched trigger input and echoes the ids → control.decision on
+    /// isNewsletter → effect.connector applies the Newsletters label, gated by
+    /// the usual effect approval. The label id is looked up in Gmail at
+    /// install time; the model copies conversationId/accountId under schema
+    /// validation so the effect can address the thread.
+    static let newsletterTriageWorkflowID = "018f6000-0001-7000-8000-000000000001"
+    static let newsletterLabelPlaceholder = "__NEWSLETTER_LABEL_ID__"
+
+    static let newsletterTriageSchemaBundleJSON = """
+    {"bundleVersion":1,"schemas":[{"id":"dev.kaname.newsletter-triage/classification/v1","schema":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["isNewsletter","confidence","reason","conversationId","accountId","destinationFingerprint"],"properties":{"isNewsletter":{"type":"boolean"},"confidence":{"type":"number","minimum":0,"maximum":1},"reason":{"type":"string","maxLength":400},"conversationId":{"type":"string","minLength":1},"accountId":{"type":"string","minLength":1},"destinationFingerprint":{"type":"string","pattern":"^[0-9a-f]{64}$"}},"additionalProperties":false}}]}
+    """
+
+    /// Pins the mail connector the effect node depends on; the compiler refuses
+    /// effect nodes whose connector is not in the lock.
+    static let newsletterTriageDependencyLockJSON = """
+    {"lockVersion":1,"dependencies":[{"kind":"connector","id":"dev.kaname.mail","digest":"sha256:kaname-desktop-mail-connector"}]}
+    """
+
+    static let newsletterTriageWorkflowJSONTemplate = """
+    {"formatVersion":1,"workflowId":"018f6000-0001-7000-8000-000000000001","packageId":"dev.kaname.newsletter-triage","name":"Newsletter triage","summary":"New mail is classified by a fast model; newsletters get the Newsletters label after approval.","graph":{"entrypoints":[{"id":"018f6000-0011-7000-8000-000000000011","nodeId":"018f6000-0101-7000-8000-000000000101"}],"nodes":[{"id":"018f6000-0101-7000-8000-000000000101","key":"mail-received","name":"Mail received","type":"trigger.event","typeVersion":1,"config":{"eventContract":"mail.message.received","deduplication":"event-id"}},{"id":"018f6000-0102-7000-8000-000000000102","key":"classify","name":"Classify newsletter","type":"compute.llm","typeVersion":1,"config":{"modelClass":"fast","instructions":"You classify exactly one email for triage. Return only JSON matching the registered schema. Set isNewsletter to true when the message is bulk content: a newsletter, marketing or promotional mailing, digest, product update, or automated mailing-list post. A List-Unsubscribe header is a strong signal. Personal replies, receipts and invoices, security or account alerts, calendar invitations, and direct work correspondence are not newsletters. Set confidence between 0 and 1 and give a one-sentence reason. Copy conversationId, accountId, and destinationFingerprint exactly as given in the input, character for character.","prompt":{"object":{"conversationId":{"select":{"root":"input","pointer":"/conversationId"}},"accountId":{"select":{"root":"input","pointer":"/accountId"}},"sender":{"coalesce":[{"select":{"root":"input","pointer":"/sender"}},{"literal":{"type":"string","value":""}}]},"recipients":{"coalesce":[{"select":{"root":"input","pointer":"/recipients"}},{"literal":{"type":"string","value":""}}]},"subject":{"coalesce":[{"select":{"root":"input","pointer":"/subject"}},{"literal":{"type":"string","value":""}}]},"listUnsubscribe":{"coalesce":[{"select":{"root":"input","pointer":"/listUnsubscribe"}},{"literal":{"type":"string","value":""}}]},"snippet":{"coalesce":[{"select":{"root":"input","pointer":"/snippet"}},{"literal":{"type":"string","value":""}}]},"bodyExcerpt":{"coalesce":[{"select":{"root":"input","pointer":"/bodyExcerpt"}},{"literal":{"type":"string","value":""}}]},"destinationFingerprint":{"select":{"root":"input","pointer":"/destinationFingerprint"}}}},"context":[],"tools":[],"outputSchemaRef":"dev.kaname.newsletter-triage/classification/v1","reasoningEffort":"low","temperatureMilli":0,"maximumContextBytes":32768,"maximumOutputTokens":512}},{"id":"018f6000-0103-7000-8000-000000000103","key":"is-newsletter","name":"Is it a newsletter?","type":"control.decision","typeVersion":1,"config":{"when":{"compare":{"left":{"root":"input","pointer":"/isNewsletter"},"operator":"equal","right":{"literal":{"type":"boolean","value":true}}}}}},{"id":"018f6000-0104-7000-8000-000000000104","key":"label-newsletter","name":"Apply Newsletters label","type":"effect.connector","typeVersion":1,"config":{"connectorClass":"dev.kaname.mail","action":"label","input":{"object":{"accountBindingId":{"select":{"root":"input","pointer":"/accountId"}},"accountId":{"select":{"root":"input","pointer":"/accountId"}},"destinationFingerprint":{"select":{"root":"input","pointer":"/destinationFingerprint"}},"conversationIds":{"array":[{"select":{"root":"input","pointer":"/conversationId"}}]},"addLabelIds":{"array":[{"literal":{"type":"string","value":"__NEWSLETTER_LABEL_ID__"}}]}}},"previewContract":"mail.label.preview.v1","reconciliationContract":"mail.label.reconcile.v1","idempotency":"required"},"policyRefs":{"authority":"owner-approval"}},{"id":"018f6000-0105-7000-8000-000000000105","key":"labelled","name":"Labelled","type":"terminal.complete","typeVersion":1,"config":{}},{"id":"018f6000-0106-7000-8000-000000000106","key":"not-newsletter","name":"Not a newsletter","type":"terminal.complete","typeVersion":1,"config":{}},{"id":"018f6000-0107-7000-8000-000000000107","key":"classify-failed","name":"Classification failed","type":"terminal.fail","typeVersion":1,"config":{"error":{"whole":true}}},{"id":"018f6000-0108-7000-8000-000000000108","key":"decision-failed","name":"Decision failed","type":"terminal.fail","typeVersion":1,"config":{"error":{"whole":true}}},{"id":"018f6000-0109-7000-8000-000000000109","key":"label-failed","name":"Label failed","type":"terminal.fail","typeVersion":1,"config":{"error":{"whole":true}}}],"edges":[{"id":"018f6100-0001-7000-8000-000000000001","from":{"nodeId":"018f6000-0101-7000-8000-000000000101","portId":"success"},"to":{"nodeId":"018f6000-0102-7000-8000-000000000102","portId":"input"},"mappingId":"018f6200-0001-7000-8000-000000000001","mapping":{"whole":true}},{"id":"018f6100-0002-7000-8000-000000000002","from":{"nodeId":"018f6000-0102-7000-8000-000000000102","portId":"success"},"to":{"nodeId":"018f6000-0103-7000-8000-000000000103","portId":"input"},"mappingId":"018f6200-0002-7000-8000-000000000002","mapping":{"whole":true}},{"id":"018f6100-0003-7000-8000-000000000003","from":{"nodeId":"018f6000-0102-7000-8000-000000000102","portId":"error"},"to":{"nodeId":"018f6000-0107-7000-8000-000000000107","portId":"input"},"mappingId":"018f6200-0003-7000-8000-000000000003","mapping":{"whole":true}},{"id":"018f6100-0004-7000-8000-000000000004","from":{"nodeId":"018f6000-0103-7000-8000-000000000103","portId":"matched"},"to":{"nodeId":"018f6000-0104-7000-8000-000000000104","portId":"input"},"mappingId":"018f6200-0004-7000-8000-000000000004","mapping":{"whole":true}},{"id":"018f6100-0005-7000-8000-000000000005","from":{"nodeId":"018f6000-0103-7000-8000-000000000103","portId":"not-matched"},"to":{"nodeId":"018f6000-0106-7000-8000-000000000106","portId":"input"},"mappingId":"018f6200-0005-7000-8000-000000000005","mapping":{"whole":true}},{"id":"018f6100-0006-7000-8000-000000000006","from":{"nodeId":"018f6000-0103-7000-8000-000000000103","portId":"error"},"to":{"nodeId":"018f6000-0108-7000-8000-000000000108","portId":"input"},"mappingId":"018f6200-0006-7000-8000-000000000006","mapping":{"whole":true}},{"id":"018f6100-0007-7000-8000-000000000007","from":{"nodeId":"018f6000-0104-7000-8000-000000000104","portId":"success"},"to":{"nodeId":"018f6000-0105-7000-8000-000000000105","portId":"input"},"mappingId":"018f6200-0007-7000-8000-000000000007","mapping":{"whole":true}},{"id":"018f6100-0008-7000-8000-000000000008","from":{"nodeId":"018f6000-0104-7000-8000-000000000104","portId":"error"},"to":{"nodeId":"018f6000-0109-7000-8000-000000000109","portId":"input"},"mappingId":"018f6200-0008-7000-8000-000000000008","mapping":{"whole":true}}]},"interfaces":{},"resources":{},"policies":{"owner-approval":{"key":"owner-approval","type":"authority","typeVersion":1,"config":{"authorityClass":"local-user","approval":"always","reversible":true}}},"storage":{},"metadata":{"source":"kaname-template","template":"newsletter-triage"}}
+    """
+
+    /// Finds the Gmail label named Newsletters (or Kaname/Newsletters) on the
+    /// first connected account, publishes the triage workflow bound to it, and
+    /// activates it. Explains what to create when the label is missing.
+    func installNewsletterTriage() async {
+        guard let runner, !isStarting else { return }
+        isStarting = true
+        defer { isStarting = false }
+        let environment = KanameDesktopEnvironment.current
+        let adapter = GmailMailProviderAdapter(service: NativeGoogleIntegrationService(
+            rootDirectory: environment.googleDirectory,
+            keychainService: environment.googleKeychainService,
+            clientConfiguration: nil,
+            accessMode: environment.googleIntegrationAccessMode
+        ))
+        var labelID: String?
+        var accountAddress = ""
+        do {
+            let accounts = try await adapter.accounts()
+            guard let account = accounts.first else {
+                startMessage = "Connect a Google account in Settings > Accounts first; the triage flow labels mail in Gmail."
+                return
+            }
+            accountAddress = account.address
+            let resources = try await adapter.resources(accountID: account.identity.localID)
+            labelID = resources.first {
+                let name = $0.name.lowercased()
+                return name == "newsletters" || name == "kaname/newsletters" || name.hasSuffix("/newsletters")
+            }?.id
+        } catch {
+            startMessage = "Could not read Gmail labels: \(error.localizedDescription)"
+            return
+        }
+        guard let labelID else {
+            startMessage = "Create a Gmail label named Newsletters on \(accountAddress), then install again. The flow applies that label to classified newsletters."
+            return
+        }
+        let workflowJSON = Self.newsletterTriageWorkflowJSONTemplate
+            .replacingOccurrences(of: Self.newsletterLabelPlaceholder, with: labelID)
+        do {
+            let result = try await runner.publishWorkflow(
+                workflowID: Self.newsletterTriageWorkflowID,
+                packageID: "dev.kaname.newsletter-triage",
+                name: "Newsletter triage",
+                summary: "Classify new mail with a fast model; label newsletters after approval.",
+                workflowJSON: workflowJSON,
+                schemaBundleJSON: Self.newsletterTriageSchemaBundleJSON,
+                dependencyLockJSON: Self.newsletterTriageDependencyLockJSON,
+                activate: true
+            )
+            startMessage = "Newsletter triage published as revision \(result.revisionID.suffix(8)) (\(result.executionSupport))\(result.activated ? ", active" : ""). New mail on \(accountAddress) now runs through it while Kaname is open; approve each label effect here until a standing rule exists."
+        } catch {
+            startMessage = "Newsletter triage install failed: \(error.localizedDescription)"
+        }
+        await loadRunnableWorkflows()
+        await reload()
+    }
+
     // MARK: Interval schedules (host state read by the control service's tick)
 
     @Published private(set) var scheduleSeconds: [String: Int] = [:]
@@ -404,11 +487,18 @@ struct DesktopDurableWorkflowRunsView: View {
     /// Manual trigger for any active, executable revision on the Rust executor.
     @ViewBuilder private var runWorkflowMenu: some View {
         if viewModel.runnableWorkflows.isEmpty {
-            Button("Install sample workflow", systemImage: "square.and.arrow.down") {
-                Task { await viewModel.installSampleWorkflow() }
+            Menu {
+                Button("Sample: route a number", systemImage: "square.and.arrow.down") {
+                    Task { await viewModel.installSampleWorkflow() }
+                }
+                Button("Newsletter triage (mail → classify → label)", systemImage: "envelope.badge") {
+                    Task { await viewModel.installNewsletterTriage() }
+                }
+            } label: {
+                Label("Install workflow", systemImage: "square.and.arrow.down")
             }
             .disabled(viewModel.isStarting)
-            .help("Publishes a small manual workflow into the Rust library so runs can be tried")
+            .help("Publishes a ready-made workflow into the Rust library")
         } else {
             TextField("Run input JSON, e.g. {\"route\": 5}", text: $viewModel.runInputJSON)
                 .textFieldStyle(.roundedBorder)
@@ -419,6 +509,12 @@ struct DesktopDurableWorkflowRunsView: View {
                     ForEach(viewModel.runnableWorkflows) { item in
                         Button(item.name) { Task { await viewModel.startRun(item) } }
                     }
+                }
+                Section("Install") {
+                    Button("Newsletter triage (mail → classify → label)") {
+                        Task { await viewModel.installNewsletterTriage() }
+                    }
+                    .disabled(viewModel.isStarting)
                 }
                 Section("Schedule") {
                     ForEach(viewModel.runnableWorkflows) { item in
@@ -571,36 +667,43 @@ struct DesktopDurableWorkflowRunsView: View {
     private func failureSummary(_ snapshot: DesktopWorkflowRunSnapshot) -> some View {
         if let failure = snapshot.run.failurePoint {
             let nodeName = failure.nodeID.flatMap { id in snapshot.graph?.nodes.first { $0.id == id }?.name }
+            let awaiting = failure.isAwaitingApproval
+            let tint = awaiting ? KanameColor.warning : KanameColor.danger
             Button {
                 if let nodeID = failure.nodeID {
                     selectedNodeID = nodeID
-                    inspectorGroup = .error
+                    inspectorGroup = awaiting ? .effect : .error
                 }
             } label: {
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    Image(systemName: "xmark.octagon.fill").foregroundStyle(KanameColor.danger)
+                    Image(systemName: awaiting ? "hand.raised.circle.fill" : "xmark.octagon.fill").foregroundStyle(tint)
                     VStack(alignment: .leading, spacing: 3) {
                         HStack(spacing: 6) {
-                            Text(nodeName.map { "Failed at \($0)" } ?? "Run failed")
+                            Text(awaiting
+                                ? (nodeName.map { "Waiting for your approval at \($0)" } ?? "Waiting for your approval")
+                                : (nodeName.map { "Failed at \($0)" } ?? "Run failed"))
                                 .font(.caption.weight(.bold))
-                            Text(failure.failureClass.label)
+                            Text(awaiting ? "Approval" : failure.failureClass.label)
                                 .font(.caption2.weight(.semibold))
                                 .padding(.horizontal, 6).padding(.vertical, 2)
-                                .background(KanameColor.danger.opacity(0.14), in: Capsule())
-                                .foregroundStyle(KanameColor.danger)
+                                .background(tint.opacity(0.14), in: Capsule())
+                                .foregroundStyle(tint)
                             Text(failure.errorCode)
                                 .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
                         }
-                        Text(failure.failureClass.explanation).font(.caption2).foregroundStyle(.secondary)
+                        Text(awaiting
+                            ? "The effect is proposed. Approve or reject it below; the run continues on approval."
+                            : failure.failureClass.explanation)
+                            .font(.caption2).foregroundStyle(.secondary)
                     }
                     Spacer()
                     if failure.nodeID != nil {
-                        Label("Open error", systemImage: "arrow.right.circle").font(.caption2)
+                        Label(awaiting ? "Open effect" : "Open error", systemImage: "arrow.right.circle").font(.caption2)
                     }
                 }
                 .padding(10)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(KanameColor.danger.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
             }
             .buttonStyle(.plain)
         }

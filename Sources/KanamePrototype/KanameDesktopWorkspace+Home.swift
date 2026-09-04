@@ -45,7 +45,7 @@ struct DesktopHomeView: View {
         var next = AutomationAttention()
         for item in snapshot.runs {
             next.proposedEffects += item.run.effectAuthorities.filter { $0.status == "proposed" }.count
-            if item.run.status == "failed" {
+            if item.run.status == "failed", item.run.errorCode != "effect.not-authorized" {
                 next.failedRuns += 1
                 let name = item.graph?.name ?? item.run.workflowID
                 if !next.failedWorkflowNames.contains(name) { next.failedWorkflowNames.append(name) }

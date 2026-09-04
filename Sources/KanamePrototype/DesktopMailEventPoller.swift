@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import KanameConnectivity
 import KanameDesktop
@@ -19,6 +20,10 @@ final class DesktopMailEventPoller: @unchecked Sendable {
     static let shared = DesktopMailEventPoller()
     static let eventContract = "mail.message.received"
     static let maximumEnrichmentsPerPoll = 40
+
+    static func destinationFingerprint(accountID: String, conversationID: String) -> String {
+        SHA256.hash(data: Data("gmail:\(accountID):\(conversationID)".utf8)).map { String(format: "%02x", $0) }.joined()
+    }
 
     private let queue = DispatchQueue(label: "com.cyberlane.kaname.mail-event-poller", qos: .utility)
     private var timer: DispatchSourceTimer?
@@ -83,6 +88,9 @@ final class DesktopMailEventPoller: @unchecked Sendable {
                             "accountId": accountID,
                             "messageId": event.messageID,
                             "conversationId": event.conversationID,
+                            // Mail effects pin their target by a 64-hex digest; workflows
+                            // pass this through to label, archive, or mark the thread.
+                            "destinationFingerprint": Self.destinationFingerprint(accountID: accountID, conversationID: event.conversationID),
                             "resourceIds": event.resourceIDs,
                             "cursor": event.cursor,
                             "provider": "gmail",

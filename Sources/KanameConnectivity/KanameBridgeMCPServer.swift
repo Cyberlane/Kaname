@@ -107,7 +107,7 @@ public actor KanameBridgeMCPServer {
     Node types, config keys, and ports:
     - trigger.manual {} → out: success. Optional config.inputSchemaRef.
     - trigger.schedule {"scheduleKey":"<key>","misfirePolicy":"skip"|"run-once"} → out: success. Cadence is set by the user in Kaname, not in the graph.
-    - trigger.event {"eventContract":"<contract>","deduplication":"event-id"|"contract-key"} → out: success. Contracts Kaname emits: mail.message.received {accountBindingId, accountId, accountAddress, messageId, conversationId, resourceIds, labelIds, sender, recipients, subject, date, snippet, bodyExcerpt (≤4 KB), attachmentCount, listUnsubscribe, cursor, provider} so a compute.llm node can classify the mail from the trigger input alone; calendar.event.changed {accountId, calendarId, calendarName, eventId, recurringEventId, title, startAtUnixMillis, endAtUnixMillis, timeZone, isAllDay, revision}; github.notification.received {notificationId, reason, unread, updatedAt, repository, subjectTitle, subjectType, subjectUrl}; any custom contract posted to the local webhook (POST http://127.0.0.1:<port>/hook/<contract> with the bearer token shown in Run history; the JSON body becomes the input, optional eventId and contractKey keys drive deduplication).
+    - trigger.event {"eventContract":"<contract>","deduplication":"event-id"|"contract-key"} → out: success. Contracts Kaname emits: mail.message.received {accountBindingId, accountId, accountAddress, messageId, conversationId, destinationFingerprint (64-hex digest mail effects require), resourceIds, labelIds, sender, recipients, subject, date, snippet, bodyExcerpt (≤4 KB), attachmentCount, listUnsubscribe, cursor, provider} so a compute.llm node can classify the mail from the trigger input alone; calendar.event.changed {accountId, calendarId, calendarName, eventId, recurringEventId, title, startAtUnixMillis, endAtUnixMillis, timeZone, isAllDay, revision}; github.notification.received {notificationId, reason, unread, updatedAt, repository, subjectTitle, subjectType, subjectUrl}; any custom contract posted to the local webhook (POST http://127.0.0.1:<port>/hook/<contract> with the bearer token shown in Run history; the JSON body becomes the input, optional eventId and contractKey keys drive deduplication).
     - data.validate {"schemaRef":"<schema id in schemaBundle>"} in: input → out: success, error.
     - data.map {"mapping":<expression>} in: input → out: success, error.
     - control.decision {"when":{"compare":{"left":<expr>,"operator":"equal"|"not-equal"|"greater"|"less"|"contains"|"exists","right":<expr>}}} in: input → out: matched, not-matched, error.
@@ -120,7 +120,8 @@ public actor KanameBridgeMCPServer {
     - control.reconcile {"effect":"<effect node id>","maximumChecks":N} in: unknown → out: success, failure, still-unknown.
     - compute.llm {"modelClass":"fast"|"balanced"|"reasoning","instructions":"…","prompt":<expr>,"context":[],"tools":[],"outputSchemaRef":"<schema id>","reasoningEffort":"low"|"medium"|"high","temperatureMilli":0,"maximumContextBytes":65536,"maximumOutputTokens":1024} in: input → out: success, error. The model answers JSON matching outputSchemaRef.
     - compute.capability {"capabilityId":"…","version":"…","input":<expr>,"outputSchemaRef":"…"} in: input → out: success, error.
-    - effect.connector {"connectorClass":"mail","action":"send"|"draft"|"archive"|"label"|"trash"|"mark-read","input":<expr producing {accountBindingId, destinationFingerprint, conversationIds?, addLabelIds?, removeLabelIds?, recipients?, subject?, body?}>,"previewContract":"…","reconciliationContract":"…","idempotency":"required"} in: input → out: success, error. The user approves each effect in Run history unless a standing rule exists.
+    - effect.connector {"connectorClass":"dev.kaname.mail","action":"send"|"draft"|"archive"|"label"|"trash"|"mark-read","input":<expr producing {accountBindingId, accountId, destinationFingerprint, conversationIds?, addLabelIds?, removeLabelIds?, recipients?, subject?, body?}>,"previewContract":"…","reconciliationContract":"…","idempotency":"required"} in: input → out: success, error. The user approves each effect in Run history unless a standing rule exists. Every effect node also needs "policyRefs":{"authority":"<policy key>"} pointing at a top-level policy {"key":"<policy key>","type":"authority","typeVersion":1,"config":{"authorityClass":"local-user","approval":"always","reversible":true}} in the document's "policies" map, and the publish call needs dependencyLockJson pinning {"kind":"connector","id":"dev.kaname.mail","digest":"sha256:…"}.
+    Downstream nodes only see the value on their incoming edge, so when a compute.llm result must be acted on, make its output schema include the ids the effect needs (conversationId, accountId, and destinationFingerprint with pattern ^[0-9a-f]{64}$) and tell the model to copy them from the input character for character.
     - storage.read/write/promote for durable scoped values; terminal.complete {"output":<expr>?}, terminal.fail {"error":<expr>}, terminal.cancel {"reason":…} in: input.
 
     schemaBundleJson: {"bundleVersion":1,"schemas":[{"id":"<schema id>","schema":{…JSON Schema…}}]} for every schemaRef and outputSchemaRef you use.
@@ -358,6 +359,7 @@ public actor KanameBridgeMCPServer {
                     "summary": ["type": "string"],
                     "workflowJson": ["type": "string", "description": "The full workflow document as a JSON string."],
                     "schemaBundleJson": ["type": "string", "description": "Optional schema bundle JSON string for schemaRef and outputSchemaRef ids."],
+                    "dependencyLockJson": ["type": "string", "description": "Optional dependency lock JSON: {\"lockVersion\":1,\"dependencies\":[{\"kind\":\"connector\",\"id\":\"dev.kaname.mail\",\"digest\":\"sha256:…\"}]}. Required when the graph has effect.connector, compute.capability, control.subflow, or compute.llm tools."],
                     "activate": ["type": "boolean"],
                 ],
                 "required": ["name", "workflowJson"],
@@ -503,6 +505,7 @@ public actor KanameBridgeMCPServer {
             let summary = (arguments["summary"] as? String) ?? (document["summary"] as? String) ?? ""
             let packageID = (document["packageId"] as? String) ?? "dev.kaname.authored"
             let schemaBundle = (arguments["schemaBundleJson"] as? String) ?? ""
+            let dependencyLock = (arguments["dependencyLockJson"] as? String) ?? ""
             let activate = (arguments["activate"] as? Bool) ?? true
             do {
                 let result = try await publisher.publishWorkflow(
@@ -512,6 +515,7 @@ public actor KanameBridgeMCPServer {
                     summary: summary,
                     workflowJSON: workflowJSON,
                     schemaBundleJSON: schemaBundle,
+                    dependencyLockJSON: dependencyLock,
                     activate: activate
                 )
                 await emit(CodexRunEvent(

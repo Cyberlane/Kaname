@@ -1086,6 +1086,10 @@ public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
         public let errorCode: String
         public let failureClass: DesktopWorkflowFailureClass
         public let error: DesktopWorkflowProjectedValue?
+
+        /// The run stopped at an effect that is proposed and waiting for the
+        /// owner's decision; it continues once approved.
+        public var isAwaitingApproval: Bool { errorCode == "effect.not-authorized" }
     }
 
     public var failurePoint: FailurePoint? {
