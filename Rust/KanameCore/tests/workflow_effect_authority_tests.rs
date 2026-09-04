@@ -202,6 +202,7 @@ fn successful_dispatch_is_idempotent_across_duplicate_requests_and_restart() {
             .dispatch_settled
             .as_ref()
             .and_then(|value| value.receipt.clone()),
+        input: None,
     };
     let _ = connector.dispatch(&connector_request);
     assert_eq!(connector.dispatch_count("idempotency-success"), 1);

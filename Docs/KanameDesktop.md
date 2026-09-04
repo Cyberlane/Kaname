@@ -49,6 +49,21 @@ For a faster development build:
 KANAME_BUILD_CONFIGURATION=debug Scripts/build-kaname-desktop.sh
 ```
 
+### Developer loop
+
+`Scripts/dev.sh` is the one entry point for day-to-day work on the Development channel:
+
+```sh
+Scripts/dev.sh doctor   # toolchain facts (Xcode vs Command Line Tools, CLIs present)
+Scripts/dev.sh check    # fast compile check of the app and the Rust core
+Scripts/dev.sh build    # debug-build every bundled Swift product and both Rust binaries
+Scripts/dev.sh run      # build, then launch the Development app, replacing a running one
+Scripts/dev.sh logs     # tail the newest UI logs and the local-core service log
+Scripts/dev.sh test     # Rust core tests, then Swift tests when Xcode is installed
+```
+
+On a Mac with Command Line Tools only, `dev.sh` puts the `swift-flow` dependency into edit mode and strips its `#Preview` blocks, because the previews macro ships only with Xcode. `Package.resolved` is rewritten while a package is in edit mode; do not commit that change. CI runs `.github/workflows/kaname-desktop-ci.yml`: Rust core format, lint, and tests, then a debug build of every bundled Swift product and the domain, protocol, and desktop test suites.
+
 ## Removal
 
 Quit Kaname, then unload `com.cyberlane.kaname.desktop.localcore.service` from the current GUI domain. The app, LaunchAgent plist, desktop workspace, and local-core journals can then be reviewed and removed independently; no mobile state is involved.
