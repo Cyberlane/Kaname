@@ -323,6 +323,7 @@ struct DesktopDurableWorkflowRunsView: View {
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     runWorkflowMenu
+                    webhookMenu
                     Button("Refresh", systemImage: "arrow.clockwise") { Task { await viewModel.reload() } }
                 }
                 if let message = viewModel.startMessage {
@@ -359,6 +360,42 @@ struct DesktopDurableWorkflowRunsView: View {
                 .onAppear { selectInitialRun(in: history) }
             }
             .frame(minHeight: 760)
+        }
+    }
+
+    /// Where external systems post events while the app is closed. The local
+    /// control service owns the port and token; this only shows them.
+    @ViewBuilder private var webhookMenu: some View {
+        if let endpoint = DesktopWorkflowEventPolling.webhookEndpoint(KanameDesktopEnvironment.current) {
+            Menu {
+                Section("Local webhook (fires with the app closed)") {
+                    Text("POST \(endpoint.url(for: "<event-contract>"))")
+                    Text("Authorization: Bearer <token>")
+                    Text("The JSON body becomes the trigger input. Optional eventId and contractKey keys drive deduplication.")
+                }
+                Button("Copy example curl") {
+                    let example = [
+                        "curl -X POST '\(endpoint.url(for: "my.event"))' \\",
+                        "  -H 'Authorization: Bearer \(endpoint.token)' \\",
+                        "  -H 'Content-Type: application/json' \\",
+                        "  -d '{\"eventId\":\"example-1\",\"hello\":\"world\"}'",
+                    ].joined(separator: "\n")
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(example, forType: .string)
+                }
+                Button("Copy bearer token") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(endpoint.token, forType: .string)
+                }
+                Section("Pollers while the app is open") {
+                    Text("mail.message.received · every 2 min")
+                    Text("calendar.event.changed · every 5 min")
+                    Text("github.notification.received · every 3 min")
+                }
+            } label: {
+                Label("Triggers", systemImage: "antenna.radiowaves.left.and.right")
+            }
+            .help("Webhook endpoint and pollers that turn outside events into trigger.event runs")
         }
     }
 
@@ -418,6 +455,7 @@ struct DesktopDurableWorkflowRunsView: View {
             }
             HStack {
                 runWorkflowMenu
+                webhookMenu
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Workflow run history").font(.headline)
                     Text("Journal position \(history.projectionHighWaterMark)")

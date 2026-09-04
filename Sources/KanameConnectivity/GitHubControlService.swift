@@ -16,6 +16,18 @@ public struct GitHubRepositorySnapshot: Equatable, Sendable {
     public let pullRequests: [GitHubPullRequestSnapshot]
 }
 
+/// One entry from the authenticated user's GitHub notification inbox.
+public struct GitHubNotificationSnapshot: Equatable, Sendable {
+    public let id: String
+    public let reason: String
+    public let unread: Bool
+    public let updatedAt: String
+    public let repository: String
+    public let subjectTitle: String
+    public let subjectType: String
+    public let subjectURL: String
+}
+
 public enum GitHubControlError: Error, Equatable, LocalizedError, Sendable {
     case invalidRepository
     case approvalMismatch
@@ -54,6 +66,43 @@ public actor GitHubControlService {
             repository: repositoryName,
             pullRequests: try Self.decodePullRequests(pullRequestData)
         )
+    }
+
+    /// Lists the authenticated user's notifications (newest first). Uses the
+    /// same `gh` identity as the rest of the service; nothing is marked read.
+    public func notifications(unreadOnly: Bool = false, limit: Int = 50) async throws -> [GitHubNotificationSnapshot] {
+        let perPage = min(max(limit, 1), 100)
+        let query = "notifications?per_page=\(perPage)&all=\(unreadOnly ? "false" : "true")"
+        let data = try await gh(["api", query], at: FileManager.default.homeDirectoryForCurrentUser)
+        struct Wire: Decodable {
+            struct Subject: Decodable {
+                let title: String?
+                let url: String?
+                let type: String?
+            }
+            struct Repository: Decodable { let full_name: String? }
+            let id: String
+            let reason: String?
+            let unread: Bool?
+            let updated_at: String?
+            let subject: Subject?
+            let repository: Repository?
+        }
+        guard let items = try? JSONDecoder().decode([Wire].self, from: data) else {
+            throw GitHubControlError.malformedResponse
+        }
+        return items.map { item in
+            GitHubNotificationSnapshot(
+                id: item.id,
+                reason: item.reason ?? "",
+                unread: item.unread ?? false,
+                updatedAt: item.updated_at ?? "",
+                repository: item.repository?.full_name ?? "",
+                subjectTitle: item.subject?.title ?? "",
+                subjectType: item.subject?.type ?? "",
+                subjectURL: item.subject?.url ?? ""
+            )
+        }
     }
 
     public func createPullRequest(

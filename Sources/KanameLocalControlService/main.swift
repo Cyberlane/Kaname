@@ -1,6 +1,8 @@
+import CryptoKit
+import Darwin
 import Foundation
 import KanameLocalCore
-import Darwin
+import Network
 
 private enum ServiceError: Error {
     case usage
@@ -75,6 +77,11 @@ private final class LocalControlService: NSObject, LocalCoreControlService {
     ) {
         (self.coreExecutable, self.journalDirectory) = (coreExecutable, journalDirectory)
         (self.localDeviceID, self.localKeyID) = (localDeviceID, localKeyID)
+    }
+
+    /// `<Application Support>/Kaname…`, two levels above `LocalCore/journal`.
+    var applicationSupportRoot: URL {
+        journalDirectory.deletingLastPathComponent().deletingLastPathComponent()
     }
 
     func runScenario(_ request: Data, reply: @escaping (Data?, String) -> Void) {
@@ -514,6 +521,235 @@ private final class LocalControlService: NSObject, LocalCoreControlService {
     }
 }
 
+/// Loopback HTTP endpoint that turns `POST /hook/<eventContract>` into a
+/// `trigger.event` fan-out on the Rust executor. Runs inside the launchd
+/// agent, so it accepts events while the desktop app is closed. The port and
+/// bearer token persist in `Workflows/webhook-endpoint.json` so the URL stays
+/// stable across restarts and the app can show it. Loopback only: anything
+/// outside this Mac reaches it through a tunnel the owner sets up.
+private final class WebhookListener: @unchecked Sendable {
+    private struct Endpoint: Codable {
+        var port: UInt16
+        var token: String
+    }
+
+    private let service: LocalControlService
+    private let endpointURL: URL
+    private let queue = DispatchQueue(label: "com.cyberlane.kaname.webhooks")
+    private let workQueue = DispatchQueue(label: "com.cyberlane.kaname.webhooks.fanout", qos: .utility)
+    private var listener: NWListener?
+    private var endpoint: Endpoint?
+    private static let maximumBodyBytes = 1_048_576
+
+    init(service: LocalControlService, applicationSupportRoot: URL) {
+        self.service = service
+        endpointURL = applicationSupportRoot
+            .appendingPathComponent("Workflows", isDirectory: true)
+            .appendingPathComponent("webhook-endpoint.json")
+    }
+
+    func start() {
+        let stored = loadEndpoint()
+        let token = stored?.token ?? Self.freshToken()
+        if let stored, bind(port: stored.port, token: token) { return }
+        _ = bind(port: 0, token: token)
+    }
+
+    private func loadEndpoint() -> Endpoint? {
+        guard let data = try? Data(contentsOf: endpointURL) else { return nil }
+        return try? JSONDecoder().decode(Endpoint.self, from: data)
+    }
+
+    private func saveEndpoint(_ endpoint: Endpoint) {
+        let directory = endpointURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(endpoint) else { return }
+        try? data.write(to: endpointURL, options: [.atomic])
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: endpointURL.path)
+    }
+
+    private static func freshToken() -> String {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        return bytes.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func bind(port: UInt16, token: String) -> Bool {
+        let parameters = NWParameters.tcp
+        parameters.allowLocalEndpointReuse = true
+        let requested = NWEndpoint.Port(rawValue: port) ?? .any
+        parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: requested)
+        guard let listener = try? NWListener(using: parameters) else { return false }
+        let ready = DispatchSemaphore(value: 0)
+        let outcome = BindOutcome()
+        listener.newConnectionHandler = { [weak self] connection in
+            guard let self else {
+                connection.cancel()
+                return
+            }
+            connection.start(queue: self.queue)
+            self.receive(on: connection, buffer: Data())
+        }
+        listener.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            switch state {
+            case .ready:
+                listener.stateUpdateHandler = nil
+                if let bound = listener.port?.rawValue {
+                    let endpoint = Endpoint(port: bound, token: token)
+                    self.endpoint = endpoint
+                    self.saveEndpoint(endpoint)
+                    outcome.succeeded = true
+                }
+                ready.signal()
+            case .failed, .cancelled:
+                listener.stateUpdateHandler = nil
+                ready.signal()
+            default:
+                break
+            }
+        }
+        listener.start(queue: queue)
+        _ = ready.wait(timeout: .now() + 5)
+        if outcome.succeeded {
+            self.listener = listener
+        } else {
+            listener.cancel()
+        }
+        return outcome.succeeded
+    }
+
+    /// Written once on the listener queue before the semaphore is signalled.
+    private final class BindOutcome: @unchecked Sendable {
+        var succeeded = false
+    }
+
+    private func receive(on connection: NWConnection, buffer: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 262_144) { [weak self] data, _, isComplete, error in
+            guard let self else {
+                connection.cancel()
+                return
+            }
+            if error != nil {
+                connection.cancel()
+                return
+            }
+            var next = buffer
+            if let data { next.append(data) }
+            if let headerEnd = next.range(of: Data("\r\n\r\n".utf8)) {
+                let headers = String(decoding: next[..<headerEnd.lowerBound], as: UTF8.self)
+                let contentLength = Self.contentLength(in: headers) ?? 0
+                if contentLength > Self.maximumBodyBytes {
+                    Self.send(Self.httpResponse(status: 413, body: Data(#"{"error":"payload too large"}"#.utf8)), on: connection)
+                    return
+                }
+                let body = next[headerEnd.upperBound...]
+                if body.count >= contentLength {
+                    let response = self.handle(headers: headers, body: Data(body.prefix(contentLength)))
+                    Self.send(response, on: connection)
+                    return
+                }
+            }
+            if isComplete || next.count > Self.maximumBodyBytes + 65_536 {
+                connection.cancel()
+                return
+            }
+            self.receive(on: connection, buffer: next)
+        }
+    }
+
+    private func handle(headers: String, body: Data) -> Data {
+        guard let requestLine = headers.split(separator: "\r\n").first else {
+            return Self.httpResponse(status: 400, body: Data(#"{"error":"bad request"}"#.utf8))
+        }
+        let parts = requestLine.split(separator: " ")
+        guard parts.count >= 2, parts[0] == "POST" else {
+            return Self.httpResponse(status: 405, body: Data(#"{"error":"POST /hook/<eventContract> only"}"#.utf8))
+        }
+        guard let token = endpoint?.token,
+              headers.lowercased().contains("authorization: bearer \(token)") else {
+            return Self.httpResponse(status: 401, body: Data(#"{"error":"unauthorized"}"#.utf8))
+        }
+        let path = String(parts[1]).split(separator: "?").first.map(String.init) ?? ""
+        guard path.hasPrefix("/hook/") else {
+            return Self.httpResponse(status: 404, body: Data(#"{"error":"unknown path"}"#.utf8))
+        }
+        let contract = String(path.dropFirst("/hook/".count)).removingPercentEncoding ?? ""
+        guard Self.isEventContract(contract) else {
+            return Self.httpResponse(status: 400, body: Data(#"{"error":"event contract must match ^[a-z][a-z0-9.-]{0,239}$"}"#.utf8))
+        }
+        var input: [String: Any]
+        if body.isEmpty {
+            input = [:]
+        } else if let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any] {
+            input = object
+        } else if let array = try? JSONSerialization.jsonObject(with: body) {
+            input = ["payload": array]
+        } else {
+            input = ["payloadText": String(decoding: body.prefix(65_536), as: UTF8.self)]
+        }
+        let digest = SHA256.hash(data: body).map { String(format: "%02x", $0) }.joined()
+        let eventID = (input["eventId"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "webhook:\(contract):\(digest)"
+        let contractKey = (input["contractKey"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? eventID
+        input["receivedAtUnixMillis"] = Int64(Date().timeIntervalSince1970 * 1_000)
+        input["source"] = "webhook"
+        let requestID = "workflow-event-\(UUID().uuidString.lowercased())"
+        let request: [String: Any] = [
+            "requestId": requestID,
+            "eventContract": contract,
+            "eventId": eventID,
+            "contractKey": contractKey,
+            "input": input,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: request, options: [.sortedKeys]) else {
+            return Self.httpResponse(status: 400, body: Data(#"{"error":"body is not JSON"}"#.utf8))
+        }
+        // The fan-out can take a while (it starts runs); answer now and let it run.
+        workQueue.async { [service] in
+            service.fanOutWorkflowEvent(data) { _, _ in }
+        }
+        let accepted: [String: Any] = ["accepted": true, "eventContract": contract, "eventId": eventID]
+        return Self.httpResponse(status: 202, body: (try? JSONSerialization.data(withJSONObject: accepted)) ?? Data())
+    }
+
+    private static func isEventContract(_ value: String) -> Bool {
+        value.range(of: "^[a-z][a-z0-9.-]{0,239}$", options: .regularExpression) != nil
+    }
+
+    private static func contentLength(in headers: String) -> Int? {
+        for line in headers.split(separator: "\r\n") {
+            let parts = line.split(separator: ":", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            guard parts.count == 2, parts[0].lowercased() == "content-length", let value = Int(parts[1]) else { continue }
+            return max(0, value)
+        }
+        return nil
+    }
+
+    private static func httpResponse(status: Int, body: Data) -> Data {
+        let reason: String = switch status {
+        case 202: "Accepted"
+        case 401: "Unauthorized"
+        case 404: "Not Found"
+        case 405: "Method Not Allowed"
+        case 413: "Payload Too Large"
+        default: "Bad Request"
+        }
+        var header = "HTTP/1.1 \(status) \(reason)\r\nConnection: close\r\nContent-Length: \(body.count)\r\n"
+        header += "Content-Type: application/json\r\n\r\n"
+        var response = Data(header.utf8)
+        response.append(body)
+        return response
+    }
+
+    private static func send(_ data: Data, on connection: NWConnection) {
+        connection.send(content: data, completion: .contentProcessed { _ in connection.cancel() })
+    }
+}
+
 private final class ListenerDelegate: NSObject, NSXPCListenerDelegate {
     private let service: LocalControlService
 
@@ -557,7 +793,11 @@ private enum KanameLocalControlServiceMain {
                 scheduler.schedule(deadline: .now() + 30, repeating: 60)
                 scheduler.setEventHandler { service.runScheduleTick() }
                 scheduler.resume()
-                withExtendedLifetime((delegate, scheduler)) { dispatchMain() }
+                // Webhooks land here too, so external systems can start
+                // workflows while the desktop app is closed.
+                let webhooks = WebhookListener(service: service, applicationSupportRoot: service.applicationSupportRoot)
+                webhooks.start()
+                withExtendedLifetime((delegate, scheduler, webhooks)) { dispatchMain() }
             case .install:
                 try LaunchAgent.install(arguments)
             }

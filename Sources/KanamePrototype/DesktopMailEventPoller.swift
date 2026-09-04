@@ -44,23 +44,7 @@ final class DesktopMailEventPoller: @unchecked Sendable {
     }
 
     private var cursorsURL: URL {
-        environment.applicationSupportRoot
-            .appendingPathComponent("Workflows", isDirectory: true)
-            .appendingPathComponent("mail-cursors.json")
-    }
-
-    private func loadCursors() -> [String: String] {
-        guard let data = try? Data(contentsOf: cursorsURL),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: String] else { return [:] }
-        return object
-    }
-
-    private func saveCursors(_ cursors: [String: String]) {
-        let directory = cursorsURL.deletingLastPathComponent()
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        if let data = try? JSONSerialization.data(withJSONObject: cursors, options: [.prettyPrinted, .sortedKeys]) {
-            try? data.write(to: cursorsURL, options: [.atomic])
-        }
+        DesktopWorkflowEventPolling.cursorsURL(environment, file: "mail-cursors.json")
     }
 
     private func poll() {
@@ -69,11 +53,9 @@ final class DesktopMailEventPoller: @unchecked Sendable {
         Task.detached { [self] in
             defer { queue.async { self.isPolling = false } }
             // Only spend Gmail API calls when at least one active workflow exists.
-            let library = DesktopWorkflowV2LibraryClient(transport: runner)
-            guard let portfolio = try? await library.portfolio(requestID: "mail-poller:\(UUID().uuidString.lowercased())"),
-                  portfolio.contains(where: { $0.activeRevisionID != nil }) else { return }
+            guard await DesktopWorkflowEventPolling.hasActiveWorkflows(runner: runner, poller: "mail-poller") else { return }
             guard let accounts = try? await adapter.accounts() else { return }
-            var cursors = self.loadCursors()
+            var cursors = DesktopWorkflowEventPolling.loadCursors(self.cursorsURL)
             for account in accounts {
                 let accountID = account.identity.localID
                 guard let start = cursors[accountID] else {
@@ -112,7 +94,7 @@ final class DesktopMailEventPoller: @unchecked Sendable {
                 } while pageToken != nil && pages < 10
                 cursors[accountID] = latest
             }
-            self.saveCursors(cursors)
+            DesktopWorkflowEventPolling.saveCursors(cursors, to: self.cursorsURL)
         }
     }
 }
