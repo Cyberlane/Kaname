@@ -25,8 +25,8 @@ enum DesktopCodingNotifier {
             let content = UNMutableNotificationContent()
             content.title = kind.title
             content.body = hideDetails ? kind.genericBody : "\(threadTitle): \(kind.body)"
-            content.sound = kind == .runFailed ? .defaultCritical : .default
-            content.threadIdentifier = "kaname.coding"
+            content.sound = kind == .runFailed || kind == .automationRunFailed ? .defaultCritical : .default
+            content.threadIdentifier = kind == .effectProposed || kind == .automationRunFailed ? "kaname.automations" : "kaname.coding"
             let request = UNNotificationRequest(
                 identifier: "kaname.coding.\(kind.rawValue).\(UUID().uuidString)",
                 content: content,
@@ -37,7 +37,7 @@ enum DesktopCodingNotifier {
     }
 
     enum Kind: String {
-        case planReady, implementationFinished, knowledgeDraftReady, runFailed, effectProposed
+        case planReady, implementationFinished, knowledgeDraftReady, runFailed, effectProposed, automationRunFailed
 
         var title: String {
             switch self {
@@ -46,6 +46,7 @@ enum DesktopCodingNotifier {
             case .knowledgeDraftReady: "Knowledge update drafted"
             case .runFailed: "Kaname run stopped"
             case .effectProposed: "Automation needs approval"
+            case .automationRunFailed: "Automation run failed"
             }
         }
 
@@ -56,6 +57,7 @@ enum DesktopCodingNotifier {
             case .knowledgeDraftReady: "review the proposed notes in the Knowledge tab."
             case .runFailed: "open the thread to see why and retry."
             case .effectProposed: "approve or reject the proposed effect in Run history."
+            case .automationRunFailed: "open Run history to see which node failed and why."
             }
         }
 
@@ -66,6 +68,7 @@ enum DesktopCodingNotifier {
             case .knowledgeDraftReady: "A knowledge update is ready to review."
             case .runFailed: "A run stopped and needs attention."
             case .effectProposed: "An automation effect needs your approval."
+            case .automationRunFailed: "An automation run failed."
             }
         }
     }

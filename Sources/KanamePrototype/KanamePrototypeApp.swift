@@ -142,6 +142,9 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
         DesktopMailEventPoller.shared.start(environment: KanameDesktopEnvironment.current)
         DesktopCalendarEventPoller.shared.start(environment: KanameDesktopEnvironment.current)
         DesktopGitHubEventPoller.shared.start(environment: KanameDesktopEnvironment.current)
+        // Failed runs and effects awaiting approval raise a notification even
+        // when Run history is not on screen.
+        DesktopAutomationRunWatcher.shared.start()
         KanameDevelopmentRuntimeLogger.shared.record(.applicationStarted)
         mouseBackMonitor = NSEvent.addLocalMonitorForEvents(matching: .otherMouseUp) { event in
             guard event.buttonNumber == 3 else { return event }
