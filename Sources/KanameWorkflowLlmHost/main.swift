@@ -86,7 +86,7 @@ func describe() {
             "modelClass": model.id,
             "timeoutMilliseconds": 300_000,
             "maximumContextBytes": 400_000,
-            "idempotent": false,
+            "idempotent": true,
             "tools": [] as [Any],
         ]
     } : []

@@ -216,8 +216,10 @@ fn workflow_run_start(
         trigger_kind: "manual".into(),
         trigger_event_id: String::new(),
         inputs,
-        installation_id: String::new(),
-        case_id: String::new(),
+        // Effect and storage nodes need a stable installation identity; the
+        // desktop has exactly one installation per workflow.
+        installation_id: format!("installation-{}", request.workflow_id),
+        case_id: format!("case-{run_id}"),
         episode_id: String::new(),
         episode_kind: String::new(),
         prior_episode_id: String::new(),
@@ -490,8 +492,8 @@ fn workflow_schedule_tick(
             workflow_id: schedule.workflow_id.clone(),
             revision_id: revision_id.clone(),
             package_digest: revision.summary.package_digest.clone(),
-            installation_id: String::new(),
-            case_id: String::new(),
+            installation_id: format!("installation-{}", schedule.workflow_id),
+            case_id: format!("case-{}-{scheduled_for}", schedule.workflow_id),
             input: v1::WorkflowValueReference {
                 value_id: format!("value-schedule-{}-{scheduled_for}", schedule.workflow_id),
                 content_type: "application/json".into(),
@@ -681,8 +683,16 @@ fn workflow_event_fanout(
             workflow_id: item.workflow_id.clone(),
             revision_id: revision_id.clone(),
             package_digest: revision.summary.package_digest.clone(),
-            installation_id: String::new(),
-            case_id: String::new(),
+            installation_id: format!("installation-{}", item.workflow_id),
+            case_id: format!(
+                "case-{}-{}",
+                item.workflow_id,
+                if request.contract_key.is_empty() {
+                    &request.event_id
+                } else {
+                    &request.contract_key
+                }
+            ),
             input: v1::WorkflowValueReference {
                 value_id: format!("value-event-{}", request.event_id),
                 content_type: "application/json".into(),
