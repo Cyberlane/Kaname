@@ -258,7 +258,7 @@ struct DesktopHomeView: View {
         }
         if thread.messages.count >= 2 {
             Button("Compact thread") {
-                model.compactThread(threadID: thread.id)
+                DesktopCompactionSummarizer.compact(model, threadID: thread.id)
             }
         }
         Button("Archive", role: .destructive) {

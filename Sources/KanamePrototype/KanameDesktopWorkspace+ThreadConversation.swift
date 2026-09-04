@@ -405,7 +405,7 @@ struct DesktopThreadConversation: View {
                 .buttonStyle(.borderless)
                 .font(.caption)
                 if thread.messages.count > compaction.messageCount + 6 {
-                    Button("Compact again") { model.compactThread(threadID: thread.id) }
+                    Button("Compact again") { DesktopCompactionSummarizer.compact(model, threadID: thread.id) }
                         .buttonStyle(.borderless)
                         .font(.caption)
                 }
@@ -422,7 +422,7 @@ struct DesktopThreadConversation: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button("Compact thread") { model.compactThread(threadID: thread.id) }
+                Button("Compact thread") { DesktopCompactionSummarizer.compact(model, threadID: thread.id) }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                     .help("Keeps every message, starts the provider on a fresh session seeded with a digest of the thread so far")

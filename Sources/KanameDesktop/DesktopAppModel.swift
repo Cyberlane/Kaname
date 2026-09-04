@@ -2142,6 +2142,24 @@ public final class DesktopAppModel: ObservableObject {
         return persistenceError == nil
     }
 
+    /// Replaces the compaction digest with a better summary (for example one a
+    /// model wrote) as long as the compaction it was written for is still the
+    /// current one. Returns false when the thread was compacted again since.
+    @discardableResult
+    public func updateCompactionSummary(threadID: String, throughMessageID: String, summary: String) -> Bool {
+        let trimmed = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let thread = thread(id: threadID),
+              let compaction = thread.compaction,
+              compaction.throughMessageID == throughMessageID else { return false }
+        mutate { snapshot in
+            guard let index = snapshot.threads.firstIndex(where: { $0.id == threadID }),
+                  snapshot.threads[index].compaction?.throughMessageID == throughMessageID else { return }
+            snapshot.threads[index].compaction?.summary = KanameTextBounds.utf8Prefix(trimmed, maximumBytes: 12_000)
+        }
+        return persistenceError == nil
+    }
+
     static func compactionDigest(thread: DesktopThread) -> String {
         func clip(_ text: String, _ bytes: Int) -> String {
             let flat = text.trimmingCharacters(in: .whitespacesAndNewlines)
