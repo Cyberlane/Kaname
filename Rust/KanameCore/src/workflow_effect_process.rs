@@ -24,7 +24,9 @@ use crate::{
         WorkflowEffectConnectorReconciliationResult, WorkflowEffectConnectorRequest,
         WorkflowEffectHost,
     },
-    workflow_host_process::{ProcessHostCommand, ProcessHostFailure, encode_request, parse_response},
+    workflow_host_process::{
+        ProcessHostCommand, ProcessHostFailure, encode_request, parse_response,
+    },
     workflow_projection::WorkflowRunProjection,
     workflow_runtime::workflow_effect_connector_registration_digest,
 };
@@ -172,16 +174,19 @@ impl ProcessWorkflowEffectHost {
                 .input
                 .as_ref()
                 .and_then(|value| serde_json::from_slice(&value.inline_canonical_json).ok()),
-            prior_receipt: request.prior_receipt.as_ref().map(|receipt| WireReceiptOut {
-                receipt_id: &receipt.receipt_id,
-                provider_reference: &receipt.provider_reference,
-                outcome: match v1::WorkflowEffectReceiptOutcome::try_from(receipt.outcome) {
-                    Ok(v1::WorkflowEffectReceiptOutcome::Applied) => "applied",
-                    Ok(v1::WorkflowEffectReceiptOutcome::NotApplied) => "not_applied",
-                    _ => "unknown",
-                },
-                evidence_digest: &receipt.evidence_digest,
-            }),
+            prior_receipt: request
+                .prior_receipt
+                .as_ref()
+                .map(|receipt| WireReceiptOut {
+                    receipt_id: &receipt.receipt_id,
+                    provider_reference: &receipt.provider_reference,
+                    outcome: match v1::WorkflowEffectReceiptOutcome::try_from(receipt.outcome) {
+                        Ok(v1::WorkflowEffectReceiptOutcome::Applied) => "applied",
+                        Ok(v1::WorkflowEffectReceiptOutcome::NotApplied) => "not_applied",
+                        _ => "unknown",
+                    },
+                    evidence_digest: &receipt.evidence_digest,
+                }),
         })
     }
 
@@ -230,7 +235,12 @@ impl WorkflowEffectConnector for ProcessWorkflowEffectHost {
             }
             _ => WorkflowEffectConnectorDispatchResult::NotSent {
                 error_code: "connector.unavailable".into(),
-                receipt: process_receipt(&key, "dispatch-unavailable", v1::WorkflowEffectReceiptOutcome::NotApplied, ""),
+                receipt: process_receipt(
+                    &key,
+                    "dispatch-unavailable",
+                    v1::WorkflowEffectReceiptOutcome::NotApplied,
+                    "",
+                ),
                 elapsed_milliseconds: 0,
             },
         };
@@ -252,14 +262,24 @@ impl WorkflowEffectConnector for ProcessWorkflowEffectHost {
                     Ok(response) => response.into_reconciliation_result(&key),
                     Err(failure) => WorkflowEffectConnectorReconciliationResult::StillUnknown {
                         error_code: "connector.reconcile_failed".into(),
-                        receipt: process_receipt(&key, "reconcile-failed", v1::WorkflowEffectReceiptOutcome::Unknown, &failure.summary()),
+                        receipt: process_receipt(
+                            &key,
+                            "reconcile-failed",
+                            v1::WorkflowEffectReceiptOutcome::Unknown,
+                            &failure.summary(),
+                        ),
                         elapsed_milliseconds: 0,
                     },
                 }
             }
             _ => WorkflowEffectConnectorReconciliationResult::StillUnknown {
                 error_code: "connector.unavailable".into(),
-                receipt: process_receipt(&key, "reconcile-unavailable", v1::WorkflowEffectReceiptOutcome::Unknown, ""),
+                receipt: process_receipt(
+                    &key,
+                    "reconcile-unavailable",
+                    v1::WorkflowEffectReceiptOutcome::Unknown,
+                    "",
+                ),
                 elapsed_milliseconds: 0,
             },
         }
@@ -319,14 +339,24 @@ fn failure_dispatch_result(
         ProcessHostFailure::Unavailable(_) | ProcessHostFailure::Crashed(_) => {
             WorkflowEffectConnectorDispatchResult::NotSent {
                 error_code: "connector.host_failed".into(),
-                receipt: process_receipt(idempotency_key, "dispatch-not-sent", v1::WorkflowEffectReceiptOutcome::NotApplied, &summary),
+                receipt: process_receipt(
+                    idempotency_key,
+                    "dispatch-not-sent",
+                    v1::WorkflowEffectReceiptOutcome::NotApplied,
+                    &summary,
+                ),
                 elapsed_milliseconds: 0,
             }
         }
         ProcessHostFailure::TimedOut | ProcessHostFailure::Malformed(_) => {
             WorkflowEffectConnectorDispatchResult::OutcomeUnknown {
                 error_code: "connector.outcome_unknown".into(),
-                receipt: process_receipt(idempotency_key, "dispatch-unknown", v1::WorkflowEffectReceiptOutcome::Unknown, &summary),
+                receipt: process_receipt(
+                    idempotency_key,
+                    "dispatch-unknown",
+                    v1::WorkflowEffectReceiptOutcome::Unknown,
+                    &summary,
+                ),
                 elapsed_milliseconds: 0,
             }
         }
@@ -413,7 +443,12 @@ struct WireEffectResponse {
 }
 
 impl WireEffectResponse {
-    fn receipt(&self, idempotency_key: &str, phase: &str, fallback: v1::WorkflowEffectReceiptOutcome) -> v1::WorkflowEffectReceipt {
+    fn receipt(
+        &self,
+        idempotency_key: &str,
+        phase: &str,
+        fallback: v1::WorkflowEffectReceiptOutcome,
+    ) -> v1::WorkflowEffectReceipt {
         let outcome = match self.receipt.outcome.as_str() {
             "applied" => v1::WorkflowEffectReceiptOutcome::Applied,
             "not_applied" => v1::WorkflowEffectReceiptOutcome::NotApplied,
@@ -433,46 +468,85 @@ impl WireEffectResponse {
 
     fn into_dispatch_result(self, idempotency_key: &str) -> WorkflowEffectConnectorDispatchResult {
         let elapsed_milliseconds = self.elapsed_milliseconds;
-        let error_code = if self.error_code.is_empty() { format!("connector.{}", self.outcome) } else { self.error_code.clone() };
+        let error_code = if self.error_code.is_empty() {
+            format!("connector.{}", self.outcome)
+        } else {
+            self.error_code.clone()
+        };
         match self.outcome.as_str() {
             "succeeded" => WorkflowEffectConnectorDispatchResult::Succeeded {
-                receipt: self.receipt(idempotency_key, "dispatch-applied", v1::WorkflowEffectReceiptOutcome::Applied),
+                receipt: self.receipt(
+                    idempotency_key,
+                    "dispatch-applied",
+                    v1::WorkflowEffectReceiptOutcome::Applied,
+                ),
                 elapsed_milliseconds,
             },
             "rejected" => WorkflowEffectConnectorDispatchResult::Rejected {
                 error_code,
-                receipt: self.receipt(idempotency_key, "dispatch-rejected", v1::WorkflowEffectReceiptOutcome::NotApplied),
+                receipt: self.receipt(
+                    idempotency_key,
+                    "dispatch-rejected",
+                    v1::WorkflowEffectReceiptOutcome::NotApplied,
+                ),
                 elapsed_milliseconds,
             },
             "not_sent" => WorkflowEffectConnectorDispatchResult::NotSent {
                 error_code,
-                receipt: self.receipt(idempotency_key, "dispatch-not-sent", v1::WorkflowEffectReceiptOutcome::NotApplied),
+                receipt: self.receipt(
+                    idempotency_key,
+                    "dispatch-not-sent",
+                    v1::WorkflowEffectReceiptOutcome::NotApplied,
+                ),
                 elapsed_milliseconds,
             },
             _ => WorkflowEffectConnectorDispatchResult::OutcomeUnknown {
                 error_code,
-                receipt: self.receipt(idempotency_key, "dispatch-unknown", v1::WorkflowEffectReceiptOutcome::Unknown),
+                receipt: self.receipt(
+                    idempotency_key,
+                    "dispatch-unknown",
+                    v1::WorkflowEffectReceiptOutcome::Unknown,
+                ),
                 elapsed_milliseconds,
             },
         }
     }
 
-    fn into_reconciliation_result(self, idempotency_key: &str) -> WorkflowEffectConnectorReconciliationResult {
+    fn into_reconciliation_result(
+        self,
+        idempotency_key: &str,
+    ) -> WorkflowEffectConnectorReconciliationResult {
         let elapsed_milliseconds = self.elapsed_milliseconds;
-        let error_code = if self.error_code.is_empty() { format!("connector.{}", self.outcome) } else { self.error_code.clone() };
+        let error_code = if self.error_code.is_empty() {
+            format!("connector.{}", self.outcome)
+        } else {
+            self.error_code.clone()
+        };
         match self.outcome.as_str() {
             "applied" => WorkflowEffectConnectorReconciliationResult::Applied {
-                receipt: self.receipt(idempotency_key, "reconcile-applied", v1::WorkflowEffectReceiptOutcome::Applied),
+                receipt: self.receipt(
+                    idempotency_key,
+                    "reconcile-applied",
+                    v1::WorkflowEffectReceiptOutcome::Applied,
+                ),
                 elapsed_milliseconds,
             },
             "not_applied" => WorkflowEffectConnectorReconciliationResult::NotApplied {
                 error_code,
-                receipt: self.receipt(idempotency_key, "reconcile-not-applied", v1::WorkflowEffectReceiptOutcome::NotApplied),
+                receipt: self.receipt(
+                    idempotency_key,
+                    "reconcile-not-applied",
+                    v1::WorkflowEffectReceiptOutcome::NotApplied,
+                ),
                 elapsed_milliseconds,
             },
             _ => WorkflowEffectConnectorReconciliationResult::StillUnknown {
                 error_code,
-                receipt: self.receipt(idempotency_key, "reconcile-unknown", v1::WorkflowEffectReceiptOutcome::Unknown),
+                receipt: self.receipt(
+                    idempotency_key,
+                    "reconcile-unknown",
+                    v1::WorkflowEffectReceiptOutcome::Unknown,
+                ),
                 elapsed_milliseconds,
             },
         }

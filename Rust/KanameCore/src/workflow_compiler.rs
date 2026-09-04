@@ -205,6 +205,10 @@ struct CompiledNode<'a> {
     node_type: &'a str,
     type_version: u32,
     execution_availability: &'static str,
+    /// Why the compiler downgraded this node to schema-only, when it did. The
+    /// Builder shows this to the author; the executor ignores it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    downgrade_condition: Option<&'static str>,
     config: &'a Value,
     ports: &'a [PortContract],
 }
@@ -360,13 +364,15 @@ fn emit_compiled_artifact(
         .iter()
         .map(|node| {
             let ports = port_sets.get(&node.id).ok_or(())?;
+            let decision = node_execution_availability(&node.node_type, &node.config);
             Ok(CompiledNode {
                 id: &node.id,
                 key: &node.key,
                 name: &node.name,
                 node_type: &node.node_type,
                 type_version: node.type_version,
-                execution_availability: execution_availability(node),
+                execution_availability: decision.availability,
+                downgrade_condition: decision.downgrade_condition,
                 config: &node.config,
                 ports,
             })
@@ -425,17 +431,15 @@ impl WorkflowNodeExecutionAvailability {
 
 /// Returns the Rust compiler's execution decision for one registered node.
 ///
-/// The Builder registry deliberately does not evaluate these configuration
-/// conditions. Its built-ins remain schema-only until a Rust compile result is
-/// available.
+/// This is the single source of truth for executability. The Builder registry
+/// defaults every built-in to schema-only and asks the core for this decision
+/// (`workflow-node-availability`) instead of re-implementing the conditions.
 pub fn node_execution_availability(
     node_type: &str,
     config: &Value,
 ) -> WorkflowNodeExecutionAvailability {
     let downgrade_condition = match node_type {
-        "trigger.manual" | "terminal.complete"
-            if config.as_object().is_some_and(Map::is_empty) =>
-        {
+        "trigger.manual" | "terminal.complete" if config.as_object().is_some_and(Map::is_empty) => {
             return WorkflowNodeExecutionAvailability::executable();
         }
         // Trigger correlation binds an event to an already running case, which
@@ -627,10 +631,6 @@ pub fn node_execution_availability(
         _ => "node_type_not_executable",
     };
     WorkflowNodeExecutionAvailability::schema_only(downgrade_condition)
-}
-
-fn execution_availability(node: &Node) -> &'static str {
-    node_execution_availability(&node.node_type, &node.config).availability
 }
 
 fn compile_graph(

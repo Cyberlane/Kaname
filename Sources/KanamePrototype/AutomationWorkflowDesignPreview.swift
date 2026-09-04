@@ -228,6 +228,9 @@ struct AutomationWorkflowProductView: View {
     @State private var editingSchedule: DesktopAutomationRule?
     @State private var showsNewSchedule = false
     @State private var packageMessage: String?
+    /// Compiler availability per legacy step for the revision on screen.
+    @State private var nodeAvailability: [String: LocalCoreRunner.WorkflowNodeAvailabilityDecision] = [:]
+    @State private var nodeAvailabilityRevisionID: String?
 
     private var definitions: [DesktopWorkflowDefinitionRecord] { model.workflowDefinitions }
 
@@ -429,7 +432,10 @@ struct AutomationWorkflowProductView: View {
             ScrollView {
                 AutomationCanvasPreview(
                     workflow: workflow,
-                    graph: AutomationCanvasGraph.live(revision: revision),
+                    graph: AutomationCanvasGraph.live(
+                        revision: revision,
+                        availability: nodeAvailabilityRevisionID == revision.id ? nodeAvailability : [:]
+                    ),
                     revisions: model.snapshot.operations.workflows.revisions
                         .filter { $0.workflowID == definition.id }
                         .sorted { $0.installedAtUnixMillis > $1.installedAtUnixMillis },
@@ -442,6 +448,7 @@ struct AutomationWorkflowProductView: View {
                 )
                 .padding(20)
             }
+            .task(id: revision.id) { await evaluateNodeAvailability(definition, revision: revision) }
         } else {
             EmptyPanel(
                 symbol: "point.3.connected.trianglepath.dotted",
@@ -485,6 +492,37 @@ struct AutomationWorkflowProductView: View {
         workflowStarterMessage = nil
         studioDraftID = draftID
         showsWorkflowStarter = false
+    }
+
+    /// Asks the Rust compiler which of this revision's steps would execute as
+    /// configured. Converts through the same importer that publishing uses, so
+    /// the Builder shows the decision the library would record.
+    private func evaluateNodeAvailability(
+        _ definition: DesktopWorkflowDefinitionRecord,
+        revision: DesktopWorkflowRevisionRecord
+    ) async {
+        guard let runner = libraryRunner,
+              let imported = try? DesktopWorkflowLegacyImporter.importSource(.init(definition: definition, revision: revision))
+        else { return }
+        let legacyIDByNodeID = Dictionary(
+            imported.nodeIDByLegacyStepID.map { ($0.value, $0.key) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let queries = imported.workflow.graph.nodes.compactMap { node -> LocalCoreRunner.WorkflowNodeAvailabilityQuery? in
+            guard legacyIDByNodeID[node.id] != nil,
+                  let configData = try? encoder.encode(node.config),
+                  let configJSON = String(data: configData, encoding: .utf8) else { return nil }
+            return .init(nodeID: node.id, type: node.type, configJSON: configJSON)
+        }
+        guard let decisions = try? await runner.evaluateWorkflowNodeAvailability(queries) else { return }
+        var byLegacyID: [String: LocalCoreRunner.WorkflowNodeAvailabilityDecision] = [:]
+        for decision in decisions {
+            if let legacyID = legacyIDByNodeID[decision.nodeID] { byLegacyID[legacyID] = decision }
+        }
+        nodeAvailability = byLegacyID
+        nodeAvailabilityRevisionID = revision.id
     }
 
     /// Converts a Builder workflow to the durable v1 graph and publishes it as
@@ -1943,6 +1981,10 @@ private enum AutomationPreviewState {
     case waiting
     case blocked
     case planned
+    /// The compiler would execute this node as configured.
+    case executable
+    /// The compiler keeps this node schema-only; see the node's reason.
+    case schemaOnly
 
     var label: String {
         switch self {
@@ -1951,6 +1993,8 @@ private enum AutomationPreviewState {
         case .waiting: "Waiting"
         case .blocked: "Blocked"
         case .planned: "Planned"
+        case .executable: "Executable"
+        case .schemaOnly: "Not executable"
         }
     }
 
@@ -1961,6 +2005,8 @@ private enum AutomationPreviewState {
         case .waiting: "pause.circle.fill"
         case .blocked: "exclamationmark.triangle.fill"
         case .planned: "circle.dashed"
+        case .executable: "bolt.circle.fill"
+        case .schemaOnly: "bolt.slash.circle"
         }
     }
 
@@ -1971,6 +2017,8 @@ private enum AutomationPreviewState {
         case .waiting: KanameColor.warning
         case .blocked: KanameColor.danger
         case .planned: Color.secondary
+        case .executable: KanameColor.success
+        case .schemaOnly: KanameColor.warning
         }
     }
 }
@@ -3311,6 +3359,8 @@ private struct AutomationCanvasStep: Identifiable {
     let input: String
     let output: String
     let authority: String
+    /// Why the compiler keeps this node schema-only, in plain language.
+    var availabilityReason: String? = nil
 }
 
 private struct AutomationCanvasEdge: Identifiable {
@@ -3367,7 +3417,10 @@ private struct AutomationCanvasGraph {
     let steps: [AutomationCanvasStep]
     let edges: [AutomationCanvasEdge]
 
-    static func live(revision: DesktopWorkflowRevisionRecord) -> Self {
+    static func live(
+        revision: DesktopWorkflowRevisionRecord,
+        availability: [String: LocalCoreRunner.WorkflowNodeAvailabilityDecision] = [:]
+    ) -> Self {
         let definitions = revision.steps
         guard !definitions.isEmpty else {
             let empty = AutomationCanvasStep(
@@ -3418,10 +3471,12 @@ private struct AutomationCanvasGraph {
                 kind: step.kind.automationKind,
                 x: 0.08 + (0.84 * CGFloat(level) / CGFloat(maximumLevel)),
                 y: y,
-                state: .planned,
+                state: availability[step.id].map { $0.isExecutable ? .executable : .schemaOnly } ?? .planned,
                 input: step.inputSchemaReference ?? "\(step.inputMappings?.count ?? 0) mapped inputs",
                 output: step.outputSchemaReference ?? "Typed output",
-                authority: step.automationAuthority
+                authority: step.automationAuthority,
+                availabilityReason: availability[step.id].flatMap(\.downgradeCondition)
+                    .map(DesktopWorkflowDowngradeConditionPresentation.text(for:))
             )
         }
         var connections = definitions.flatMap { source in
@@ -5329,8 +5384,16 @@ private struct AutomationNodeInspector: View {
         case .configuration:
             inspectorFact("Node ID", value: step.id)
             inspectorFact("Execution", value: executionLabel)
+            if step.state == .executable || step.state == .schemaOnly {
+                inspectorFact("Compiler", value: step.state.label)
+            }
             inspectorFact("Retry", value: retryLabel)
             Divider()
+            if let reason = step.availabilityReason {
+                Label(reason, systemImage: "bolt.slash.circle")
+                    .foregroundStyle(KanameColor.warning)
+                Divider()
+            }
             Text(step.subtitle).foregroundStyle(.secondary)
         case .data:
             inspectorFact("Input", value: step.input)

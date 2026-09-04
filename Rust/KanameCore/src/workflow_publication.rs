@@ -134,6 +134,9 @@ struct PublishedCompiledNode {
     node_type: String,
     type_version: u32,
     execution_availability: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    downgrade_condition: Option<String>,
     config: Value,
     ports: Vec<Value>,
 }

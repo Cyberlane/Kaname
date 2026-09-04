@@ -74,6 +74,7 @@ public protocol LocalCoreControlService {
     func authorizeWorkflowEffect(_ request: Data, reply: @escaping (Data?, String) -> Void)
     func publishWorkflow(_ request: Data, reply: @escaping (Data?, String) -> Void)
     func fanOutWorkflowEvent(_ request: Data, reply: @escaping (Data?, String) -> Void)
+    func evaluateWorkflowNodeAvailability(_ request: Data, reply: @escaping (Data?, String) -> Void)
 }
 #endif
 
@@ -394,6 +395,62 @@ public struct LocalCoreRunner: Sendable {
         return result
     }
 
+    public struct WorkflowNodeAvailabilityQuery: Encodable, Equatable, Sendable {
+        public let nodeID: String
+        public let type: String
+        /// Canonical JSON of the node configuration object.
+        public let configJSON: String
+
+        public init(nodeID: String, type: String, configJSON: String) {
+            self.nodeID = nodeID
+            self.type = type
+            self.configJSON = configJSON
+        }
+    }
+
+    public struct WorkflowNodeAvailabilityDecision: Decodable, Equatable, Sendable {
+        public let nodeID: String
+        /// `executable` or `schema-only`, as the compiler records it.
+        public let availability: String
+        /// Compiler condition code when the node is schema-only.
+        public let downgradeCondition: String?
+
+        public var isExecutable: Bool { availability == "executable" }
+
+        enum CodingKeys: String, CodingKey {
+            case nodeID = "nodeId", availability, downgradeCondition
+        }
+    }
+
+    private struct WorkflowNodeAvailabilityResult: Decodable {
+        let requestId: String
+        let nodes: [WorkflowNodeAvailabilityDecision]
+    }
+
+    /// Asks the compiler whether each node, as configured, would execute or
+    /// stay schema-only, and why. Nothing is published or stored.
+    public func evaluateWorkflowNodeAvailability(
+        _ nodes: [WorkflowNodeAvailabilityQuery],
+        timeout: TimeInterval = 10
+    ) async throws -> [WorkflowNodeAvailabilityDecision] {
+        guard !nodes.isEmpty else { return [] }
+        let requestID = "workflow-node-availability-\(UUID().uuidString.lowercased())"
+        let nodeObjects: [[String: Any]] = try nodes.map { node in
+            let configData = Data(node.configJSON.utf8)
+            let config = (try? JSONSerialization.jsonObject(with: configData)) ?? [String: Any]()
+            return ["nodeId": node.nodeID, "type": node.type, "config": config]
+        }
+        let request: [String: Any] = ["requestId": requestID, "nodes": nodeObjects]
+        let data = try JSONSerialization.data(withJSONObject: request, options: [.sortedKeys])
+        let output = try await serviceResponse(request: data, timeout: timeout, operation: .evaluateWorkflowNodeAvailability)
+        guard output.count <= Self.maximumWorkflowLibraryResponseBytes,
+              let result = try? JSONDecoder().decode(WorkflowNodeAvailabilityResult.self, from: output),
+              result.requestId == requestID else {
+            throw LocalCoreRunnerError.malformedReport
+        }
+        return result.nodes
+    }
+
     /// Records the owner's decision for a proposed workflow effect. The run
     /// continues on its next start; nothing is dispatched here.
     public func authorizeWorkflowEffect(
@@ -648,6 +705,7 @@ private enum LocalCoreServiceOperation {
     case authorizeWorkflowEffect
     case publishWorkflow
     case fanOutWorkflowEvent
+    case evaluateWorkflowNodeAvailability
 
     var maximumResponseBytes: Int {
         switch self {
@@ -721,6 +779,8 @@ private func runBoundedService(
         service.publishWorkflow(request, reply: reply)
     case .fanOutWorkflowEvent:
         service.fanOutWorkflowEvent(request, reply: reply)
+    case .evaluateWorkflowNodeAvailability:
+        service.evaluateWorkflowNodeAvailability(request, reply: reply)
     }
     guard completion.wait(timeout: .now() + timeout) == .success else {
         connection.invalidate()

@@ -93,6 +93,9 @@ public struct DesktopWorkflowLegacyImportResult: Equatable, Identifiable, Sendab
     public var canonicalSource: String
     public var canonicalLayoutSource: String
     public var losses: [DesktopWorkflowLegacyImportLoss]
+    /// Stable v1 node identity for each legacy Builder step, so compiler
+    /// decisions about the graph can be shown on the steps that produced it.
+    public var nodeIDByLegacyStepID: [String: String] = [:]
 
     public var isLossless: Bool {
         !losses.contains { $0.severity == .blocking }
@@ -321,7 +324,8 @@ public enum DesktopWorkflowLegacyImporter {
             layout: layout,
             canonicalSource: canonicalSource,
             canonicalLayoutSource: canonicalLayoutSource,
-            losses: losses.sorted { ($0.pointer, $0.code) < ($1.pointer, $1.code) }
+            losses: losses.sorted { ($0.pointer, $0.code) < ($1.pointer, $1.code) },
+            nodeIDByLegacyStepID: nodeIDByLegacyID
         )
     }
 

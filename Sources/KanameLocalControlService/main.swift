@@ -250,6 +250,16 @@ private final class LocalControlService: NSObject, LocalCoreControlService {
         )
     }
 
+    func evaluateWorkflowNodeAvailability(_ request: Data, reply: @escaping (Data?, String) -> Void) {
+        runWireOperation(
+            "workflow-node-availability",
+            request: request,
+            maximumRequestBytes: LocalCoreRunner.maximumWorkflowLibraryRequestBytes,
+            timeout: 10,
+            reply: reply
+        )
+    }
+
     func authorizeWorkflowEffect(_ request: Data, reply: @escaping (Data?, String) -> Void) {
         let applicationSupportRoot = journalDirectory
             .deletingLastPathComponent()

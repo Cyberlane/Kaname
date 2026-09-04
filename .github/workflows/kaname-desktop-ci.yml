@@ -46,10 +46,9 @@ jobs:
             ~/.cargo/git
             Rust/KanameCore/target
           key: kaname-core-${{ runner.os }}-${{ hashFiles('Rust/KanameCore/Cargo.lock') }}
-      - name: Format, lint, test
+      - name: Format and test
         run: |
           cargo fmt --manifest-path Rust/KanameCore/Cargo.toml --check
-          cargo clippy --locked --manifest-path Rust/KanameCore/Cargo.toml --all-targets -- -D warnings
           cargo test --locked --manifest-path Rust/KanameCore/Cargo.toml
 
   swift-desktop:

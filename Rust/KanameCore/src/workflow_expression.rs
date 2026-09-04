@@ -178,8 +178,13 @@ fn validate_shape(
             format!("Expressions nest deeper than {MAXIMUM_EXPRESSION_DEPTH} levels."),
         ));
     }
-    let malformed =
-        |path: &str| ExpressionEvaluationError::new("mapping.malformed", path, "The expression is not one of whole, select, literal, object, array, coalesce, or format.");
+    let malformed = |path: &str| {
+        ExpressionEvaluationError::new(
+            "mapping.malformed",
+            path,
+            "The expression is not one of whole, select, literal, object, array, coalesce, or format.",
+        )
+    };
     let object = expression.as_object().ok_or_else(|| malformed(path))?;
     if object.len() != 1 {
         return Err(malformed(path));
@@ -192,7 +197,9 @@ fn validate_shape(
             }
         }
         "select" => {
-            let reference = body.as_object().ok_or_else(|| malformed(&format!("{path}/select")))?;
+            let reference = body
+                .as_object()
+                .ok_or_else(|| malformed(&format!("{path}/select")))?;
             let root = reference.get("root").and_then(Value::as_str);
             let pointer = reference.get("pointer").and_then(Value::as_str);
             if reference.len() != 2 || root.is_none() || pointer.is_none() {
@@ -210,7 +217,9 @@ fn validate_shape(
             }
         }
         "literal" => {
-            let literal = body.as_object().ok_or_else(|| malformed(&format!("{path}/literal")))?;
+            let literal = body
+                .as_object()
+                .ok_or_else(|| malformed(&format!("{path}/literal")))?;
             let literal_type = literal.get("type").and_then(Value::as_str);
             let value = literal.get("value");
             let valid = literal.len() == 2
@@ -227,7 +236,9 @@ fn validate_shape(
             }
         }
         "object" => {
-            let properties = body.as_object().ok_or_else(|| malformed(&format!("{path}/object")))?;
+            let properties = body
+                .as_object()
+                .ok_or_else(|| malformed(&format!("{path}/object")))?;
             if properties.len() > MAXIMUM_OBJECT_PROPERTIES {
                 return Err(ExpressionEvaluationError::new(
                     "mapping.bounds-exceeded",
@@ -236,11 +247,17 @@ fn validate_shape(
                 ));
             }
             for (key, property) in properties {
-                validate_shape(property, &format!("{path}/object/{}", escape(key)), depth + 1)?;
+                validate_shape(
+                    property,
+                    &format!("{path}/object/{}", escape(key)),
+                    depth + 1,
+                )?;
             }
         }
         "array" => {
-            let items = body.as_array().ok_or_else(|| malformed(&format!("{path}/array")))?;
+            let items = body
+                .as_array()
+                .ok_or_else(|| malformed(&format!("{path}/array")))?;
             if items.len() > MAXIMUM_ARRAY_ITEMS {
                 return Err(ExpressionEvaluationError::new(
                     "mapping.bounds-exceeded",
@@ -253,7 +270,9 @@ fn validate_shape(
             }
         }
         "coalesce" => {
-            let operands = body.as_array().ok_or_else(|| malformed(&format!("{path}/coalesce")))?;
+            let operands = body
+                .as_array()
+                .ok_or_else(|| malformed(&format!("{path}/coalesce")))?;
             if operands.len() < MINIMUM_COALESCE_OPERANDS
                 || operands.len() > MAXIMUM_COALESCE_OPERANDS
             {
@@ -270,7 +289,9 @@ fn validate_shape(
             }
         }
         "format" => {
-            let format = body.as_object().ok_or_else(|| malformed(&format!("{path}/format")))?;
+            let format = body
+                .as_object()
+                .ok_or_else(|| malformed(&format!("{path}/format")))?;
             let template = format.get("template").and_then(Value::as_str);
             let values = format.get("values").and_then(Value::as_object);
             let (Some(template), Some(values)) = (template, values) else {
@@ -297,7 +318,11 @@ fn validate_shape(
                 }
             }
             for (key, value) in values {
-                validate_shape(value, &format!("{path}/format/values/{}", escape(key)), depth + 1)?;
+                validate_shape(
+                    value,
+                    &format!("{path}/format/values/{}", escape(key)),
+                    depth + 1,
+                )?;
             }
         }
         _ => return Err(malformed(path)),
@@ -334,7 +359,11 @@ fn evaluate_at(expression: &Value, roots: &ExpressionRoots, path: &str) -> Evalu
             Ok(Value::Array(result))
         }
         "coalesce" => {
-            for (index, operand) in body.as_array().expect("validated coalesce").iter().enumerate()
+            for (index, operand) in body
+                .as_array()
+                .expect("validated coalesce")
+                .iter()
+                .enumerate()
             {
                 match evaluate_at(operand, roots, &format!("{path}/coalesce/{index}")) {
                     Ok(Value::Null) => {}
@@ -353,9 +382,7 @@ fn evaluate_at(expression: &Value, roots: &ExpressionRoots, path: &str) -> Evalu
             let template = body["template"].as_str().expect("validated format");
             let values = body["values"].as_object().expect("validated format");
             let mut rendered = String::new();
-            for segment in
-                template_segments(template, &format!("{path}/format/template"))?
-            {
+            for segment in template_segments(template, &format!("{path}/format/template"))? {
                 match segment {
                     TemplateSegment::Text(text) => rendered.push_str(&text),
                     TemplateSegment::Placeholder(name) => {
@@ -454,7 +481,9 @@ fn parse_array_index(token: &str) -> Option<usize> {
     if token == "0" {
         return Some(0);
     }
-    if token.is_empty() || token.starts_with('0') || !token.bytes().all(|byte| byte.is_ascii_digit())
+    if token.is_empty()
+        || token.starts_with('0')
+        || !token.bytes().all(|byte| byte.is_ascii_digit())
     {
         return None;
     }
@@ -566,7 +595,10 @@ mod tests {
         };
         assert_eq!(select("/subject").expect("string"), json!("Invoice 42"));
         assert_eq!(select("/flags/spam~1like").expect("escape"), json!(false));
-        assert_eq!(select("/recipients/1").expect("index"), json!("justin@example.com"));
+        assert_eq!(
+            select("/recipients/1").expect("index"),
+            json!("justin@example.com")
+        );
         assert_eq!(select("").expect("empty pointer")["amount"], json!(1280.5));
         assert_eq!(
             select("/recipients/01").expect_err("leading zero").code,
@@ -591,7 +623,11 @@ mod tests {
     #[test]
     fn literals_pass_through_typed_values() {
         assert_eq!(
-            evaluate(&json!({"literal": {"type": "number", "value": 7}}), &roots()).expect("number"),
+            evaluate(
+                &json!({"literal": {"type": "number", "value": 7}}),
+                &roots()
+            )
+            .expect("number"),
             json!(7)
         );
         assert_eq!(
@@ -718,7 +754,8 @@ mod tests {
 
     #[test]
     fn bounds_and_depth_fail_closed() {
-        let too_many_items = json!({"array": (0..129).map(|_| json!({"whole": true})).collect::<Vec<_>>()});
+        let too_many_items =
+            json!({"array": (0..129).map(|_| json!({"whole": true})).collect::<Vec<_>>()});
         assert_eq!(
             evaluate(&too_many_items, &roots()).expect_err("items").code,
             "mapping.bounds-exceeded"
@@ -733,7 +770,9 @@ mod tests {
         );
         let single_coalesce = json!({"coalesce": [{"whole": true}]});
         assert_eq!(
-            evaluate(&single_coalesce, &roots()).expect_err("operands").code,
+            evaluate(&single_coalesce, &roots())
+                .expect_err("operands")
+                .code,
             "mapping.bounds-exceeded"
         );
     }
@@ -761,7 +800,10 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    evaluate(&expression, &roots()).expect_err("malformed").code.as_str(),
+                    evaluate(&expression, &roots())
+                        .expect_err("malformed")
+                        .code
+                        .as_str(),
                     "mapping.malformed" | "mapping.pointer-invalid"
                 ),
                 "{expression}"
@@ -775,8 +817,12 @@ mod tests {
         assert!(executable_mapping(&json!({"object": {
             "a": {"select": {"root": "input", "pointer": "/subject"}}
         }})));
-        assert!(!executable_mapping(&json!({"select": {"root": "case", "pointer": "/x"}})));
-        assert!(!executable_mapping(&json!({"select": {"root": "workflow", "pointer": ""}})));
+        assert!(!executable_mapping(
+            &json!({"select": {"root": "case", "pointer": "/x"}})
+        ));
+        assert!(!executable_mapping(
+            &json!({"select": {"root": "workflow", "pointer": ""}})
+        ));
         assert!(!executable_mapping(&json!({"unknown": true})));
     }
 
@@ -786,8 +832,10 @@ mod tests {
             "z": {"whole": true},
             "a": {"format": {"template": "{s}", "values": {"s": {"select": {"root": "input", "pointer": "/subject"}}}}}
         }});
-        let first = serde_json::to_vec(&evaluate(&expression, &roots()).expect("first")).expect("encode");
-        let second = serde_json::to_vec(&evaluate(&expression, &roots()).expect("second")).expect("encode");
+        let first =
+            serde_json::to_vec(&evaluate(&expression, &roots()).expect("first")).expect("encode");
+        let second =
+            serde_json::to_vec(&evaluate(&expression, &roots()).expect("second")).expect("encode");
         assert_eq!(first, second);
     }
 }

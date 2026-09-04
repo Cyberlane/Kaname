@@ -5,6 +5,53 @@ public enum DesktopWorkflowNodeExecutionAvailability: String, Codable, Sendable 
     case executable
 }
 
+/// Plain-language readings of the compiler's downgrade condition codes so the
+/// Builder can say why a node will not execute as configured.
+public enum DesktopWorkflowDowngradeConditionPresentation {
+    public static func text(for condition: String) -> String {
+        switch condition {
+        case "empty_configuration_required":
+            "This node takes no configuration; remove the extra settings."
+        case "event_trigger_contract_not_executable":
+            "Set an event contract (for example mail.message.received) and leave correlation empty."
+        case "schedule_trigger_contract_not_executable":
+            "Set a valid interval or calendar schedule."
+        case "mapping_not_executable":
+            "The mapping uses a form the executor cannot evaluate; use whole, pointer, or literal mappings."
+        case "capability_contract_incomplete":
+            "Choose a capability, version, input mapping, and output schema."
+        case "llm_contract_incomplete":
+            "Set the model class, instructions, prompt mapping, output schema, and limits."
+        case "subflow_contract_incomplete":
+            "Pick a published child workflow revision and map its inputs."
+        case "storage_write_not_executable":
+            "Set the storage scope, key mapping, and value mapping."
+        case "match_policy_not_executable":
+            "Add at least one case with an evaluable condition and a default."
+        case "join_policy_not_executable":
+            "Set the join policy and threshold to match the incoming branches."
+        case "decision_condition_not_executable":
+            "Write the condition with exists, equals, or another supported test."
+        case "reconciliation_contract_incomplete":
+            "Set the probe mapping, attempts, and delay for reconciliation."
+        case "human_review_contract_incomplete":
+            "Set the review prompt, options, and expiry."
+        case "connector_contract_incomplete":
+            "Choose the connector, action, and input mapping for this effect."
+        case "artifact_contract_incomplete":
+            "Set the artifact kind and content mapping."
+        case "cancel_reason_not_executable":
+            "Give the cancellation a reason mapping."
+        case "error_mapping_not_executable":
+            "Give the failure an error mapping."
+        case "node_type_not_executable":
+            "The executor does not run this node type yet."
+        default:
+            "The compiler reported \(condition.replacingOccurrences(of: "_", with: " "))."
+        }
+    }
+}
+
 public struct DesktopWorkflowNodeTypeMigration: Codable, Equatable, Sendable {
     public var fromTypeVersion: UInt32
     public var migrationID: String

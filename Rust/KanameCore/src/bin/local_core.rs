@@ -112,12 +112,15 @@ fn main() {
         [operation, _journal_path, application_support] if operation == "workflow-library-publish" => {
             workflow_library_publish(application_support)
         }
+        [operation, _journal_path] if operation == "workflow-node-availability" => {
+            workflow_node_availability()
+        }
         [operation, journal_path, projection_path, application_support]
             if operation == "workflow-event-fanout" =>
         {
             workflow_event_fanout(journal_path, projection_path, application_support)
         }
-        _ => Err("usage: kaname-local-core scenario <F-01..F-14> | scenario-store <F-01..F-14> <journal-path> | append-event <journal-path> < event-envelope.bin | authorize-action <journal-path> < approval-command.bin | record-review <journal-path> < command-envelope.bin | replay <journal-path> < replay-request.bin | mobile-propose <journal-path> < enrollment-challenge.bin | mobile-decide <journal-path> < enrollment-decision.bin | mobile-admit <journal-path> <recipient-device-id> <recipient-key-id> < encrypted-envelope.bin | scale <S-01..S-04> | workflow-schema-check < request.json | workflow-canonicalize < value.json | workflow-compile < compile-request.bin | workflow-library-query <application-support-root> < query-request.bin | workflow-library-activate <application-support-root> < activation-request.bin | workflow-library-import-frozen <application-support-root> < import-request.bin | workflow-run-inspect <journal-path> <projection-path> < query.bin | workflow-connector-observation-begin <journal-path> <projection-path> < request.bin | workflow-connector-observation-settle <journal-path> <projection-path> < request.bin | workflow-run-purge <journal-path> <projection-path> <application-support-root> < request.bin | workflow-run-start <journal-path> <projection-path> <application-support-root> < request.json".to_owned()),
+        _ => Err("usage: kaname-local-core scenario <F-01..F-14> | scenario-store <F-01..F-14> <journal-path> | append-event <journal-path> < event-envelope.bin | authorize-action <journal-path> < approval-command.bin | record-review <journal-path> < command-envelope.bin | replay <journal-path> < replay-request.bin | mobile-propose <journal-path> < enrollment-challenge.bin | mobile-decide <journal-path> < enrollment-decision.bin | mobile-admit <journal-path> <recipient-device-id> <recipient-key-id> < encrypted-envelope.bin | scale <S-01..S-04> | workflow-schema-check < request.json | workflow-canonicalize < value.json | workflow-compile < compile-request.bin | workflow-library-query <application-support-root> < query-request.bin | workflow-library-activate <application-support-root> < activation-request.bin | workflow-library-import-frozen <application-support-root> < import-request.bin | workflow-run-inspect <journal-path> <projection-path> < query.bin | workflow-connector-observation-begin <journal-path> <projection-path> < request.bin | workflow-connector-observation-settle <journal-path> <projection-path> < request.bin | workflow-run-purge <journal-path> <projection-path> <application-support-root> < request.bin | workflow-run-start <journal-path> <projection-path> <application-support-root> < request.json | workflow-effect-authorize <journal-path> <projection-path> < request.json | workflow-schedule-tick <journal-path> <projection-path> <application-support-root> | workflow-library-publish <journal-path> <application-support-root> < request.json | workflow-event-fanout <journal-path> <projection-path> <application-support-root> < request.json | workflow-node-availability <journal-path> < request.json".to_owned()),
     };
     match result {
         Ok(json) => println!("{json}"),
@@ -164,7 +167,10 @@ fn workflow_run_start(
     let wire = read_standard_input()?;
     let request: WorkflowRunStartRequest =
         serde_json::from_slice(&wire).map_err(|_| "workflow_run_start_rejected".to_owned())?;
-    if request.request_id.is_empty() || request.workflow_id.is_empty() || request.revision_id.is_empty() {
+    if request.request_id.is_empty()
+        || request.workflow_id.is_empty()
+        || request.revision_id.is_empty()
+    {
         return Err("workflow_run_start_rejected".to_owned());
     }
     let store = open_workflow_library(application_support)
@@ -261,7 +267,10 @@ fn workflow_run_start(
     let llm_host = if llm.is_available() {
         format!("available:{}", llm.registered_model_classes().join(","))
     } else {
-        format!("unavailable:{}", llm.unavailable_reason().unwrap_or("unknown"))
+        format!(
+            "unavailable:{}",
+            llm.unavailable_reason().unwrap_or("unknown")
+        )
     };
     let mut capabilities =
         kaname_core::workflow_capabilities::ProcessWorkflowCapabilityHost::from_environment();
@@ -273,15 +282,19 @@ fn workflow_run_start(
             capabilities.unavailable_reason().unwrap_or("unknown")
         )
     };
-    let mut effects = kaname_core::workflow_effect_process::ProcessWorkflowEffectHost::from_environment(
-        journal_path,
-        projection_path,
-        CURSOR_KEY,
-    );
+    let mut effects =
+        kaname_core::workflow_effect_process::ProcessWorkflowEffectHost::from_environment(
+            journal_path,
+            projection_path,
+            CURSOR_KEY,
+        );
     let effect_host = if effects.is_available() {
         format!("available:{}", effects.registered_connectors().len())
     } else {
-        format!("unavailable:{}", effects.unavailable_reason().unwrap_or("unknown"))
+        format!(
+            "unavailable:{}",
+            effects.unavailable_reason().unwrap_or("unknown")
+        )
     };
     let result = kaname_core::workflow_executor::execute_with_hosts(
         &mut journal,
@@ -305,7 +318,8 @@ fn workflow_run_start(
         capability_host,
         effect_host,
     };
-    let json = serde_json::to_vec(&response).map_err(|_| "workflow_run_start_encode_failed".to_owned())?;
+    let json =
+        serde_json::to_vec(&response).map_err(|_| "workflow_run_start_encode_failed".to_owned())?;
     Ok(hex::encode(json))
 }
 
@@ -385,40 +399,57 @@ fn workflow_schedule_tick(
     let mut llm = kaname_core::workflow_llm::ProcessWorkflowLlmProvider::from_environment();
     let mut capabilities =
         kaname_core::workflow_capabilities::ProcessWorkflowCapabilityHost::from_environment();
-    let mut effects = kaname_core::workflow_effect_process::ProcessWorkflowEffectHost::from_environment(
-        journal_path,
-        projection_path,
-        CURSOR_KEY,
-    );
+    let mut effects =
+        kaname_core::workflow_effect_process::ProcessWorkflowEffectHost::from_environment(
+            journal_path,
+            projection_path,
+            CURSOR_KEY,
+        );
     let mut changed = false;
     for schedule in file.schedules.iter_mut() {
         if !schedule.enabled || schedule.interval_seconds < 60 {
-            response.skipped.push(format!("{}:disabled", schedule.workflow_id));
+            response
+                .skipped
+                .push(format!("{}:disabled", schedule.workflow_id));
             continue;
         }
-        let Some(item) = portfolio.iter().find(|item| item.workflow_id == schedule.workflow_id) else {
-            response.skipped.push(format!("{}:not_in_portfolio", schedule.workflow_id));
+        let Some(item) = portfolio
+            .iter()
+            .find(|item| item.workflow_id == schedule.workflow_id)
+        else {
+            response
+                .skipped
+                .push(format!("{}:not_in_portfolio", schedule.workflow_id));
             continue;
         };
         let Some(revision_id) = item.active_revision_id.clone() else {
-            response.skipped.push(format!("{}:no_active_revision", schedule.workflow_id));
+            response
+                .skipped
+                .push(format!("{}:no_active_revision", schedule.workflow_id));
             continue;
         };
         let revision = match store.load_workflow_revision(&revision_id, "active") {
             Ok(revision) => revision,
             Err(error) => {
-                response.errors.push(format!("{}:{error:?}", schedule.workflow_id));
+                response
+                    .errors
+                    .push(format!("{}:{error:?}", schedule.workflow_id));
                 continue;
             }
         };
         let compiled: serde_json::Value = match serde_json::from_slice(&revision.compiled_source) {
             Ok(value) => value,
             Err(_) => {
-                response.errors.push(format!("{}:compiled_unreadable", schedule.workflow_id));
+                response
+                    .errors
+                    .push(format!("{}:compiled_unreadable", schedule.workflow_id));
                 continue;
             }
         };
-        let entry_node_id = compiled["entrypoints"][0]["nodeId"].as_str().unwrap_or_default().to_owned();
+        let entry_node_id = compiled["entrypoints"][0]["nodeId"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
         let is_schedule_entry = compiled["nodes"]
             .as_array()
             .map(|nodes| {
@@ -429,7 +460,9 @@ fn workflow_schedule_tick(
             })
             .unwrap_or(false);
         if !is_schedule_entry {
-            response.skipped.push(format!("{}:entrypoint_not_schedule", schedule.workflow_id));
+            response
+                .skipped
+                .push(format!("{}:entrypoint_not_schedule", schedule.workflow_id));
             continue;
         }
         let interval_millis = schedule.interval_seconds * 1_000;
@@ -441,11 +474,18 @@ fn workflow_schedule_tick(
             schedule.last_scheduled_for_unix_millis + interval_millis
         };
         if due > now {
-            response.skipped.push(format!("{}:not_due", schedule.workflow_id));
+            response
+                .skipped
+                .push(format!("{}:not_due", schedule.workflow_id));
             continue;
         }
-        let scheduled_for = if now - due > interval_millis { now - ((now - due) % interval_millis) } else { due };
-        let empty_input = serde_json_canonicalizer::to_vec(&serde_json::json!({})).unwrap_or_default();
+        let scheduled_for = if now - due > interval_millis {
+            now - ((now - due) % interval_millis)
+        } else {
+            due
+        };
+        let empty_input =
+            serde_json_canonicalizer::to_vec(&serde_json::json!({})).unwrap_or_default();
         let binding = kaname_core::workflow_executor::WorkflowTriggerRunBinding {
             workflow_id: schedule.workflow_id.clone(),
             revision_id: revision_id.clone(),
@@ -496,13 +536,18 @@ fn workflow_schedule_tick(
                     .map(|result| format!("{:?}", result.outcome).to_lowercase())
                     .unwrap_or_else(|| "misfired".into());
                 changed = true;
-                response.admitted.push(format!("{}:{}:{}", schedule.workflow_id, receipt.run_id, schedule.last_outcome));
+                response.admitted.push(format!(
+                    "{}:{}:{}",
+                    schedule.workflow_id, receipt.run_id, schedule.last_outcome
+                ));
             }
             Err(error) => {
                 schedule.last_scheduled_for_unix_millis = scheduled_for;
                 schedule.last_outcome = format!("error:{error:?}");
                 changed = true;
-                response.errors.push(format!("{}:{error:?}", schedule.workflow_id));
+                response
+                    .errors
+                    .push(format!("{}:{error:?}", schedule.workflow_id));
             }
         }
     }
@@ -560,7 +605,10 @@ fn workflow_event_fanout(
     let wire = read_standard_input()?;
     let request: WorkflowEventFanoutRequest =
         serde_json::from_slice(&wire).map_err(|_| "workflow_event_fanout_rejected".to_owned())?;
-    if request.request_id.is_empty() || request.event_contract.is_empty() || request.event_id.is_empty() {
+    if request.request_id.is_empty()
+        || request.event_contract.is_empty()
+        || request.event_id.is_empty()
+    {
         return Err("workflow_event_fanout_rejected".to_owned());
     }
     let store = open_workflow_library(application_support)
@@ -582,24 +630,38 @@ fn workflow_event_fanout(
     let mut llm = kaname_core::workflow_llm::ProcessWorkflowLlmProvider::from_environment();
     let mut capabilities =
         kaname_core::workflow_capabilities::ProcessWorkflowCapabilityHost::from_environment();
-    let mut effects = kaname_core::workflow_effect_process::ProcessWorkflowEffectHost::from_environment(
-        journal_path,
-        projection_path,
-        CURSOR_KEY,
-    );
+    let mut effects =
+        kaname_core::workflow_effect_process::ProcessWorkflowEffectHost::from_environment(
+            journal_path,
+            projection_path,
+            CURSOR_KEY,
+        );
     let input_bytes = serde_json_canonicalizer::to_vec(&request.input).unwrap_or_default();
     let input_sha = {
         use sha2::Digest as _;
         hex::encode(sha2::Sha256::digest(&input_bytes))
     };
     for item in portfolio {
-        let Some(revision_id) = item.active_revision_id.clone() else { continue };
-        let Ok(revision) = store.load_workflow_revision(&revision_id, "active") else { continue };
-        let Ok(compiled) = serde_json::from_slice::<serde_json::Value>(&revision.compiled_source) else { continue };
-        let entry_node_id = compiled["entrypoints"][0]["nodeId"].as_str().unwrap_or_default();
+        let Some(revision_id) = item.active_revision_id.clone() else {
+            continue;
+        };
+        let Ok(revision) = store.load_workflow_revision(&revision_id, "active") else {
+            continue;
+        };
+        let Ok(compiled) = serde_json::from_slice::<serde_json::Value>(&revision.compiled_source)
+        else {
+            continue;
+        };
+        let entry_node_id = compiled["entrypoints"][0]["nodeId"]
+            .as_str()
+            .unwrap_or_default();
         let Some(entry) = compiled["nodes"].as_array().and_then(|nodes| {
-            nodes.iter().find(|node| node["id"].as_str() == Some(entry_node_id))
-        }) else { continue };
+            nodes
+                .iter()
+                .find(|node| node["id"].as_str() == Some(entry_node_id))
+        }) else {
+            continue;
+        };
         if entry["type"].as_str() != Some("trigger.event")
             || entry["config"]["eventContract"].as_str() != Some(request.event_contract.as_str())
         {
@@ -612,7 +674,9 @@ fn workflow_event_fanout(
                     .map_err(|_| "workflow_run_journal_unavailable".to_owned())?,
             );
         }
-        let Some(journal) = journal.as_mut() else { continue };
+        let Some(journal) = journal.as_mut() else {
+            continue;
+        };
         let binding = kaname_core::workflow_executor::WorkflowTriggerRunBinding {
             workflow_id: item.workflow_id.clone(),
             revision_id: revision_id.clone(),
@@ -640,7 +704,11 @@ fn workflow_event_fanout(
         };
         let trigger = kaname_core::workflow_executor::WorkflowEventTrigger {
             event_id: request.event_id.clone(),
-            contract_key: if request.contract_key.is_empty() { request.event_id.clone() } else { request.contract_key.clone() },
+            contract_key: if request.contract_key.is_empty() {
+                request.event_id.clone()
+            } else {
+                request.contract_key.clone()
+            },
         };
         match kaname_core::workflow_executor::execute_event_trigger_with_hosts(
             journal,
@@ -662,7 +730,9 @@ fn workflow_event_fanout(
                     .map(|result| format!("{:?}", result.outcome).to_lowercase())
                     .unwrap_or_default(),
             }),
-            Err(error) => response.errors.push(format!("{}:{error:?}", item.workflow_id)),
+            Err(error) => response
+                .errors
+                .push(format!("{}:{error:?}", item.workflow_id)),
         }
     }
     if let Some(journal) = journal.as_ref() {
@@ -716,9 +786,12 @@ fn workflow_library_publish(application_support: &str) -> Result<String, String>
     use kaname_core::workflow_drafts::CreateWorkflowDraft;
     use kaname_core::workflow_publication::PublishWorkflowRevision;
     let wire = read_standard_input()?;
-    let request: WorkflowLibraryPublishRequest =
-        serde_json::from_slice(&wire).map_err(|_| "workflow_library_publish_rejected".to_owned())?;
-    if request.request_id.is_empty() || request.workflow_id.is_empty() || request.workflow_json.is_empty() {
+    let request: WorkflowLibraryPublishRequest = serde_json::from_slice(&wire)
+        .map_err(|_| "workflow_library_publish_rejected".to_owned())?;
+    if request.request_id.is_empty()
+        || request.workflow_id.is_empty()
+        || request.workflow_json.is_empty()
+    {
         return Err("workflow_library_publish_rejected".to_owned());
     }
     let now = std::time::SystemTime::now()
@@ -751,7 +824,11 @@ fn workflow_library_publish(application_support: &str) -> Result<String, String>
             expected_draft_sequence: draft.head_sequence,
             revision_id: revision_id.clone(),
             registration_id: format!("registration-{}", request.request_id),
-            release_version: if request.release_version.is_empty() { "1.0.0".into() } else { request.release_version.clone() },
+            release_version: if request.release_version.is_empty() {
+                "1.0.0".into()
+            } else {
+                request.release_version.clone()
+            },
             schema_bundle_json: if request.schema_bundle_json.is_empty() {
                 br#"{"bundleVersion":1,"schemas":[]}"#.to_vec()
             } else {
@@ -793,10 +870,17 @@ fn workflow_library_publish(application_support: &str) -> Result<String, String>
                     activation_generation = outcome.generation;
                     break;
                 }
-                Err(kaname_core::workflow_library::WorkflowLibraryError::ActivationConflict { actual, .. }) => {
+                Err(kaname_core::workflow_library::WorkflowLibraryError::ActivationConflict {
+                    actual,
+                    ..
+                }) => {
                     expected_generation = actual;
                 }
-                Err(error) => return Err(format!("workflow_library_publish_failed:activate:{error:?}")),
+                Err(error) => {
+                    return Err(format!(
+                        "workflow_library_publish_failed:activate:{error:?}"
+                    ));
+                }
             }
         }
     }
@@ -810,6 +894,70 @@ fn workflow_library_publish(application_support: &str) -> Result<String, String>
         activation_generation,
     })
     .map_err(|_| "workflow_library_publish_encode_failed".to_owned())?;
+    Ok(hex::encode(json))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowNodeAvailabilityRequest {
+    request_id: String,
+    nodes: Vec<WorkflowNodeAvailabilityRequestNode>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowNodeAvailabilityRequestNode {
+    node_id: String,
+    #[serde(rename = "type")]
+    node_type: String,
+    #[serde(default)]
+    config: serde_json::Value,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowNodeAvailabilityResponse {
+    request_id: String,
+    nodes: Vec<WorkflowNodeAvailabilityResponseNode>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowNodeAvailabilityResponseNode {
+    node_id: String,
+    availability: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    downgrade_condition: Option<&'static str>,
+}
+
+/// Answers the Builder's question "would the compiler execute this node as
+/// configured?" without publishing anything. Same decision the compiler
+/// records into the compiled artifact.
+fn workflow_node_availability() -> Result<String, String> {
+    let wire = read_standard_input()?;
+    let request: WorkflowNodeAvailabilityRequest = serde_json::from_slice(&wire)
+        .map_err(|_| "workflow_node_availability_rejected".to_owned())?;
+    if request.request_id.is_empty() || request.nodes.len() > 512 {
+        return Err("workflow_node_availability_rejected".to_owned());
+    }
+    let nodes = request
+        .nodes
+        .iter()
+        .map(|node| {
+            let decision =
+                workflow_compiler::node_execution_availability(&node.node_type, &node.config);
+            WorkflowNodeAvailabilityResponseNode {
+                node_id: node.node_id.clone(),
+                availability: decision.availability,
+                downgrade_condition: decision.downgrade_condition,
+            }
+        })
+        .collect();
+    let json = serde_json::to_vec(&WorkflowNodeAvailabilityResponse {
+        request_id: request.request_id,
+        nodes,
+    })
+    .map_err(|_| "workflow_node_availability_encode_failed".to_owned())?;
     Ok(hex::encode(json))
 }
 
@@ -840,8 +988,8 @@ struct WorkflowEffectAuthorizeResponse {
 /// resolution up on its next transition; nothing is dispatched here.
 fn workflow_effect_authorize(journal_path: &str, projection_path: &str) -> Result<String, String> {
     let wire = read_standard_input()?;
-    let request: WorkflowEffectAuthorizeRequest =
-        serde_json::from_slice(&wire).map_err(|_| "workflow_effect_authorize_rejected".to_owned())?;
+    let request: WorkflowEffectAuthorizeRequest = serde_json::from_slice(&wire)
+        .map_err(|_| "workflow_effect_authorize_rejected".to_owned())?;
     let fingerprint = hex::decode(&request.fingerprint_hex)
         .map_err(|_| "workflow_effect_authorize_rejected:fingerprint".to_owned())?;
     let decision = match request.decision.as_str() {
@@ -865,7 +1013,11 @@ fn workflow_effect_authorize(journal_path: &str, projection_path: &str) -> Resul
             approval_id: request.approval_id,
             decision: decision as i32,
             expected_fingerprint: fingerprint,
-            actor_id: if request.actor_id.is_empty() { "local-owner".into() } else { request.actor_id },
+            actor_id: if request.actor_id.is_empty() {
+                "local-owner".into()
+            } else {
+                request.actor_id
+            },
             device_id: request.device_id,
             standing_rule_reference: String::new(),
         },
