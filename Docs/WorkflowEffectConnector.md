@@ -96,6 +96,17 @@ the attempt's start; the dispatch deadline is the earlier of the authorization
 expiry and the dispatch start plus 60 seconds; the authority window is 900
 seconds.
 
+## Standing approvals
+
+The owner can answer a proposed effect with "Approve and always allow". Kaname
+records a standing rule (`Workflows/standing-rules.json`, keyed by workflow,
+connector class, and action) and approves that effect. From then on the app
+approves matching proposed effects automatically the next time it observes
+them and continues the run, sending `standing_rule_reference` with the
+approval so the journal shows no human clicked. Rules are listed and removed
+under Run workflow › Standing approvals in Run history. Effects for other
+actions or other workflows still wait for an explicit decision.
+
 ## Reconciliation and the idempotency boundary
 
 A dispatch whose outcome is unknown is reconciled rather than repeated. The

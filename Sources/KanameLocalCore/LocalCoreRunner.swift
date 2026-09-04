@@ -460,6 +460,7 @@ public struct LocalCoreRunner: Sendable {
         approvalID: String,
         approvalFingerprint: Data,
         approve: Bool,
+        standingRuleReference: String? = nil,
         timeout: TimeInterval = 10
     ) async throws -> WorkflowEffectAuthorizeResult {
         let requestID = "workflow-effect:\(UUID().uuidString.lowercased())"
@@ -469,7 +470,8 @@ public struct LocalCoreRunner: Sendable {
             "approval_id": approvalID,
             "fingerprint_hex": approvalFingerprint.map { String(format: "%02x", $0) }.joined(),
             "decision": approve ? "approve" : "reject",
-            "actor_id": "local-owner",
+            "actor_id": standingRuleReference == nil ? "local-owner" : "local-owner-standing-rule",
+            "standing_rule_reference": standingRuleReference ?? "",
         ]
         let data = try JSONSerialization.data(withJSONObject: request, options: [.sortedKeys])
         let output = try await serviceResponse(request: data, timeout: timeout, operation: .authorizeWorkflowEffect)

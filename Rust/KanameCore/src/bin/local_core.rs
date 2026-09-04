@@ -984,6 +984,10 @@ struct WorkflowEffectAuthorizeRequest {
     actor_id: String,
     #[serde(default)]
     device_id: String,
+    /// Identity of the owner's standing rule when no human clicked this
+    /// approval; empty for an explicit decision.
+    #[serde(default)]
+    standing_rule_reference: String,
 }
 
 #[derive(Serialize)]
@@ -1029,7 +1033,7 @@ fn workflow_effect_authorize(journal_path: &str, projection_path: &str) -> Resul
                 request.actor_id
             },
             device_id: request.device_id,
-            standing_rule_reference: String::new(),
+            standing_rule_reference: request.standing_rule_reference,
         },
         now,
     )

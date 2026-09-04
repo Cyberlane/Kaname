@@ -40,9 +40,16 @@ final class DesktopAutomationRunWatcher: @unchecked Sendable {
                 inspection: DesktopWorkflowRunInspectionClient(transport: runner),
                 library: DesktopWorkflowV2LibraryClient(transport: runner)
             )
-            guard let snapshot = try? await loader.load(
+            guard var snapshot = try? await loader.load(
                 limit: 30, requestID: "run-watcher:\(UUID().uuidString.lowercased())"
             ) else { return }
+            // Standing rules approve their effects without a click; reload so
+            // the notification pass sees the advanced runs, not the parked ones.
+            let advanced = await DesktopStandingEffectRules.applyStandingRules(to: snapshot, runner: runner)
+            if !advanced.isEmpty,
+               let refreshed = try? await loader.load(limit: 30, requestID: "run-watcher:\(UUID().uuidString.lowercased())") {
+                snapshot = refreshed
+            }
             let observations = snapshot.runs.map { item in
                 (
                     runID: item.run.runID,

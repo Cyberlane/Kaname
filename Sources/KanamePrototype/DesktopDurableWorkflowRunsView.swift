@@ -172,6 +172,16 @@ final class DesktopDurableWorkflowRunsViewModel: ObservableObject {
         await reload()
     }
 
+    // MARK: Standing approvals
+
+    @Published private(set) var standingRules: [DesktopStandingEffectRule] = DesktopStandingEffectRules.load()
+
+    func removeStandingRule(_ rule: DesktopStandingEffectRule) {
+        DesktopStandingEffectRules.remove(id: rule.id)
+        standingRules = DesktopStandingEffectRules.load()
+        startMessage = "Standing approval removed: \(rule.action) on \(rule.workflowName). Future effects wait for you again."
+    }
+
     // MARK: Interval schedules (host state read by the control service's tick)
 
     @Published private(set) var scheduleSeconds: [String: Int] = [:]
@@ -230,16 +240,35 @@ final class DesktopDurableWorkflowRunsViewModel: ObservableObject {
 
     /// Records the owner's decision for a proposed effect, then continues the
     /// run so the executor can dispatch (or settle the rejection).
-    func decideEffect(_ effect: DesktopWorkflowProjectedEffectAuthority, run: DesktopDurableWorkflowRun, approve: Bool) async {
+    func decideEffect(
+        _ effect: DesktopWorkflowProjectedEffectAuthority,
+        run: DesktopDurableWorkflowRun,
+        approve: Bool,
+        alwaysAllow: Bool = false
+    ) async {
         guard let runner, !isStarting else { return }
         isStarting = true
         defer { isStarting = false }
+        var standingRuleReference: String?
+        if approve, alwaysAllow {
+            let rule = DesktopStandingEffectRule(
+                workflowID: run.workflowID,
+                workflowName: runnableWorkflows.first { $0.workflowID == run.workflowID }?.name ?? run.workflowID,
+                connectorClass: effect.connectorClass,
+                action: effect.action,
+                createdAtUnixMillis: Int64(Date().timeIntervalSince1970 * 1_000)
+            )
+            DesktopStandingEffectRules.add(rule)
+            standingRuleReference = rule.reference
+            standingRules = DesktopStandingEffectRules.load()
+        }
         do {
             let decision = try await runner.authorizeWorkflowEffect(
                 effectID: effect.effectID,
                 approvalID: effect.approvalID,
                 approvalFingerprint: effect.approvalFingerprint,
-                approve: approve
+                approve: approve,
+                standingRuleReference: standingRuleReference
             )
             let continued = try await runner.startWorkflowRun(
                 workflowID: run.workflowID,
@@ -515,6 +544,15 @@ struct DesktopDurableWorkflowRunsView: View {
                         Task { await viewModel.installNewsletterTriage() }
                     }
                     .disabled(viewModel.isStarting)
+                }
+                if !viewModel.standingRules.isEmpty {
+                    Section("Standing approvals (auto-approved effects)") {
+                        ForEach(viewModel.standingRules) { rule in
+                            Button("Remove: \(rule.action) on \(rule.workflowName)", systemImage: "xmark.circle") {
+                                viewModel.removeStandingRule(rule)
+                            }
+                        }
+                    }
                 }
                 Section("Schedule") {
                     ForEach(viewModel.runnableWorkflows) { item in
@@ -1208,6 +1246,12 @@ struct DesktopDurableWorkflowRunsView: View {
                             }
                             .buttonStyle(.borderedProminent)
                             .controlSize(.small)
+                            Button("Approve and always allow", systemImage: "checkmark.shield.fill") {
+                                Task { await viewModel.decideEffect(effect, run: run, approve: true, alwaysAllow: true) }
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .help("Future \(effect.action) effects from this workflow run without asking. Remove the rule under Run workflow › Standing approvals.")
                             Button("Reject", role: .destructive) {
                                 Task { await viewModel.decideEffect(effect, run: run, approve: false) }
                             }
