@@ -750,6 +750,145 @@ private final class WebhookListener: @unchecked Sendable {
     }
 }
 
+/// Polls the authenticated `gh` user's notification inbox every three minutes
+/// and offers each new or updated entry to the executor as a
+/// `github.notification.received` event. Lives in the launchd agent so it
+/// keeps working with the desktop app closed; `gh` holds its own login. Seen
+/// entries persist in `Workflows/github-cursors.json`; the first poll only
+/// records what already exists. Skips the network entirely until a workflow
+/// library exists.
+private final class GitHubNotificationPoller: @unchecked Sendable {
+    static let eventContract = "github.notification.received"
+
+    private let service: LocalControlService
+    private let cursorsURL: URL
+    private let libraryURL: URL
+    private let queue = DispatchQueue(label: "com.cyberlane.kaname.github-poller", qos: .utility)
+    private var timer: DispatchSourceTimer?
+    private var isPolling = false
+
+    init(service: LocalControlService, applicationSupportRoot: URL) {
+        self.service = service
+        let workflows = applicationSupportRoot.appendingPathComponent("Workflows", isDirectory: true)
+        cursorsURL = workflows.appendingPathComponent("github-cursors.json")
+        libraryURL = workflows.appendingPathComponent("workflow-library.sqlite")
+    }
+
+    func start() {
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + 90, repeating: 180)
+        timer.setEventHandler { [weak self] in self?.poll() }
+        timer.resume()
+        self.timer = timer
+    }
+
+    private static var ghExecutable: URL? {
+        for path in ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh"]
+        where FileManager.default.isExecutableFile(atPath: path) {
+            return URL(fileURLWithPath: path)
+        }
+        return nil
+    }
+
+    private struct Notification: Decodable {
+        struct Subject: Decodable {
+            let title: String?
+            let url: String?
+            let type: String?
+        }
+        struct Repository: Decodable { let full_name: String? }
+        let id: String
+        let reason: String?
+        let unread: Bool?
+        let updated_at: String?
+        let subject: Subject?
+        let repository: Repository?
+    }
+
+    private func poll() {
+        guard !isPolling, FileManager.default.fileExists(atPath: libraryURL.path), let gh = Self.ghExecutable else { return }
+        isPolling = true
+        defer { isPolling = false }
+        guard let data = runGh(gh, arguments: ["api", "notifications?per_page=50&all=true"]),
+              let notifications = try? JSONDecoder().decode([Notification].self, from: data) else { return }
+        let seen = loadCursors()
+        let baseline = seen.isEmpty
+        var next: [String: String] = [:]
+        for notification in notifications {
+            let updatedAt = notification.updated_at ?? ""
+            next[notification.id] = updatedAt
+            guard !baseline, seen[notification.id] != updatedAt else { continue }
+            let subjectURL = notification.subject?.url ?? ""
+            let eventID = "github:notification:\(notification.id):\(updatedAt)"
+            let request: [String: Any] = [
+                "requestId": "workflow-event-\(UUID().uuidString.lowercased())",
+                "eventContract": Self.eventContract,
+                "eventId": eventID,
+                "contractKey": subjectURL.isEmpty ? notification.id : subjectURL,
+                "input": [
+                    "notificationId": notification.id,
+                    "reason": notification.reason ?? "",
+                    "unread": notification.unread ?? false,
+                    "updatedAt": updatedAt,
+                    "repository": notification.repository?.full_name ?? "",
+                    "subjectTitle": notification.subject?.title ?? "",
+                    "subjectType": notification.subject?.type ?? "",
+                    "subjectUrl": subjectURL,
+                    "provider": "github",
+                    "source": "control-service",
+                ] as [String: Any],
+            ]
+            guard let payload = try? JSONSerialization.data(withJSONObject: request, options: [.sortedKeys]) else { continue }
+            let done = DispatchSemaphore(value: 0)
+            service.fanOutWorkflowEvent(payload) { _, _ in done.signal() }
+            _ = done.wait(timeout: .now() + 600)
+        }
+        next["_baseline"] = seen["_baseline"] ?? ISO8601DateFormatter().string(from: Date())
+        saveCursors(next)
+    }
+
+    private func runGh(_ executable: URL, arguments: [String]) -> Data? {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = executable
+        process.arguments = arguments
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+        environment["GH_PROMPT_DISABLED"] = "1"
+        environment["GH_NO_UPDATE_NOTIFIER"] = "1"
+        process.environment = environment
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        timer.schedule(deadline: .now() + 30)
+        timer.setEventHandler { if process.isRunning { process.terminate() } }
+        timer.resume()
+        defer { timer.cancel() }
+        guard (try? process.run()) != nil else { return nil }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0, data.count <= 4 * 1_048_576 else { return nil }
+        return data
+    }
+
+    private func loadCursors() -> [String: String] {
+        guard let data = try? Data(contentsOf: cursorsURL),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: String] else { return [:] }
+        return object
+    }
+
+    private func saveCursors(_ cursors: [String: String]) {
+        let directory = cursorsURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]
+        )
+        guard let data = try? JSONSerialization.data(withJSONObject: cursors, options: [.prettyPrinted, .sortedKeys]) else { return }
+        try? data.write(to: cursorsURL, options: [.atomic])
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: cursorsURL.path)
+    }
+}
+
 private final class ListenerDelegate: NSObject, NSXPCListenerDelegate {
     private let service: LocalControlService
 
@@ -797,7 +936,11 @@ private enum KanameLocalControlServiceMain {
                 // workflows while the desktop app is closed.
                 let webhooks = WebhookListener(service: service, applicationSupportRoot: service.applicationSupportRoot)
                 webhooks.start()
-                withExtendedLifetime((delegate, scheduler, webhooks)) { dispatchMain() }
+                // GitHub notifications poll from here as well: gh keeps its own
+                // credentials, so no app session is needed.
+                let github = GitHubNotificationPoller(service: service, applicationSupportRoot: service.applicationSupportRoot)
+                github.start()
+                withExtendedLifetime((delegate, scheduler, webhooks, github)) { dispatchMain() }
             case .install:
                 try LaunchAgent.install(arguments)
             }

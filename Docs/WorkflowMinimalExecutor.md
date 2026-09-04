@@ -23,7 +23,7 @@ difference between them is how an occurrence is admitted, not how it executes.
   absent or empty. Kaname offers these contracts through
   `workflow-event-fanout`: `mail.message.received` (Gmail deltas, app open),
   `calendar.event.changed` (Google Calendar sync tokens, app open),
-  `github.notification.received` (the `gh` user's inbox, app open), and any
+  `github.notification.received` (the `gh` user's inbox, polled by the local control service so it works with the app closed), and any
   contract posted to the local control service's webhook
   (`POST http://127.0.0.1:<port>/hook/<contract>` with the bearer token from
   `Workflows/webhook-endpoint.json`), which works with the app closed.

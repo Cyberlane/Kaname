@@ -137,11 +137,12 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
         // Workflow effects reach Gmail through this app-owned bridge; the Rust
         // executor's connector host forwards to it over a local socket.
         DesktopWorkflowConnectorBridge.shared.start(environment: KanameDesktopEnvironment.current)
-        // New Gmail messages, calendar changes, and GitHub notifications become
-        // trigger.event occurrences for active workflows while the app is open.
+        // New Gmail messages and calendar changes become trigger.event
+        // occurrences for active workflows while the app is open (Google
+        // credentials live here). GitHub notifications and webhooks are polled
+        // by the local control service, which runs with the app closed.
         DesktopMailEventPoller.shared.start(environment: KanameDesktopEnvironment.current)
         DesktopCalendarEventPoller.shared.start(environment: KanameDesktopEnvironment.current)
-        DesktopGitHubEventPoller.shared.start(environment: KanameDesktopEnvironment.current)
         // Failed runs and effects awaiting approval raise a notification even
         // when Run history is not on screen.
         DesktopAutomationRunWatcher.shared.start()

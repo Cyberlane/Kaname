@@ -390,7 +390,9 @@ struct DesktopDurableWorkflowRunsView: View {
                 Section("Pollers while the app is open") {
                     Text("mail.message.received · every 2 min")
                     Text("calendar.event.changed · every 5 min")
-                    Text("github.notification.received · every 3 min")
+                }
+                Section("Pollers in the Kaname service (app closed too)") {
+                    Text("github.notification.received · every 3 min via gh")
                 }
             } label: {
                 Label("Triggers", systemImage: "antenna.radiowaves.left.and.right")
