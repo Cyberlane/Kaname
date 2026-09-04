@@ -14,10 +14,14 @@ public struct KanameBridgeMemoryEntry: Codable, Equatable, Sendable {
     public let decisions: [String]
     public let findings: [String]
     public let updatedAtUnixMillis: Int64
+    /// Set when the thread belongs to a different project than the run; nil
+    /// for same-project history.
+    public var projectName: String? = nil
 
-    public init(threadID: String, title: String, summary: String, outcome: String, plan: [String], decisions: [String], findings: [String], updatedAtUnixMillis: Int64) {
+    public init(threadID: String, title: String, summary: String, outcome: String, plan: [String], decisions: [String], findings: [String], updatedAtUnixMillis: Int64, projectName: String? = nil) {
         (self.threadID, self.title, self.summary, self.outcome) = (threadID, title, summary, outcome)
         (self.plan, self.decisions, self.findings, self.updatedAtUnixMillis) = (plan, decisions, findings, updatedAtUnixMillis)
+        self.projectName = projectName
     }
 }
 

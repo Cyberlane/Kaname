@@ -1883,14 +1883,21 @@ final class DesktopConversationRuntime: ObservableObject {
         }
     }
 
-    /// Compact history of this project's other coding threads for the Bridge
-    /// `history_search` and `history_read` tools. Bounded so it stays cheap to
-    /// ship with every run.
+    /// Compact history of earlier coding threads for the Bridge
+    /// `history_search` and `history_read` tools: up to 40 from this project,
+    /// plus up to 20 recent ones from other projects (labelled with their
+    /// project) so lessons carry across repositories. Bounded so it stays
+    /// cheap to ship with every run.
     private func bridgeMemoryPack(for thread: DesktopThread) -> [KanameBridgeMemoryEntry] {
-        model.snapshot.threads
+        let others = model.snapshot.threads
             .filter { $0.projectID == thread.projectID && $0.id != thread.id && $0.kind == .coding }
             .sorted { $0.updatedAtUnixMillis > $1.updatedAtUnixMillis }
             .prefix(40)
+        let elsewhere = model.snapshot.threads
+            .filter { $0.projectID != thread.projectID && $0.kind == .coding && !$0.plan.isEmpty }
+            .sorted { $0.updatedAtUnixMillis > $1.updatedAtUnixMillis }
+            .prefix(20)
+        return (Array(others) + Array(elsewhere))
             .map { prior in
                 KanameBridgeMemoryEntry(
                     threadID: prior.id,
@@ -1903,14 +1910,34 @@ final class DesktopConversationRuntime: ObservableObject {
                         .prefix(6)
                         .map { String("\($0.title): \($0.detail)".prefix(400)) },
                     findings: (prior.findings ?? []).prefix(8).map { String($0.detail.prefix(300)) },
-                    updatedAtUnixMillis: prior.updatedAtUnixMillis
+                    updatedAtUnixMillis: prior.updatedAtUnixMillis,
+                    projectName: prior.projectID == thread.projectID ? nil : projectName(prior.projectID)
                 )
             }
     }
 
+    private func projectName(_ projectID: String?) -> String {
+        model.snapshot.projects.first { $0.id == projectID }?.name ?? "another project"
+    }
+
+    /// Lexical relevance of an earlier thread to the request: how many query
+    /// terms (3+ characters) appear in its title, summary, plan, decisions, or
+    /// findings.
+    private func recallHits(_ prior: DesktopThread, terms: [String]) -> Int {
+        guard !terms.isEmpty else { return 0 }
+        let decisions = (model.codingKnowledgeLane(threadID: prior.id)?.candidates ?? [])
+            .filter { $0.category == .decision }
+            .map { "\($0.title) \($0.detail)" }
+        let haystack = ([prior.title, prior.summary] + prior.plan.map(\.title)
+            + (prior.findings ?? []).map { "\($0.title) \($0.detail)" } + decisions)
+            .joined(separator: "\n").lowercased()
+        return terms.reduce(0) { $0 + (haystack.contains($1) ? 1 : 0) }
+    }
+
     /// Deterministic recall for a planning turn: up to five vault hits for the
-    /// request across readable scopes, and up to three earlier coding threads
-    /// in the same project with their plans, decisions, and findings.
+    /// request across readable scopes, up to three earlier coding threads in
+    /// the same project ranked by relevance to the request (recency when
+    /// nothing matches), and up to two relevant threads from other projects.
     private func recallSources(for thread: DesktopThread, userMessage: String) async -> [CodingContextSource] {
         var sources: [CodingContextSource] = []
         let query = String(
@@ -1936,11 +1963,28 @@ final class DesktopConversationRuntime: ObservableObject {
                 }
             }
         }
-        let priorThreads = model.snapshot.threads
-            .filter { $0.projectID == thread.projectID && $0.id != thread.id && $0.kind == .coding && !$0.plan.isEmpty }
-            .sorted { $0.updatedAtUnixMillis > $1.updatedAtUnixMillis }
+        let terms = userMessage.lowercased()
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+            .map(String.init)
+            .filter { $0.count > 2 }
+        let candidates = model.snapshot.threads
+            .filter { $0.id != thread.id && $0.kind == .coding && !$0.plan.isEmpty }
+            .map { (thread: $0, hits: recallHits($0, terms: terms)) }
+        let sameProject = candidates
+            .filter { $0.thread.projectID == thread.projectID }
+            .sorted { lhs, rhs in
+                if lhs.hits != rhs.hits { return lhs.hits > rhs.hits }
+                return lhs.thread.updatedAtUnixMillis > rhs.thread.updatedAtUnixMillis
+            }
             .prefix(3)
-        for prior in priorThreads {
+        let otherProjects = candidates
+            .filter { $0.thread.projectID != thread.projectID && $0.hits > 0 }
+            .sorted { lhs, rhs in
+                if lhs.hits != rhs.hits { return lhs.hits > rhs.hits }
+                return lhs.thread.updatedAtUnixMillis > rhs.thread.updatedAtUnixMillis
+            }
+            .prefix(2)
+        for prior in (Array(sameProject) + Array(otherProjects)).map(\.thread) {
             let workflow = model.codingWorkflow(threadID: prior.id)?.state
             let decisions = (model.codingKnowledgeLane(threadID: prior.id)?.candidates ?? [])
                 .filter { $0.category == .decision }
@@ -1956,9 +2000,10 @@ final class DesktopConversationRuntime: ObservableObject {
                 decisions.isEmpty ? nil : "Decisions:\n" + decisions.joined(separator: "\n"),
                 findings.isEmpty ? nil : "Findings:\n" + findings.joined(separator: "\n"),
             ].compactMap { $0 }.joined(separator: "\n")
+            let elsewhere = prior.projectID == thread.projectID ? "" : " (project \(projectName(prior.projectID)))"
             sources.append(CodingContextSource(
                 kind: .repositoryKnowledge,
-                title: "Recall · earlier thread \(prior.title)",
+                title: "Recall · earlier thread\(elsewhere) \(prior.title)",
                 path: "kaname://thread/\(prior.id)",
                 excerpt: String(excerpt.prefix(2_000))
             ))

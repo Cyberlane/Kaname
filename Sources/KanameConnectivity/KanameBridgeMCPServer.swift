@@ -324,7 +324,7 @@ public actor KanameBridgeMCPServer {
         ],
         [
             "name": "history_search",
-            "description": "Search Kaname's earlier coding threads in this project (titles, summaries, plans, decisions, findings). Use it before re-deriving something the user may have decided before.",
+            "description": "Search Kaname's earlier coding threads (titles, summaries, plans, decisions, findings), this project first and recent threads from the user's other projects labelled by project. Use it before re-deriving something the user may have decided before.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
@@ -447,7 +447,7 @@ public actor KanameBridgeMCPServer {
                 return Self.toolText("history_search needs a query.", isError: true)
             }
             guard !memory.isEmpty else {
-                return Self.toolText("No earlier threads exist for this project yet.")
+                return Self.toolText("No earlier threads exist yet.")
             }
             let limit = min(max((arguments["limit"] as? Int) ?? 5, 1), 20)
             let terms = query.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init).filter { $0.count > 2 }
@@ -470,7 +470,8 @@ public actor KanameBridgeMCPServer {
             for item in ranked {
                 let matches = item.hits == 1 ? "match" : "matches"
                 let summary = String(item.entry.summary.prefix(200))
-                lines.append("- [\(item.entry.threadID)] \(item.entry.title) · \(item.entry.outcome) · \(item.hits) \(matches)\n  \(summary)")
+                let project = item.entry.projectName.map { " · project \($0)" } ?? ""
+                lines.append("- [\(item.entry.threadID)] \(item.entry.title) · \(item.entry.outcome)\(project) · \(item.hits) \(matches)\n  \(summary)")
             }
             return Self.toolText(lines.joined(separator: "\n"))
         case "history_read":
