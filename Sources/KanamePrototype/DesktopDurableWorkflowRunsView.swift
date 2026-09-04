@@ -250,7 +250,7 @@ final class DesktopDurableWorkflowRunsViewModel: ObservableObject {
         isStarting = true
         defer { isStarting = false }
         var standingRuleReference: String?
-        if approve, alwaysAllow {
+        if approve, alwaysAllow, DesktopStandingEffectRules.isEligible(effect) {
             let rule = DesktopStandingEffectRule(
                 workflowID: run.workflowID,
                 workflowName: runnableWorkflows.first { $0.workflowID == run.workflowID }?.name ?? run.workflowID,
@@ -1246,12 +1246,14 @@ struct DesktopDurableWorkflowRunsView: View {
                             }
                             .buttonStyle(.borderedProminent)
                             .controlSize(.small)
-                            Button("Approve and always allow", systemImage: "checkmark.shield.fill") {
-                                Task { await viewModel.decideEffect(effect, run: run, approve: true, alwaysAllow: true) }
+                            if DesktopStandingEffectRules.isEligible(effect) {
+                                Button("Approve and always allow", systemImage: "checkmark.shield.fill") {
+                                    Task { await viewModel.decideEffect(effect, run: run, approve: true, alwaysAllow: true) }
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .help("Future \(effect.action) effects from this workflow run without asking. Remove the rule under Run workflow › Standing approvals.")
                             }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                            .help("Future \(effect.action) effects from this workflow run without asking. Remove the rule under Run workflow › Standing approvals.")
                             Button("Reject", role: .destructive) {
                                 Task { await viewModel.decideEffect(effect, run: run, approve: false) }
                             }

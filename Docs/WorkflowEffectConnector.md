@@ -105,7 +105,10 @@ approves matching proposed effects automatically the next time it observes
 them and continues the run, sending `standing_rule_reference` with the
 approval so the journal shows no human clicked. Rules are listed and removed
 under Run workflow › Standing approvals in Run history. Effects for other
-actions or other workflows still wait for an explicit decision.
+actions or other workflows still wait for an explicit decision. Per the
+Candidate enablement ladder, standing approvals are offered only for
+reversible mailbox mutations (label, archive, mark-read, draft), never for
+send or trash, and are not honoured on the Development channel.
 
 ## Reconciliation and the idempotency boundary
 

@@ -29,6 +29,17 @@ enum DesktopStandingEffectRules {
         var rules: [DesktopStandingEffectRule]
     }
 
+    /// Only narrow, reversible mailbox mutations may be granted standing
+    /// authority (Candidate enablement ladder). Sending and trashing always
+    /// wait for an explicit decision.
+    static let standingEligibleActions: Set<String> = ["label", "archive", "mark-read", "draft"]
+
+    /// Standing grants are never honoured on the Development channel, where
+    /// external mutations are denied by policy anyway.
+    static func isEligible(_ effect: DesktopWorkflowProjectedEffectAuthority, environment: KanameDesktopEnvironment = .current) -> Bool {
+        environment.allowsExternalMutations && standingEligibleActions.contains(effect.action)
+    }
+
     static func url(_ environment: KanameDesktopEnvironment = .current) -> URL {
         environment.applicationSupportRoot
             .appendingPathComponent("Workflows", isDirectory: true)
@@ -71,14 +82,14 @@ enum DesktopStandingEffectRules {
     /// covers and continues its run. Returns the names of workflows advanced.
     static func applyStandingRules(to snapshot: DesktopWorkflowRunHistorySnapshot, runner: LocalCoreRunner) async -> [String] {
         let rules = load()
-        guard !rules.isEmpty else { return [] }
+        guard !rules.isEmpty, KanameDesktopEnvironment.current.allowsExternalMutations else { return [] }
         var advanced: [String] = []
         for item in snapshot.runs {
             let run = item.run
             let proposed = run.effectAuthorities.filter { $0.status == "proposed" }
             guard !proposed.isEmpty else { continue }
             var approvedAny = false
-            for effect in proposed {
+            for effect in proposed where isEligible(effect) {
                 guard let rule = rules.first(where: { $0.matches(effect, workflowID: run.workflowID) }) else { continue }
                 do {
                     _ = try await runner.authorizeWorkflowEffect(
