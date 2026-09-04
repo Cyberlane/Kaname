@@ -496,12 +496,16 @@ struct DesktopDurableWorkflowRunsView: View {
                             Text("Workflow v\(revision.summary.revisionNumber)")
                             Text(revision.summary.revisionID).lineLimit(1)
                         }
+                        if let duration = snapshot.run.durationMilliseconds {
+                            Label(DesktopWorkflowDurationPresentation.text(milliseconds: duration), systemImage: "timer")
+                        }
                         Label("Historical snapshot", systemImage: "lock.doc")
                     }
                     .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
             }
+            failureSummary(snapshot)
             effectLifecycleSummary(snapshot.run.effectAuthorities, compact: effectCompact)
             retentionCard(snapshot.run)
             if let reason = snapshot.revisionAbsenceReason {
@@ -521,6 +525,45 @@ struct DesktopDurableWorkflowRunsView: View {
         .padding(14)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(KanameColor.surface.opacity(0.45), in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    @ViewBuilder
+    private func failureSummary(_ snapshot: DesktopWorkflowRunSnapshot) -> some View {
+        if let failure = snapshot.run.failurePoint {
+            let nodeName = failure.nodeID.flatMap { id in snapshot.graph?.nodes.first { $0.id == id }?.name }
+            Button {
+                if let nodeID = failure.nodeID {
+                    selectedNodeID = nodeID
+                    inspectorGroup = .error
+                }
+            } label: {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Image(systemName: "xmark.octagon.fill").foregroundStyle(KanameColor.danger)
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 6) {
+                            Text(nodeName.map { "Failed at \($0)" } ?? "Run failed")
+                                .font(.caption.weight(.bold))
+                            Text(failure.failureClass.label)
+                                .font(.caption2.weight(.semibold))
+                                .padding(.horizontal, 6).padding(.vertical, 2)
+                                .background(KanameColor.danger.opacity(0.14), in: Capsule())
+                                .foregroundStyle(KanameColor.danger)
+                            Text(failure.errorCode)
+                                .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
+                        }
+                        Text(failure.failureClass.explanation).font(.caption2).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if failure.nodeID != nil {
+                        Label("Open error", systemImage: "arrow.right.circle").font(.caption2)
+                    }
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(KanameColor.danger.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+            }
+            .buttonStyle(.plain)
+        }
     }
 
     @ViewBuilder
@@ -735,7 +778,15 @@ struct DesktopDurableWorkflowRunsView: View {
                                 Text(node.type).font(.system(size: 9, design: .monospaced)).foregroundStyle(.secondary)
                                 HStack(spacing: 4) {
                                     Text(state.capitalized).foregroundStyle(statusTint(state))
-                                    if let effect {
+                                    if let duration = run.nodes.first(where: { $0.nodeID == node.id })?.durationMilliseconds {
+                                        Text("·").foregroundStyle(.secondary)
+                                        Text(DesktopWorkflowDurationPresentation.text(milliseconds: duration))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    if let failureClass = run.attempt(for: node.id)?.failureClass {
+                                        Text("·").foregroundStyle(.secondary)
+                                        Text(failureClass.label).foregroundStyle(KanameColor.danger).lineLimit(1)
+                                    } else if let effect {
                                         Text("·").foregroundStyle(.secondary)
                                         Text(DesktopWorkflowEffectLifecyclePresentation.title(for: effect.status))
                                             .foregroundStyle(effectStatusTint(effect.status))
@@ -810,12 +861,31 @@ struct DesktopDurableWorkflowRunsView: View {
         let run = snapshot.run
         switch inspectorGroup {
         case .inputs:
-            valueList(run.inputs(for: node.id), empty: "This node has no admitted input checkpoint.")
+            let admitted = run.inputs(for: node.id)
+            let entry = run.entryInputs(for: node.id)
+            if admitted.isEmpty, !entry.isEmpty {
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("Entry input from the trigger that started this run.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                    ForEach(Array(entry.enumerated()), id: \.offset) { _, binding in
+                        evidenceCard(title: binding.portID, detail: valueText(binding.value))
+                    }
+                }
+            } else {
+                valueList(admitted, empty: "This node has no admitted input checkpoint.")
+            }
         case .output:
             valueList(run.outputs(for: node.id), empty: "This node produced no output emission.")
         case .error:
             if let attempt = run.attempt(for: node.id), let code = attempt.errorCode {
-                evidenceCard(title: code, detail: attempt.error.flatMap(valueText) ?? "No error payload was retained.")
+                let failureClass = DesktopWorkflowFailureClass(errorCode: code)
+                VStack(alignment: .leading, spacing: 7) {
+                    evidenceCard(title: "\(failureClass.label) · \(code)", detail: failureClass.explanation)
+                    evidenceCard(
+                        title: "Error payload",
+                        detail: attempt.error.flatMap(valueText) ?? "No error payload was retained."
+                    )
+                }
             } else {
                 explainedEmpty("This attempt did not report an error.")
             }
@@ -930,12 +1000,39 @@ struct DesktopDurableWorkflowRunsView: View {
                 }
             }
         case .timing:
-            if let attempt = run.attempt(for: node.id) {
-                evidenceCard(
-                    title: "Attempt \(attempt.number) · \(attempt.status)",
-                    detail: "Started \(attempt.startedAtUnixMillis) · settled \(attempt.settledAtUnixMillis.map(String.init) ?? "not settled") · journal \(attempt.startedStorePosition)…\(attempt.settledStorePosition.map(String.init) ?? "—")"
-                )
-            } else { explainedEmpty("This node has no recorded attempt timing.") }
+            let nodeAttempts = run.attempts.filter { $0.nodeID == node.id }.sorted { $0.number < $1.number }
+            if nodeAttempts.isEmpty {
+                explainedEmpty("This node has no recorded attempt timing.")
+            } else {
+                VStack(alignment: .leading, spacing: 7) {
+                    ForEach(nodeAttempts) { attempt in
+                        let duration = attempt.durationMilliseconds
+                            .map(DesktopWorkflowDurationPresentation.text(milliseconds:)) ?? "still running"
+                        let settled = attempt.settledAtUnixMillis
+                            .map(DesktopWorkflowDurationPresentation.timestamp) ?? "not settled"
+                        evidenceCard(
+                            title: "Attempt \(attempt.number) · \(attempt.status) · \(duration)",
+                            detail: "Started \(DesktopWorkflowDurationPresentation.timestamp(attempt.startedAtUnixMillis))\nSettled \(settled)\nJournal \(attempt.startedStorePosition)…\(attempt.settledStorePosition.map(String.init) ?? "—")"
+                        )
+                    }
+                    ForEach(run.capabilities(for: node.id)) { capability in
+                        if let elapsed = capability.elapsedMilliseconds {
+                            evidenceCard(
+                                title: "Capability host · \(DesktopWorkflowDurationPresentation.text(milliseconds: Int64(elapsed)))",
+                                detail: "Time inside the capability process for this attempt."
+                            )
+                        }
+                    }
+                    ForEach(run.llmAttempts(for: node.id)) { llm in
+                        if let elapsed = llm.elapsedMilliseconds {
+                            evidenceCard(
+                                title: "Model host · \(DesktopWorkflowDurationPresentation.text(milliseconds: Int64(elapsed)))",
+                                detail: "Time inside the model host for this attempt."
+                            )
+                        }
+                    }
+                }
+            }
         case .raw:
             VStack(alignment: .leading, spacing: 4) {
                 ForEach(run.events) { event in

@@ -57,6 +57,92 @@ public struct DesktopWorkflowStorageValueMetadata: Equatable, Sendable {
     public let result: String
 }
 
+/// The family a durable-run error code belongs to, derived from the dotted
+/// prefix the executor emits (`connector.timeout`, `llm.crashed`, ...). No
+/// protocol field carries this; it is a client-side reading of `errorCode`.
+public enum DesktopWorkflowFailureClass: String, CaseIterable, Sendable {
+    case connector
+    case capability
+    case llm
+    case validation
+    case storage
+    case review
+    case wait
+    case reconcile
+    case effect
+    case subflow
+    case cancel
+    case artifact
+    case other
+
+    public init(errorCode: String) {
+        let prefix = errorCode.split(separator: ".", maxSplits: 1).first.map(String.init) ?? errorCode
+        self = DesktopWorkflowFailureClass(rawValue: prefix) ?? .other
+    }
+
+    public var label: String {
+        switch self {
+        case .connector: "Connector"
+        case .capability: "Capability"
+        case .llm: "Model"
+        case .validation: "Validation"
+        case .storage: "Storage"
+        case .review: "Review"
+        case .wait: "Wait"
+        case .reconcile: "Reconciliation"
+        case .effect: "Effect"
+        case .subflow: "Child workflow"
+        case .cancel: "Cancelled"
+        case .artifact: "Artifact"
+        case .other: "Failure"
+        }
+    }
+
+    /// One plain sentence Justin can act on without reading logs.
+    public var explanation: String {
+        switch self {
+        case .connector: "An external service call (Gmail, Calendar, GitHub) failed or timed out."
+        case .capability: "An installed capability package crashed or exceeded its time budget."
+        case .llm: "The model host failed, timed out, or returned output that did not match the contract."
+        case .validation: "A value did not satisfy the schema the next node requires."
+        case .storage: "A scoped storage read or write failed, conflicted, or was unsupported."
+        case .review: "A human review was rejected, expired, or answered against a stale revision."
+        case .wait: "A durable wait expired before its signal arrived."
+        case .reconcile: "Post-effect reconciliation gave up before confirming the outcome."
+        case .effect: "The effect was rejected before dispatch."
+        case .subflow: "The child workflow was cancelled or failed."
+        case .cancel: "The run was cancelled on request."
+        case .artifact: "A produced artifact was malformed."
+        case .other: "The executor reported an error outside the known families."
+        }
+    }
+}
+
+public enum DesktopWorkflowDurationPresentation {
+    public static func text(milliseconds: Int64) -> String {
+        if milliseconds < 1_000 { return "\(milliseconds) ms" }
+        if milliseconds < 60_000 {
+            let seconds = Double(milliseconds) / 1_000
+            return seconds < 10 ? String(format: "%.1f s", seconds) : "\(Int(seconds.rounded())) s"
+        }
+        let minutes = milliseconds / 60_000
+        let seconds = (milliseconds % 60_000) / 1_000
+        if minutes < 60 { return seconds == 0 ? "\(minutes) min" : "\(minutes) min \(seconds) s" }
+        let hours = minutes / 60
+        return "\(hours) h \(minutes % 60) min"
+    }
+
+    public static func text(startedAtUnixMillis: Int64, settledAtUnixMillis: Int64?) -> String? {
+        guard let settledAtUnixMillis, settledAtUnixMillis >= startedAtUnixMillis else { return nil }
+        return text(milliseconds: settledAtUnixMillis - startedAtUnixMillis)
+    }
+
+    public static func timestamp(_ unixMillis: Int64) -> String {
+        Date(timeIntervalSince1970: TimeInterval(unixMillis) / 1_000)
+            .formatted(date: .abbreviated, time: .standard)
+    }
+}
+
 public struct DesktopWorkflowProjectedAttempt: Identifiable, Equatable, Sendable {
     public let id: String
     public let nodeID: String
@@ -93,6 +179,14 @@ public struct DesktopWorkflowProjectedAttempt: Identifiable, Equatable, Sendable
         self.settledStorePosition = settledStorePosition
         self.executionTokenID = executionTokenID
     }
+
+    public var durationMilliseconds: Int64? {
+        settledAtUnixMillis.flatMap { $0 >= startedAtUnixMillis ? $0 - startedAtUnixMillis : nil }
+    }
+
+    public var failureClass: DesktopWorkflowFailureClass? {
+        errorCode.map(DesktopWorkflowFailureClass.init(errorCode:))
+    }
 }
 
 public struct DesktopWorkflowProjectedNode: Identifiable, Equatable, Sendable {
@@ -104,6 +198,10 @@ public struct DesktopWorkflowProjectedNode: Identifiable, Equatable, Sendable {
     public let startedAtUnixMillis: Int64
     public let settledAtUnixMillis: Int64?
     public let lastStorePosition: UInt64
+
+    public var durationMilliseconds: Int64? {
+        settledAtUnixMillis.flatMap { $0 >= startedAtUnixMillis ? $0 - startedAtUnixMillis : nil }
+    }
 }
 
 public struct DesktopWorkflowProjectedEmission: Identifiable, Equatable, Sendable {
@@ -979,6 +1077,43 @@ public struct DesktopDurableWorkflowRun: Identifiable, Equatable, Sendable {
 
     public func attempt(for nodeID: String) -> DesktopWorkflowProjectedAttempt? {
         attempts.filter { $0.nodeID == nodeID }.max { $0.number < $1.number }
+    }
+
+    /// Where a failed run went wrong: the earliest attempt that reported an
+    /// error code, or the run's own code when no attempt carries one.
+    public struct FailurePoint: Equatable, Sendable {
+        public let nodeID: String?
+        public let errorCode: String
+        public let failureClass: DesktopWorkflowFailureClass
+        public let error: DesktopWorkflowProjectedValue?
+    }
+
+    public var failurePoint: FailurePoint? {
+        if let attempt = attempts
+            .filter({ $0.errorCode?.isEmpty == false })
+            .min(by: { $0.startedStorePosition < $1.startedStorePosition }),
+           let code = attempt.errorCode {
+            return FailurePoint(
+                nodeID: attempt.nodeID, errorCode: code,
+                failureClass: DesktopWorkflowFailureClass(errorCode: code), error: attempt.error
+            )
+        }
+        guard let errorCode, !errorCode.isEmpty else { return nil }
+        return FailurePoint(
+            nodeID: nil, errorCode: errorCode,
+            failureClass: DesktopWorkflowFailureClass(errorCode: errorCode), error: error
+        )
+    }
+
+    public var durationMilliseconds: Int64? {
+        settledAtUnixMillis.flatMap { $0 >= createdAtUnixMillis ? $0 - createdAtUnixMillis : nil }
+    }
+
+    /// The run's entry input for a node with no inbound admitted edge (the
+    /// trigger or entry node), read from the case episode that started it.
+    public func entryInputs(for nodeID: String) -> [DesktopWorkflowProjectedInputBinding] {
+        guard let episode, !edges.contains(where: { $0.targetNodeID == nodeID }) else { return [] }
+        return episode.inputs
     }
 
     public func inputs(for nodeID: String) -> [DesktopWorkflowProjectedEmission] {
