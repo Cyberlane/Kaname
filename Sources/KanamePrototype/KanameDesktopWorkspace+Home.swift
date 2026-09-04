@@ -23,6 +23,36 @@ struct DesktopHomeView: View {
     let openDestination: (DesktopDestination) -> Void
     let startConversation: () -> Void
     let startConversationInProject: (String) -> Void
+    /// Automation state that needs a decision, read from the durable run
+    /// projection when Home appears and every minute after.
+    @State private var automationAttention = AutomationAttention()
+
+    private struct AutomationAttention: Equatable {
+        var proposedEffects = 0
+        var failedRuns = 0
+        var failedWorkflowNames: [String] = []
+
+        var isEmpty: Bool { proposedEffects == 0 && failedRuns == 0 }
+    }
+
+    private func loadAutomationAttention() async {
+        guard let runner = LocalCoreRunner.bundled() else { return }
+        let loader = DesktopWorkflowRunHistoryLoader(
+            inspection: DesktopWorkflowRunInspectionClient(transport: runner),
+            library: DesktopWorkflowV2LibraryClient(transport: runner)
+        )
+        guard let snapshot = try? await loader.load(limit: 30, requestID: "home-attention:\(UUID().uuidString.lowercased())") else { return }
+        var next = AutomationAttention()
+        for item in snapshot.runs {
+            next.proposedEffects += item.run.effectAuthorities.filter { $0.status == "proposed" }.count
+            if item.run.status == "failed" {
+                next.failedRuns += 1
+                let name = item.graph?.name ?? item.run.workflowID
+                if !next.failedWorkflowNames.contains(name) { next.failedWorkflowNames.append(name) }
+            }
+        }
+        if next != automationAttention { automationAttention = next }
+    }
 
     private var attentionThreads: [DesktopThread] {
         model.threads(matching: searchText).filter {
@@ -52,13 +82,17 @@ struct DesktopHomeView: View {
                     detail: attentionThreads.isEmpty ? "You are caught up." : "Open the exact context before deciding."
                 )
 
-                if attentionThreads.isEmpty {
+                if !automationAttention.isEmpty {
+                    automationAttentionCard
+                }
+
+                if attentionThreads.isEmpty, automationAttention.isEmpty {
                     EmptyPanel(
                         symbol: "checkmark.circle.fill",
                         title: "Nothing needs a decision",
                         detail: "Running and recent work stays visible below."
                     )
-                } else {
+                } else if !attentionThreads.isEmpty {
                     LazyVGrid(
                         columns: [GridItem(.adaptive(minimum: usesSyntheticLargeText ? 380 : 300), spacing: 12)],
                         spacing: 12
@@ -85,6 +119,46 @@ struct DesktopHomeView: View {
         }
         .background(KanameColor.canvas)
         .kanameSemanticFont(.body)
+        .task {
+            await loadAutomationAttention()
+            while !_Concurrency.Task.isCancelled {
+                try? await _Concurrency.Task.sleep(for: .seconds(60))
+                await loadAutomationAttention()
+            }
+        }
+    }
+
+    private var automationAttentionCard: some View {
+        let parts: [String] = [
+            automationAttention.proposedEffects > 0
+                ? "\(automationAttention.proposedEffects) effect\(automationAttention.proposedEffects == 1 ? "" : "s") awaiting approval"
+                : nil,
+            automationAttention.failedRuns > 0
+                ? "\(automationAttention.failedRuns) failed run\(automationAttention.failedRuns == 1 ? "" : "s")"
+                    + (automationAttention.failedWorkflowNames.isEmpty ? "" : " (\(automationAttention.failedWorkflowNames.prefix(3).joined(separator: ", ")))")
+                : nil,
+        ].compactMap { $0 }
+        return Button {
+            openDestination(.automations)
+        } label: {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Image(systemName: automationAttention.failedRuns > 0 ? "xmark.octagon.fill" : "bolt.horizontal.circle.fill")
+                    .foregroundStyle(automationAttention.failedRuns > 0 ? KanameColor.danger : KanameColor.warning)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Automations need you").font(.body.weight(.semibold))
+                    Text(parts.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Label("Open Run history", systemImage: "arrow.right").font(.caption)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                (automationAttention.failedRuns > 0 ? KanameColor.danger : KanameColor.warning).opacity(0.10),
+                in: RoundedRectangle(cornerRadius: 12)
+            )
+        }
+        .buttonStyle(.plain)
     }
 
     private var usesSyntheticLargeText: Bool {
