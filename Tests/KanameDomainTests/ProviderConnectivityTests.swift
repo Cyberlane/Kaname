@@ -310,7 +310,13 @@ struct ProviderConnectivityTests {
     }
 
     @Test
-    func unknownAndMissingDriversProduceDistinctFailureSnapshots() async {
+    func unknownAndMissingDriversProduceDistinctFailureSnapshots() async throws {
+        let codexHome = FileManager.default.temporaryDirectory
+            .appending(path: "kaname-missing-provider-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: codexHome) }
+        try FileManager.default.createDirectory(at: codexHome, withIntermediateDirectories: true)
+        try Data("{}".utf8).write(to: codexHome.appending(path: "auth.json"))
+
         let unsupported = await capabilitySnapshot(
             id: "communityFork",
             driver: ProviderDriverKind(rawValue: "communityFork")!,
@@ -321,7 +327,8 @@ struct ProviderConnectivityTests {
             id: "codexLocal",
             driver: .codex,
             displayName: "Codex local",
-            executable: "kaname-definitely-missing-codex"
+            executable: "kaname-definitely-missing-codex",
+            codexHome: codexHome
         )
 
         #expect(unsupported.state == .unsupported)
@@ -333,7 +340,8 @@ struct ProviderConnectivityTests {
         id: String,
         driver: ProviderDriverKind,
         displayName: String,
-        executable: String
+        executable: String,
+        codexHome: URL? = nil
     ) async -> ProviderCapabilitySnapshot {
         let instance = ProviderInstance(
             id: ProviderInstanceID(rawValue: id)!,
@@ -343,7 +351,8 @@ struct ProviderConnectivityTests {
         return await ProviderCapabilityProber().probe(ProviderProbeConfiguration(
             instance: instance,
             executable: executable,
-            workingDirectory: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            workingDirectory: URL(fileURLWithPath: FileManager.default.currentDirectoryPath),
+            codexHome: codexHome
         ))
     }
 
