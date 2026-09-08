@@ -12,7 +12,7 @@ struct DesktopThreadNavigationTests {
             .conversation, .plan, .changes, .evidence,
         ])
         #expect(DesktopThreadPanel.allCases.map(\.label) == [
-            "Chat", "Plan", "Changes", "Terminal", "Preview", "Evidence", "Knowledge",
+            "Chat", "Plan", "Changes", "Processes", "Browser", "Evidence", "Knowledge",
         ])
         #expect(DesktopCyclicSelection.moving(.preview, .next, in: codingPanels) == .evidence)
     }

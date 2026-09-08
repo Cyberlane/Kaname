@@ -769,6 +769,10 @@ public struct DesktopWorkflowProjectedEffectAuthority: Identifiable, Equatable, 
     public let idempotencyKey: String
     public let approvalID: String
     public let approvalFingerprint: Data
+    /// Present only for an authorized effect. A non-empty value proves that
+    /// the authorization came from a persisted standing rule and may be
+    /// safely resumed by the background service after an interrupted start.
+    public internal(set) var standingRuleReference: String? = nil
     public let status: String
     public let consequence: String
     public let reversible: Bool
@@ -917,7 +921,7 @@ public enum DesktopWorkflowEffectLifecyclePresentation {
     }
 
     public static func requiresAttention(_ status: String) -> Bool {
-        ["proposed", "dispatching", "outcome_unknown"].contains(status)
+        ["proposed", "authorized", "dispatching", "outcome_unknown"].contains(status)
     }
 
     public static func protectsDeletion(_ status: String) -> Bool {
@@ -1192,6 +1196,112 @@ public struct DesktopWorkflowRunHistorySnapshot: Equatable, Sendable {
     public let absenceReason: String?
 }
 
+/// A small, durable projection of work that still needs a decision or
+/// recovery. Home uses this instead of inferring attention from a recent-run
+/// window, so every unresolved effect remains addressable by its exact run
+/// and effect identity.
+public struct DesktopWorkflowAttentionItem: Identifiable, Equatable, Sendable {
+    public enum Kind: String, Equatable, Sendable {
+        case effect
+        case failedRun
+    }
+
+    public let kind: Kind
+    public let runID: String
+    public let effectID: String?
+    public let workflowID: String
+    public let workflowName: String
+    public let title: String
+    public let detail: String
+    public let occurredAtUnixMillis: Int64
+
+    public var id: String {
+        "\(kind.rawValue):\(effectID ?? runID)"
+    }
+}
+
+public struct DesktopWorkflowAttentionSummary: Equatable, Sendable {
+    public let items: [DesktopWorkflowAttentionItem]
+
+    public var proposedEffectCount: Int {
+        items.count(where: { $0.kind == .effect })
+    }
+
+    public var failedRunCount: Int {
+        items.count(where: { $0.kind == .failedRun })
+    }
+
+    public var isEmpty: Bool { items.isEmpty }
+
+    public init(items: [DesktopWorkflowAttentionItem] = []) {
+        self.items = items.sorted {
+            ($0.occurredAtUnixMillis, $0.id) > ($1.occurredAtUnixMillis, $1.id)
+        }
+    }
+
+    public static func from(_ history: DesktopWorkflowRunHistorySnapshot) -> Self {
+        var items: [DesktopWorkflowAttentionItem] = []
+        for snapshot in history.runs {
+            let run = snapshot.run
+            let name = snapshot.graph?.name ?? run.workflowID
+            for effect in run.effectAuthorities
+                where DesktopWorkflowEffectLifecyclePresentation.requiresAttention(effect.status) {
+                items.append(.init(
+                    kind: .effect,
+                    runID: run.runID,
+                    effectID: effect.effectID,
+                    workflowID: run.workflowID,
+                    workflowName: name,
+                    title: "\(effect.action) · \(name)",
+                    detail: DesktopWorkflowEffectLifecyclePresentation.nextAction(for: effect.status),
+                    occurredAtUnixMillis: effect.proposedAtUnixMillis
+                ))
+            }
+            let hasUnresolvedEffect = run.effectAuthorities.contains {
+                DesktopWorkflowEffectLifecyclePresentation.requiresAttention($0.status)
+            }
+            if run.status == "failed",
+               run.errorCode != "effect.not-authorized",
+               !hasUnresolvedEffect {
+                let detail = run.failurePoint?.failureClass.explanation ?? "Inspect the durable run evidence to decide whether to retry."
+                items.append(.init(
+                    kind: .failedRun,
+                    runID: run.runID,
+                    effectID: nil,
+                    workflowID: run.workflowID,
+                    workflowName: name,
+                    title: "Failed · \(name)",
+                    detail: detail,
+                    occurredAtUnixMillis: run.settledAtUnixMillis ?? run.createdAtUnixMillis
+                ))
+            }
+        }
+        return .init(items: items)
+    }
+}
+
+public enum DesktopWorkflowRunStatusPresentation {
+    public static func isAwaitingApproval(_ run: DesktopDurableWorkflowRun) -> Bool {
+        run.status == "running"
+            && run.effectAuthorities.contains { $0.status == "proposed" }
+    }
+
+    public static func title(for run: DesktopDurableWorkflowRun) -> String {
+        isAwaitingApproval(run) ? "Awaiting approval" : run.status.capitalized
+    }
+
+    public static func symbol(for run: DesktopDurableWorkflowRun) -> String {
+        if isAwaitingApproval(run) { return "hand.raised.circle.fill" }
+        switch run.status {
+        case "succeeded": return "checkmark.circle.fill"
+        case "failed": return "xmark.octagon.fill"
+        case "cancelled": return "stop.circle.fill"
+        case "running", "cancelling": return "arrow.triangle.2.circlepath"
+        default: return "circle.dashed"
+        }
+    }
+}
+
 public enum DesktopWorkflowEffectLifecycleFixture {
     public static func unknownOutcomeHistory() -> DesktopWorkflowRunHistorySnapshot {
         let effect = DesktopWorkflowProjectedEffectAuthority(
@@ -1336,8 +1446,53 @@ public struct DesktopWorkflowRunHistoryLoader: Sendable {
         self.library = library
     }
 
-    public func load(limit: UInt32 = 30, requestID: String) async throws -> DesktopWorkflowRunHistorySnapshot {
-        let page = try await inspection.runs(limit: limit, requestID: requestID)
+    public func load(
+        limit: UInt32 = 30,
+        requestID: String,
+        runID: String? = nil,
+        attentionOnly: Bool = false
+    ) async throws -> DesktopWorkflowRunHistorySnapshot {
+        let asOfUnixMillis = Int64(Date().timeIntervalSince1970 * 1_000)
+        var pages: [DesktopWorkflowRunInspectionPage] = []
+        var beforeFirstStorePosition: UInt64?
+        var seenRunIDs = Set<String>()
+        repeat {
+            try Task.checkCancellation()
+            let page = try await inspection.runs(
+                runID: runID,
+                limit: limit,
+                asOfUnixMillis: asOfUnixMillis,
+                attentionOnly: attentionOnly,
+                beforeFirstStorePosition: beforeFirstStorePosition,
+                requestID: pages.isEmpty ? requestID : "\(requestID):page:\(pages.count)"
+            )
+            pages.append(page)
+            if attentionOnly {
+                let pageIDs = page.runs.map(\.runID)
+                guard Set(pageIDs).count == pageIDs.count,
+                      seenRunIDs.isDisjoint(with: pageIDs),
+                      zip(page.runs, page.runs.dropFirst()).allSatisfy({
+                          $0.firstStorePosition > $1.firstStorePosition
+                      }) else {
+                    throw DesktopWorkflowRunInspectionError.malformedResponse
+                }
+                seenRunIDs.formUnion(pageIDs)
+            }
+            try Task.checkCancellation()
+            guard attentionOnly, runID == nil, page.runs.count == limit,
+                  let last = page.runs.last else { break }
+            if let beforeFirstStorePosition,
+               last.firstStorePosition >= beforeFirstStorePosition {
+                throw DesktopWorkflowRunInspectionError.malformedResponse
+            }
+            beforeFirstStorePosition = last.firstStorePosition
+        } while true
+
+        let page = DesktopWorkflowRunInspectionPage(
+            projectionHighWaterMark: pages.map(\.projectionHighWaterMark).max() ?? 0,
+            runs: pages.flatMap(\.runs),
+            absenceReason: pages.compactMap(\.absenceReason).first
+        )
         var revisions: [String: DesktopWorkflowV2RevisionContent?] = [:]
         var snapshots: [DesktopWorkflowRunSnapshot] = []
         for (index, run) in page.runs.enumerated() {
@@ -1465,6 +1620,8 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
         runID: String? = nil,
         limit: UInt32 = 30,
         asOfUnixMillis: Int64 = Int64(Date().timeIntervalSince1970 * 1_000),
+        attentionOnly: Bool = false,
+        beforeFirstStorePosition: UInt64? = nil,
         requestID: String
     ) async throws -> DesktopWorkflowRunInspectionPage {
         guard !requestID.isEmpty,
@@ -1481,6 +1638,8 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
         request.runID = runID ?? ""
         request.limit = limit
         request.asOfUnixMillis = asOfUnixMillis
+        request.attentionOnly = attentionOnly
+        request.beforeFirstStorePosition = beforeFirstStorePosition ?? 0
         let response = try await transport.inspectWorkflowRuns(request, timeout: timeout)
         guard response.schemaVersion.major == 1,
               response.requestID == requestID else {
@@ -1659,6 +1818,7 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
               authorized == (item.authorizedStorePosition > 0) else {
             throw DesktopWorkflowRunInspectionError.malformedResponse
         }
+        var standingRuleReference: String?
         if authorized {
             let authorization = item.authorization
             guard authorization.effectID == intent.effectID,
@@ -1676,6 +1836,7 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
                   !authorization.resolution.deviceID.isEmpty else {
                 throw DesktopWorkflowRunInspectionError.malformedResponse
             }
+            standingRuleReference = authorization.resolution.standingRuleReference.nilIfEmpty
         }
         let dispatch = try effectDispatch(item, proposal: proposal)
         let reconciliation = try effectReconciliation(item, dispatch: dispatch)
@@ -1692,6 +1853,7 @@ public struct DesktopWorkflowRunInspectionClient: Sendable {
             idempotencyKey: intent.idempotencyKey,
             approvalID: approval.approvalID,
             approvalFingerprint: approval.fingerprint,
+            standingRuleReference: standingRuleReference,
             status: item.status,
             consequence: preview.consequence,
             reversible: preview.reversible,

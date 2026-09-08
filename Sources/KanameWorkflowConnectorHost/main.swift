@@ -6,33 +6,38 @@ import Foundation
 // `reconcile` with one JSON request on stdin and expects one JSON response on
 // stdout. Credentials for Gmail and the other connectors live in the desktop
 // app's Keychain items, so this host performs no external effect itself: it
-// forwards each request over a local Unix socket to the running Kaname app,
-// which owns the accounts, and relays the reply. When no app is listening the
-// host describes no connectors, so the executor refuses effect graphs instead
-// of guessing.
+// forwards each request over the one channel-specific local Unix socket named
+// by KANAME_WORKFLOW_CONNECTOR_SOCKET to the running Kaname app, which owns the
+// accounts, and relays the reply. The host never discovers or guesses among
+// other Kaname channels. When the configured socket is unavailable the host
+// describes no connectors, so the executor refuses effect graphs instead of
+// guessing.
 
 enum HostEnvironment {
-    static var home: String {
-        if let home = ProcessInfo.processInfo.environment["HOME"], !home.isEmpty { return home }
-        if let entry = getpwuid(getuid()), let directory = entry.pointee.pw_dir { return String(cString: directory) }
-        return NSHomeDirectory()
-    }
-
-    /// Socket files published by running Kaname apps, newest first.
-    static var bridgeSockets: [String] {
-        let support = URL(fileURLWithPath: home, isDirectory: true)
-            .appendingPathComponent("Library/Application Support", isDirectory: true)
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: support.path)) ?? []
-        let candidates = names
-            .filter { $0 == "Kaname" || $0.hasPrefix("Kaname ") }
-            .map { support.appendingPathComponent($0).appendingPathComponent("Runtime/connector-bridge.sock").path }
-            .filter { FileManager.default.fileExists(atPath: $0) }
-        return candidates.sorted { lhs, rhs in
-            let left = (try? FileManager.default.attributesOfItem(atPath: lhs)[.modificationDate] as? Date) ?? .distantPast
-            let right = (try? FileManager.default.attributesOfItem(atPath: rhs)[.modificationDate] as? Date) ?? .distantPast
-            return left > right
+    /// The parent process supplies the exact socket for its app channel. An
+    /// absent, relative, malformed, or overlong value fails closed rather than
+    /// falling back to another installed Kaname channel.
+    static var bridgeSocket: String? {
+        guard let raw = ProcessInfo.processInfo.environment["KANAME_WORKFLOW_CONNECTOR_SOCKET"],
+              !raw.isEmpty,
+              raw.hasPrefix("/"),
+              !raw.contains("\0"),
+              !raw.unicodeScalars.contains(where: { CharacterSet.newlines.contains($0) }) else {
+            return nil
         }
+        let path = URL(fileURLWithPath: raw).standardizedFileURL.path
+        guard path.hasPrefix("/"),
+              path.utf8.count < MemoryLayout<sockaddr_un>.size else { return nil }
+        return path
     }
+}
+
+enum BridgeExchangeResult {
+    case response(Data)
+    case unavailable
+    /// The request was partially or fully written, but no definitive reply
+    /// arrived. A workflow effect must be reconciled before retrying.
+    case outcomeUnknown
 }
 
 func emit(_ object: [String: Any]) {
@@ -41,51 +46,50 @@ func emit(_ object: [String: Any]) {
     FileHandle.standardOutput.write(Data("\n".utf8))
 }
 
-/// One request/response exchange over a Unix domain socket: a single JSON line
-/// each way. Returns nil when no app answers.
-func exchange(_ line: Data, timeoutSeconds: Int) -> Data? {
-    for path in HostEnvironment.bridgeSockets {
-        let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard descriptor >= 0 else { continue }
-        defer { close(descriptor) }
-        var address = sockaddr_un()
-        address.sun_family = sa_family_t(AF_UNIX)
-        let bytes = Array(path.utf8)
-        guard bytes.count < MemoryLayout.size(ofValue: address.sun_path) else { continue }
-        withUnsafeMutableBytes(of: &address.sun_path) { buffer in
-            for (index, byte) in bytes.enumerated() { buffer[index] = byte }
-            buffer[bytes.count] = 0
-        }
-        var timeout = timeval(tv_sec: timeoutSeconds, tv_usec: 0)
-        setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
-        setsockopt(descriptor, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
-        let connected = withUnsafePointer(to: &address) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
-                connect(descriptor, sockaddrPointer, socklen_t(MemoryLayout<sockaddr_un>.size))
-            }
-        }
-        guard connected == 0 else { continue }
-        var payload = line
-        payload.append(0x0A)
-        var sent = 0
-        while sent < payload.count {
-            let written = payload.withUnsafeBytes { raw -> Int in
-                Foundation.write(descriptor, raw.baseAddress!.advanced(by: sent), payload.count - sent)
-            }
-            guard written > 0 else { return nil }
-            sent += written
-        }
-        var response = Data()
-        var buffer = [UInt8](repeating: 0, count: 65_536)
-        while response.count < 8 * 1_048_576 {
-            let count = read(descriptor, &buffer, buffer.count)
-            if count <= 0 { break }
-            response.append(buffer, count: count)
-            if response.last == 0x0A { break }
-        }
-        if !response.isEmpty { return response }
+/// One request/response exchange over the configured Unix domain socket: a
+/// single JSON line each way. A connected socket with bytes written but no
+/// response is outcome-unknown; it must never be reported as not sent.
+func exchange(_ line: Data, timeoutSeconds: Int) -> BridgeExchangeResult {
+    guard let path = HostEnvironment.bridgeSocket else { return .unavailable }
+    let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
+    guard descriptor >= 0 else { return .unavailable }
+    defer { close(descriptor) }
+    var address = sockaddr_un()
+    address.sun_family = sa_family_t(AF_UNIX)
+    let bytes = Array(path.utf8)
+    guard bytes.count < MemoryLayout.size(ofValue: address.sun_path) else { return .unavailable }
+    withUnsafeMutableBytes(of: &address.sun_path) { buffer in
+        for (index, byte) in bytes.enumerated() { buffer[index] = byte }
+        buffer[bytes.count] = 0
     }
-    return nil
+    var timeout = timeval(tv_sec: timeoutSeconds, tv_usec: 0)
+    setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+    setsockopt(descriptor, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+    let connected = withUnsafePointer(to: &address) { pointer in
+        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
+            connect(descriptor, sockaddrPointer, socklen_t(MemoryLayout<sockaddr_un>.size))
+        }
+    }
+    guard connected == 0 else { return .unavailable }
+    var payload = line
+    payload.append(0x0A)
+    var sent = 0
+    while sent < payload.count {
+        let written = payload.withUnsafeBytes { raw -> Int in
+            Foundation.write(descriptor, raw.baseAddress!.advanced(by: sent), payload.count - sent)
+        }
+        guard written > 0 else { return sent == 0 ? .unavailable : .outcomeUnknown }
+        sent += written
+    }
+    var response = Data()
+    var buffer = [UInt8](repeating: 0, count: 65_536)
+    while response.count < 8 * 1_048_576 {
+        let count = read(descriptor, &buffer, buffer.count)
+        if count <= 0 { break }
+        response.append(buffer, count: count)
+        if response.last == 0x0A { break }
+    }
+    return response.isEmpty ? .outcomeUnknown : .response(response)
 }
 
 func forward(mode: String) {
@@ -95,20 +99,40 @@ func forward(mode: String) {
         return
     }
     let envelope: [String: Any] = ["mode": mode, "request": requestObject]
-    guard let line = try? JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys]),
-          let response = exchange(line, timeoutSeconds: mode == "describe" ? 5 : 120),
-          let object = try? JSONSerialization.jsonObject(with: response) as? [String: Any] else {
+    guard let line = try? JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys]) else {
+        emit(mode == "describe"
+            ? ["connectors": [] as [Any]]
+            : ["outcome": mode == "dispatch" ? "not_sent" : "still_unknown", "errorCode": "connector.bridge_request_encoding_failed", "summary": "The connector request could not be encoded safely."])
+        return
+    }
+    switch exchange(line, timeoutSeconds: mode == "describe" ? 5 : 120) {
+    case .response(let response):
+        guard let object = try? JSONSerialization.jsonObject(with: response) as? [String: Any] else {
+            emit(mode == "describe"
+                ? ["connectors": [] as [Any]]
+                : ["outcome": mode == "dispatch" ? "outcome_unknown" : "still_unknown", "errorCode": "connector.transport_unknown", "summary": "The connector bridge returned an invalid response; reconcile before retrying any effect."])
+            return
+        }
+        emit(object)
+    case .unavailable:
         switch mode {
         case "describe":
             emit(["connectors": [] as [Any]])
         case "dispatch":
-            emit(["outcome": "not_sent", "errorCode": "connector.app_unreachable", "summary": "Kaname is not running, so no connector could send this effect."])
+            emit(["outcome": "not_sent", "errorCode": "connector.bridge_unavailable", "summary": "The configured Kaname connector bridge is unavailable; no connector request was written."])
         default:
-            emit(["outcome": "still_unknown", "errorCode": "connector.app_unreachable", "summary": "Kaname is not running, so the effect could not be reconciled."])
+            emit(["outcome": "still_unknown", "errorCode": "connector.bridge_unavailable", "summary": "The configured Kaname connector bridge is unavailable, so the effect could not be reconciled."])
         }
-        return
+    case .outcomeUnknown:
+        switch mode {
+        case "describe":
+            emit(["connectors": [] as [Any]])
+        case "dispatch":
+            emit(["outcome": "outcome_unknown", "errorCode": "connector.transport_unknown", "summary": "The connector request may have reached Kaname, but no definitive response arrived; reconcile before retrying."])
+        default:
+            emit(["outcome": "still_unknown", "errorCode": "connector.transport_unknown", "summary": "The connector request may have reached Kaname, but no definitive response arrived; reconcile before retrying."])
+        }
     }
-    emit(object)
 }
 
 switch CommandLine.arguments.dropFirst().first {

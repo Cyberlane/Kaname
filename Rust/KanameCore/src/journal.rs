@@ -249,6 +249,34 @@ impl Journal {
         })
     }
 
+    /// Reads the exact admitted request for recovery, including its original
+    /// input and timestamp. Reconstructing an envelope changes its identity.
+    pub fn admitted_command(&self, command_id: &str) -> Result<Option<v1::CommandEnvelope>> {
+        let stored = self
+            .connection
+            .query_row(
+                "SELECT wire, wire_digest FROM commands WHERE command_id = ?1",
+                [command_id],
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .optional()?;
+        let Some((wire, expected_digest)) = stored else {
+            return Ok(None);
+        };
+        if digest(&wire) != expected_digest {
+            return Err(JournalError::Integrity(
+                "stored_command_digest_mismatch".into(),
+            ));
+        }
+        let command = v1::CommandEnvelope::decode(wire.as_slice())
+            .map_err(|_| JournalError::Integrity("stored_command_malformed".into()))?;
+        validate_command(&command)?;
+        if command.command_id != command_id {
+            return Err(JournalError::Integrity("stored_command_id_mismatch".into()));
+        }
+        Ok(Some(command))
+    }
+
     pub fn admit_command(&mut self, command: &v1::CommandEnvelope) -> Result<v1::CommandOutcome> {
         self.require_writable()?;
         validate_command(command)?;

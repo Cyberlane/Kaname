@@ -6,6 +6,7 @@ import KanameDesktop
 import KanameDomain
 import KanameFixtures
 import KanamePrototypeUI
+import KanameWorkflowHost
 #if os(macOS)
 import AppKit
 import Darwin
@@ -134,17 +135,9 @@ final class KanameDesktopAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Workflow effects reach Gmail through this app-owned bridge; the Rust
-        // executor's connector host forwards to it over a local socket.
-        DesktopWorkflowConnectorBridge.shared.start(environment: KanameDesktopEnvironment.current)
-        // New Gmail messages and calendar changes become trigger.event
-        // occurrences for active workflows while the app is open (Google
-        // credentials live here). GitHub notifications and webhooks are polled
-        // by the local control service, which runs with the app closed.
-        DesktopMailEventPoller.shared.start(environment: KanameDesktopEnvironment.current)
-        DesktopCalendarEventPoller.shared.start(environment: KanameDesktopEnvironment.current)
-        // Failed runs and effects awaiting approval raise a notification even
-        // when Run history is not on screen.
+        // The installed WorkflowWorker owns connector execution, mail/calendar
+        // polling, and standing approvals in both app-open and app-closed
+        // operation. The app only observes its durable projection for alerts.
         DesktopAutomationRunWatcher.shared.start()
         KanameDevelopmentRuntimeLogger.shared.record(.applicationStarted)
         mouseBackMonitor = NSEvent.addLocalMonitorForEvents(matching: .otherMouseUp) { event in

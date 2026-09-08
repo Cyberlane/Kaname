@@ -17,6 +17,15 @@ extension DesktopAppModel {
         snapshot.operations.codingWorkflows.first { $0.threadID == threadID }
     }
 
+    /// Decisions are recallable only after the linked knowledge lane has been
+    /// reconciled. A candidate shown for review is still unaccepted and must
+    /// not be presented to a later provider as durable project truth.
+    public func acceptedCodingKnowledgeDecisions(threadID: String) -> [DesktopCodingKnowledgeCandidate] {
+        guard codingKnowledgeLane(threadID: threadID)?.disposition == .reconciled else { return [] }
+        return (codingKnowledgeLane(threadID: threadID)?.candidates ?? [])
+            .filter { $0.category == .decision }
+    }
+
     @discardableResult
     public func ensureCodingWorkflow(threadID: String) -> DesktopCodingWorkflowRecord? {
         guard let thread = thread(id: threadID), thread.kind == .coding else { return nil }
@@ -136,6 +145,11 @@ extension DesktopAppModel {
             guard !duplicate,
                   snapshot.operations.codingKnowledgeLanes[laneIndex].candidates.count < Self.codingKnowledgeMaximumCandidateCount else { return }
             snapshot.operations.codingKnowledgeLanes[laneIndex].candidates.append(candidate)
+            if snapshot.operations.codingKnowledgeLanes[laneIndex].disposition == .reconciled {
+                snapshot.operations.codingKnowledgeLanes[laneIndex].disposition = .needsReview
+                snapshot.operations.codingKnowledgeLanes[laneIndex].dispositionReason =
+                    "A new knowledge candidate was added after reconciliation; review it before recalling decisions."
+            }
             snapshot.operations.codingKnowledgeLanes[laneIndex].updatedAtUnixMillis = timestamp
             Self.ensureCodingWorkflow(
                 in: &snapshot,

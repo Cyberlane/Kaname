@@ -1561,6 +1561,7 @@ struct DesktopAutomationsView: View {
     @ObservedObject var model: DesktopAppModel
     @ObservedObject var scheduler: DesktopAutomationSchedulerViewModel
     @ObservedObject var integrations: DesktopPersonalIntegrationViewModel
+    let deepLink: DesktopAutomationDeepLink?
 
     var body: some View {
         Group {
@@ -1570,7 +1571,8 @@ struct DesktopAutomationsView: View {
                 AutomationWorkflowProductView(
                     model: model,
                     scheduler: scheduler,
-                    integrations: integrations
+                    integrations: integrations,
+                    deepLink: deepLink
                 )
             }
         }

@@ -95,7 +95,7 @@ pub fn decode_run_inspection_query(
     if !request.workflow_id.is_empty() && request.workflow_id.len() > 128 {
         return Err(WorkflowProtocolError::RequestOutOfBounds);
     }
-    if request.as_of_unix_millis < 0 {
+    if request.as_of_unix_millis < 0 || request.before_first_store_position > i64::MAX as u64 {
         return Err(WorkflowProtocolError::RequestOutOfBounds);
     }
     Ok(request)

@@ -12,7 +12,11 @@ use kaname_core::{
         WorkflowEffectReconciliationOutcome, WorkflowInputBinding, WorkflowValueReference,
     },
     workflow_drafts::CreateWorkflowDraft,
-    workflow_effect_connector::{AutoApprovedWorkflowEffectHost, DeterministicEffectConnectorPlan},
+    workflow_effect_connector::{
+        AutoApprovedWorkflowEffectHost, DeterministicEffectConnectorPlan, WorkflowEffectConnector,
+        WorkflowEffectConnectorDispatchResult, WorkflowEffectConnectorReconciliationResult,
+        WorkflowEffectConnectorRequest, WorkflowEffectHost,
+    },
     workflow_executor::{self, DurableRunOutcome, WorkflowExecutionFault},
     workflow_library::WorkflowLibraryStore,
     workflow_mail_effect::WorkflowMailEffectClass,
@@ -327,7 +331,14 @@ fn effect_connector_without_a_host_cannot_reach_a_provider() {
     let command = effect_run_command("run-effect-hostless-001", &published, "send");
     let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
 
-    let result = workflow_executor::execute(&mut journal, &library, &command).unwrap();
+    let result = workflow_executor::execute_with_effects(
+        &mut journal,
+        &library,
+        &mut kaname_core::workflow_effect_connector::UnavailableWorkflowEffectHost,
+        &command,
+        SUBMITTED_AT_UNIX_MILLIS,
+    )
+    .unwrap();
 
     assert_eq!(result.outcome, DurableRunOutcome::Failed);
     let authority = projected_authority(&journal, "run-effect-hostless-001");
@@ -382,44 +393,63 @@ fn interrupted_effect_dispatch_resumes_without_a_second_provider_effect() {
             + 1
     };
 
-    let directory = tempdir().unwrap();
-    let (library, published) = published_effect_library(directory.path(), "send");
-    let command = effect_run_command("run-effect-crash-001", &published, "send");
-    let mut host = effect_host("send", DeterministicEffectConnectorPlan::TimeoutAfterSend);
-    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
-    let interrupted = workflow_executor::execute_with_effects_fault_for_test(
-        &mut journal,
-        &library,
-        &mut host,
-        &command,
-        SUBMITTED_AT_UNIX_MILLIS,
-        WorkflowExecutionFault::AfterNewEvent(dispatch_started_ordinal),
-    );
-    assert!(matches!(
-        interrupted,
-        Err(workflow_executor::WorkflowExecutionError::InjectedInterruption)
-    ));
+    // Recovery before the deadline may retry the same idempotency key.
+    // Recovery at or after it may only reconcile, never invoke the effect.
+    for delay in [0, 60_000, 900_001] {
+        let directory = tempdir().unwrap();
+        let (library, published) = published_effect_library(directory.path(), "send");
+        let command = effect_run_command("run-effect-crash-001", &published, "send");
+        let mut host = effect_host("send", DeterministicEffectConnectorPlan::TimeoutAfterSend);
+        let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+        let interrupted = workflow_executor::execute_with_effects_fault_for_test(
+            &mut journal,
+            &library,
+            &mut host,
+            &command,
+            SUBMITTED_AT_UNIX_MILLIS,
+            WorkflowExecutionFault::AfterNewEvent(dispatch_started_ordinal),
+        );
+        assert!(matches!(
+            interrupted,
+            Err(workflow_executor::WorkflowExecutionError::InjectedInterruption)
+        ));
 
-    let resumed = workflow_executor::execute_with_effects(
-        &mut journal,
-        &library,
-        &mut host,
-        &command,
-        SUBMITTED_AT_UNIX_MILLIS,
-    )
-    .unwrap();
-
-    assert_eq!(resumed.outcome, DurableRunOutcome::Succeeded);
-    assert_eq!(run_wires(&journal, "run-effect-crash-001"), expected);
-    let authority = projected_authority(&journal, "run-effect-crash-001");
-    let intent = authority
-        .proposal
-        .as_ref()
-        .unwrap()
-        .intent
-        .as_ref()
+        let resumed = workflow_executor::execute_with_effects(
+            &mut journal,
+            &library,
+            &mut host,
+            &command,
+            SUBMITTED_AT_UNIX_MILLIS + delay,
+        )
         .unwrap();
-    assert_eq!(host.dispatch_count(&intent.idempotency_key), 1);
+
+        if delay == 0 {
+            assert_eq!(resumed.outcome, DurableRunOutcome::Succeeded);
+            assert_eq!(run_wires(&journal, "run-effect-crash-001"), expected);
+        } else {
+            assert_eq!(resumed.outcome, DurableRunOutcome::Failed);
+        }
+        let authority = projected_authority(&journal, "run-effect-crash-001");
+        let intent = authority
+            .proposal
+            .as_ref()
+            .unwrap()
+            .intent
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            host.dispatch_count(&intent.idempotency_key),
+            if delay == 0 { 1 } else { 0 }
+        );
+        if delay != 0 {
+            assert_eq!(authority.status, "reconciled_not_applied");
+            assert_eq!(host.reconciliation_count(&intent.idempotency_key), 1);
+            assert_eq!(
+                authority.dispatch_settled.as_ref().unwrap().error_code,
+                "connector.dispatch_expired"
+            );
+        }
+    }
 }
 
 #[test]
@@ -456,6 +486,147 @@ fn an_input_without_a_destination_fingerprint_never_reaches_a_connector() {
         !journal_kinds(&journal, "run-effect-unfingerprinted-001")
             .contains(&WORKFLOW_EFFECT_PROPOSED_KIND.to_owned())
     );
+}
+
+#[test]
+fn attention_inspection_pages_old_unresolved_work_before_applying_the_limit() {
+    let directory = tempdir().unwrap();
+    let (library, published) = published_effect_library(directory.path(), "label");
+    let mut journal = Journal::open_in_memory(&CURSOR_KEY).unwrap();
+    let mut host = effect_host("label", DeterministicEffectConnectorPlan::Succeed);
+    for index in 0..36 {
+        let command = effect_run_command(&format!("attention-run-{index}"), &published, "label");
+        if index < 4 {
+            // Four old approvals must remain visible behind 32 completed runs.
+            workflow_executor::execute(&mut journal, &library, &command).unwrap();
+        } else {
+            workflow_executor::execute_with_effects(
+                &mut journal,
+                &library,
+                &mut host,
+                &command,
+                SUBMITTED_AT_UNIX_MILLIS,
+            )
+            .unwrap();
+        }
+    }
+    let mut projection = WorkflowRunProjection::open_in_memory().unwrap();
+    projection.catch_up(&journal).unwrap();
+    let mut query = kaname_core::v1::WorkflowRunInspectionQuery {
+        attention_only: true,
+        limit: 2,
+        ..Default::default()
+    };
+    let mut found = Vec::new();
+    loop {
+        let page = projection.inspect_runs_query(&query).unwrap();
+        if page.is_empty() {
+            break;
+        }
+        let cursor = page.last().unwrap().first_store_position;
+        assert!(
+            query.before_first_store_position == 0 || cursor < query.before_first_store_position
+        );
+        query.before_first_store_position = cursor;
+        found.extend(page.into_iter().map(|run| run.run_id));
+    }
+    assert_eq!(
+        found,
+        [
+            "attention-run-3",
+            "attention-run-2",
+            "attention-run-1",
+            "attention-run-0"
+        ]
+    );
+}
+
+#[test]
+fn owner_approval_resumes_a_waiting_effect_from_the_original_admitted_command() {
+    struct PendingOwner {
+        inner: AutoApprovedWorkflowEffectHost,
+        approved: bool,
+    }
+    impl WorkflowEffectConnector for PendingOwner {
+        fn registration(
+            &self,
+            connector: &str,
+            account: &str,
+        ) -> Option<WorkflowEffectConnectorRegistration> {
+            self.inner.registration(connector, account)
+        }
+        fn dispatch(
+            &mut self,
+            request: &WorkflowEffectConnectorRequest,
+        ) -> WorkflowEffectConnectorDispatchResult {
+            self.inner.dispatch(request)
+        }
+        fn reconcile(
+            &mut self,
+            request: &WorkflowEffectConnectorRequest,
+        ) -> WorkflowEffectConnectorReconciliationResult {
+            self.inner.reconcile(request)
+        }
+    }
+    impl WorkflowEffectHost for PendingOwner {
+        fn is_awaiting_authorization(&self, _: &WorkflowEffectProposed) -> bool {
+            !self.approved
+        }
+        fn authorize(
+            &mut self,
+            proposal: &WorkflowEffectProposed,
+        ) -> Option<kaname_core::v1::ApprovalResolution> {
+            if self.approved {
+                self.inner.authorize(proposal)
+            } else {
+                None
+            }
+        }
+    }
+    let directory = tempdir().unwrap();
+    let (library, published) = published_effect_library(directory.path(), "label");
+    let command = effect_run_command("run-owner-wait", &published, "label");
+    let path = directory.path().join("journal.sqlite");
+    let mut journal = Journal::open(&path, &CURSOR_KEY).unwrap();
+    let mut host = PendingOwner {
+        inner: effect_host("label", DeterministicEffectConnectorPlan::Succeed),
+        approved: false,
+    };
+    let waiting = workflow_executor::execute_with_effects(
+        &mut journal,
+        &library,
+        &mut host,
+        &command,
+        SUBMITTED_AT_UNIX_MILLIS,
+    )
+    .unwrap();
+    assert_eq!(waiting.outcome, DurableRunOutcome::Waiting);
+    drop(journal);
+    let mut reopened = Journal::open(&path, &CURSOR_KEY).unwrap();
+    let original = workflow_executor::admitted_run_command(&reopened, "run-owner-wait")
+        .unwrap()
+        .unwrap();
+    assert_eq!(original, command);
+    host.approved = true;
+    let completed = workflow_executor::execute_with_effects(
+        &mut reopened,
+        &library,
+        &mut host,
+        &original,
+        SUBMITTED_AT_UNIX_MILLIS + 300_000,
+    )
+    .unwrap();
+    assert_eq!(completed.outcome, DurableRunOutcome::Succeeded);
+    let authority = projected_authority(&reopened, "run-owner-wait");
+    let key = &authority
+        .proposal
+        .as_ref()
+        .unwrap()
+        .intent
+        .as_ref()
+        .unwrap()
+        .idempotency_key;
+    assert_eq!(host.inner.dispatch_count(key), 1);
 }
 
 fn effect_host(

@@ -1,5 +1,5 @@
 import Foundation
-import KanameDesktop
+@testable import KanameDesktop
 import KanameProtocol
 import Testing
 
@@ -170,6 +170,99 @@ struct DesktopWorkflowRunInspectionTests {
         #expect(fixture.runs.first?.graph?.nodes.first?.id == "effect-node")
     }
 
+    @Test("attention projection keeps unresolved effect and run identities addressable")
+    func attentionProjectionKeepsExactTargets() {
+        let history = DesktopWorkflowEffectLifecycleFixture.unknownOutcomeHistory()
+        let summary = DesktopWorkflowAttentionSummary.from(history)
+
+        #expect(summary.items.count == 1)
+        #expect(summary.items.first?.kind == .effect)
+        #expect(summary.items.first?.runID == "run-synthetic-effect")
+        #expect(summary.items.first?.effectID == "effect-synthetic-archive")
+        #expect(summary.items.first?.title.contains("archive") == true)
+        #expect(summary.proposedEffectCount == 1)
+        #expect(summary.failedRunCount == 0)
+    }
+
+    @Test("running runs with unresolved effects present as awaiting approval")
+    func runningApprovalStatusPresentation() throws {
+        let effect = DesktopWorkflowProjectedEffectAuthority(
+            effectID: "effect-awaiting-approval", nodeID: "effect-node",
+            connectorClass: "dev.kaname.synthetic-mail", action: "archive",
+            accountBindingID: "synthetic-account", destinationFingerprint: String(repeating: "a", count: 64),
+            inputDigest: String(repeating: "b", count: 64), intentDigest: String(repeating: "c", count: 64),
+            previewDigest: String(repeating: "d", count: 64), idempotencyKey: "awaiting-once",
+            approvalID: "approval-awaiting", approvalFingerprint: Data(), standingRuleReference: nil,
+            status: "proposed", consequence: "Archive the exact message.", reversible: true,
+            expiresAtUnixMillis: 100_000, grantID: nil, actorID: nil, deviceID: nil,
+            proposedAtUnixMillis: 1, authorizedAtUnixMillis: nil, proposedStorePosition: 1,
+            authorizedStorePosition: nil, dispatch: nil, reconciliation: nil
+        )
+        let run = DesktopDurableWorkflowRun(
+            runID: "run-awaiting-approval", workflowID: "workflow-one", revisionID: "revision-one",
+            packageDigest: String(repeating: "a", count: 64), status: "running", outcome: nil,
+            errorCode: nil, error: nil, createdAtUnixMillis: 1, settledAtUnixMillis: nil,
+            firstStorePosition: 1, lastStorePosition: 2, attempts: [], nodes: [], emissions: [],
+            edges: [], matchTraces: [], events: [], effectAuthorities: [effect]
+        )
+
+        #expect(DesktopWorkflowRunStatusPresentation.isAwaitingApproval(run))
+        #expect(DesktopWorkflowRunStatusPresentation.title(for: run) == "Awaiting approval")
+        #expect(DesktopWorkflowRunStatusPresentation.symbol(for: run) == "hand.raised.circle.fill")
+
+        let ordinary = DesktopDurableWorkflowRun(
+            runID: "run-ordinary", workflowID: "workflow-one", revisionID: "revision-one",
+            packageDigest: String(repeating: "a", count: 64), status: "running", outcome: nil,
+            errorCode: nil, error: nil, createdAtUnixMillis: 1, settledAtUnixMillis: nil,
+            firstStorePosition: 3, lastStorePosition: 4, attempts: [], nodes: [], emissions: [],
+            edges: [], matchTraces: [], events: []
+        )
+        #expect(!DesktopWorkflowRunStatusPresentation.isAwaitingApproval(ordinary))
+        #expect(DesktopWorkflowRunStatusPresentation.title(for: ordinary) == "Running")
+    }
+
+    @Test("attention loader follows every page and rejects a nonadvancing cursor")
+    func attentionLoaderPagesAndValidatesCursor() async throws {
+        let transport = PagedAttentionTransport(nonAdvancing: false)
+        let loader = DesktopWorkflowRunHistoryLoader(
+            inspection: DesktopWorkflowRunInspectionClient(transport: transport),
+            library: DesktopWorkflowV2LibraryClient(transport: transport)
+        )
+        let history = try await loader.load(limit: 2, requestID: "attention:pages", attentionOnly: true)
+        #expect(history.runs.map(\.run.runID) == ["run-new-a", "run-new-b", "run-old"])
+        let requests = await transport.requests()
+        #expect(requests.map(\.beforeFirstStorePosition) == [0, 3])
+        let allRequestsFilterAttention = requests.allSatisfy { $0.attentionOnly }
+        #expect(allRequestsFilterAttention)
+
+        let malformedTransport = PagedAttentionTransport(nonAdvancing: true)
+        let malformedLoader = DesktopWorkflowRunHistoryLoader(
+            inspection: DesktopWorkflowRunInspectionClient(transport: malformedTransport),
+            library: DesktopWorkflowV2LibraryClient(transport: malformedTransport)
+        )
+        await #expect(throws: DesktopWorkflowRunInspectionError.malformedResponse) {
+            _ = try await malformedLoader.load(limit: 2, requestID: "attention:stuck", attentionOnly: true)
+        }
+    }
+
+    @Test("attention inspection carries the durable cursor contract")
+    func attentionInspectionCarriesCursor() async throws {
+        let transport = AttentionQueryTransport()
+        _ = try await DesktopWorkflowRunInspectionClient(transport: transport).runs(
+            limit: 2,
+            asOfUnixMillis: 5_000,
+            attentionOnly: true,
+            beforeFirstStorePosition: 101,
+            requestID: "attention:cursor"
+        )
+
+        let request = try #require(await transport.request())
+        #expect(request.attentionOnly)
+        #expect(request.beforeFirstStorePosition == 101)
+        #expect(request.asOfUnixMillis == 5_000)
+        #expect(request.limit == 2)
+    }
+
     @Test("manual purge binds the reviewed digest and accepts only a tombstone receipt")
     func manualPurgeContract() async throws {
         let page = try await DesktopWorkflowRunInspectionClient(
@@ -185,6 +278,88 @@ struct DesktopWorkflowRunInspectionTests {
         #expect(receipt.tombstone.historicalRevisionRetained)
         #expect(receipt.compactedJournalEventCount == 8)
     }
+}
+
+private actor AttentionQueryTransport: DesktopWorkflowRunInspectionTransport {
+    private var lastRequest: Kaname_V1_WorkflowRunInspectionQuery?
+
+    func inspectWorkflowRuns(
+        _ request: Kaname_V1_WorkflowRunInspectionQuery,
+        timeout _: TimeInterval
+    ) async throws -> Kaname_V1_WorkflowRunInspectionResponse {
+        lastRequest = request
+        var response = Kaname_V1_WorkflowRunInspectionResponse()
+        response.schemaVersion.major = 1
+        response.requestID = request.requestID
+        return response
+    }
+
+    func request() -> Kaname_V1_WorkflowRunInspectionQuery? { lastRequest }
+}
+
+private actor PagedAttentionTransport: DesktopWorkflowRunInspectionTransport, DesktopWorkflowLibraryTransport {
+    private let nonAdvancing: Bool
+    private var seenRequests: [Kaname_V1_WorkflowRunInspectionQuery] = []
+
+    init(nonAdvancing: Bool) { self.nonAdvancing = nonAdvancing }
+
+    func inspectWorkflowRuns(
+        _ request: Kaname_V1_WorkflowRunInspectionQuery,
+        timeout _: TimeInterval
+    ) async throws -> Kaname_V1_WorkflowRunInspectionResponse {
+        seenRequests.append(request)
+        let positions: [UInt64]
+        if request.beforeFirstStorePosition == 0 {
+            positions = [4, 3]
+        } else if nonAdvancing {
+            positions = [3]
+        } else {
+            positions = [2]
+        }
+        var response = Kaname_V1_WorkflowRunInspectionResponse()
+        response.schemaVersion.major = 1
+        response.requestID = request.requestID
+        response.projectionHighWaterMark = 4
+        response.runs = positions.enumerated().map { index, position in
+            Self.projectedRun(id: position == 4 ? "run-new-a" : position == 3 ? "run-new-b" : "run-old", position: position)
+        }
+        return response
+    }
+
+    func queryWorkflowLibrary(
+        _: Kaname_V1_WorkflowLibraryQueryRequest,
+        timeout _: TimeInterval
+    ) async throws -> Kaname_V1_WorkflowLibraryQueryResponse { throw Failure.unsupported }
+
+    func setWorkflowActivation(
+        _: Kaname_V1_SetWorkflowActivationRequest,
+        timeout _: TimeInterval
+    ) async throws -> Kaname_V1_SetWorkflowActivationResponse { throw Failure.unsupported }
+
+    func importFrozenWorkspace(
+        _: Kaname_V1_ImportFrozenWorkspaceRequest,
+        timeout _: TimeInterval
+    ) async throws -> Kaname_V1_ImportFrozenWorkspaceResponse { throw Failure.unsupported }
+
+    func requests() -> [Kaname_V1_WorkflowRunInspectionQuery] { seenRequests }
+
+    private static func projectedRun(id: String, position: UInt64) -> Kaname_V1_WorkflowProjectedRun {
+        var run = Kaname_V1_WorkflowProjectedRun()
+        run.runID = id
+        run.workflowID = "workflow-one"
+        run.revisionID = "revision-one"
+        run.packageDigest = String(repeating: "a", count: 64)
+        run.status = "running"
+        run.createdAtUnixMillis = Int64(position)
+        run.firstStorePosition = position
+        run.lastStorePosition = position
+        run.retentionPolicy.mode = .duration
+        run.retentionPolicy.days = 30
+        run.purgePreview.evidenceDigest = String(repeating: "b", count: 64)
+        return run
+    }
+
+    private enum Failure: Error { case unsupported }
 }
 
 private actor PurgeTransport: DesktopWorkflowRunPurgeTransport {

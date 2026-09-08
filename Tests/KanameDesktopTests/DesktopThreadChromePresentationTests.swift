@@ -17,8 +17,8 @@ struct DesktopThreadChromePresentationTests {
             "Chat",
             "Plan",
             "Changes",
-            "Terminal",
-            "Preview",
+            "Processes",
+            "Browser",
             "Evidence",
             "Knowledge",
         ])

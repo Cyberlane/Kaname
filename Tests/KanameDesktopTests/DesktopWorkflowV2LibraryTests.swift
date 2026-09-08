@@ -17,6 +17,8 @@ struct DesktopWorkflowV2LibraryTests {
         #expect(portfolio[0].latestRevisionNumber == 2)
         #expect(portfolio[0].activeRevisionID == "revision-one")
         #expect(portfolio[0].executionSupport == .unsupported)
+        #expect(DesktopWorkflowRunAvailabilityPresentation.reason(for: portfolio[0])
+            == "The active revision is installed but its required capabilities are unavailable in this executor.")
 
         let history = try await client.revisionHistory(
             workflowID: "workflow-one",

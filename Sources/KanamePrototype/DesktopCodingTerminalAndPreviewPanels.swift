@@ -427,6 +427,7 @@ struct DesktopCodingPreviewPanel: View {
     @ObservedObject var model: DesktopAppModel
     let thread: DesktopThread
     @State private var urlDraft = "http://127.0.0.1:5173"
+    @State private var reloadToken = 0
     @State private var grantMessage: String?
 
     private var tab: DesktopCodingPreviewTabRecord? {
@@ -473,7 +474,7 @@ struct DesktopCodingPreviewPanel: View {
                     .textFieldStyle(.roundedBorder)
                     .onSubmit { openPreview() }
                 Button("Open") { openPreview() }
-                Button("Reload", systemImage: "arrow.clockwise") { openPreview() }
+                Button("Reload", systemImage: "arrow.clockwise") { reloadPreview() }
                     .labelStyle(.iconOnly)
                     .disabled(tab == nil)
                 Menu("More") {
@@ -508,7 +509,7 @@ struct DesktopCodingPreviewPanel: View {
 
             if let tab, let url = URL(string: tab.url), CodingPreviewMCPGrant.isLocalPreviewURL(url) {
 #if os(macOS)
-                DesktopCodingPreviewWebView(url: url)
+                DesktopCodingPreviewWebView(url: url, reloadToken: reloadToken)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 #else
                 Text("Preview is desktop-only.")
@@ -548,6 +549,11 @@ struct DesktopCodingPreviewPanel: View {
         model.upsertCodingPreviewTab(record)
     }
 
+    private func reloadPreview() {
+        guard tab != nil else { return }
+        reloadToken &+= 1
+    }
+
     private func requestPreviewMCPGrant() {
         guard let worktree else { return }
         let target = CodingPreviewMCPGrant.exactTarget(
@@ -570,6 +576,19 @@ struct DesktopCodingPreviewPanel: View {
 #if os(macOS)
 private struct DesktopCodingPreviewWebView: NSViewRepresentable {
     let url: URL
+    let reloadToken: Int
+
+    final class Coordinator {
+        var reloadToken: Int
+
+        init(reloadToken: Int) {
+            self.reloadToken = reloadToken
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(reloadToken: reloadToken)
+    }
 
     func makeNSView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
@@ -581,7 +600,11 @@ private struct DesktopCodingPreviewWebView: NSViewRepresentable {
 
     func updateNSView(_ webView: WKWebView, context: Context) {
         if webView.url != url {
+            context.coordinator.reloadToken = reloadToken
             webView.load(URLRequest(url: url))
+        } else if context.coordinator.reloadToken != reloadToken {
+            context.coordinator.reloadToken = reloadToken
+            webView.reload()
         }
     }
 }

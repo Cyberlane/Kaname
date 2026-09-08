@@ -21,37 +21,50 @@ struct DesktopHomeView: View {
     let openThread: (String) -> Void
     let requestArchive: (String) -> Void
     let openDestination: (DesktopDestination) -> Void
+    let openAutomationRun: (String, String?) -> Void
     let startConversation: () -> Void
     let startConversationInProject: (String) -> Void
     /// Automation state that needs a decision, read from the durable run
     /// projection when Home appears and every minute after.
-    @State private var automationAttention = AutomationAttention()
+    @State private var automationAttention: AutomationAttentionState = .loading
 
-    private struct AutomationAttention: Equatable {
-        var proposedEffects = 0
-        var failedRuns = 0
-        var failedWorkflowNames: [String] = []
+    private enum AutomationAttentionState: Equatable {
+        case loading
+        case loaded(DesktopWorkflowAttentionSummary)
+        case stale(DesktopWorkflowAttentionSummary, String)
+        case unavailable(String)
 
-        var isEmpty: Bool { proposedEffects == 0 && failedRuns == 0 }
+        var summary: DesktopWorkflowAttentionSummary? {
+            switch self {
+            case .loaded(let summary), .stale(let summary, _): return summary
+            case .loading, .unavailable: return nil
+            }
+        }
     }
 
     private func loadAutomationAttention() async {
-        guard let runner = LocalCoreRunner.bundled() else { return }
+        let previous = automationAttention.summary
+        guard let runner = LocalCoreRunner.bundled() else {
+            automationAttention = previous.map { .stale($0, "The local core is unavailable. Showing the last durable result.") }
+                ?? .unavailable("The local core service that owns automation attention is unavailable.")
+            return
+        }
         let loader = DesktopWorkflowRunHistoryLoader(
             inspection: DesktopWorkflowRunInspectionClient(transport: runner),
             library: DesktopWorkflowV2LibraryClient(transport: runner)
         )
-        guard let snapshot = try? await loader.load(limit: 30, requestID: "home-attention:\(UUID().uuidString.lowercased())") else { return }
-        var next = AutomationAttention()
-        for item in snapshot.runs {
-            next.proposedEffects += item.run.effectAuthorities.filter { $0.status == "proposed" }.count
-            if item.run.status == "failed", item.run.errorCode != "effect.not-authorized" {
-                next.failedRuns += 1
-                let name = item.graph?.name ?? item.run.workflowID
-                if !next.failedWorkflowNames.contains(name) { next.failedWorkflowNames.append(name) }
-            }
+        do {
+            let snapshot = try await loader.load(
+                limit: 100,
+                requestID: "home-attention:\(UUID().uuidString.lowercased())",
+                attentionOnly: true
+            )
+            automationAttention = .loaded(.from(snapshot))
+        } catch {
+            automationAttention = previous.map {
+                .stale($0, "The latest durable automation result could not be loaded. Showing the last successful result.")
+            } ?? .unavailable("The local core service did not return durable automation evidence. It was not treated as caught up.")
         }
-        if next != automationAttention { automationAttention = next }
     }
 
     private var attentionThreads: [DesktopThread] {
@@ -79,14 +92,21 @@ struct DesktopHomeView: View {
 
                 SectionHeading(
                     title: "Needs attention",
-                    detail: attentionThreads.isEmpty ? "You are caught up." : "Open the exact context before deciding."
+                    detail: attentionSectionDetail
                 )
 
-                if !automationAttention.isEmpty {
-                    automationAttentionCard
+                if let summary = automationAttention.summary, !summary.isEmpty {
+                    automationAttentionCard(summary)
                 }
 
-                if attentionThreads.isEmpty, automationAttention.isEmpty {
+                if case .loading = automationAttention {
+                    attentionLoadingPanel
+                } else if case .unavailable(let message) = automationAttention {
+                    attentionUnavailablePanel(message)
+                } else if case .stale(_, let message) = automationAttention {
+                    attentionStalePanel(message)
+                } else if case .loaded(let summary) = automationAttention,
+                          attentionThreads.isEmpty, summary.isEmpty {
                     EmptyPanel(
                         symbol: "checkmark.circle.fill",
                         title: "Nothing needs a decision",
@@ -128,37 +148,87 @@ struct DesktopHomeView: View {
         }
     }
 
-    private var automationAttentionCard: some View {
+    private func automationAttentionCard(_ summary: DesktopWorkflowAttentionSummary) -> some View {
         let parts: [String] = [
-            automationAttention.proposedEffects > 0
-                ? "\(automationAttention.proposedEffects) effect\(automationAttention.proposedEffects == 1 ? "" : "s") awaiting approval"
+            summary.proposedEffectCount > 0
+                ? "\(summary.proposedEffectCount) effect\(summary.proposedEffectCount == 1 ? "" : "s") awaiting approval"
                 : nil,
-            automationAttention.failedRuns > 0
-                ? "\(automationAttention.failedRuns) failed run\(automationAttention.failedRuns == 1 ? "" : "s")"
-                    + (automationAttention.failedWorkflowNames.isEmpty ? "" : " (\(automationAttention.failedWorkflowNames.prefix(3).joined(separator: ", ")))")
+            summary.failedRunCount > 0
+                ? "\(summary.failedRunCount) failed run\(summary.failedRunCount == 1 ? "" : "s")"
                 : nil,
         ].compactMap { $0 }
-        return Button {
-            openDestination(.automations)
-        } label: {
+        let tint = summary.failedRunCount > 0 ? KanameColor.danger : KanameColor.warning
+        return VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
-                Image(systemName: automationAttention.failedRuns > 0 ? "xmark.octagon.fill" : "bolt.horizontal.circle.fill")
-                    .foregroundStyle(automationAttention.failedRuns > 0 ? KanameColor.danger : KanameColor.warning)
+                Image(systemName: summary.failedRunCount > 0 ? "xmark.octagon.fill" : "bolt.horizontal.circle.fill")
+                    .foregroundStyle(summary.failedRunCount > 0 ? KanameColor.danger : KanameColor.warning)
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Automations need you").font(.body.weight(.semibold))
                     Text(parts.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Label("Open Run history", systemImage: "arrow.right").font(.caption)
+                Button("Open Automations", systemImage: "arrow.right") { openDestination(.automations) }
+                    .buttonStyle(.borderless).font(.caption)
             }
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                (automationAttention.failedRuns > 0 ? KanameColor.danger : KanameColor.warning).opacity(0.10),
-                in: RoundedRectangle(cornerRadius: 12)
-            )
+            ForEach(summary.items.prefix(8)) { item in
+                Button { openAutomationRun(item.runID, item.effectID) } label: {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Image(systemName: item.kind == .effect ? "bolt.horizontal.circle" : "xmark.octagon")
+                            .foregroundStyle(item.kind == .effect ? KanameColor.warning : KanameColor.danger)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(item.title).font(.caption.weight(.semibold)).lineLimit(1)
+                            Text(item.detail).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+                        }
+                        Spacer()
+                        Image(systemName: "arrow.right.circle").font(.caption2).foregroundStyle(.secondary)
+                    }
+                }.buttonStyle(.plain)
+            }
+            if summary.items.count > 8 {
+                Text("Showing the 8 most recent unresolved items; open Automations for the complete list.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
         }
-        .buttonStyle(.plain)
+        .padding(12)
+        .background(tint.opacity(0.10), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var attentionSectionDetail: String {
+        switch automationAttention {
+        case .loading: "Checking conversations and durable automations…"
+        case .unavailable: "Automation attention is unavailable; no empty state is implied."
+        case .stale: "Showing the last durable result while the latest check is unavailable."
+        case .loaded(let summary):
+            attentionThreads.isEmpty && summary.isEmpty
+                ? "You are caught up."
+                : "Open the exact context before deciding."
+        }
+    }
+
+    private var attentionLoadingPanel: some View {
+        Label("Checking durable automation attention…", systemImage: "arrow.triangle.2.circlepath")
+            .font(.caption).foregroundStyle(.secondary)
+            .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+            .background(KanameColor.surface, in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func attentionStalePanel(_ message: String) -> some View {
+        Label(message, systemImage: "clock.badge.exclamationmark")
+            .font(.caption).foregroundStyle(KanameColor.warning)
+            .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+            .background(KanameColor.warning.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func attentionUnavailablePanel(_ message: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Automation attention unavailable", systemImage: "exclamationmark.triangle.fill")
+                .font(.caption.weight(.semibold)).foregroundStyle(KanameColor.warning)
+            Text(message).font(.caption).foregroundStyle(.secondary)
+            Button("Try again", systemImage: "arrow.clockwise") { _Concurrency.Task { await loadAutomationAttention() } }
+                .buttonStyle(.bordered)
+        }
+        .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+        .background(KanameColor.warning.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
     }
 
     private var usesSyntheticLargeText: Bool {
@@ -302,7 +372,7 @@ struct DesktopHomeView: View {
             }
             QuickActionCard(
                 title: "Automations",
-                detail: "\(model.snapshot.domains.automations.count) workflow\(model.snapshot.domains.automations.count == 1 ? "" : "s"). Runs, schedules, and effects waiting for approval.",
+                detail: "Runs, schedules, and effects waiting for approval.",
                 symbol: DesktopDestination.automations.symbol,
                 tint: KanameColor.warning
             ) { openDestination(.automations) }

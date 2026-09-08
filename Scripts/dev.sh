@@ -13,7 +13,7 @@ Commands
   check            Fast compile check: swift build of the app only, plus cargo check.
   run              Build (debug), then launch the Development app, replacing a running one.
   logs             Tail the newest Development UI logs and the local-core service log.
-  test [swift|rust]  Run Rust core tests, then Swift tests where the toolchain has them.
+  test [swift|rust]  Run Rust core tests and all Swift tests (requires Xcode).
   smoke            Run the Newsletter triage flow through the core with the real hosts
                    (one small model call) and assert it parks on the approval gate.
   clean            Remove .build and Rust target directories.
@@ -141,15 +141,20 @@ case "$command_name" in
         ;;
     test)
         target="${1:-all}"
+        case "$target" in
+            all|rust|swift) ;;
+            *) echo "dev: unknown test target: $target (expected all, rust, or swift)." >&2; exit 64 ;;
+        esac
+        if [[ "$target" != "rust" ]] && ! has_xcode; then
+            echo "dev: Swift tests require Xcode; no passing test result was produced." >&2
+            exit 1
+        fi
         if [[ "$target" == "all" || "$target" == "rust" ]]; then
             cargo test --locked --manifest-path Rust/KanameCore/Cargo.toml
         fi
         if [[ "$target" == "all" || "$target" == "swift" ]]; then
-            if has_xcode; then
-                swift test
-            else
-                echo "dev: swift test needs Xcode (Swift Testing module); skipped on Command Line Tools." >&2
-            fi
+            swift test --skip DesktopGlobalSearchPerformanceTests
+            swift test --skip-build --filter DesktopGlobalSearchPerformanceTests
         fi
         ;;
     smoke)

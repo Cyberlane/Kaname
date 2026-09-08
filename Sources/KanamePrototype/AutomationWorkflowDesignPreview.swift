@@ -231,6 +231,20 @@ struct AutomationWorkflowProductView: View {
     /// Compiler availability per legacy step for the revision on screen.
     @State private var nodeAvailability: [String: LocalCoreRunner.WorkflowNodeAvailabilityDecision] = [:]
     @State private var nodeAvailabilityRevisionID: String?
+    let deepLink: DesktopAutomationDeepLink?
+
+    init(
+        model: DesktopAppModel,
+        scheduler: DesktopAutomationSchedulerViewModel,
+        integrations: DesktopPersonalIntegrationViewModel,
+        deepLink: DesktopAutomationDeepLink? = nil
+    ) {
+        self.model = model
+        self.scheduler = scheduler
+        self.integrations = integrations
+        self.deepLink = deepLink
+        _section = State(initialValue: deepLink == nil ? Section.initial(arguments: CommandLine.arguments) : .runs)
+    }
 
     private var definitions: [DesktopWorkflowDefinitionRecord] { model.workflowDefinitions }
 
@@ -320,7 +334,10 @@ struct AutomationWorkflowProductView: View {
                 case .builder:
                     builderPage
                 case .runs:
-                    AutomationLiveRunsView()
+                    AutomationLiveRunsView(
+                        initialRunID: deepLink?.runID,
+                        initialEffectID: deepLink?.effectID
+                    )
                 case .components:
                     AutomationComponentsView(
                         model: model,
@@ -350,6 +367,10 @@ struct AutomationWorkflowProductView: View {
                 selectedWorkflowID = ids.first
             }
         }
+        .onChange(of: deepLink) { link in
+            guard link != nil else { return }
+            section = .runs
+        }
         .sheet(item: $manualRunDefinition) { definition in
             WorkflowManualRunSheet(
                 definition: definition,
@@ -377,8 +398,8 @@ struct AutomationWorkflowProductView: View {
         if workflowPresentations.isEmpty {
             EmptyPanel(
                 symbol: "square.stack.3d.up",
-                title: "No workflows installed",
-                detail: "Create a workflow or install a reviewed package. New definitions remain disabled until Readiness is complete."
+                title: "No saved workflow designs",
+                detail: "Published workflows can still appear in Run history. Create or import a design to edit it here."
             )
             .padding(24)
         } else {

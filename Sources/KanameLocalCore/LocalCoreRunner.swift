@@ -344,6 +344,9 @@ public struct LocalCoreRunner: Sendable {
               result.requestID == requestID else {
             throw LocalCoreRunnerError.malformedReport
         }
+        guard result.errors.isEmpty, result.matched == result.receipts.count else {
+            throw LocalCoreRunnerError.failed(code: "workflow_event_admission_incomplete")
+        }
         return result
     }
 

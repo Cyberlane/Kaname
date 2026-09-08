@@ -52,6 +52,20 @@ public struct DesktopWorkflowV2PortfolioItem: Identifiable, Equatable, Sendable 
     public let executionSupport: DesktopWorkflowV2ExecutionSupport?
 }
 
+public enum DesktopWorkflowRunAvailabilityPresentation {
+    /// Returns a user-facing explanation for an active revision that cannot
+    /// be started from the local executor. An unavailable revision remains
+    /// visible so the user can understand why Run now is disabled.
+    public static func reason(for item: DesktopWorkflowV2PortfolioItem) -> String? {
+        guard item.activeRevisionID != nil else { return "No active revision is published." }
+        guard item.executionSupport != .executable else { return nil }
+        if item.executionSupport == nil {
+            return "The active revision did not report execution support, so Kaname will not start it."
+        }
+        return "The active revision is installed but its required capabilities are unavailable in this executor."
+    }
+}
+
 public struct DesktopWorkflowV2RevisionSummary: Identifiable, Equatable, Sendable {
     public var id: String { revisionID }
     public let workflowID: String

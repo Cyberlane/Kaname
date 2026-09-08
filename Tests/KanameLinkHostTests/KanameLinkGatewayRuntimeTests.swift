@@ -17,7 +17,7 @@ struct KanameLinkGatewayRuntimeTests {
         do {
             let status = try await runtime.start()
             #expect(status.state == .running)
-            #expect(status.bindAddress == "127.0.0.1:43110")
+            #expect(status.bindAddress == fixture.bindAddress)
             #expect(status.healthVerified)
             #expect(status.ownedProcessIdentifier != nil)
 
@@ -25,7 +25,7 @@ struct KanameLinkGatewayRuntimeTests {
             #expect(serveArguments == [
                 "serve",
                 "--state-root", fixture.stateRootURL.path,
-                "--bind", "127.0.0.1:43110",
+                "--bind", fixture.bindAddress,
             ])
 
             let admin = try await runtime.makeAdminRunner()
@@ -61,7 +61,10 @@ struct KanameLinkGatewayRuntimeTests {
             stateRootURL: firstFixture.stateRootURL,
             configuration: firstFixture.configuration
         )
-        let secondFixture = try GatewayRuntimeFixture(mode: "healthy")
+        let secondFixture = try GatewayRuntimeFixture(
+            mode: "healthy",
+            bindAddress: firstFixture.bindAddress
+        )
         let second = try KanameLinkGatewayRuntime(
             executableURL: secondFixture.executableURL,
             stateRootURL: secondFixture.stateRootURL,
@@ -183,8 +186,16 @@ private final class GatewayRuntimeFixture {
     let executableURL: URL
     let stateRootURL: URL
     let configuration: KanameLinkGatewayRuntimeConfiguration
+    let bindAddress: String
 
-    init(mode: String) throws {
+    init(mode: String, bindAddress: String? = nil) throws {
+        let selectedPort: UInt16
+        if let bindAddress {
+            selectedPort = try Self.port(from: bindAddress)
+        } else {
+            selectedPort = try Self.reserveLoopbackPort()
+        }
+        self.bindAddress = bindAddress ?? "127.0.0.1:\(selectedPort)"
         rootURL = FileManager.default.temporaryDirectory
             .appending(path: "kaname-link-runtime-test-\(UUID().uuidString)", directoryHint: .isDirectory)
         let bundleURL = rootURL.appending(path: "Bundle", directoryHint: .isDirectory)
@@ -209,7 +220,8 @@ private final class GatewayRuntimeFixture {
             startupTimeout: 2,
             healthRequestTimeout: 0.1,
             maximumStartupLineBytes: 1_024,
-            maximumSuppressedDiagnosticBytes: 512
+            maximumSuppressedDiagnosticBytes: 512,
+            bindAddress: self.bindAddress
         )
     }
 
@@ -220,6 +232,45 @@ private final class GatewayRuntimeFixture {
     func recordedArguments(named name: String) throws -> [String] {
         let data = try Data(contentsOf: stateRootURL.appending(path: name))
         return try JSONDecoder().decode([String].self, from: data)
+    }
+
+    private static func port(from bindAddress: String) throws -> UInt16 {
+        guard let port = bindAddress.split(separator: ":").last.flatMap({ UInt16($0) }), port > 0 else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        return port
+    }
+
+    private static func reserveLoopbackPort() throws -> UInt16 {
+        let descriptor = socket(AF_INET, SOCK_STREAM, 0)
+        guard descriptor >= 0 else { throw POSIXError(.EIO) }
+        defer { Darwin.close(descriptor) }
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = 0
+        address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+        let bound = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+                Darwin.bind(
+                    descriptor,
+                    socketAddress,
+                    socklen_t(MemoryLayout<sockaddr_in>.size)
+                )
+            }
+        }
+        guard bound == 0 else { throw POSIXError(.EIO) }
+        var assigned = sockaddr_in()
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let result = withUnsafeMutablePointer(to: &assigned) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+                getsockname(descriptor, socketAddress, &length)
+            }
+        }
+        guard result == 0 else { throw POSIXError(.EIO) }
+        let port = UInt16(bigEndian: assigned.sin_port)
+        guard port > 0 else { throw POSIXError(.EIO) }
+        return port
     }
 
     private static let executableSource = #"""
@@ -249,6 +300,12 @@ if arguments[0] == "admin":
         "result": {}
     }, separators=(",", ":")), flush=True)
     sys.exit(0)
+
+if "--bind" not in arguments:
+    sys.exit(91)
+bind_address = arguments[arguments.index("--bind") + 1]
+host, port_text = bind_address.rsplit(":", 1)
+port = int(port_text)
 
 with open(os.path.join(state_root, "serve-arguments.json"), "w", encoding="utf-8") as handle:
     json.dump(arguments, handle, separators=(",", ":"))
@@ -281,8 +338,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         return
 
-server = http.server.HTTPServer(("127.0.0.1", 43110), Handler)
-startup_address = "127.0.0.1:43111" if mode == "wrong-startup" else "127.0.0.1:43110"
+server = http.server.HTTPServer((host, port), Handler)
+startup_address = f"{host}:{port + 1}" if mode == "wrong-startup" else bind_address
 print(json.dumps({
     "schemaVersion": 1,
     "requestID": "startup",

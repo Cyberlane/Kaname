@@ -89,6 +89,12 @@ public struct KanameDesktopEnvironment: Equatable, Sendable {
     public var connectivityDirectory: URL { applicationSupportRoot.appending(path: "Connectivity", directoryHint: .isDirectory) }
     public var googleDirectory: URL { applicationSupportRoot.appending(path: "Google", directoryHint: .isDirectory) }
     public var runtimeDirectory: URL { applicationSupportRoot.appending(path: "Runtime", directoryHint: .isDirectory) }
+    /// Separate ownership for the long lived automation worker. The desktop UI
+    /// and the legacy maintenance invocation use different locks so closing or
+    /// reopening the UI cannot duplicate provider pollers.
+    public var automationServiceLockURL: URL {
+        runtimeDirectory.appending(path: "automation-service.lock")
+    }
     public var desktopUIInstanceLockURL: URL { Self.desktopUIInstanceLockURL() }
     public var instanceLockURL: URL { runtimeDirectory.appending(path: "desktop-instance.lock") }
     public var updateDirectory: URL { applicationSupportRoot.appending(path: "Updates", directoryHint: .isDirectory) }

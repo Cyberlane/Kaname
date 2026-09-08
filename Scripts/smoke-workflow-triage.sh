@@ -21,6 +21,8 @@ for binary in "$core" "$llm_host" "$effect_host" "$capability_host"; do
     [[ -x "$binary" ]] || { echo "smoke: missing $binary (run Scripts/dev.sh build)" >&2; exit 2; }
 done
 command -v sqlite3 >/dev/null || { echo "smoke: sqlite3 missing" >&2; exit 2; }
+: "${KANAME_WORKFLOW_CONNECTOR_SOCKET:?Set the exact authorized Development worker socket path before this live-provider smoke.}"
+export KANAME_WORKFLOW_CONNECTOR_SOCKET
 
 scratch="$(mktemp -d /tmp/kaname-triage-smoke.XXXXXX)"
 trap 'chmod -R u+rwX "$scratch" 2>/dev/null; rm -rf "$scratch"' EXIT
@@ -94,7 +96,8 @@ check 0102 succeeded   # classifier (real model call)
 check 0103 succeeded   # decision
 [[ "$effects" == "proposed" ]] || { echo "smoke: expected one proposed effect, got '${effects:-none}'" >&2; failures=$((failures + 1)); }
 run_error="$(sqlite3 "$projection" "select coalesce(error_code, '') from workflow_runs limit 1")"
-[[ "$run_error" == "effect.not-authorized" ]] || { echo "smoke: run should be parked on effect.not-authorized, got '$run_error'" >&2; failures=$((failures + 1)); }
+run_status="$(sqlite3 "$projection" "select status from workflow_runs limit 1")"
+[[ -z "$run_error" && "$run_status" == "running" && "$fanout" == *'"outcome":"waiting"'* ]] || { echo "smoke: run should remain resumable awaiting approval, got '$run_status/$run_error'" >&2; failures=$((failures + 1)); }
 
 if [[ $failures -eq 0 ]]; then
     echo "smoke: OK — trigger, classifier, and decision ran; label effect awaits approval"

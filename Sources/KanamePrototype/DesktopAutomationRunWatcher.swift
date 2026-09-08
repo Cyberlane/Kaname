@@ -1,6 +1,7 @@
 import Foundation
 import KanameDesktop
 import KanameLocalCore
+import KanameWorkflowHost
 
 /// Watches the durable run projection while the app is open and posts a local
 /// notification when something needs Justin: a run that failed, or an effect
@@ -43,13 +44,6 @@ final class DesktopAutomationRunWatcher: @unchecked Sendable {
             guard var snapshot = try? await loader.load(
                 limit: 30, requestID: "run-watcher:\(UUID().uuidString.lowercased())"
             ) else { return }
-            // Standing rules approve their effects without a click; reload so
-            // the notification pass sees the advanced runs, not the parked ones.
-            let advanced = await DesktopStandingEffectRules.applyStandingRules(to: snapshot, runner: runner)
-            if !advanced.isEmpty,
-               let refreshed = try? await loader.load(limit: 30, requestID: "run-watcher:\(UUID().uuidString.lowercased())") {
-                snapshot = refreshed
-            }
             let observations = snapshot.runs.map { item in
                 (
                     runID: item.run.runID,

@@ -2023,8 +2023,23 @@ impl WorkflowRunProjection {
         limit: u32,
         as_of_unix_millis: i64,
     ) -> Result<Vec<v1::WorkflowProjectedRun>> {
+        self.inspect_runs_query(&v1::WorkflowRunInspectionQuery {
+            workflow_id: workflow_id.unwrap_or_default().into(),
+            run_id: run_id.unwrap_or_default().into(),
+            limit,
+            as_of_unix_millis,
+            ..Default::default()
+        })
+    }
+
+    pub fn inspect_runs_query(
+        &self,
+        query: &v1::WorkflowRunInspectionQuery,
+    ) -> Result<Vec<v1::WorkflowProjectedRun>> {
         self.integrity_check()?;
-        if as_of_unix_millis < 0 {
+        let as_of_unix_millis = query.as_of_unix_millis;
+        let limit = query.limit;
+        if as_of_unix_millis < 0 || query.before_first_store_position > i64::MAX as u64 {
             return Err(WorkflowProjectionError::Integrity(
                 "inspection_time_out_of_bounds".into(),
             ));
@@ -2034,53 +2049,33 @@ impl WorkflowRunProjection {
                 "inspection_limit_out_of_bounds".into(),
             ));
         }
-        let mut run_ids = Vec::new();
-        match (
-            workflow_id.filter(|value| !value.is_empty()),
-            run_id.filter(|value| !value.is_empty()),
-        ) {
-            (_, Some(run_id)) => {
-                let found = self
-                    .connection
-                    .query_row(
-                        "SELECT run_id FROM workflow_runs r WHERE run_id = ?1
-                         AND NOT EXISTS (
-                           SELECT 1 FROM workflow_run_purge_receipts p WHERE p.run_id = r.run_id
-                         )",
-                        [run_id],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()?;
-                run_ids.extend(found);
-            }
-            (Some(workflow_id), None) => {
-                let mut statement = self.connection.prepare(
-                    "SELECT run_id FROM workflow_runs r WHERE workflow_id = ?1
-                       AND NOT EXISTS (
-                         SELECT 1 FROM workflow_run_purge_receipts p WHERE p.run_id = r.run_id
-                       )
-                     ORDER BY created_at_unix_millis DESC, first_store_position DESC, run_id
-                     LIMIT ?2",
-                )?;
-                let rows = statement.query_map(params![workflow_id, i64::from(limit)], |row| {
-                    row.get::<_, String>(0)
-                })?;
-                run_ids = rows.collect::<std::result::Result<_, _>>()?;
-            }
-            (None, None) => {
-                let mut statement = self.connection.prepare(
-                    "SELECT run_id FROM workflow_runs r
-                     WHERE NOT EXISTS (
-                       SELECT 1 FROM workflow_run_purge_receipts p WHERE p.run_id = r.run_id
-                     )
-                     ORDER BY created_at_unix_millis DESC, first_store_position DESC, run_id
-                     LIMIT ?1",
-                )?;
-                let rows =
-                    statement.query_map([i64::from(limit)], |row| row.get::<_, String>(0))?;
-                run_ids = rows.collect::<std::result::Result<_, _>>()?;
-            }
-        }
+        let mut statement = self.connection.prepare(
+            "SELECT run_id FROM workflow_runs r
+             WHERE (?1 = '' OR workflow_id = ?1) AND (?2 = '' OR run_id = ?2)
+               AND (?3 = 0 OR first_store_position < ?3)
+               AND NOT EXISTS (
+                 SELECT 1 FROM workflow_run_purge_receipts p WHERE p.run_id = r.run_id
+               )
+               AND (?4 = 0 OR r.status = 'failed' OR EXISTS (
+                 SELECT 1 FROM workflow_effect_authorities a
+                 WHERE a.run_id = r.run_id AND a.status IN ('proposed', 'authorized', 'outcome_unknown', 'dispatching')
+               ))
+             ORDER BY CASE WHEN ?4 = 0 THEN created_at_unix_millis END DESC,
+                      first_store_position DESC, run_id
+             LIMIT ?5",
+        )?;
+        let run_ids = statement
+            .query_map(
+                params![
+                    query.workflow_id,
+                    query.run_id,
+                    query.before_first_store_position as i64,
+                    query.attention_only,
+                    i64::from(limit)
+                ],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         run_ids
             .iter()
             .map(|run_id| self.inspect_run(run_id, as_of_unix_millis))

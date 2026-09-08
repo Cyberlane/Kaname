@@ -3,6 +3,7 @@ import Darwin
 import Foundation
 import KanameLocalCore
 import Network
+import Security
 
 private enum ServiceError: Error {
     case usage
@@ -63,7 +64,8 @@ private struct Arguments {
     }
 }
 
-private final class LocalControlService: NSObject, LocalCoreControlService {
+// Configuration is immutable; each request owns its subprocess and buffers.
+private final class LocalControlService: NSObject, LocalCoreControlService, @unchecked Sendable {
     private let coreExecutable: URL
     private let journalDirectory: URL
     private let localDeviceID: String?
@@ -491,6 +493,8 @@ private final class LocalControlService: NSObject, LocalCoreControlService {
         if FileManager.default.isExecutableFile(atPath: connectorHost.path) {
             environment["KANAME_WORKFLOW_EFFECT_COMMAND"] = connectorHost.path
         }
+        environment["KANAME_WORKFLOW_CONNECTOR_SOCKET"] = applicationSupportRoot
+            .appendingPathComponent("Runtime/connector-bridge.sock").path
         process.environment = environment
         let timedOut = LockedFlag()
         let timer = DispatchSource.makeTimerSource(queue: .global(qos: .userInitiated))
@@ -930,7 +934,9 @@ private enum KanameLocalControlServiceMain {
                 // fire even when the desktop app is closed.
                 let scheduler = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "com.cyberlane.kaname.scheduler"))
                 scheduler.schedule(deadline: .now() + 30, repeating: 60)
-                scheduler.setEventHandler { service.runScheduleTick() }
+                // A Sendable handler must not inherit main()'s actor: this
+                // timer executes on its own queue, including with no UI open.
+                scheduler.setEventHandler { @Sendable [service] in service.runScheduleTick() }
                 scheduler.resume()
                 // Webhooks land here too, so external systems can start
                 // workflows while the desktop app is closed.
@@ -940,13 +946,79 @@ private enum KanameLocalControlServiceMain {
                 // credentials, so no app session is needed.
                 let github = GitHubNotificationPoller(service: service, applicationSupportRoot: service.applicationSupportRoot)
                 github.start()
-                withExtendedLifetime((delegate, scheduler, webhooks, github)) { dispatchMain() }
+                let automation = AutomationWorkerSupervisor(arguments: arguments, applicationSupportRoot: service.applicationSupportRoot)
+                automation.start()
+                withExtendedLifetime((delegate, scheduler, webhooks, github, automation)) { dispatchMain() }
             case .install:
                 try LaunchAgent.install(arguments)
             }
         } catch {
             FileHandle.standardError.write(Data("kaname-local-control-service: configuration failed\n".utf8))
             exit(64)
+        }
+    }
+}
+
+/// The launchd-owned service supervises one credential-capable worker. Its
+/// lifetime is independent of the UI; the worker uses a separate process lock
+/// and exits when this parent disappears during an update or service restart.
+private final class AutomationWorkerSupervisor: @unchecked Sendable {
+    private let arguments: Arguments
+    private let applicationSupportRoot: URL
+    private let queue = DispatchQueue(label: "com.cyberlane.kaname.automation-supervisor")
+    private var timer: DispatchSourceTimer?
+    private var process: Process?
+
+    init(arguments: Arguments, applicationSupportRoot: URL) {
+        self.arguments = arguments
+        self.applicationSupportRoot = applicationSupportRoot
+    }
+
+    func start() {
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now(), repeating: 15)
+        timer.setEventHandler { [weak self] in self?.ensureWorker() }
+        self.timer = timer
+        timer.resume()
+    }
+
+    private func ensureWorker() {
+        guard process?.isRunning != true else { return }
+        let resources = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL.deletingLastPathComponent()
+        let executable = resources.appendingPathComponent("KanameWorkflowWorker")
+        let infoURL = resources.deletingLastPathComponent().appendingPathComponent("Info.plist")
+        guard let info = NSDictionary(contentsOf: infoURL),
+              let channel = info["KanameDesktopChannel"] as? String,
+              ["development", "candidate", "stable"].contains(channel),
+              info["KanameLocalCoreMachService"] as? String == arguments.machService,
+              let serviceRequirement = info["KanameLocalCoreServiceRequirement"] as? String,
+              !serviceRequirement.isEmpty else { return }
+        var code: SecStaticCode?
+        var requirement: SecRequirement?
+        guard SecStaticCodeCreateWithPath(executable as CFURL, [], &code) == errSecSuccess,
+              let code,
+              SecRequirementCreateWithString(arguments.requirement as CFString, [], &requirement) == errSecSuccess,
+              SecStaticCodeCheckValidity(code, [], requirement) == errSecSuccess else {
+            FileHandle.standardError.write(Data("automation worker signature verification failed\n".utf8))
+            return
+        }
+        let child = Process()
+        child.executableURL = executable
+        child.arguments = [
+            "--automation-service", "--channel", channel,
+            "--application-support-base", applicationSupportRoot.deletingLastPathComponent().path,
+            "--mach-service", arguments.machService,
+            "--service-requirement", serviceRequirement,
+            "--parent-pid", String(getpid()),
+        ]
+        child.standardInput = FileHandle.nullDevice
+        child.standardOutput = FileHandle.nullDevice
+        child.standardError = FileHandle.standardError
+        do {
+            try child.run()
+            process = child
+        } catch {
+            FileHandle.standardError.write(Data("automation worker launch failed; will retry\n".utf8))
         }
     }
 }
@@ -974,7 +1046,7 @@ private enum LaunchAgent {
             "MachServices": [arguments.machService: true],
             "ProgramArguments": programArguments,
             "RunAtLoad": true,
-            "KeepAlive": false,
+            "KeepAlive": true,
             "StandardErrorPath": errorLog.path,
         ]
         try FileManager.default.createDirectory(at: plist.deletingLastPathComponent(), withIntermediateDirectories: true)

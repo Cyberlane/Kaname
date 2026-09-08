@@ -452,14 +452,19 @@ public actor KanameBridgeMCPServer {
                 return Self.toolText("No earlier threads exist yet.")
             }
             let limit = min(max((arguments["limit"] as? Int) ?? 5, 1), 20)
-            let terms = query.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init).filter { $0.count > 2 }
-            func score(_ entry: KanameBridgeMemoryEntry) -> Int {
-                let haystack = ([entry.title, entry.summary] + entry.plan + entry.decisions + entry.findings).joined(separator: "\n").lowercased()
-                return terms.reduce(0) { $0 + (haystack.contains($1) ? 1 : 0) }
-            }
+            let terms: [String] = query.lowercased()
+                .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+                .map(String.init)
+                .filter { $0.count > 2 }
             var scored: [(entry: KanameBridgeMemoryEntry, hits: Int)] = []
             for entry in memory {
-                let hits = score(entry)
+                let fields: [String] = [entry.title, entry.summary]
+                    + entry.plan + entry.decisions + entry.findings
+                let haystack = fields.joined(separator: "\n").lowercased()
+                var hits = 0
+                for term in terms where haystack.contains(term) {
+                    hits += 1
+                }
                 if hits > 0 { scored.append((entry, hits)) }
             }
             scored.sort { lhs, rhs in
@@ -472,7 +477,12 @@ public actor KanameBridgeMCPServer {
             for item in ranked {
                 let matches = item.hits == 1 ? "match" : "matches"
                 let summary = String(item.entry.summary.prefix(200))
-                let project = item.entry.projectName.map { " · project \($0)" } ?? ""
+                let project: String
+                if let projectName = item.entry.projectName {
+                    project = " · project \(projectName)"
+                } else {
+                    project = ""
+                }
                 lines.append("- [\(item.entry.threadID)] \(item.entry.title) · \(item.entry.outcome)\(project) · \(item.hits) \(matches)\n  \(summary)")
             }
             return Self.toolText(lines.joined(separator: "\n"))
@@ -480,14 +490,29 @@ public actor KanameBridgeMCPServer {
             guard let threadID = arguments["threadId"] as? String, let entry = memory.first(where: { $0.threadID == threadID }) else {
                 return Self.toolText("No earlier thread with that id is in this project's history.", isError: true)
             }
-            let text = [
-                "# \(entry.title)",
-                "Outcome: \(entry.outcome)",
-                entry.summary.isEmpty ? nil : "Summary: \(entry.summary)",
-                entry.plan.isEmpty ? nil : "## Plan\n" + entry.plan.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n"),
-                entry.decisions.isEmpty ? nil : "## Decisions\n" + entry.decisions.map { "- \($0)" }.joined(separator: "\n"),
-                entry.findings.isEmpty ? nil : "## Findings\n" + entry.findings.map { "- \($0)" }.joined(separator: "\n"),
-            ].compactMap { $0 }.joined(separator: "\n\n")
+            var sections: [String] = ["# \(entry.title)", "Outcome: \(entry.outcome)"]
+            if !entry.summary.isEmpty {
+                sections.append("Summary: \(entry.summary)")
+            }
+            if !entry.plan.isEmpty {
+                let planLines: [String] = entry.plan.enumerated().map { (index: Int, item: String) -> String in
+                    "\(index + 1). \(item)"
+                }
+                sections.append("## Plan\n" + planLines.joined(separator: "\n"))
+            }
+            if !entry.decisions.isEmpty {
+                let decisionLines: [String] = entry.decisions.map { (decision: String) -> String in
+                    "- \(decision)"
+                }
+                sections.append("## Decisions\n" + decisionLines.joined(separator: "\n"))
+            }
+            if !entry.findings.isEmpty {
+                let findingLines: [String] = entry.findings.map { (finding: String) -> String in
+                    "- \(finding)"
+                }
+                sections.append("## Findings\n" + findingLines.joined(separator: "\n"))
+            }
+            let text = sections.joined(separator: "\n\n")
             return Self.toolText(text)
         case "workflow_schema":
             return Self.toolText(Self.workflowAuthoringGuide)

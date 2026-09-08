@@ -25,6 +25,17 @@ extension DesktopAppModel {
         snapshot.operations.providerRuns.first { $0.id == id }
     }
 
+    /// Returns the assistant message projected from one exact provider run.
+    /// Provider replies share a thread, so selecting the thread's last
+    /// assistant message can accidentally read a later run during completion
+    /// races. Retries also reuse the application turn ID, so it cannot be used
+    /// as a fallback identity when the exact run message is absent.
+    public func assistantMessage(threadID: String, runID: String) -> DesktopMessage? {
+        guard let run = providerRun(id: runID), run.threadID == threadID,
+              let thread = thread(id: threadID) else { return nil }
+        return thread.messages.first(where: { $0.id == "assistant-\(runID)" && $0.role == .assistant })
+    }
+
     public var providerActivityThreadIDsRequiringPolling: Set<String> {
         let providerRunThreadIDs: [String] = snapshot.operations.providerRuns.compactMap { run -> String? in
             guard run.state == .proposed || run.state == .running else { return nil }
@@ -363,6 +374,9 @@ extension DesktopAppModel {
 
     private func finishProviderRun(id: String, outcome: ProviderRunOutcome) {
         let timestamp = now()
+        let completedAssistant = providerRun(id: id).flatMap { run in
+            run.threadID.flatMap { threadID in assistantMessage(threadID: threadID, runID: id)?.body }
+        }
         mutate { snapshot in
             guard let index = snapshot.operations.providerRuns.firstIndex(where: { $0.id == id }) else { return }
             let sessionState: DesktopProviderSessionState
@@ -375,7 +389,6 @@ extension DesktopAppModel {
                 snapshot.operations.providerRuns[index].costSummary = tokenUsage.map { "\($0) tokens" } ?? "Usage not reported"
                 sessionState = .ready
                 let threadID = snapshot.operations.providerRuns[index].threadID
-                let assistant = snapshot.threads.first(where: { $0.id == threadID })?.messages.last(where: { $0.role == .assistant })?.body
                 switch snapshot.operations.providerRuns[index].purpose {
                 case .codingPlan:
                     attention = .needsApproval
@@ -402,7 +415,7 @@ extension DesktopAppModel {
                     threadSummary = "Knowledge update drafted. Review the proposed notes in the Knowledge tab."
                 case .conversation:
                     attention = .needsResponse
-                    threadSummary = assistant.map(Self.provisionalConversationTitle) ?? "Provider completed."
+                    threadSummary = completedAssistant.map(Self.provisionalConversationTitle) ?? "Provider completed."
                 }
             case let .stopped(interrupted, error):
                 snapshot.operations.providerRuns[index].state = interrupted ? .interrupted : .failed

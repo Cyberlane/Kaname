@@ -198,7 +198,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "KanameWorkflowWorker",
-            dependencies: ["KanameWorkflowHost", "KanameConnectivity", "KanameDesktop"]
+            dependencies: ["KanameWorkflowHost", "KanameConnectivity", "KanameDesktop", "KanameLocalCore"]
         ),
         .executableTarget(
             name: "KanameWorkflowLlmHost",

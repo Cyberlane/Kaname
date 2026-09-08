@@ -65,11 +65,8 @@ jobs:
           key: kaname-swiftpm-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
       - name: Build every bundled product
         run: |
-          for product in KanamePrototype KanameLocalControlService KanameUpdateHelper KanameConversationWorker KanameWorkflowWorker KanameWorkflowLlmHost KanameWorkflowCapabilityHost KanameWorkflowConnectorHost; do
-            swift build -c debug --product "$product"
-          done
-      - name: Test desktop boundaries
-        run: |
-          swift test --filter KanameDomainTests
-          swift test --filter KanameProtocolTests
-          swift test --filter KanameDesktopTests
+          swift build -c debug
+      - name: Test all Swift boundaries and presentation models
+        run: swift test --skip DesktopGlobalSearchPerformanceTests
+      - name: Test search latency without concurrent fixture load
+        run: swift test --skip-build --filter DesktopGlobalSearchPerformanceTests

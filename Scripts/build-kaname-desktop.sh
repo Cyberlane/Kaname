@@ -111,14 +111,9 @@ fi
 [[ -s "$release_notes_path" ]] || { echo "Release notes are missing: $release_notes_path" >&2; exit 1; }
 
 cd "$project_dir"
-swift build -c "$configuration" --product KanamePrototype
-swift build -c "$configuration" --product KanameLocalControlService
-swift build -c "$configuration" --product KanameUpdateHelper
-swift build -c "$configuration" --product KanameConversationWorker
-swift build -c "$configuration" --product KanameWorkflowWorker
-swift build -c "$configuration" --product KanameWorkflowLlmHost
-swift build -c "$configuration" --product KanameWorkflowCapabilityHost
-swift build -c "$configuration" --product KanameWorkflowConnectorHost
+# Build the package's products together so SwiftPM plans and runs the protocol
+# plugin once for the complete bundle rather than once per helper executable.
+swift build -c "$configuration"
 if [[ "$core_configuration" == "debug" ]]; then
     cargo build --locked --manifest-path Rust/KanameCore/Cargo.toml --bin kaname-local-core
     cargo build --locked --manifest-path Rust/KanameLinkCore/Cargo.toml --bin kaname-link-gateway

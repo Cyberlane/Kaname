@@ -10,25 +10,41 @@ public struct KanameLinkGatewayRuntimeConfiguration: Equatable, Sendable {
     public let healthRequestTimeout: TimeInterval
     public let maximumStartupLineBytes: Int
     public let maximumSuppressedDiagnosticBytes: Int
+    public let bindAddress: String
 
     public init(
         startupTimeout: TimeInterval = 4,
         healthRequestTimeout: TimeInterval = 0.35,
         maximumStartupLineBytes: Int = 4 * 1_024,
-        maximumSuppressedDiagnosticBytes: Int = 8 * 1_024
+        maximumSuppressedDiagnosticBytes: Int = 8 * 1_024,
+        bindAddress: String = "127.0.0.1:43110"
     ) throws {
         guard startupTimeout >= 0.1, startupTimeout <= 15,
               healthRequestTimeout >= 0.05, healthRequestTimeout <= 2,
               maximumStartupLineBytes >= 256, maximumStartupLineBytes <= 16 * 1_024,
               maximumSuppressedDiagnosticBytes >= 256,
-              maximumSuppressedDiagnosticBytes <= 64 * 1_024 else {
+              maximumSuppressedDiagnosticBytes <= 64 * 1_024,
+              Self.isValidLoopbackBindAddress(bindAddress) else {
             throw KanameLinkGatewayRuntimeFailure.invalidConfiguration
         }
         self.startupTimeout = startupTimeout
         self.healthRequestTimeout = healthRequestTimeout
         self.maximumStartupLineBytes = maximumStartupLineBytes
         self.maximumSuppressedDiagnosticBytes = maximumSuppressedDiagnosticBytes
+        self.bindAddress = bindAddress
     }
+
+    private static func isValidLoopbackBindAddress(_ value: String) -> Bool {
+        let components = value.split(separator: ":", omittingEmptySubsequences: false)
+        guard components.count == 2,
+              components[0] == "127.0.0.1",
+              let port = UInt16(components[1]),
+              port > 0,
+              value == "127.0.0.1:\(port)" else { return false }
+        return true
+    }
+
+    var healthURL: URL { URL(string: "http://\(bindAddress)/health")! }
 }
 
 public enum KanameLinkGatewayRuntimeFailure: Error, Equatable, LocalizedError, Sendable {
@@ -153,7 +169,7 @@ public actor KanameLinkGatewayRuntime {
         KanameLinkGatewayRuntimeStatus(
             state: runtimeState,
             ownedProcessIdentifier: ownedProcess?.processIdentifier,
-            bindAddress: Self.bindAddress,
+            bindAddress: configuration.bindAddress,
             healthVerified: healthVerified
         )
     }
@@ -177,7 +193,7 @@ public actor KanameLinkGatewayRuntime {
         do {
             try validateExecutable()
             try preparePrivateStateRoot()
-            try Self.requireAvailableLoopbackPort()
+            try Self.requireAvailableLoopbackPort(configuration.bindAddress)
         } catch let failure as KanameLinkGatewayRuntimeFailure {
             runtimeState = .failed(failure)
             healthVerified = false
@@ -202,7 +218,7 @@ public actor KanameLinkGatewayRuntime {
         process.arguments = [
             "serve",
             "--state-root", stateRootURL.path,
-            "--bind", Self.bindAddress,
+            "--bind", configuration.bindAddress,
         ]
         process.environment = [
             "LANG": "en_US.UTF-8",
@@ -256,7 +272,7 @@ public actor KanameLinkGatewayRuntime {
             try requireCurrent(owned, generation: nextGeneration)
             switch startup {
             case let .line(line):
-                try Self.validateStartupLine(line)
+                try validateStartupLine(line)
             case .timedOut:
                 throw KanameLinkGatewayRuntimeFailure.startupTimedOut
             case .oversized:
@@ -381,7 +397,10 @@ public actor KanameLinkGatewayRuntime {
                     status: owned.terminationStatusIfAvailable ?? -1
                 )
             }
-            if await Self.probeExactHealth(timeout: configuration.healthRequestTimeout) {
+            if await Self.probeExactHealth(
+                url: configuration.healthURL,
+                timeout: configuration.healthRequestTimeout
+            ) {
                 return
             }
             try? await Task.sleep(for: .milliseconds(50))
@@ -442,7 +461,7 @@ public actor KanameLinkGatewayRuntime {
         }
     }
 
-    private static func validateStartupLine(_ line: Data) throws {
+    private func validateStartupLine(_ line: Data) throws {
         guard line.count >= 2,
               line.first == Character("{").asciiValue,
               line.last == Character("}").asciiValue,
@@ -462,12 +481,19 @@ public actor KanameLinkGatewayRuntime {
               ok.boolValue,
               let result = object["result"] as? [String: Any],
               Set(result.keys) == Set(["listeningAddress"]),
-              result["listeningAddress"] as? String == Self.bindAddress else {
+              result["listeningAddress"] as? String == configuration.bindAddress else {
             throw KanameLinkGatewayRuntimeFailure.startupMismatch
         }
     }
 
-    private static func requireAvailableLoopbackPort() throws {
+    private static func requireAvailableLoopbackPort(_ bindAddress: String) throws {
+        let components = bindAddress.split(separator: ":", omittingEmptySubsequences: false)
+        guard components.count == 2,
+              components[0] == "127.0.0.1",
+              let port = UInt16(components[1]),
+              port > 0 else {
+            throw KanameLinkGatewayRuntimeFailure.invalidConfiguration
+        }
         let descriptor = socket(AF_INET, SOCK_STREAM, 0)
         guard descriptor >= 0 else {
             throw KanameLinkGatewayRuntimeFailure.portOccupied
@@ -486,7 +512,7 @@ public actor KanameLinkGatewayRuntime {
         var address = sockaddr_in()
         address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
         address.sin_family = sa_family_t(AF_INET)
-        address.sin_port = in_port_t(43_110).bigEndian
+        address.sin_port = port.bigEndian
         address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
         let result = withUnsafePointer(to: &address) { pointer in
             pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
@@ -502,7 +528,7 @@ public actor KanameLinkGatewayRuntime {
         }
     }
 
-    private static func probeExactHealth(timeout: TimeInterval) async -> Bool {
+    private static func probeExactHealth(url: URL, timeout: TimeInterval) async -> Bool {
         let sessionConfiguration = URLSessionConfiguration.ephemeral
         sessionConfiguration.timeoutIntervalForRequest = timeout
         sessionConfiguration.timeoutIntervalForResource = timeout
@@ -517,7 +543,7 @@ public actor KanameLinkGatewayRuntime {
             delegateQueue: nil
         )
         defer { session.invalidateAndCancel() }
-        var request = URLRequest(url: healthURL)
+        var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.timeoutInterval = timeout
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
@@ -526,7 +552,7 @@ public actor KanameLinkGatewayRuntime {
             guard data.isEmpty,
                   let http = response as? HTTPURLResponse,
                   http.statusCode == 204,
-                  http.url == healthURL else { return false }
+                  http.url == url else { return false }
             return true
         } catch {
             return false

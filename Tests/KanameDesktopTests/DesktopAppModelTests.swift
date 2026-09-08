@@ -7,6 +7,168 @@ import Testing
 @MainActor
 struct DesktopAppModelTests {
     @Test
+    func bridgeScopesAreEmptyWithoutProjectContextAndNarrowedToSelectedNotes() {
+        let sources = [
+            DesktopKnowledgeSource(
+                id: "selected",
+                name: "Selected note",
+                kind: .obsidian,
+                scope: "Projects/Shared/Decision.md",
+                status: .ready,
+                lastReadAtUnixMillis: nil
+            ),
+            DesktopKnowledgeSource(
+                id: "unselected",
+                name: "Unselected note",
+                kind: .obsidian,
+                scope: "Projects/Shared/Private.md",
+                status: .ready,
+                lastReadAtUnixMillis: nil
+            ),
+        ]
+        let scopes = [
+            DesktopVaultScopeRecord(
+                id: "read",
+                sourceID: nil,
+                path: "Projects/Shared",
+                canRead: true,
+                canWrite: false,
+                lastReconciledAtUnixMillis: nil
+            ),
+            DesktopVaultScopeRecord(
+                id: "write",
+                sourceID: nil,
+                path: "Projects/Shared",
+                canRead: true,
+                canWrite: true,
+                lastReconciledAtUnixMillis: nil
+            ),
+        ]
+        let context = DesktopProjectContext(knowledgeSourceIDs: ["selected"])
+        let selected = DesktopBridgeContext.selectedVaultScopes(
+            projectContext: context,
+            usesProjectContext: true,
+            knowledgeSources: sources,
+            vaultScopes: scopes
+        )
+        #expect(selected.read == ["Projects/Shared/Decision.md"])
+        #expect(selected.write == ["Projects/Shared/Decision.md"])
+
+        let disabled = DesktopBridgeContext.selectedVaultScopes(
+            projectContext: context,
+            usesProjectContext: false,
+            knowledgeSources: sources,
+            vaultScopes: scopes
+        )
+        #expect(disabled.read.isEmpty)
+        #expect(disabled.write.isEmpty)
+    }
+
+    @Test
+    func compactionTranscriptIncludesTheEntireInclusiveCutoffPrefix() {
+        let thread = DesktopThread(
+            id: "compaction-thread",
+            title: "Compaction",
+            summary: "",
+            kind: .coding,
+            attention: .needsResponse,
+            updatedAtUnixMillis: 4,
+            messages: [
+                DesktopMessage(id: "user-1", role: .user, body: "First request", createdAtUnixMillis: 1),
+                DesktopMessage(id: "assistant-1", turnID: "turn-1", role: .assistant, body: "First answer", createdAtUnixMillis: 2),
+                DesktopMessage(id: "user-2", role: .user, body: "Final request", createdAtUnixMillis: 3),
+            ]
+        )
+
+        let transcript = DesktopCompactionTranscript.bounded(
+            thread: thread,
+            throughMessageID: "user-2"
+        )
+
+        #expect(transcript == "User: First request\n\nAssistant: First answer\n\nUser: Final request")
+    }
+
+    @Test
+    func compactionTranscriptStaysWithinUTF8BudgetIncludingSeparators() {
+        let messages = (0..<30).map { index in
+            DesktopMessage(
+                id: "message-\(index)",
+                role: index.isMultiple(of: 2) ? .user : .assistant,
+                body: "message-\(index) " + String(repeating: "界", count: 2_000),
+                createdAtUnixMillis: Int64(index)
+            )
+        }
+        let thread = DesktopThread(
+            id: "bounded-compaction-thread",
+            title: "Compaction",
+            summary: "",
+            kind: .coding,
+            attention: .needsResponse,
+            updatedAtUnixMillis: 30,
+            messages: messages
+        )
+
+        let transcript = DesktopCompactionTranscript.bounded(
+            thread: thread,
+            throughMessageID: "message-29"
+        )
+
+        #expect(transcript.utf8.count <= DesktopCompactionTranscript.maximumBytes)
+        #expect(transcript.contains("message-29"))
+        #expect(!transcript.contains("message-0"))
+    }
+
+    @Test
+    func assistantMessageStaysBoundToItsProviderRunWhenLaterRunsAppend() throws {
+        let model = DesktopAppModel(store: MemoryDesktopStateStore(), now: { 1_000 })
+        let threadID = model.createConversation(kind: .coding, projectID: nil)
+        let firstMessageID = try #require(model.appendUserMessage(threadID: threadID, body: "First"))
+        let firstRunID = try #require(model.enqueueProviderRun(threadID: threadID, sourceMessageID: firstMessageID))
+        let firstEvent = DesktopProviderEventRecord(
+            id: "\(firstRunID)-delta",
+            threadID: threadID,
+            runID: firstRunID,
+            kind: .assistantText,
+            title: "Response",
+            detail: "First response",
+            nativeType: "item/agentMessage/delta",
+            nativeThreadID: nil,
+            nativeTurnID: nil,
+            approvalID: nil,
+            rawPayloadBase64: nil,
+            payloadWasTruncated: false,
+            createdAtUnixMillis: 1_001
+        )
+        #expect(model.recordProviderEvent(firstEvent, assistantDelta: "first reply"))
+        model.stopProviderRun(id: firstRunID, interrupted: false, error: "Retry the exact provider run")
+        let retryRunID = try #require(model.retryProviderRun(id: firstRunID))
+        #expect(model.providerRun(id: retryRunID)?.turnID == model.providerRun(id: firstRunID)?.turnID)
+        #expect(model.assistantMessage(threadID: threadID, runID: retryRunID) == nil)
+
+        let secondMessageID = try #require(model.appendUserMessage(threadID: threadID, body: "Second"))
+        let secondRunID = try #require(model.enqueueProviderRun(threadID: threadID, sourceMessageID: secondMessageID))
+        let secondEvent = DesktopProviderEventRecord(
+            id: "\(secondRunID)-delta",
+            threadID: threadID,
+            runID: secondRunID,
+            kind: .assistantText,
+            title: "Response",
+            detail: "Second response",
+            nativeType: "item/agentMessage/delta",
+            nativeThreadID: nil,
+            nativeTurnID: nil,
+            approvalID: nil,
+            rawPayloadBase64: nil,
+            payloadWasTruncated: false,
+            createdAtUnixMillis: 1_002
+        )
+        #expect(model.recordProviderEvent(secondEvent, assistantDelta: "second reply"))
+
+        #expect(model.assistantMessage(threadID: threadID, runID: firstRunID)?.body == "first reply")
+        #expect(model.assistantMessage(threadID: threadID, runID: secondRunID)?.body == "second reply")
+    }
+
+    @Test
     func createOrReuseConversationDraftReusesOnlyEmptyMatchingContext() throws {
         let model = DesktopAppModel(store: MemoryDesktopStateStore(), now: { 1_000 })
         let projectID = try #require(model.snapshot.projects.first?.id)
@@ -563,7 +725,7 @@ struct DesktopAppModelTests {
         #expect(thread.plan.map(\.title) == ["Inspect the flow", "Implement after approval"])
         #expect(thread.plan.map(\.state) == [.pending, .pending])
         #expect(thread.attention == .needsApproval)
-        #expect(thread.summary == "Plan ready for review. No implementation authority has been granted.")
+        #expect(thread.summary == "Plan ready. Approve it to start implementing, or keep refining in Chat.")
     }
 
     @Test
@@ -1068,6 +1230,25 @@ struct DesktopAppModelTests {
     }
 
     @Test
+    func legacyProjectContextDefaultsCrossProjectRecallToDisabled() throws {
+        let data = try JSONSerialization.data(withJSONObject: [
+            "instructionReferences": ["AGENTS.md"],
+            "knowledgeSourceIDs": ["knowledge-coding-ade"],
+            "skillIDs": ["skill-mori-review"],
+            "defaultKind": "coding",
+            "defaultProvider": "Codex",
+            "defaultModel": "Use provider default"
+        ])
+
+        let context = try JSONDecoder().decode(DesktopProjectContext.self, from: data)
+
+        #expect(context.instructionReferences == ["AGENTS.md"])
+        #expect(context.knowledgeSourceIDs == ["knowledge-coding-ade"])
+        #expect(context.skillIDs == ["skill-mori-review"])
+        #expect(!context.allowsCrossProjectRecall)
+    }
+
+    @Test
     func projectContextSearchEditingAndArchiveStayCoherent() throws {
         let store = MemoryDesktopStateStore()
         var clock: Int64 = 1_000
@@ -1079,6 +1260,7 @@ struct DesktopAppModelTests {
             instructionReferences: [" AGENTS.md ", "Docs/UX.md", "AGENTS.md", ""],
             knowledgeSourceIDs: ["knowledge-coding-ade", "missing-source"],
             skillIDs: ["skill-mori-review", "missing-skill"],
+            allowsCrossProjectRecall: true,
             defaultKind: .planning,
             defaultProvider: " Codex ",
             defaultModel: " Use provider default "
@@ -1095,6 +1277,7 @@ struct DesktopAppModelTests {
         #expect(updated.context.instructionReferences == ["AGENTS.md", "Docs/UX.md"])
         #expect(updated.context.knowledgeSourceIDs == ["knowledge-coding-ade"])
         #expect(updated.context.skillIDs == ["skill-mori-review"])
+        #expect(updated.context.allowsCrossProjectRecall)
         #expect(updated.context.defaultKind == .planning)
         #expect(updated.context.defaultProvider == "Codex")
         #expect(model.projects(matching: "ux.md").map(\.id) == [projectID])
@@ -1856,6 +2039,48 @@ extension DesktopAppModelTests {
         #expect(model.codingKnowledgeLane(threadID: threadID)?.disposition == .needsReview)
         #expect(model.codingKnowledgeLane(threadID: threadID)?.acceptedWorktreeID == worktreeID)
         #expect(model.thread(id: threadID)?.attention == .needsApproval)
+    }
+
+    @Test
+    func onlyReconciledKnowledgeDecisionsAreRecallable() throws {
+        let model = DesktopAppModel(store: MemoryDesktopStateStore(), now: { 23_500 })
+        let (threadID, worktreeID) = try prepareCodingReview(model)
+        recordPassingCodingEvidence(model, threadID: threadID, worktreeID: worktreeID)
+        #expect(model.recordCodingReview(threadID: threadID, worktreeID: worktreeID, accepted: true))
+        let content = "Accepted durable decision"
+        let proposalID = try #require(model.createKnowledgeProposal(
+            sourceID: "knowledge-coding-ade",
+            title: "Accepted decision",
+            target: "Projects/Coding ADE/Decisions.md",
+            summary: "Record the accepted decision.",
+            proposedContent: content,
+            baseRevision: "base"
+        ))
+        #expect(model.linkCodingKnowledge(threadID: threadID, proposalID: proposalID))
+        let writeID = try #require(model.recordKnowledgeWrite(
+            proposalID: proposalID,
+            targetPath: "Projects/Coding ADE/Decisions.md",
+            baseDigest: "base",
+            proposedDigest: knowledgeDigest(content),
+            diffSummary: "1 added line",
+            unifiedDiff: "+Accepted durable decision"
+        ))
+        model.reconcileKnowledgeWrite(
+            id: writeID,
+            state: .reconciled,
+            currentDigest: knowledgeDigest(content),
+            detail: "The accepted decision was reconciled."
+        )
+        #expect(model.codingKnowledgeLane(threadID: threadID)?.disposition == .reconciled)
+        #expect(model.addCodingKnowledgeCandidate(
+            threadID: threadID,
+            category: .decision,
+            title: "Pending decision",
+            detail: "This has not been reconciled to durable knowledge."
+        ) != nil)
+
+        #expect(model.codingKnowledgeLane(threadID: threadID)?.disposition == .needsReview)
+        #expect(model.acceptedCodingKnowledgeDecisions(threadID: threadID).isEmpty)
     }
 
     @Test

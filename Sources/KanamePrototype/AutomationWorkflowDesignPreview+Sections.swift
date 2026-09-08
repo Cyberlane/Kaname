@@ -12,6 +12,13 @@ import KanameDesignSystem
 /// here: a run either has durable evidence or its absence is stated outright.
 struct AutomationLiveRunsView: View {
     private let runner = LocalCoreRunner.bundled()
+    let initialRunID: String?
+    let initialEffectID: String?
+
+    init(initialRunID: String? = nil, initialEffectID: String? = nil) {
+        self.initialRunID = initialRunID
+        self.initialEffectID = initialEffectID
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -29,7 +36,13 @@ struct AutomationLiveRunsView: View {
             }
 
             if let runner {
-                ScrollView { DesktopDurableWorkflowRunsView(runner: runner) }
+                ScrollView {
+                    DesktopDurableWorkflowRunsView(
+                        runner: runner,
+                        initialRunID: initialRunID,
+                        initialEffectID: initialEffectID
+                    )
+                }
             } else {
                 EmptyPanel(
                     symbol: "externaldrive.badge.questionmark",
@@ -206,6 +219,8 @@ struct AutomationComponentsView: View {
                     Label("Schedule triggers", systemImage: "calendar.badge.clock").font(.headline)
                     Text("Schedules start workflows or local actions; they never grant effect authority.")
                         .font(.caption).foregroundStyle(.secondary)
+                    Text("The signed Kaname service owns scheduled runs and provider pollers, including while the app is closed. A failed local-core pass is recorded as unavailable and retried on the next pass.")
+                        .font(.caption2).foregroundStyle(.secondary)
                 }
                 Spacer()
                 Label(scheduler.ownerState, systemImage: "lock.shield")

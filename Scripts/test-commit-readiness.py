@@ -187,10 +187,27 @@ class CommitReadinessTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("Mori staged-review receipt is missing or changed", result.stderr)
 
+    def test_moved_and_deleted_paths_remain_bound_to_snapshot(self) -> None:
+        worktree = self.new_worktree("moved-deleted")
+        self.git("mv", "source.py", "moved source.py", cwd=worktree)
+        self.git("rm", "other.py", cwd=worktree)
+        options = ("prepare", "--no-tests", "fixture", "--", "source.py", "moved source.py", "other.py")
+        self.helper(*options, cwd=worktree, check=True)
+        self.assert_ready(worktree)
+        git_directory = Path(self.git("rev-parse", "--git-dir", cwd=worktree).stdout.strip())
+        receipt = json.loads((git_directory / "kaname/commit-ready/receipt.json").read_text())
+        self.assertEqual(receipt["snapshot"]["staged_paths"], ["moved source.py", "other.py", "source.py"])
+        self.assertEqual(receipt["snapshot"]["staged_live_paths"], ["moved source.py"])
+        self.environment["MORI_TEST_OMIT_PATH"] = "moved source.py"
+        rejected = self.helper(*options, cwd=worktree)
+        self.assertEqual(rejected.returncode, 2)
+        self.assertIn("paths do not match", rejected.stderr)
+
     @staticmethod
     def fake_mori_source() -> str:
         return textwrap.dedent(
             r'''#!/usr/bin/env python3
+import os
 import json
 from pathlib import Path
 import subprocess
@@ -206,9 +223,9 @@ if arguments[:3] == ["project", "upgrade", "--check"]:
 output = Path(arguments[arguments.index("--output") + 1])
 head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
 paths = subprocess.check_output(
-    ["git", "diff", "--cached", "--name-only", "-z", "HEAD"]
+    ["git", "diff", "--cached", "--name-only", "--find-renames", "--diff-filter=ACMRTUXB", "-z", "HEAD"]
 ).split(b"\0")
-changed_paths = sorted(path.decode("utf-8") for path in paths if path)
+changed_paths = sorted(path.decode("utf-8") for path in paths if path and path.decode("utf-8") != os.environ.get("MORI_TEST_OMIT_PATH"))
 staged = arguments[:3] == ["review", "staged", "check"]
 report = {
     "schema_version": 20,

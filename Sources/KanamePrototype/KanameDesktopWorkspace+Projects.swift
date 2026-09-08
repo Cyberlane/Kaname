@@ -310,6 +310,7 @@ private struct DesktopProjectEditor: View {
     @State private var instructionText: String
     @State private var knowledgeSourceIDs: Set<String>
     @State private var skillIDs: Set<String>
+    @State private var allowsCrossProjectRecall: Bool
     @State private var defaultKind: DesktopWorkKind
     @State private var defaultProvider: String
     @State private var defaultModel: String
@@ -324,6 +325,7 @@ private struct DesktopProjectEditor: View {
         _instructionText = State(initialValue: project.context.instructionReferences.joined(separator: "\n"))
         _knowledgeSourceIDs = State(initialValue: Set(project.context.knowledgeSourceIDs))
         _skillIDs = State(initialValue: Set(project.context.skillIDs))
+        _allowsCrossProjectRecall = State(initialValue: project.context.allowsCrossProjectRecall)
         _defaultKind = State(initialValue: project.context.defaultKind)
         _defaultProvider = State(initialValue: project.context.defaultProvider)
         _defaultModel = State(initialValue: project.context.defaultModel)
@@ -377,6 +379,11 @@ private struct DesktopProjectEditor: View {
                             .accessibilityValue("\(source.kind.label), \(source.scope), \(source.status.label)")
                         }
                     }
+                    Toggle("Allow accepted cross project recall", isOn: $allowsCrossProjectRecall)
+                        .accessibilityHint("Makes explicitly accepted shared knowledge from other projects available to this project's history tools.")
+                    Text("Only reconciled knowledge from a source this project selects can be recalled across projects.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 Section("Skills & tools") {
@@ -440,6 +447,7 @@ private struct DesktopProjectEditor: View {
             instructionReferences: instructions,
             knowledgeSourceIDs: Array(knowledgeSourceIDs).sorted(),
             skillIDs: Array(skillIDs).sorted(),
+            allowsCrossProjectRecall: allowsCrossProjectRecall,
             defaultKind: defaultKind,
             defaultProvider: defaultProvider,
             defaultModel: defaultModel

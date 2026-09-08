@@ -100,6 +100,7 @@ def staged_paths(root: Path) -> List[str]:
             "diff",
             "--cached",
             "--name-only",
+            "--no-renames",
             "-z",
             "--diff-filter=ACDMRTUXB",
             "HEAD",
@@ -142,20 +143,25 @@ def snapshot(root: Path) -> Dict[str, Any]:
     branch = git(root, "branch", "--show-current").stdout.strip()
     index_tree = git(root, "write-tree").stdout.strip()
     paths = staged_paths(root)
+    indexed = set(nul_paths(git(root, "ls-files", "-z", text=False)))
+    # Mori focuses surviving index paths; deleted files and rename sources
+    # remain bound by staged_paths and the complete index tree below.
+    live_paths = [path for path in paths if path in indexed]
     digest_input = "\0".join([head, branch, index_tree, *paths]).encode("utf-8", "surrogateescape")
     return {
         "head": head,
         "branch": branch,
         "index_tree": index_tree,
         "staged_paths": paths,
+        "staged_live_paths": live_paths,
         "digest": hashlib.sha256(digest_input).hexdigest(),
     }
 
 
 def ensure_exact_worktree(root: Path, expected: Dict[str, Any]) -> None:
     current = snapshot(root)
-    for key in ("head", "branch", "index_tree", "staged_paths", "digest"):
-        if current[key] != expected[key]:
+    for key in ("head", "branch", "index_tree", "staged_paths", "staged_live_paths", "digest"):
+        if current[key] != expected.get(key):
             raise WorkflowError(
                 f"The commit-ready snapshot changed ({key}). Run commit preparation again."
             )
@@ -267,7 +273,7 @@ def validate_staged_report(
         raise WorkflowError("Mori staged evidence was produced for a different HEAD.")
     if input_evidence.get("working_tree_included") is not False or input_evidence.get("untracked_included") is not False:
         raise WorkflowError("Mori staged evidence unexpectedly included working-tree content.")
-    if not isinstance(focus, dict) or sorted(focus.get("changed_paths", [])) != expected["staged_paths"]:
+    if not isinstance(focus, dict) or sorted(focus.get("changed_paths", [])) != expected["staged_live_paths"]:
         raise WorkflowError("Mori staged evidence paths do not match the exact staged snapshot.")
     if (report.get("groups") and not allow_authorized_findings) or report.get("warnings") or report.get("truncated") is not False:
         raise WorkflowError("Mori staged evidence contains findings, warnings, or truncation.")
@@ -309,9 +315,15 @@ def prepare(arguments: argparse.Namespace) -> None:
             "The index already contains paths outside this task: " + ", ".join(unexpected)
         )
 
-    stage_result = git(root, "--literal-pathspecs", "add", "-A", "--", *pathspecs, check=False)
-    if stage_result.returncode != 0:
-        raise WorkflowError(stage_result.stderr.strip() or stage_result.stdout.strip() or "git add failed.")
+    # An already staged deletion has neither a worktree file nor an index
+    # entry. It is still task evidence, but passing it to git add fails. Keep
+    # it in the exact snapshot and only refresh paths that Git can stage.
+    indexed = set(nul_paths(git(root, "ls-files", "-z", text=False)))
+    stageable = [path for path in pathspecs if (root / path).exists() or path in indexed]
+    if stageable:
+        stage_result = git(root, "--literal-pathspecs", "add", "-A", "--", *stageable, check=False)
+        if stage_result.returncode != 0:
+            raise WorkflowError(stage_result.stderr.strip() or stage_result.stdout.strip() or "git add failed.")
     paths = staged_paths(root)
     if not paths:
         raise WorkflowError("The selected paths contain no staged changes.")

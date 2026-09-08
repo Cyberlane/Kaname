@@ -2,16 +2,16 @@ import CryptoKit
 import Foundation
 import KanameConnectivity
 
-/// App-side half of the workflow connector bridge.
+/// Provider-owned half of the workflow connector bridge.
 ///
 /// The Rust executor talks to `KanameWorkflowConnectorHost`, which forwards
 /// `describe`, `dispatch`, and `reconcile` requests here over a Unix socket.
 /// This is where Gmail credentials and the mail adapter live, so the effect is
-/// performed by the app process under the channel's external-mutation policy.
-/// Development denies external mutations; dispatches are then rejected with a
-/// clear reason instead of silently succeeding.
-final class DesktopWorkflowConnectorBridge: @unchecked Sendable {
-    static let shared = DesktopWorkflowConnectorBridge()
+/// performed by the signed workflow service under the channel's external-
+/// mutation policy. Development denies external mutations; dispatches are then
+/// rejected with a clear reason instead of silently succeeding.
+public final class DesktopWorkflowConnectorBridge: @unchecked Sendable {
+    public static let shared = DesktopWorkflowConnectorBridge()
 
     private let queue = DispatchQueue(label: "com.cyberlane.kaname.connector-bridge", qos: .utility)
     private var listenerDescriptor: Int32 = -1
@@ -19,16 +19,29 @@ final class DesktopWorkflowConnectorBridge: @unchecked Sendable {
     private var environment: KanameDesktopEnvironment = .current
     private var adapter: (any MailProviderAdapter)?
 
-    private init() {}
+    /// Internal fixture initializer keeps bridge policy testable without
+    /// opening a socket or constructing a live provider integration.
+    init(
+        environment: KanameDesktopEnvironment = .current,
+        adapter: (any MailProviderAdapter)? = nil
+    ) {
+        self.environment = environment
+        self.adapter = adapter
+    }
 
-    func start(environment: KanameDesktopEnvironment) {
-        queue.async { [self] in
+    public func start(
+        environment: KanameDesktopEnvironment,
+        googleClientConfiguration: GoogleOAuthClientConfiguration? = nil
+    ) {
+        // Setup is small and synchronous so a worker's first maintenance pass
+        // cannot race connector-host discovery before the socket is listening.
+        queue.sync { [self] in
             guard listenerDescriptor < 0 else { return }
             self.environment = environment
             let service = NativeGoogleIntegrationService(
                 rootDirectory: environment.googleDirectory,
                 keychainService: environment.googleKeychainService,
-                clientConfiguration: nil,
+                clientConfiguration: googleClientConfiguration,
                 accessMode: environment.googleIntegrationAccessMode
             )
             adapter = GmailMailProviderAdapter(service: service)
@@ -58,7 +71,7 @@ final class DesktopWorkflowConnectorBridge: @unchecked Sendable {
         }
     }
 
-    func stop() {
+    public func stop() {
         queue.sync {
             if listenerDescriptor >= 0 { close(listenerDescriptor) }
             listenerDescriptor = -1
@@ -95,7 +108,7 @@ final class DesktopWorkflowConnectorBridge: @unchecked Sendable {
             semaphore.signal()
         }
         _ = semaphore.wait(timeout: .now() + 300)
-        let response = box.get() ?? ["outcome": "not_sent", "errorCode": "connector.bridge_timeout", "summary": "The app did not answer in time."]
+        let response = box.get() ?? ["outcome": "outcome_unknown", "errorCode": "connector.bridge_timeout", "summary": "The provider worker did not answer in time; reconcile before retrying."]
         var payload = (try? JSONSerialization.data(withJSONObject: response, options: [.sortedKeys])) ?? Data("{}".utf8)
         payload.append(0x0A)
         var sent = 0
@@ -124,7 +137,7 @@ final class DesktopWorkflowConnectorBridge: @unchecked Sendable {
         SHA256.hash(data: Data("kaname.connector.mail.gmail.v1".utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
-    private func handle(_ line: Data) async -> [String: Any] {
+    func handle(_ line: Data) async -> [String: Any] {
         guard let envelope = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
               let mode = envelope["mode"] as? String else {
             return ["outcome": "not_sent", "errorCode": "connector.bridge_request_invalid", "summary": "Malformed bridge request."]
@@ -205,10 +218,19 @@ final class DesktopWorkflowConnectorBridge: @unchecked Sendable {
         let started = Date()
         let action = (request["action"] as? String) ?? ""
         let idempotencyKey = (request["idempotencyKey"] as? String) ?? UUID().uuidString
+        let deadline = (request["deadlineUnixMillis"] as? NSNumber)?.int64Value
         let accountBinding = (request["accountBindingId"] as? String) ?? ""
         let inputValue = (request["input"] as? [String: Any]) ?? [:]
         let input = MailInput(inputValue, accountBindingID: accountBinding)
         func elapsed() -> UInt64 { UInt64(Date().timeIntervalSince(started) * 1_000) }
+        guard let deadline, deadline > Int64(Date().timeIntervalSince1970 * 1_000) else {
+            return [
+                "outcome": "outcome_unknown",
+                "errorCode": "connector.dispatch_expired",
+                "summary": "The durable dispatch deadline expired before the provider boundary.",
+                "elapsedMilliseconds": elapsed(),
+            ]
+        }
         guard let adapter else {
             return ["outcome": "not_sent", "errorCode": "connector.unavailable", "summary": "No mail adapter is configured.", "elapsedMilliseconds": elapsed()]
         }
@@ -283,6 +305,9 @@ final class DesktopWorkflowConnectorBridge: @unchecked Sendable {
         if result.failures.isEmpty {
             return ["outcome": "applied", "receipt": receipt("gmail-reconcile-\(idempotencyKey)", providerReference: "gmail:\(input.accountID)", outcome: "applied", evidence: evidence), "elapsedMilliseconds": elapsed()]
         }
-        return ["outcome": "not_applied", "errorCode": "connector.postcondition_missing", "summary": result.failures.values.joined(separator: "; "), "receipt": receipt("gmail-reconcile-\(idempotencyKey)", providerReference: "gmail:\(input.accountID)", outcome: "not_applied", evidence: evidence), "elapsedMilliseconds": elapsed()]
+        // The batch failure map includes read/transport failures as well as
+        // missing postconditions. It cannot prove that no external write
+        // happened, particularly when only part of a batch was observed.
+        return ["outcome": "still_unknown", "errorCode": "connector.reconciliation_incomplete", "summary": result.failures.values.joined(separator: "; "), "elapsedMilliseconds": elapsed()]
     }
 }

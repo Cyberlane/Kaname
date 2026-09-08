@@ -117,6 +117,8 @@ fn run_inspection_queries_are_bounded_and_path_free() {
         run_id: String::new(),
         limit: 30,
         as_of_unix_millis: 1_700_000_000_000,
+        attention_only: true,
+        before_first_store_position: 321,
     };
     assert_eq!(
         workflow_protocol::decode_run_inspection_query(&query.encode_to_vec()).unwrap(),
@@ -127,6 +129,12 @@ fn run_inspection_queries_are_bounded_and_path_free() {
     assert_eq!(
         workflow_protocol::decode_run_inspection_query(&invalid.encode_to_vec()),
         Err(WorkflowProtocolError::InspectionLimitOutOfBounds)
+    );
+    invalid.limit = 30;
+    invalid.before_first_store_position = u64::MAX;
+    assert_eq!(
+        workflow_protocol::decode_run_inspection_query(&invalid.encode_to_vec()),
+        Err(WorkflowProtocolError::RequestOutOfBounds)
     );
 }
 

@@ -75,6 +75,7 @@ extension DesktopAppModel {
                 instructionReferences: instructionReferences,
                 knowledgeSourceIDs: Self.unique(context.knowledgeSourceIDs.filter(knowledgeIDs.contains)),
                 skillIDs: Self.unique(context.skillIDs.filter(skillIDs.contains)),
+                allowsCrossProjectRecall: context.allowsCrossProjectRecall,
                 defaultKind: context.defaultKind,
                 defaultProvider: provider,
                 defaultModel: model
@@ -118,6 +119,7 @@ extension DesktopAppModel {
             instructionReferences: instructions,
             knowledgeSourceIDs: Self.unique(context.knowledgeSourceIDs.filter(knowledgeIDs.contains)),
             skillIDs: Self.unique(context.skillIDs.filter(skillIDs.contains)),
+            allowsCrossProjectRecall: context.allowsCrossProjectRecall,
             defaultKind: context.defaultKind,
             defaultProvider: provider,
             defaultModel: model

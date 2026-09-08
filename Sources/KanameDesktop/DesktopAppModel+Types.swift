@@ -301,6 +301,9 @@ public struct DesktopProjectContext: Codable, Equatable, Sendable {
     public var instructionReferences: [String]
     public var knowledgeSourceIDs: [String]
     public var skillIDs: [String]
+    /// Explicitly permits accepted, shared knowledge from other projects to
+    /// enter this project's Bridge history context.
+    public var allowsCrossProjectRecall: Bool
     public var defaultKind: DesktopWorkKind
     public var defaultProvider: String
     public var defaultModel: String
@@ -309,6 +312,7 @@ public struct DesktopProjectContext: Codable, Equatable, Sendable {
         instructionReferences: [String] = [],
         knowledgeSourceIDs: [String] = [],
         skillIDs: [String] = [],
+        allowsCrossProjectRecall: Bool = false,
         defaultKind: DesktopWorkKind = .coding,
         defaultProvider: String = "Codex",
         defaultModel: String = "Use provider default"
@@ -316,9 +320,33 @@ public struct DesktopProjectContext: Codable, Equatable, Sendable {
         self.instructionReferences = instructionReferences
         self.knowledgeSourceIDs = knowledgeSourceIDs
         self.skillIDs = skillIDs
+        self.allowsCrossProjectRecall = allowsCrossProjectRecall
         self.defaultKind = defaultKind
         self.defaultProvider = defaultProvider
         self.defaultModel = defaultModel
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case instructionReferences
+        case knowledgeSourceIDs
+        case skillIDs
+        case allowsCrossProjectRecall
+        case defaultKind
+        case defaultProvider
+        case defaultModel
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            instructionReferences: try container.decodeIfPresent([String].self, forKey: .instructionReferences) ?? [],
+            knowledgeSourceIDs: try container.decodeIfPresent([String].self, forKey: .knowledgeSourceIDs) ?? [],
+            skillIDs: try container.decodeIfPresent([String].self, forKey: .skillIDs) ?? [],
+            allowsCrossProjectRecall: try container.decodeIfPresent(Bool.self, forKey: .allowsCrossProjectRecall) ?? false,
+            defaultKind: try container.decodeIfPresent(DesktopWorkKind.self, forKey: .defaultKind) ?? .coding,
+            defaultProvider: try container.decodeIfPresent(String.self, forKey: .defaultProvider) ?? "Codex",
+            defaultModel: try container.decodeIfPresent(String.self, forKey: .defaultModel) ?? "Use provider default"
+        )
     }
 
     public static let empty = DesktopProjectContext()

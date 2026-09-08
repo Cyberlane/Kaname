@@ -1073,6 +1073,10 @@ message WorkflowRunInspectionQuery {
   int64 as_of_unix_millis = 6;
   reserved 7 to 15;
   reserved "database_path", "journal_path", "raw_path";
+  // Filter before limiting so old unresolved decisions remain discoverable.
+  bool attention_only = 16;
+  // Exclusive descending journal-position cursor; zero starts the first page.
+  uint64 before_first_store_position = 17;
 }
 
 message WorkflowProjectedValue {

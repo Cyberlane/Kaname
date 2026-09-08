@@ -14,7 +14,10 @@ enum DesktopCompactionSummarizer {
               let thread = model.thread(id: threadID),
               let compaction = thread.compaction else { return }
         let deterministic = compaction.summary
-        let transcript = olderTranscript(thread, throughMessageID: compaction.throughMessageID)
+        let transcript = DesktopCompactionTranscript.bounded(
+            thread: thread,
+            throughMessageID: compaction.throughMessageID
+        )
         let throughMessageID = compaction.throughMessageID
         _Concurrency.Task.detached(priority: .utility) {
             guard let summary = await summarize(deterministic: deterministic, transcript: transcript) else { return }
@@ -22,22 +25,6 @@ enum DesktopCompactionSummarizer {
                 model.updateCompactionSummary(threadID: threadID, throughMessageID: throughMessageID, summary: summary)
             }
         }
-    }
-
-    /// The messages the compaction hides, bounded so the prompt stays small.
-    private static func olderTranscript(_ thread: DesktopThread, throughMessageID: String) -> String {
-        var lines: [String] = []
-        var budget = 40_000
-        for message in thread.messages.reversed() where message.role != .system {
-            let role = message.role == .user ? "User" : "Assistant"
-            let body = KanameTextBounds.utf8Prefix(message.body.trimmingCharacters(in: .whitespacesAndNewlines), maximumBytes: 3_000)
-            let line = "\(role): \(body)"
-            budget -= line.utf8.count
-            if budget < 0 { break }
-            lines.append(line)
-            if message.id == throughMessageID { break }
-        }
-        return lines.reversed().joined(separator: "\n\n")
     }
 
     private static func summarize(deterministic: String, transcript: String) async -> String? {

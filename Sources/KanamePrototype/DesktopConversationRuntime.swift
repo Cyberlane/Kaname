@@ -826,9 +826,15 @@ final class DesktopConversationRuntime: ObservableObject {
             isCodingPlan: run.purpose == .codingPlan,
             curatedPreviewMCPGranted: previewGrant && run.purpose == .codingImplementation,
             createdAtUnixMillis: run.startedAtUnixMillis,
-            bridgeKnowledgeReadScopes: model.snapshot.operations.vaultScopes.filter(\.canRead).map(\.path),
-            bridgeKnowledgeWriteScopes: model.snapshot.operations.vaultScopes.filter(\.canWrite).map(\.path),
-            bridgeMemoryPack: bridgeMemoryPack(for: thread)
+            bridgeKnowledgeReadScopes: bridgeKnowledgeScopes(
+                for: thread,
+                usesProjectContext: run.usesProjectContext ?? true
+            ).read,
+            bridgeKnowledgeWriteScopes: bridgeKnowledgeScopes(
+                for: thread,
+                usesProjectContext: run.usesProjectContext ?? true
+            ).write,
+            bridgeMemoryPack: (run.usesProjectContext ?? true) ? bridgeMemoryPack(for: thread) : []
         )
         var queuedRequestURL: URL?
         do {
@@ -1161,7 +1167,7 @@ final class DesktopConversationRuntime: ObservableObject {
                 }
             }
             if completedRun?.purpose == .codingPlan || completedRun?.purpose == .codingImplementation,
-               let reply = model.thread(id: serviceEvent.threadID)?.messages.last(where: { $0.role == .assistant })?.body {
+               let reply = model.assistantMessage(threadID: serviceEvent.threadID, runID: serviceEvent.runID)?.body {
                 let findings = ProviderFindingsMarkdown.findings(fromMarkdown: reply)
                 if !findings.isEmpty {
                     model.appendFindings(threadID: serviceEvent.threadID, runID: serviceEvent.runID, texts: findings)
@@ -1169,7 +1175,7 @@ final class DesktopConversationRuntime: ObservableObject {
                 }
             }
             if completedRun?.purpose == .codingPlan,
-               let fallback = model.thread(id: serviceEvent.threadID)?.messages.last(where: { $0.role == .assistant })?.body,
+               let fallback = model.assistantMessage(threadID: serviceEvent.threadID, runID: serviceEvent.runID)?.body,
                !fallback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 // The final planning message is the readable plan body unless the
                 // provider already supplied one through a structured plan update.
@@ -1883,18 +1889,55 @@ final class DesktopConversationRuntime: ObservableObject {
         }
     }
 
+    private func bridgeKnowledgeScopes(
+        for thread: DesktopThread,
+        usesProjectContext: Bool
+    ) -> (read: [String], write: [String]) {
+        DesktopBridgeContext.selectedVaultScopes(
+            projectContext: model.project(id: thread.projectID)?.context,
+            usesProjectContext: usesProjectContext,
+            knowledgeSources: model.snapshot.domains.knowledgeSources,
+            vaultScopes: model.snapshot.operations.vaultScopes
+        )
+    }
+
+    private func acceptedDecisionCandidates(for thread: DesktopThread) -> [DesktopCodingKnowledgeCandidate] {
+        model.acceptedCodingKnowledgeDecisions(threadID: thread.id)
+    }
+
+    /// Cross-project history is available only when the current project has
+    /// explicitly selected a source that the earlier, accepted knowledge lane
+    /// consulted. This keeps intentional shared learning possible without
+    /// making every project's private history global by default.
+    private func allowsExplicitCrossProjectRecall(
+        from prior: DesktopThread,
+        for thread: DesktopThread
+    ) -> Bool {
+        guard prior.projectID != thread.projectID,
+              model.codingKnowledgeLane(threadID: prior.id)?.disposition == .reconciled,
+              let project = model.project(id: thread.projectID),
+              project.context.allowsCrossProjectRecall else { return false }
+        let selectedSourceIDs = Set(project.context.knowledgeSourceIDs)
+        guard !selectedSourceIDs.isEmpty,
+              let lane = model.codingKnowledgeLane(threadID: prior.id) else { return false }
+        return lane.consultedSources.contains { selectedSourceIDs.contains($0.sourceID) }
+    }
+
     /// Compact history of earlier coding threads for the Bridge
-    /// `history_search` and `history_read` tools: up to 40 from this project,
-    /// plus up to 20 recent ones from other projects (labelled with their
-    /// project) so lessons carry across repositories. Bounded so it stays
-    /// cheap to ship with every run.
+    /// `history_search` and `history_read` tools. Same-project history remains
+    /// available to project-scoped runs; cross-project history requires an
+    /// explicitly selected shared source and an accepted durable knowledge
+    /// lane. Bounded so it stays cheap to ship with every run.
     private func bridgeMemoryPack(for thread: DesktopThread) -> [KanameBridgeMemoryEntry] {
         let others = model.snapshot.threads
             .filter { $0.projectID == thread.projectID && $0.id != thread.id && $0.kind == .coding }
             .sorted { $0.updatedAtUnixMillis > $1.updatedAtUnixMillis }
             .prefix(40)
         let elsewhere = model.snapshot.threads
-            .filter { $0.projectID != thread.projectID && $0.kind == .coding && !$0.plan.isEmpty }
+            .filter {
+                $0.kind == .coding && !$0.plan.isEmpty
+                    && allowsExplicitCrossProjectRecall(from: $0, for: thread)
+            }
             .sorted { $0.updatedAtUnixMillis > $1.updatedAtUnixMillis }
             .prefix(20)
         return (Array(others) + Array(elsewhere))
@@ -1905,8 +1948,7 @@ final class DesktopConversationRuntime: ObservableObject {
                     summary: String(prior.summary.prefix(400)),
                     outcome: model.codingWorkflow(threadID: prior.id).map { "\($0.state)" } ?? "unknown",
                     plan: prior.plan.prefix(12).map { String($0.title.prefix(300)) },
-                    decisions: (model.codingKnowledgeLane(threadID: prior.id)?.candidates ?? [])
-                        .filter { $0.category == .decision }
+                    decisions: acceptedDecisionCandidates(for: prior)
                         .prefix(6)
                         .map { String("\($0.title): \($0.detail)".prefix(400)) },
                     findings: (prior.findings ?? []).prefix(8).map { String($0.detail.prefix(300)) },
@@ -1925,13 +1967,15 @@ final class DesktopConversationRuntime: ObservableObject {
     /// findings.
     private func recallHits(_ prior: DesktopThread, terms: [String]) -> Int {
         guard !terms.isEmpty else { return 0 }
-        let decisions = (model.codingKnowledgeLane(threadID: prior.id)?.candidates ?? [])
-            .filter { $0.category == .decision }
-            .map { "\($0.title) \($0.detail)" }
-        let haystack = ([prior.title, prior.summary] + prior.plan.map(\.title)
-            + (prior.findings ?? []).map { "\($0.title) \($0.detail)" } + decisions)
-            .joined(separator: "\n").lowercased()
-        return terms.reduce(0) { $0 + (haystack.contains($1) ? 1 : 0) }
+        let decisionFields: [String] = acceptedDecisionCandidates(for: prior)
+            .map { candidate in "\(candidate.title) \(candidate.detail)" }
+        let planFields: [String] = prior.plan.map(\.title)
+        let findingFields: [String] = (prior.findings ?? [])
+            .map { finding in "\(finding.title) \(finding.detail)" }
+        let fields: [String] = [prior.title, prior.summary]
+            + planFields + findingFields + decisionFields
+        let haystack = fields.joined(separator: "\n").lowercased()
+        return terms.filter { term in haystack.contains(term) }.count
     }
 
     /// Deterministic recall for a planning turn: up to five vault hits for the
@@ -1963,43 +2007,56 @@ final class DesktopConversationRuntime: ObservableObject {
                 }
             }
         }
-        let terms = userMessage.lowercased()
+        let termParts = userMessage.lowercased()
             .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+        let terms: [String] = termParts
             .map(String.init)
-            .filter { $0.count > 2 }
-        let candidates = model.snapshot.threads
+            .filter { term in term.count > 2 }
+        let codingThreads: [DesktopThread] = model.snapshot.threads
             .filter { $0.id != thread.id && $0.kind == .coding && !$0.plan.isEmpty }
-            .map { (thread: $0, hits: recallHits($0, terms: terms)) }
-        let sameProject = candidates
+        let candidates: [(thread: DesktopThread, hits: Int)] = codingThreads.map { prior in
+            (thread: prior, hits: recallHits(prior, terms: terms))
+        }
+        let sameProjectCandidates: [(thread: DesktopThread, hits: Int)] = candidates
             .filter { $0.thread.projectID == thread.projectID }
             .sorted { lhs, rhs in
                 if lhs.hits != rhs.hits { return lhs.hits > rhs.hits }
                 return lhs.thread.updatedAtUnixMillis > rhs.thread.updatedAtUnixMillis
             }
-            .prefix(3)
-        let otherProjects = candidates
-            .filter { $0.thread.projectID != thread.projectID && $0.hits > 0 }
+        let sameProject: [(thread: DesktopThread, hits: Int)] = Array(sameProjectCandidates.prefix(3))
+        let otherProjectCandidates: [(thread: DesktopThread, hits: Int)] = candidates
+            .filter {
+                $0.thread.projectID != thread.projectID && $0.hits > 0
+                    && allowsExplicitCrossProjectRecall(from: $0.thread, for: thread)
+            }
             .sorted { lhs, rhs in
                 if lhs.hits != rhs.hits { return lhs.hits > rhs.hits }
                 return lhs.thread.updatedAtUnixMillis > rhs.thread.updatedAtUnixMillis
             }
-            .prefix(2)
-        for prior in (Array(sameProject) + Array(otherProjects)).map(\.thread) {
+        let otherProjects: [(thread: DesktopThread, hits: Int)] = Array(otherProjectCandidates.prefix(2))
+        let recalledCandidates: [(thread: DesktopThread, hits: Int)] = sameProject + otherProjects
+        for candidate in recalledCandidates {
+            let prior = candidate.thread
             let workflow = model.codingWorkflow(threadID: prior.id)?.state
-            let decisions = (model.codingKnowledgeLane(threadID: prior.id)?.candidates ?? [])
-                .filter { $0.category == .decision }
+            let decisions: [String] = acceptedDecisionCandidates(for: prior)
                 .prefix(4)
-                .map { "- \($0.title): \($0.detail.prefix(200))" }
-            let findings = (prior.findings ?? []).prefix(4).map { "- \($0.title)" }
-            let plan = prior.plan.prefix(8).enumerated().map { "\($0.offset + 1). \($0.element.title)" }
-            let excerpt = [
+                .map { candidate in "- \(candidate.title): \(candidate.detail.prefix(200))" }
+            let findings: [String] = (prior.findings ?? [])
+                .prefix(4)
+                .map { finding in "- \(finding.title)" }
+            let plan: [String] = prior.plan.prefix(8).enumerated().map { (offset: Int, step: DesktopPlanItem) in
+                "\(offset + 1). \(step.title)"
+            }
+            let outcome = workflow.map { state in "\(state)" } ?? "unknown"
+            var excerptSections: [String] = [
                 "Thread: \(prior.title)",
-                "Outcome: \(workflow.map { "\($0)" } ?? "unknown")",
-                prior.summary.isEmpty ? nil : "Summary: \(prior.summary)",
-                plan.isEmpty ? nil : "Plan:\n" + plan.joined(separator: "\n"),
-                decisions.isEmpty ? nil : "Decisions:\n" + decisions.joined(separator: "\n"),
-                findings.isEmpty ? nil : "Findings:\n" + findings.joined(separator: "\n"),
-            ].compactMap { $0 }.joined(separator: "\n")
+                "Outcome: \(outcome)",
+            ]
+            if !prior.summary.isEmpty { excerptSections.append("Summary: \(prior.summary)") }
+            if !plan.isEmpty { excerptSections.append("Plan:\n" + plan.joined(separator: "\n")) }
+            if !decisions.isEmpty { excerptSections.append("Decisions:\n" + decisions.joined(separator: "\n")) }
+            if !findings.isEmpty { excerptSections.append("Findings:\n" + findings.joined(separator: "\n")) }
+            let excerpt = excerptSections.joined(separator: "\n")
             let elsewhere = prior.projectID == thread.projectID ? "" : " (project \(projectName(prior.projectID)))"
             sources.append(CodingContextSource(
                 kind: .repositoryKnowledge,

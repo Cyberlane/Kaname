@@ -210,6 +210,11 @@ private struct NewConversationRequest: Identifiable {
     let projectID: String?
 }
 
+struct DesktopAutomationDeepLink: Equatable, Sendable {
+    let runID: String
+    let effectID: String?
+}
+
 private struct DesktopQALargeTextKey: EnvironmentKey {
     static let defaultValue = false
 }
@@ -266,6 +271,7 @@ struct KanameDesktopWorkspace: View {
     @State private var dismissedUpdateIdentity: String?
     @State private var showsUpdateInstallConfirmation = false
     @State private var pendingThreadArchiveID: String?
+    @State private var automationDeepLink: DesktopAutomationDeepLink?
 #if os(macOS)
     @State private var searchPreviousResponder: NSResponder?
     @State private var modalPreviousResponder: NSResponder?
@@ -1003,7 +1009,7 @@ struct KanameDesktopWorkspace: View {
                 }
 
                 Section("Automations") {
-                    destinationButton(.automations, count: model.snapshot.domains.automations.count)
+                    destinationButton(.automations)
                 }
 
                 Section("Knowledge") {
@@ -1094,6 +1100,9 @@ struct KanameDesktopWorkspace: View {
     private func destinationButton(_ item: DesktopDestination, count: Int? = nil) -> some View {
         let visibleCount = count.flatMap { $0 > 0 ? $0 : nil }
         return Button {
+            if item == .automations {
+                automationDeepLink = nil
+            }
             navigate(to: item)
         } label: {
             Label {
@@ -1145,7 +1154,14 @@ struct KanameDesktopWorkspace: View {
                     searchText: searchText,
                     openThread: { openThread($0) },
                     requestArchive: requestThreadArchive,
-                    openDestination: navigate,
+                    openDestination: { target in
+                        automationDeepLink = nil
+                        navigate(to: target)
+                    },
+                    openAutomationRun: { runID, effectID in
+                        automationDeepLink = DesktopAutomationDeepLink(runID: runID, effectID: effectID)
+                        navigate(to: .automations)
+                    },
                     startConversation: { beginConversation(projectID: inheritedProjectID) },
                     startConversationInProject: { beginConversation(projectID: $0) }
                 )
@@ -1208,7 +1224,8 @@ struct KanameDesktopWorkspace: View {
                 DesktopAutomationsView(
                     model: model,
                     scheduler: automationScheduler,
-                    integrations: personalIntegrations
+                    integrations: personalIntegrations,
+                    deepLink: automationDeepLink
                 )
             case .github:
                 DesktopGitHubView(model: model, integrations: personalIntegrations)
@@ -1453,7 +1470,10 @@ struct KanameDesktopWorkspace: View {
             beginConfiguredConversation(projectID: projectID)
         case .newProject:
             presentNewProject()
+        case .open(.settings):
+            presentSettings()
         case let .open(destination):
+            automationDeepLink = nil
             navigateFromSearch(to: destination)
         }
     }

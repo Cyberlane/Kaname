@@ -91,12 +91,12 @@ struct DesktopGlobalSearchPalette: View {
         }
         actions.append(.configureConversation(projectID: currentProject?.id, projectName: currentProject?.name))
         actions.append(.newProject)
-        actions.append(contentsOf: [
-            .open(.inbox), .open(.projects), .open(.research), .open(.liveCodex),
-            .open(.github), .open(.knowledge), .open(.calendar), .open(.automations),
-            .open(.skills), .open(.devices), .open(.links),
-        ])
-        guard !commandQuery.isEmpty else { return Array(actions.prefix(8)) }
+        // Keep the command destination catalog in lockstep with the product
+        // destination enum. The command center is the keyboard path to every
+        // workspace, including the destinations that are intentionally quiet
+        // in the sidebar and the Home/Threads/Settings entry points.
+        actions.append(contentsOf: DesktopDestination.allCases.map { .open($0) })
+        guard !commandQuery.isEmpty else { return actions }
         return actions.filter {
             $0.title.lowercased().contains(commandQuery)
                 || $0.detail.lowercased().contains(commandQuery)

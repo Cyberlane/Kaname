@@ -99,6 +99,7 @@ public struct KanameConversationServiceRequest: Codable, Equatable, Sendable {
         case runtimeMode, networkAccess, prompt, attachments, workspacePath, providerStatePath
         case resumableNativeThreadID, localCoreMachService, localCoreRequirement, workspaceAuthorization
         case isCodingPlan, curatedPreviewMCPGranted, createdAtUnixMillis
+        case bridgeKnowledgeReadScopes, bridgeKnowledgeWriteScopes, bridgeMemoryPack
     }
 
     /// The persisted request predates several runtime-policy fields. Keeping
@@ -124,6 +125,9 @@ public struct KanameConversationServiceRequest: Codable, Equatable, Sendable {
         let isCodingPlan: Bool?
         let curatedPreviewMCPGranted: Bool?
         let createdAtUnixMillis: Int64
+        let bridgeKnowledgeReadScopes: [String]?
+        let bridgeKnowledgeWriteScopes: [String]?
+        let bridgeMemoryPack: [KanameBridgeMemoryEntry]?
     }
 
     public init(from decoder: any Decoder) throws {
@@ -147,7 +151,10 @@ public struct KanameConversationServiceRequest: Codable, Equatable, Sendable {
             workspaceAuthorization: payload.workspaceAuthorization,
             isCodingPlan: payload.isCodingPlan ?? false,
             curatedPreviewMCPGranted: payload.curatedPreviewMCPGranted ?? false,
-            createdAtUnixMillis: payload.createdAtUnixMillis
+            createdAtUnixMillis: payload.createdAtUnixMillis,
+            bridgeKnowledgeReadScopes: payload.bridgeKnowledgeReadScopes,
+            bridgeKnowledgeWriteScopes: payload.bridgeKnowledgeWriteScopes,
+            bridgeMemoryPack: payload.bridgeMemoryPack
         )
     }
 }

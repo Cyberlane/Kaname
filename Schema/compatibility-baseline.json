@@ -1600,6 +1600,8 @@
     },
     "workflow_runtime.WorkflowRunInspectionQuery": {
       "1": "SchemaVersion schema_version",
+      "16": "bool attention_only",
+      "17": "uint64 before_first_store_position",
       "2": "string request_id",
       "3": "string workflow_id",
       "4": "string run_id",

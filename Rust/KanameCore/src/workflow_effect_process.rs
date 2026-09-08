@@ -40,6 +40,64 @@ pub const WORKFLOW_EFFECT_COMMAND_VARIABLE: &str = "KANAME_WORKFLOW_EFFECT_COMMA
 const DESCRIBE_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_DISPATCH_TIMEOUT: Duration = Duration::from_secs(60);
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expired_dispatch_never_starts_the_process_and_remains_uncertain() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut host = ProcessWorkflowEffectHost {
+            // Starting this missing program would produce connector.host_failed,
+            // so the result also proves expiry is checked before invocation.
+            command: Some(ProcessHostCommand::new(directory.path().join("not-a-host"))),
+            registrations: BTreeMap::new(),
+            dispatch_results: BTreeMap::new(),
+            journal_path: directory.path().join("journal"),
+            projection_path: directory.path().join("projection"),
+            cursor_key: [0; 32],
+            unavailable_reason: None,
+        };
+        let mut request = WorkflowEffectConnectorRequest {
+            proposal: v1::WorkflowEffectProposed {
+                intent: Some(v1::WorkflowEffectIntent::default()),
+                ..Default::default()
+            },
+            authorization: v1::WorkflowEffectAuthorized {
+                expires_at_unix_millis: i64::MAX,
+                ..Default::default()
+            },
+            dispatch: v1::WorkflowEffectDispatchStarted {
+                idempotency_key: "expired-effect".into(),
+                deadline_unix_millis: 1,
+                ..Default::default()
+            },
+            prior_receipt: None,
+            input: None,
+        };
+        for authority_expired in [false, true] {
+            if authority_expired {
+                request.authorization.expires_at_unix_millis = 1;
+                request.dispatch.deadline_unix_millis = i64::MAX;
+            }
+            assert!(
+                matches!(host.dispatch(&request), WorkflowEffectConnectorDispatchResult::OutcomeUnknown { error_code, .. } if error_code == "connector.dispatch_expired")
+            );
+        }
+    }
+
+    #[test]
+    fn child_failure_after_launch_does_not_claim_the_effect_was_unsent() {
+        assert!(matches!(
+            failure_dispatch_result(
+                ProcessHostFailure::Crashed("exit 1 after write".into()),
+                "effect"
+            ),
+            WorkflowEffectConnectorDispatchResult::OutcomeUnknown { .. }
+        ));
+    }
+}
+
 pub struct ProcessWorkflowEffectHost {
     command: Option<ProcessHostCommand>,
     registrations: BTreeMap<(String, String), v1::WorkflowEffectConnectorRegistration>,
@@ -150,6 +208,18 @@ impl ProcessWorkflowEffectHost {
         self.registrations.keys().cloned().collect()
     }
 
+    fn projected_authority(
+        &self,
+        proposal: &v1::WorkflowEffectProposed,
+    ) -> Option<v1::WorkflowProjectedEffectAuthority> {
+        let intent = proposal.intent.as_ref()?;
+        let journal = Journal::open_read_only(&self.journal_path, &self.cursor_key).ok()?;
+        let (mut projection, _) =
+            WorkflowRunProjection::open_or_rebuild(&self.projection_path, &journal).ok()?;
+        projection.catch_up(&journal).ok()?;
+        projection.effect_authority(&intent.effect_id).ok()?
+    }
+
     fn wire_request<'a>(
         &self,
         request: &'a WorkflowEffectConnectorRequest,
@@ -190,17 +260,14 @@ impl ProcessWorkflowEffectHost {
         })
     }
 
-    fn timeout(request: &WorkflowEffectConnectorRequest) -> Duration {
+    fn dispatch_timeout(request: &WorkflowEffectConnectorRequest) -> Option<Duration> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_millis() as i64)
             .unwrap_or_default();
-        let remaining = request.dispatch.deadline_unix_millis.saturating_sub(now);
-        if remaining <= 0 {
-            DEFAULT_DISPATCH_TIMEOUT
-        } else {
-            Duration::from_millis(remaining as u64).min(Duration::from_secs(600))
-        }
+        request
+            .remaining_dispatch_milliseconds(now)
+            .map(|remaining| Duration::from_millis(remaining).min(Duration::from_secs(600)))
     }
 }
 
@@ -223,10 +290,13 @@ impl WorkflowEffectConnector for ProcessWorkflowEffectHost {
         if let Some(result) = self.dispatch_results.get(&key) {
             return result.clone();
         }
+        let Some(timeout) = Self::dispatch_timeout(request) else {
+            return request.expired_dispatch_result();
+        };
         let result = match (&self.command, self.wire_request(request)) {
             (Some(command), Some(wire)) => {
                 match encode_request(&wire)
-                    .and_then(|bytes| command.run("dispatch", &bytes, Self::timeout(request)))
+                    .and_then(|bytes| command.run("dispatch", &bytes, timeout))
                     .and_then(|response| parse_response::<WireEffectResponse>(&response))
                 {
                     Ok(response) => response.into_dispatch_result(&key),
@@ -256,7 +326,7 @@ impl WorkflowEffectConnector for ProcessWorkflowEffectHost {
         match (&self.command, self.wire_request(request)) {
             (Some(command), Some(wire)) => {
                 match encode_request(&wire)
-                    .and_then(|bytes| command.run("reconcile", &bytes, Self::timeout(request)))
+                    .and_then(|bytes| command.run("reconcile", &bytes, DEFAULT_DISPATCH_TIMEOUT))
                     .and_then(|response| parse_response::<WireEffectResponse>(&response))
                 {
                     Ok(response) => response.into_reconciliation_result(&key),
@@ -287,18 +357,20 @@ impl WorkflowEffectConnector for ProcessWorkflowEffectHost {
 }
 
 impl WorkflowEffectHost for ProcessWorkflowEffectHost {
+    fn is_awaiting_authorization(&self, proposal: &v1::WorkflowEffectProposed) -> bool {
+        self.is_available()
+            && self
+                .projected_authority(proposal)
+                .is_some_and(|authority| authority.status == "proposed")
+    }
+
     /// Returns the owner's recorded resolution for this proposal, read from the
     /// durable projection. Nothing is approved here.
     fn authorize(
         &mut self,
         proposal: &v1::WorkflowEffectProposed,
     ) -> Option<v1::ApprovalResolution> {
-        let intent = proposal.intent.as_ref()?;
-        let journal = Journal::open_read_only(&self.journal_path, &self.cursor_key).ok()?;
-        let (mut projection, _) =
-            WorkflowRunProjection::open_or_rebuild(&self.projection_path, &journal).ok()?;
-        projection.catch_up(&journal).ok()?;
-        let authority = projection.effect_authority(&intent.effect_id).ok()??;
+        let authority = self.projected_authority(proposal)?;
         if authority.status != "authorized" {
             return None;
         }
@@ -336,30 +408,28 @@ fn failure_dispatch_result(
 ) -> WorkflowEffectConnectorDispatchResult {
     let summary = failure.summary();
     match failure {
-        ProcessHostFailure::Unavailable(_) | ProcessHostFailure::Crashed(_) => {
-            WorkflowEffectConnectorDispatchResult::NotSent {
-                error_code: "connector.host_failed".into(),
-                receipt: process_receipt(
-                    idempotency_key,
-                    "dispatch-not-sent",
-                    v1::WorkflowEffectReceiptOutcome::NotApplied,
-                    &summary,
-                ),
-                elapsed_milliseconds: 0,
-            }
-        }
-        ProcessHostFailure::TimedOut | ProcessHostFailure::Malformed(_) => {
-            WorkflowEffectConnectorDispatchResult::OutcomeUnknown {
-                error_code: "connector.outcome_unknown".into(),
-                receipt: process_receipt(
-                    idempotency_key,
-                    "dispatch-unknown",
-                    v1::WorkflowEffectReceiptOutcome::Unknown,
-                    &summary,
-                ),
-                elapsed_milliseconds: 0,
-            }
-        }
+        ProcessHostFailure::Unavailable(_) => WorkflowEffectConnectorDispatchResult::NotSent {
+            error_code: "connector.host_failed".into(),
+            receipt: process_receipt(
+                idempotency_key,
+                "dispatch-not-sent",
+                v1::WorkflowEffectReceiptOutcome::NotApplied,
+                &summary,
+            ),
+            elapsed_milliseconds: 0,
+        },
+        ProcessHostFailure::TimedOut
+        | ProcessHostFailure::Malformed(_)
+        | ProcessHostFailure::Crashed(_) => WorkflowEffectConnectorDispatchResult::OutcomeUnknown {
+            error_code: "connector.outcome_unknown".into(),
+            receipt: process_receipt(
+                idempotency_key,
+                "dispatch-unknown",
+                v1::WorkflowEffectReceiptOutcome::Unknown,
+                &summary,
+            ),
+            elapsed_milliseconds: 0,
+        },
     }
 }
 

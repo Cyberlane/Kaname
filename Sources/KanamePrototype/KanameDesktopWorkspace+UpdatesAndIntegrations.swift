@@ -448,8 +448,6 @@ final class DesktopPersonalIntegrationViewModel: ObservableObject {
     private let googleIntegration: NativeGoogleIntegrationService
     private let appleCalendar = AppleCalendarIntegrationService()
     private let providerCache: ProviderCapabilityCacheStore
-    private let workflowMailMonitor: DesktopMailViewModel
-
     init(environment: KanameDesktopEnvironment = .current) {
         googleIntegration = NativeGoogleIntegrationService(
             rootDirectory: environment.googleDirectory,
@@ -457,7 +455,6 @@ final class DesktopPersonalIntegrationViewModel: ObservableObject {
             accessMode: environment.googleIntegrationAccessMode
         )
         providerCache = ProviderCapabilityCacheStore(directory: environment.connectivityDirectory)
-        workflowMailMonitor = DesktopMailViewModel(environment: environment)
         appleAccessState = appleCalendar.accessState
         do {
             googleAccounts = try NativeGoogleIntegrationService.savedAccounts(
@@ -480,7 +477,6 @@ final class DesktopPersonalIntegrationViewModel: ObservableObject {
 
     func startMonitoring(model: DesktopAppModel) {
         guard monitoringTask == nil else { return }
-        workflowMailMonitor.startWorkflowMonitoring(model: model)
         monitoringTask = _Concurrency.Task { [weak self] in
             guard let self else { return }
             hasGoogleClientConfiguration = await googleIntegration.hasClientConfiguration

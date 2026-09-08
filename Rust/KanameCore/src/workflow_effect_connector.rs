@@ -90,6 +90,34 @@ pub struct WorkflowEffectConnectorRequest {
     pub input: Option<v1::WorkflowValueReference>,
 }
 
+impl WorkflowEffectConnectorRequest {
+    /// Both the durable dispatch deadline and its authority bound invocation.
+    pub(crate) fn remaining_dispatch_milliseconds(&self, now: i64) -> Option<u64> {
+        let deadline = self
+            .dispatch
+            .deadline_unix_millis
+            .min(self.authorization.expires_at_unix_millis);
+        let remaining = deadline.saturating_sub(now);
+        (remaining > 0).then_some(remaining as u64)
+    }
+
+    /// A recorded dispatch may have crossed the provider boundary before a
+    /// crash. Expiry prevents resending; it does not prove nothing happened.
+    pub(crate) fn expired_dispatch_result(&self) -> WorkflowEffectConnectorDispatchResult {
+        let digest = hex::encode(Sha256::digest(self.dispatch.encode_to_vec()));
+        WorkflowEffectConnectorDispatchResult::OutcomeUnknown {
+            error_code: "connector.dispatch_expired".into(),
+            receipt: v1::WorkflowEffectReceipt {
+                receipt_id: format!("expired-dispatch:{digest}"),
+                provider_reference: String::new(),
+                outcome: v1::WorkflowEffectReceiptOutcome::Unknown as i32,
+                evidence_digest: digest,
+            },
+            elapsed_milliseconds: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum WorkflowEffectConnectorDispatchResult {
     Succeeded {
@@ -157,6 +185,12 @@ pub trait WorkflowEffectConnector {
 /// the proposal's approval request, or nothing, and the executor never invents
 /// one.
 pub trait WorkflowEffectHost: WorkflowEffectConnector {
+    /// A real host can leave a proposal pending for an owner decision without
+    /// settling the node or run as failed. Unavailable hosts still fail visibly.
+    fn is_awaiting_authorization(&self, _proposal: &v1::WorkflowEffectProposed) -> bool {
+        false
+    }
+
     fn authorize(
         &mut self,
         proposal: &v1::WorkflowEffectProposed,

@@ -2,6 +2,7 @@ import Foundation
 import KanameConnectivity
 import KanameDesktop
 import KanameLocalCore
+import KanameWorkflowHost
 import KanamePrototypeUI
 import SwiftUI
 import KanameDesignSystem
@@ -16,6 +17,7 @@ final class DesktopDurableWorkflowRunsViewModel: ObservableObject {
     }
 
     @Published private(set) var state: State = .idle
+    @Published private(set) var activeWorkflows: [DesktopWorkflowV2PortfolioItem] = []
     @Published private(set) var runnableWorkflows: [DesktopWorkflowV2PortfolioItem] = []
     @Published private(set) var startMessage: String?
     @Published private(set) var isStarting = false
@@ -47,8 +49,13 @@ final class DesktopDurableWorkflowRunsViewModel: ObservableObject {
     func loadRunnableWorkflows() async {
         guard let library else { return }
         let items = try? await library.portfolio(requestID: "workflow-runnable:\(UUID().uuidString.lowercased())")
-        runnableWorkflows = (items ?? []).filter { $0.activeRevisionID != nil }
+        activeWorkflows = (items ?? []).filter { $0.activeRevisionID != nil }
+        runnableWorkflows = activeWorkflows.filter { $0.executionSupport == .executable }
         loadSchedules()
+    }
+
+    func unsupportedReason(for item: DesktopWorkflowV2PortfolioItem) -> String? {
+        DesktopWorkflowRunAvailabilityPresentation.reason(for: item)
     }
 
     // MARK: Sample workflow
@@ -164,7 +171,7 @@ final class DesktopDurableWorkflowRunsViewModel: ObservableObject {
                 dependencyLockJSON: Self.newsletterTriageDependencyLockJSON,
                 activate: true
             )
-            startMessage = "Newsletter triage published as revision \(result.revisionID.suffix(8)) (\(result.executionSupport))\(result.activated ? ", active" : ""). New mail on \(accountAddress) now runs through it while Kaname is open; approve each label effect here until a standing rule exists."
+            startMessage = "Newsletter triage published as revision \(result.revisionID.suffix(8)) (\(result.executionSupport))\(result.activated ? ", active" : ""). New mail on \(accountAddress) is handled by the Kaname service, even with the app closed; approve each label effect here until a standing rule exists."
         } catch {
             startMessage = "Newsletter triage install failed: \(error.localizedDescription)"
         }
@@ -179,7 +186,7 @@ final class DesktopDurableWorkflowRunsViewModel: ObservableObject {
     func removeStandingRule(_ rule: DesktopStandingEffectRule) {
         DesktopStandingEffectRules.remove(id: rule.id)
         standingRules = DesktopStandingEffectRules.load()
-        startMessage = "Standing approval removed: \(rule.action) on \(rule.workflowName). Future effects wait for you again."
+        startMessage = "Standing approval removed: \(rule.action) on \(rule.workflowName) (\(rule.scope == .account ? "account-wide" : "this destination")). Future effects wait for you again."
     }
 
     // MARK: Interval schedules (host state read by the control service's tick)
@@ -244,24 +251,28 @@ final class DesktopDurableWorkflowRunsViewModel: ObservableObject {
         _ effect: DesktopWorkflowProjectedEffectAuthority,
         run: DesktopDurableWorkflowRun,
         approve: Bool,
-        alwaysAllow: Bool = false
+        alwaysAllow: Bool = false,
+        standingScope: DesktopStandingEffectScope = .destination
     ) async {
         guard let runner, !isStarting else { return }
         isStarting = true
         defer { isStarting = false }
         var standingRuleReference: String?
-        if approve, alwaysAllow, DesktopStandingEffectRules.isEligible(effect) {
-            let rule = DesktopStandingEffectRule(
+        let standingRule: DesktopStandingEffectRule? = {
+            guard approve, alwaysAllow, DesktopStandingEffectRules.isEligible(effect) else { return nil }
+            return DesktopStandingEffectRule(
                 workflowID: run.workflowID,
                 workflowName: runnableWorkflows.first { $0.workflowID == run.workflowID }?.name ?? run.workflowID,
+                revisionID: run.revisionID,
+                accountBindingID: effect.accountBindingID,
                 connectorClass: effect.connectorClass,
                 action: effect.action,
+                scope: standingScope,
+                destinationFingerprint: effect.destinationFingerprint,
                 createdAtUnixMillis: Int64(Date().timeIntervalSince1970 * 1_000)
             )
-            DesktopStandingEffectRules.add(rule)
-            standingRuleReference = rule.reference
-            standingRules = DesktopStandingEffectRules.load()
-        }
+        }()
+        standingRuleReference = standingRule?.reference
         do {
             let decision = try await runner.authorizeWorkflowEffect(
                 effectID: effect.effectID,
@@ -270,6 +281,13 @@ final class DesktopDurableWorkflowRunsViewModel: ObservableObject {
                 approve: approve,
                 standingRuleReference: standingRuleReference
             )
+            // Keep the local grant only after core has accepted the owner
+            // decision. A rejected or expired approval must never leave a
+            // standing rule behind that could authorize a later effect.
+            if let standingRule {
+                DesktopStandingEffectRules.add(standingRule)
+                standingRules = DesktopStandingEffectRules.load()
+            }
             let continued = try await runner.startWorkflowRun(
                 workflowID: run.workflowID,
                 revisionID: run.revisionID,
@@ -326,22 +344,23 @@ final class DesktopDurableWorkflowRunsViewModel: ObservableObject {
         await reload()
     }
 
-    func load() async {
+    func load(runID: String? = nil) async {
         guard state == .idle else { return }
         state = .loading
         do {
             guard let loader else { return }
             state = .loaded(try await loader.load(
-                requestID: "workflow-runs:\(UUID().uuidString.lowercased())"
+                requestID: "workflow-runs:\(UUID().uuidString.lowercased())",
+                runID: runID
             ))
         } catch {
             state = .failed("Run history is temporarily unavailable. Durable evidence was not treated as empty or successful.")
         }
     }
 
-    func reload() async {
+    func reload(runID: String? = nil) async {
         state = .idle
-        await load()
+        await load(runID: runID)
     }
 
     func purge(_ run: DesktopDurableWorkflowRun) async {
@@ -391,14 +410,29 @@ struct DesktopDurableWorkflowRunsView: View {
     @State private var showingPurgePreview = false
     @State private var showingPurgeConfirmation = false
     private let qualificationFixture: Bool
+    private let initialRunID: String?
+    private let initialEffectID: String?
 
-    init(runner: LocalCoreRunner) {
+    init(
+        runner: LocalCoreRunner,
+        initialRunID: String? = nil,
+        initialEffectID: String? = nil
+    ) {
         qualificationFixture = false
+        self.initialRunID = initialRunID
+        self.initialEffectID = initialEffectID
         _viewModel = StateObject(wrappedValue: DesktopDurableWorkflowRunsViewModel(runner: runner))
     }
 
-    init(snapshot: DesktopWorkflowRunHistorySnapshot, qualificationFixture: Bool = false) {
+    init(
+        snapshot: DesktopWorkflowRunHistorySnapshot,
+        qualificationFixture: Bool = false,
+        initialRunID: String? = nil,
+        initialEffectID: String? = nil
+    ) {
         self.qualificationFixture = qualificationFixture
+        self.initialRunID = initialRunID
+        self.initialEffectID = initialEffectID
         _viewModel = StateObject(wrappedValue: DesktopDurableWorkflowRunsViewModel(snapshot: snapshot))
         _compactShowsDetail = State(initialValue: true)
     }
@@ -417,8 +451,14 @@ struct DesktopDurableWorkflowRunsView: View {
             }
         }
         .task {
-            await viewModel.load()
+            await viewModel.load(runID: initialRunID)
             await viewModel.loadRunnableWorkflows()
+        }
+        .onChange(of: initialSelectionID) { _ in
+            selectedRunID = nil
+            selectedNodeID = nil
+            inspectorGroup = .inputs
+            _Concurrency.Task { await viewModel.reload(runID: initialRunID) }
         }
     }
 
@@ -436,7 +476,7 @@ struct DesktopDurableWorkflowRunsView: View {
                 HStack {
                     runWorkflowMenu
                     webhookMenu
-                    Button("Refresh", systemImage: "arrow.clockwise") { Task { await viewModel.reload() } }
+                    Button("Refresh", systemImage: "arrow.clockwise") { _Concurrency.Task { await viewModel.reload() } }
                 }
                 if let message = viewModel.startMessage {
                     Text(message).font(.caption).foregroundStyle(.secondary)
@@ -499,12 +539,9 @@ struct DesktopDurableWorkflowRunsView: View {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(endpoint.token, forType: .string)
                 }
-                Section("Pollers while the app is open") {
+                Section("Pollers in the Kaname service (app closed too)") {
                     Text("mail.message.received · every 2 min")
                     Text("calendar.event.changed · every 5 min")
-                }
-                Section("Pollers in the Kaname service (app closed too)") {
-                    Text("github.notification.received · every 3 min via gh")
                 }
             } label: {
                 Label("Triggers", systemImage: "antenna.radiowaves.left.and.right")
@@ -515,13 +552,13 @@ struct DesktopDurableWorkflowRunsView: View {
 
     /// Manual trigger for any active, executable revision on the Rust executor.
     @ViewBuilder private var runWorkflowMenu: some View {
-        if viewModel.runnableWorkflows.isEmpty {
+        if viewModel.activeWorkflows.isEmpty {
             Menu {
                 Button("Sample: route a number", systemImage: "square.and.arrow.down") {
-                    Task { await viewModel.installSampleWorkflow() }
+                    _Concurrency.Task { await viewModel.installSampleWorkflow() }
                 }
                 Button("Newsletter triage (mail → classify → label)", systemImage: "envelope.badge") {
-                    Task { await viewModel.installNewsletterTriage() }
+                    _Concurrency.Task { await viewModel.installNewsletterTriage() }
                 }
             } label: {
                 Label("Install workflow", systemImage: "square.and.arrow.down")
@@ -536,21 +573,45 @@ struct DesktopDurableWorkflowRunsView: View {
             Menu {
                 Section("Run now") {
                     ForEach(viewModel.runnableWorkflows) { item in
-                        Button(item.name) { Task { await viewModel.startRun(item) } }
+                        Button(item.name) { _Concurrency.Task { await viewModel.startRun(item) } }
+                    }
+                    ForEach(viewModel.activeWorkflows.filter { viewModel.unsupportedReason(for: $0) != nil }) { item in
+                        Button {
+                            // Disabled menu entries explain the capability
+                            // gap without offering a request that cannot run.
+                        } label: {
+                            Label("\(item.name) unavailable", systemImage: "exclamationmark.triangle")
+                        }
+                        .disabled(true)
+                        .help(viewModel.unsupportedReason(for: item) ?? "This active revision cannot run here.")
                     }
                 }
                 Section("Install") {
                     Button("Newsletter triage (mail → classify → label)") {
-                        Task { await viewModel.installNewsletterTriage() }
+                        _Concurrency.Task { await viewModel.installNewsletterTriage() }
                     }
                     .disabled(viewModel.isStarting)
                 }
                 if !viewModel.standingRules.isEmpty {
                     Section("Standing approvals (auto-approved effects)") {
                         ForEach(viewModel.standingRules) { rule in
-                            Button("Remove: \(rule.action) on \(rule.workflowName)", systemImage: "xmark.circle") {
-                                viewModel.removeStandingRule(rule)
+                            HStack {
+                                Button {
+                                    viewModel.removeStandingRule(rule)
+                                } label: {
+                                    Label(
+                                        "Remove: \(rule.action) on \(rule.workflowName)",
+                                        systemImage: "xmark.circle"
+                                    )
+                                }
+                                Spacer(minLength: 8)
+                                Text(rule.scope == .account ? "account-wide" : "destination only")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
                             }
+                            .help(rule.scope == .account
+                                ? "Account-wide for this workflow revision and bound account."
+                                : "Only this exact destination for this workflow revision and bound account.")
                         }
                     }
                 }
@@ -598,7 +659,7 @@ struct DesktopDurableWorkflowRunsView: View {
                         .font(.caption2).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button("Refresh", systemImage: "arrow.clockwise") { Task { await viewModel.reload() } }
+                Button("Refresh", systemImage: "arrow.clockwise") { _Concurrency.Task { await viewModel.reload() } }
                     .labelStyle(.iconOnly)
             }
             ForEach(history.runs) { snapshot in
@@ -607,15 +668,15 @@ struct DesktopDurableWorkflowRunsView: View {
                     compactShowsDetail = true
                 } label: {
                     HStack(alignment: .top, spacing: 9) {
-                        Image(systemName: statusSymbol(snapshot.run.status))
-                            .foregroundStyle(statusTint(snapshot.run.status)).frame(width: 16)
+                        Image(systemName: statusSymbol(snapshot.run))
+                            .foregroundStyle(statusTint(snapshot.run)).frame(width: 16)
                         VStack(alignment: .leading, spacing: 3) {
                             Text(snapshot.graph?.name ?? snapshot.run.workflowID)
                                 .font(.caption.weight(.semibold)).lineLimit(1)
                             Text(snapshot.run.runID)
                                 .font(.system(size: 9, design: .monospaced)).lineLimit(1)
                             HStack(spacing: 6) {
-                                Text(snapshot.run.status.capitalized)
+                                Text(DesktopWorkflowRunStatusPresentation.title(for: snapshot.run))
                                 if let number = snapshot.revision?.summary.revisionNumber {
                                     Text("v\(number)")
                                 } else {
@@ -664,8 +725,8 @@ struct DesktopDurableWorkflowRunsView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(snapshot.graph?.name ?? snapshot.run.workflowID).font(.headline)
                     HStack(spacing: 8) {
-                        Label(snapshot.run.status.capitalized, systemImage: statusSymbol(snapshot.run.status))
-                            .foregroundStyle(statusTint(snapshot.run.status))
+                        Label(DesktopWorkflowRunStatusPresentation.title(for: snapshot.run), systemImage: statusSymbol(snapshot.run))
+                            .foregroundStyle(statusTint(snapshot.run))
                         if let revision = snapshot.revision {
                             Text("Workflow v\(revision.summary.revisionNumber)")
                             Text(revision.summary.revisionID).lineLimit(1)
@@ -876,7 +937,7 @@ struct DesktopDurableWorkflowRunsView: View {
             titleVisibility: .visible
         ) {
             Button("Delete run data", role: .destructive) {
-                Task { await viewModel.purge(run) }
+                _Concurrency.Task { await viewModel.purge(run) }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -1242,20 +1303,35 @@ struct DesktopDurableWorkflowRunsView: View {
                     if effect.status == "proposed" {
                         HStack(spacing: 8) {
                             Button("Approve and dispatch", systemImage: "checkmark.shield") {
-                                Task { await viewModel.decideEffect(effect, run: run, approve: true) }
+                                _Concurrency.Task { await viewModel.decideEffect(effect, run: run, approve: true) }
                             }
                             .buttonStyle(.borderedProminent)
                             .controlSize(.small)
                             if DesktopStandingEffectRules.isEligible(effect) {
-                                Button("Approve and always allow", systemImage: "checkmark.shield.fill") {
-                                    Task { await viewModel.decideEffect(effect, run: run, approve: true, alwaysAllow: true) }
+                                Menu {
+                                    Button("This destination only") {
+                                        _Concurrency.Task {
+                                            await viewModel.decideEffect(
+                                                effect, run: run, approve: true, alwaysAllow: true, standingScope: .destination
+                                            )
+                                        }
+                                    }
+                                    Button("All matching actions in this account") {
+                                        _Concurrency.Task {
+                                            await viewModel.decideEffect(
+                                                effect, run: run, approve: true, alwaysAllow: true, standingScope: .account
+                                            )
+                                        }
+                                    }
+                                } label: {
+                                    Label("Approve and remember…", systemImage: "checkmark.shield.fill")
                                 }
                                 .buttonStyle(.bordered)
                                 .controlSize(.small)
-                                .help("Future \(effect.action) effects from this workflow run without asking. Remove the rule under Run workflow › Standing approvals.")
+                                .help("Choose whether \(effect.action) is remembered for this exact destination or for this workflow revision and account. Remove the rule under Run workflow › Standing approvals.")
                             }
                             Button("Reject", role: .destructive) {
-                                Task { await viewModel.decideEffect(effect, run: run, approve: false) }
+                                _Concurrency.Task { await viewModel.decideEffect(effect, run: run, approve: false) }
                             }
                             .buttonStyle(.bordered)
                             .controlSize(.small)
@@ -1263,7 +1339,7 @@ struct DesktopDurableWorkflowRunsView: View {
                         .disabled(viewModel.isStarting)
                     } else if ["authorized", "dispatching", "outcome_unknown"].contains(effect.status) {
                         Button("Continue run", systemImage: "play.fill") {
-                            Task { await viewModel.continueRun(run) }
+                            _Concurrency.Task { await viewModel.continueRun(run) }
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
@@ -1721,7 +1797,7 @@ struct DesktopDurableWorkflowRunsView: View {
             Label("Workflow run history unavailable", systemImage: "exclamationmark.triangle.fill")
                 .font(.headline).foregroundStyle(KanameColor.warning)
             Text(message).font(.caption).foregroundStyle(.secondary)
-            Button("Try again", systemImage: "arrow.clockwise") { Task { await viewModel.reload() } }
+            Button("Try again", systemImage: "arrow.clockwise") { _Concurrency.Task { await viewModel.reload() } }
         }
         .frame(maxWidth: .infinity, minHeight: 220).panelStyle()
     }
@@ -1731,8 +1807,19 @@ struct DesktopDurableWorkflowRunsView: View {
     }
 
     private func selectInitialRun(in history: DesktopWorkflowRunHistorySnapshot) {
-        guard selectedRunID == nil, let first = history.runs.first else { return }
+        let preferred = initialRunID.flatMap { id in history.runs.first { $0.id == id } }
+            ?? history.runs.first
+        guard selectedRunID == nil, let first = preferred else { return }
         select(first)
+        if let effectID = initialEffectID,
+           let effect = first.run.effectAuthorities.first(where: { $0.effectID == effectID }) {
+            selectedNodeID = effect.nodeID
+            inspectorGroup = .effect
+        }
+    }
+
+    private var initialSelectionID: String {
+        "\(initialRunID ?? ""):\(initialEffectID ?? "")"
     }
 
     private func select(_ snapshot: DesktopWorkflowRunSnapshot) {
@@ -1797,6 +1884,10 @@ struct DesktopDurableWorkflowRunsView: View {
         }
     }
 
+    private func statusSymbol(_ run: DesktopDurableWorkflowRun) -> String {
+        DesktopWorkflowRunStatusPresentation.symbol(for: run)
+    }
+
     private func statusTint(_ status: String) -> Color {
         switch status {
         case "succeeded": KanameColor.success
@@ -1805,6 +1896,12 @@ struct DesktopDurableWorkflowRunsView: View {
         case "running", "cancelling": KanameColor.accent
         default: .secondary
         }
+    }
+
+    private func statusTint(_ run: DesktopDurableWorkflowRun) -> Color {
+        DesktopWorkflowRunStatusPresentation.isAwaitingApproval(run)
+            ? KanameColor.warning
+            : statusTint(run.status)
     }
 }
 

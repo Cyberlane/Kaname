@@ -636,7 +636,20 @@ struct ProviderConnectivityTests {
             resumableNativeThreadID: nil,
             localCoreMachService: "service",
             localCoreRequirement: "requirement",
-            createdAtUnixMillis: 1_000
+            createdAtUnixMillis: 1_000,
+            bridgeKnowledgeReadScopes: ["Projects/Coding ADE"],
+            bridgeKnowledgeWriteScopes: ["Projects/Coding ADE/Decisions.md"],
+            bridgeMemoryPack: [KanameBridgeMemoryEntry(
+                threadID: "prior-thread",
+                title: "Prior decision",
+                summary: "Accepted shared context",
+                outcome: "completed",
+                plan: ["Inspect"],
+                decisions: ["Use bounded context"],
+                findings: ["The scope is explicit"],
+                updatedAtUnixMillis: 900,
+                projectName: "Shared project"
+            )],
         )
         let queuedURL = try store.enqueue(request)
         let queued = try store.pendingRequests(threadID: "thread-1")
@@ -645,6 +658,9 @@ struct ProviderConnectivityTests {
         #expect(queued.first?.1.runtimeMode == .auto)
         #expect(queued.first?.1.networkAccess == true)
         #expect(queued.first?.1.attachments == [attachment])
+        #expect(queued.first?.1.bridgeKnowledgeReadScopes == ["Projects/Coding ADE"])
+        #expect(queued.first?.1.bridgeKnowledgeWriteScopes == ["Projects/Coding ADE/Decisions.md"])
+        #expect(queued.first?.1.bridgeMemoryPack?.first?.projectName == "Shared project")
         #expect((try FileManager.default.attributesOfItem(atPath: root.path)[.posixPermissions] as? NSNumber)?.intValue == 0o700)
 
         let event = KanameConversationServiceEvent.record(

@@ -224,16 +224,8 @@ fn workflow_run_start(
         episode_kind: String::new(),
         prior_episode_id: String::new(),
     };
-    // The journal admits one command per idempotency key and requires an
-    // identical envelope to re-issue it, so everything here derives from the
-    // run ID. Re-running the same run (after an effect approval, for example)
-    // then continues from the journaled state instead of being rejected.
-    let stable_submitted_at = {
-        use sha2::Digest as _;
-        let digest = Sha256::digest(run_id.as_bytes());
-        let seed = u64::from_be_bytes(digest[..8].try_into().unwrap_or([0; 8]));
-        1_780_000_000_000_i64 + (seed % 86_400_000_000) as i64
-    };
+    // Recovery reuses the admitted wire, not a fabricated timestamp or a
+    // reconstructed request that loses the original trigger input.
     let envelope = v1::CommandEnvelope {
         schema_version: Some(v1::SchemaVersion {
             major: kaname_core::SCHEMA_MAJOR,
@@ -258,11 +250,34 @@ fn workflow_run_start(
         }),
         actor_id: "local-owner".into(),
         expected_revision: 0,
-        submitted_at_unix_millis: stable_submitted_at,
+        submitted_at_unix_millis: now,
     };
-    let _ = now;
     let mut journal = Journal::open(journal_path, &CURSOR_KEY)
         .map_err(|_| "workflow_run_journal_unavailable".to_owned())?;
+    let original = kaname_core::workflow_executor::admitted_run_command(&journal, &run_id)
+        .map_err(|_| "workflow_run_command_unavailable".to_owned())?
+        .or(journal
+            .admitted_command(&envelope.command_id)
+            .map_err(|_| "workflow_run_command_unavailable".to_owned())?);
+    let envelope = match original {
+        Some(original) => {
+            let original_payload = original
+                .payload
+                .as_ref()
+                .ok_or("workflow_run_original_payload_missing")?;
+            let original_run = v1::RequestWorkflowRun::decode(original_payload.value.as_slice())
+                .map_err(|_| "workflow_run_original_payload_malformed")?;
+            if original_run.run_id != run_id
+                || original_run.workflow_id != request.workflow_id
+                || original_run.revision_id != request.revision_id
+                || (!request.inputs.is_empty() && original_run.inputs != payload.inputs)
+            {
+                return Err("workflow_run_resume_mismatch".into());
+            }
+            original
+        }
+        None => envelope,
+    };
     // Use the process LLM host when the service configured one; otherwise the
     // executor rejects compute.llm graphs before a run token exists.
     let mut llm = kaname_core::workflow_llm::ProcessWorkflowLlmProvider::from_environment();
@@ -648,10 +663,16 @@ fn workflow_event_fanout(
             continue;
         };
         let Ok(revision) = store.load_workflow_revision(&revision_id, "active") else {
+            response
+                .errors
+                .push(format!("{}:revision_unavailable", item.workflow_id));
             continue;
         };
         let Ok(compiled) = serde_json::from_slice::<serde_json::Value>(&revision.compiled_source)
         else {
+            response
+                .errors
+                .push(format!("{}:compiled_revision_invalid", item.workflow_id));
             continue;
         };
         let entry_node_id = compiled["entrypoints"][0]["nodeId"]
@@ -1057,12 +1078,7 @@ fn workflow_run_inspect(journal_path: &str, projection_path: &str) -> Result<Str
     let (projection, _) = WorkflowRunProjection::open_or_rebuild(projection_path, &journal)
         .map_err(|_| "workflow_run_projection_unavailable".to_owned())?;
     let runs = projection
-        .inspect_runs_as_of(
-            (!query.workflow_id.is_empty()).then_some(query.workflow_id.as_str()),
-            (!query.run_id.is_empty()).then_some(query.run_id.as_str()),
-            query.limit,
-            query.as_of_unix_millis,
-        )
+        .inspect_runs_query(&query)
         .map_err(|_| "workflow_run_inspection_failed".to_owned())?;
     let absence_reason = if !query.run_id.is_empty() && runs.is_empty() {
         "not_found_or_purged"

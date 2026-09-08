@@ -1,11 +1,12 @@
 # Executable effect.connector
 
 WFP-113 makes `effect.connector` the first node family that can leave the
-executor's own bookkeeping and ask something outside to act. Nothing here
-reaches a real provider: the only connector the durable executor can talk to is
-one the caller injects, and the only implementation this repository ships is a
-deterministic in-process fixture. There is no network client, credential store,
-account binding, or provider SDK behind it.
+executor's own bookkeeping and ask something outside to act. Deterministic
+in-process fixtures exercise the contract in tests. The bundled process host
+forwards real mailbox requests to the channel's signed automation worker,
+which owns credentials and applies the channel's mutation policy. Development
+denies external mutations. The local control service pins the exact socket in
+`KANAME_WORKFLOW_CONNECTOR_SOCKET`; the host never discovers another channel.
 
 ## Mail effect kinds
 
@@ -87,20 +88,25 @@ run stream:
 Authority stays outside the executor. `WorkflowEffectHost::authorize` returns
 the resolution an owner recorded for one approval request, or nothing; the
 executor verifies the returned approval identity and fingerprint against the
-request it proposed before it trusts it. When no resolution exists the attempt
-fails on `error` with `effect.not-authorized` and no dispatch is ever journaled.
+request it proposed before it trusts it. A process host with a pending owner
+proposal returns `waiting` without settling the attempt or run; approving it
+resumes the original admitted command and input. Unavailable hosts still fail
+on `error` with `effect.not-authorized`. Expired authority fails without dispatch.
 
-Every timestamp is derived from durable facts rather than a wall clock, so a
-replay proposes byte-identical candidates. Proposal and authorization occur at
-the attempt's start; the dispatch deadline is the earlier of the authorization
-expiry and the dispatch start plus 60 seconds; the authority window is 900
-seconds.
+The initial command stores its actual submission time. Recovery reads that
+exact admitted envelope, including for event and schedule runs, instead of
+reconstructing input or inventing repeatable timestamps. The dispatch deadline
+is the earlier of authorization expiry and the actual dispatch start plus 60
+seconds; the authority window is 900 seconds. An unsettled dispatch recovered
+at or after its deadline is marked uncertain and reconciled without resending.
+A connector process crash is also uncertain because it may have occurred after
+the external effect applied.
 
 ## Standing approvals
 
 The owner can answer a proposed effect with "Approve and always allow". Kaname
 records a standing rule (`Workflows/standing-rules.json`, keyed by workflow,
-connector class, and action) and approves that effect. From then on the app
+connector class, action, revision, account, and approved target scope) and approves that effect. The background worker
 approves matching proposed effects automatically the next time it observes
 them and continues the run, sending `standing_rule_reference` with the
 approval so the journal shows no human clicked. Rules are listed and removed
@@ -121,7 +127,8 @@ the check count, which hands the outcome to a `control.reconcile` node.
 
 An interruption between `dispatch-started` and `dispatch-settled` is genuinely
 ambiguous, and the executor resolves it by re-offering the same dispatch record
-under the same idempotency key. That is safe only because a registration must
+under the same idempotency key only before its original deadline. After expiry
+it can only reconcile. That is safe only because a registration must
 declare itself `idempotent` and `supportsReconciliation` before any intent may
 cross the boundary at all, so the duplicate collapses at the provider instead of
 producing a second effect. This reliance on provider-side idempotency is

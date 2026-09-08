@@ -1,10 +1,10 @@
 {
   "schema_version": 4,
-  "mori_version": "0.29.0",
+  "mori_version": "0.31.0",
   "normalization_version": 12,
   "identity_scope": "path",
   "threshold": 0.85,
-  "scan_profile_digest": "ceb09aa693f01e3f2d8fffd2b70d8e26b5357ebaf9b35e536a080ac17b420d46",
+  "scan_profile_digest": "23b50c6d1aa26b009e07853c7dc52e5ab09a5df8be2f9f5ee13f89ab336148e0",
   "scan_profile": {
     "threshold": 0.85,
     "min_tokens": 40,
@@ -25,7 +25,7 @@
     "ignore_files": [
       {
         "path": ".gitignore",
-        "digest": "7383eeee5dda36e0268bddee5a8e822a4c2fbd899ee56bf852982bcfc894d2c3"
+        "digest": "714847615123e0222617cd710f16adad0695662963529f1b637b83ac931a205a"
       },
       {
         "path": ".moriignore",

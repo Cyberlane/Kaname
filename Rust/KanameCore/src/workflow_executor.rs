@@ -776,6 +776,22 @@ pub fn execute_with_hosts(
     )
 }
 
+/// Finds the request named by a durable run token, including event/schedule
+/// commands whose IDs are not the manual run-start naming convention.
+pub fn admitted_run_command(
+    journal: &Journal,
+    run_id: &str,
+) -> Result<Option<v1::CommandEnvelope>> {
+    let state = recorded_run(journal, run_id)?;
+    let Some(token) = state.token else {
+        return Ok(None);
+    };
+    let command = journal
+        .admitted_command(&token.request_command_id)?
+        .ok_or_else(|| WorkflowExecutionError::Integrity("run_command_missing".into()))?;
+    Ok(Some(command))
+}
+
 pub fn execute_with_capabilities(
     journal: &mut Journal,
     library: &WorkflowLibraryStore,
@@ -3422,7 +3438,14 @@ fn node_event_sequence(
     if mapping_failure.is_none()
         && node.node_type == "effect.connector"
         && let Some(events) = pending_effect_event_sequence(
-            effects, request, token_id, state, attempt, node, &inputs,
+            effects,
+            request,
+            token_id,
+            state,
+            attempt,
+            node,
+            &inputs,
+            now_unix_millis,
         )?
     {
         return Ok(events);
@@ -3485,7 +3508,7 @@ fn node_event_sequence(
     } else if node.node_type == "compute.llm" {
         execute_settled_llm_node(request, state, attempt, node)?
     } else if node.node_type == "effect.connector" {
-        execute_settled_effect_node(request, state, attempt, node, &inputs)?
+        execute_settled_effect_node(request, state, attempt, node, &inputs, now_unix_millis)?
     } else if node.node_type == "control.subflow" {
         execute_settled_subflow_node(request, state, attempt, node)?
     } else if node.node_type == "control.join" {
@@ -7504,6 +7527,7 @@ fn pending_effect_event_sequence(
         Option<&v1::WorkflowEdgeCheckpointed>,
         v1::WorkflowValueReference,
     )],
+    now_unix_millis: i64,
 ) -> Result<Option<Vec<v1::EventEnvelope>>> {
     let EffectPreparation::Ready(prepared) =
         prepare_effect(request, run_token_id, attempt, node, inputs)?
@@ -7544,6 +7568,13 @@ fn pending_effect_event_sequence(
         // Authority stays outside the executor: the host returns the exact
         // resolution an owner recorded for this approval request, or nothing.
         let Some(resolution) = effects.authorize(proposal) else {
+            if effects.is_awaiting_authorization(proposal)
+                && now_unix_millis < approval.expires_at_unix_millis
+            {
+                return Err(WorkflowExecutionError::WaitingUntil(
+                    approval.expires_at_unix_millis,
+                ));
+            }
             return Ok(None);
         };
         if resolution.approval_id != approval.approval_id
@@ -7576,6 +7607,10 @@ fn pending_effect_event_sequence(
         )]));
     };
     let Some(dispatch) = recorded.dispatch_started.as_ref() else {
+        if now_unix_millis >= authorization.expires_at_unix_millis {
+            return Ok(None);
+        }
+        let dispatched_at = now_unix_millis.max(attempt.started_at_unix_millis);
         let Some(registration) =
             effects.registration(&intent.connector_class, &intent.account_binding_id)
         else {
@@ -7586,7 +7621,7 @@ fn pending_effect_event_sequence(
         }
         let dispatch_id = stable_effect_id("effect-dispatch", effect_id, &intent.idempotency_key);
         return Ok(Some(vec![runtime_event(
-            attempt.started_at_unix_millis,
+            dispatched_at,
             &effect_event_id(request, "effect-dispatch-started", effect_id),
             workflow_runtime::WORKFLOW_EFFECT_DISPATCH_STARTED_KIND,
             workflow_runtime::WORKFLOW_EFFECT_DISPATCH_STARTED_TYPE,
@@ -7601,11 +7636,9 @@ fn pending_effect_event_sequence(
                 destination_fingerprint: intent.destination_fingerprint.clone(),
                 idempotency_key: intent.idempotency_key.clone(),
                 registration: Some(registration),
-                deadline_unix_millis: authorization.expires_at_unix_millis.min(
-                    attempt
-                        .started_at_unix_millis
-                        .saturating_add(EFFECT_DISPATCH_TIMEOUT_MILLISECONDS),
-                ),
+                deadline_unix_millis: authorization
+                    .expires_at_unix_millis
+                    .min(dispatched_at.saturating_add(EFFECT_DISPATCH_TIMEOUT_MILLISECONDS)),
             },
             recorded.latest_event_id(),
             &request.run_id,
@@ -7619,8 +7652,15 @@ fn pending_effect_event_sequence(
         input: Some(prepared.input.clone()),
     };
     let Some(settled) = recorded.dispatch_settled.as_ref() else {
-        let result =
-            dispatch_result_payload(&connector_request, effects.dispatch(&connector_request));
+        let dispatched = if connector_request
+            .remaining_dispatch_milliseconds(now_unix_millis)
+            .is_some()
+        {
+            effects.dispatch(&connector_request)
+        } else {
+            connector_request.expired_dispatch_result()
+        };
+        let result = dispatch_result_payload(&connector_request, dispatched);
         return Ok(Some(vec![runtime_event(
             occurred_after_effect_phase(
                 recorded.dispatch_started_at_unix_millis,
@@ -7701,6 +7741,7 @@ fn execute_settled_effect_node(
         Option<&v1::WorkflowEdgeCheckpointed>,
         v1::WorkflowValueReference,
     )],
+    now_unix_millis: i64,
 ) -> Result<NodeExecution> {
     let prepared = match prepare_effect(
         request,
@@ -7732,6 +7773,17 @@ fn execute_settled_effect_node(
         )?;
         Ok(failure_output("error", code, value))
     };
+    if recorded.dispatch_started.is_none()
+        && now_unix_millis
+            >= prepared
+                .proposal
+                .approval_request
+                .as_ref()
+                .map(|approval| approval.expires_at_unix_millis)
+                .unwrap_or(0)
+    {
+        return failure("effect.authority-expired", "expired", json!({}));
+    }
     if recorded.authorized.is_none() {
         return failure("effect.not-authorized", "proposed", json!({}));
     }
