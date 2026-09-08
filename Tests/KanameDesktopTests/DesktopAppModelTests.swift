@@ -444,20 +444,21 @@ struct DesktopAppModelTests {
         #expect(snapshot.remote.events.filter { $0.state == .notRun }.count == 3)
         #expect(snapshot.remote.events.filter { $0.state == .deferred }.count == 1)
 
-        let starterPresentation = (
-            snapshot.threads.flatMap { thread in
-                [thread.title, thread.summary]
-                    + thread.messages.map(\.body)
-                    + thread.evidence.flatMap { [$0.label, $0.detail] }
-            }
-            + [
-                snapshot.remote.relayStatus,
-                snapshot.remote.enrollmentStatus,
-                snapshot.remote.notificationStatus,
-                snapshot.remote.queueStatus,
-            ]
-            + snapshot.remote.events.flatMap { [$0.title, $0.detail] }
-        ).joined(separator: " ").lowercased()
+        let threadPresentation: [String] = snapshot.threads.flatMap { thread in
+            let messages = thread.messages.map(\.body)
+            let evidence = thread.evidence.flatMap { [$0.label, $0.detail] }
+            return [thread.title, thread.summary] + messages + evidence
+        }
+        let remotePresentation = [
+            snapshot.remote.relayStatus,
+            snapshot.remote.enrollmentStatus,
+            snapshot.remote.notificationStatus,
+            snapshot.remote.queueStatus,
+        ]
+        let remoteEventPresentation = snapshot.remote.events.flatMap { [$0.title, $0.detail] }
+        let starterPresentation = (threadPresentation + remotePresentation + remoteEventPresentation)
+            .joined(separator: " ")
+            .lowercased()
         #expect(!starterPresentation.contains("tests passed"))
         #expect(!starterPresentation.contains("signed, installed"))
         #expect(!starterPresentation.contains("simulator qualified"))
